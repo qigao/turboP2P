@@ -1,0 +1,40 @@
+{
+  "version": 6,
+  "include": [
+    "presets/ConfigurePresets.json"
+  ],
+  "buildPresets": [
+    {
+      "name": "default-windows",
+      "displayName": "Build (Default, Windows)",
+      "configurePreset": "dev-win-msvc-ninja",
+      "inherits": [
+        "ISWindows"
+      ]
+    },
+    {
+      "name": "release-windows",
+      "displayName": "Build (Default, Windows)",
+      "configurePreset": "release-win-msvc-ninja",
+      "inherits": [
+        "ISWindows"
+      ]
+    },
+    {
+      "name": "default-linux",
+      "displayName": "Build (Default, Linux)",
+      "configurePreset": "release-linux-ninja",
+      "inherits": [
+        "ISLinux"
+      ]
+    },
+    {
+      "name": "default-mac",
+      "displayName": "Build (Default, Mac)",
+      "configurePreset": "release-mac-ninja",
+      "inherits": [
+        "ISMac"
+      ]
+    }
+  ]
+}

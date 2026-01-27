@@ -1,0 +1,44 @@
+{
+    "version": 6,
+    "include": [
+        "CMakePresets.json"
+    ],
+    "configurePresets": [
+        {
+            "name": "user-paths",
+            "hidden": true,
+            "cacheVariables": {
+                "EXTERNAL_REPO_ROOT": "c:/projects/cpp/external/",
+                "EXTERNAL_ROOT": "c:/projects/cpp/external/pkgs",
+                "CMAKE_MAKE_PROGRAM": "C:/Users/lockg/scoop/shims/ninja.exe"
+            },
+            "environment": {
+                "VCPKG_ROOT": "C:/tools/vcpkg"
+            }
+        },
+        {
+            "name": "win-dev-user",
+            "displayName": "Developer Build (Windows, User)",
+            "inherits": [
+                "dev-win-msvc-ninja",
+                "user-paths",
+                "pkg-vcpkg"
+            ],
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-windows"
+            }
+        },
+        {
+            "name": "win-release-user",
+            "displayName": "Release Build (Windows, User)",
+            "inherits": [
+                "release-win-msvc-ninja",
+                "user-paths",
+                "pkg-vcpkg"
+            ],
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-windows"
+            }
+        } 
+    ]
+}

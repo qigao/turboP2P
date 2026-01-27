@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies (add more as needed)
+find_dependency(libuv)
+find_dependency(OpenSSL)  
+find_dependency(c-ares)
+find_dependency(base64) 
+find_dependency(TurboNet)
+
+include("${CMAKE_CURRENT_LIST_DIR}/TurboP2PTargets.cmake")
+
+check_required_components(TurboP2P)
