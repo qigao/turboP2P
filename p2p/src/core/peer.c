@@ -1,17 +1,21 @@
 #include "peer.h"
 #include "node.h"
 #include "../internal.h"
+#include <CoroNet/turbo_stream.h>
 #include <tlog.h>
 #include <platform.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 #define RECV_BUF_INITIAL 4096
 
-/* Forward declaration for client callback */
-static void peer_client_event_cb(async_client_t *client,
-                                  const async_client_event_t *event,
-                                  void *user_data);
+static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip);
+static void p2p_peer_handle_stream_disconnect(p2p_peer_t *peer, int destroy_peer);
+static void p2p_peer_finalize(p2p_peer_t *peer);
+static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer);
+static void p2p_peer_capture_remote_public_key(p2p_peer_t *peer);
+static void p2p_peer_reset_security_state(p2p_peer_t *peer);
 
 /* =============================================================================
  * Peer State String
@@ -59,24 +63,38 @@ CXX_C_API p2p_peer_t* p2p_peer_create(p2p_node_t *node, const char *ip, int port
 }
 
 CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer) {
+    int should_finalize = 0;
+
     if (!peer) return;
-    
+
     p2p_node_t *node = peer->node;
     if (node) {
         turbo_mutex_lock(&node->mutex);
     }
-    
+
     if (peer->destroying) {
         if (node) turbo_mutex_unlock(&node->mutex);
         return;
     }
     peer->destroying = 1;
+    should_finalize = (peer->callback_refs == 0);
 
     if (node) {
         turbo_mutex_unlock(&node->mutex);
     }
 
     p2p_peer_disconnect(peer);
+    if (!should_finalize) {
+        return;
+    }
+
+    p2p_peer_finalize(peer);
+}
+
+static void p2p_peer_finalize(p2p_peer_t *peer) {
+    if (!peer) {
+        return;
+    }
 
     /* Clean up crypto state */
     if (peer->handshake) {
@@ -93,44 +111,177 @@ CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer) {
     free(peer);
 }
 
+int p2p_peer_hold_locked(p2p_peer_t *peer) {
+    if (!peer) {
+        return 0;
+    }
+
+    if (!peer->destroying) {
+        peer->callback_refs++;
+        return 1;
+    }
+
+    return 0;
+}
+
+int p2p_peer_hold(p2p_peer_t *peer) {
+    p2p_node_t *node = NULL;
+    int held = 0;
+
+    if (!peer) {
+        return 0;
+    }
+
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+
+    held = p2p_peer_hold_locked(peer);
+
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
+
+    return held;
+}
+
+void p2p_peer_release(p2p_peer_t *peer) {
+    p2p_node_t *node = NULL;
+    int should_finalize = 0;
+
+    if (!peer) {
+        return;
+    }
+
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+
+    if (peer->callback_refs > 0) {
+        peer->callback_refs--;
+    }
+    if (peer->destroying && peer->callback_refs == 0 && peer->conn == NULL) {
+        should_finalize = 1;
+    }
+
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
+
+    if (should_finalize) {
+        p2p_peer_finalize(peer);
+    }
+}
+
 int p2p_peer_connect(p2p_peer_t *peer) {
+    uint64_t now_ms = 0;
+
     if (!peer || !peer->node) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    if (peer->is_connected) {
+    if (p2p_peer_connect_is_suppressed(peer)) {
+        return P2P_ERR_NETWORK;
+    }
+
+    if (peer->state == P2P_PEER_STATE_CONNECTING ||
+        peer->state == P2P_PEER_STATE_HANDSHAKING ||
+        peer->state == P2P_PEER_STATE_CONNECTED) {
         return P2P_OK;
     }
 
-    /* Create async client for outbound connection */
-    async_client_t *client = async_client_create(peer_client_event_cb, peer);
-    if (!client) {
-        TLOG_ERROR("[P2P] peer_connect: failed to create async client");
+    now_ms = turbo_hrtime() / 1000000;
+    if (peer->reconnect_after_ms > now_ms) {
+        return P2P_OK;
+    }
+
+    p2p_peer_reset_security_state(peer);
+
+    turbo_stream_t *stream = turbo_stream_create(peer->node->ctx,
+                                                 peer_stream_kind_from_ip(peer->ip));
+    if (!stream) {
+        TLOG_ERROR("[P2P] peer_connect: failed to create stream");
         return P2P_ERR_NO_MEM;
     }
+    turbo_stream_set_user_data(stream, peer);
 
     /* Create unified connection abstraction */
-    peer->conn = p2p_connection_create_outbound(client);
+    peer->conn = p2p_connection_create_outbound(stream);
     if (!peer->conn) {
-        async_client_destroy(client);
+        turbo_stream_destroy(stream);
         return P2P_ERR_NO_MEM;
     }
 
-    /* Format connection URL (e.g., tcp://127.0.0.1:8080) */
-    char url[128];
-    snprintf(url, sizeof(url), "tcp://%s:%d", peer->ip, peer->port);
-
-    async_client_status_t status = async_client_connect(client, url);
-    if (status != ASYNC_CLIENT_STATUS_OK) {
-        TLOG_ERROR("[P2P] peer_connect: connect to %s failed", url);
+    if (turbo_stream_connect(stream, peer->ip, (unsigned short)peer->port,
+                             p2p_peer_stream_connect, p2p_peer_stream_close) != 0) {
+        TLOG_DEBUG("[P2P] peer_connect: connect to {}:{} failed", peer->ip, peer->port);
         p2p_connection_destroy(peer->conn);
         peer->conn = NULL;
         return P2P_ERR_NETWORK;
     }
 
-    peer->is_connected = 1;
-    TLOG_DEBUG("[P2P] peer_connect: connecting to {}", url);
+    peer->state = P2P_PEER_STATE_CONNECTING;
+    peer->connect_time = turbo_hrtime();
+    TLOG_DEBUG("[P2P] peer_connect: connecting to {}:{}", peer->ip, peer->port);
     return P2P_OK;
+}
+
+static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
+    p2p_connect_suppression_t *suppression = NULL;
+    char key[96];
+    uint64_t now_ms = 0;
+    int blocked = 0;
+    p2p_node_t *node = NULL;
+
+    if (!peer || !peer->node) {
+        return 0;
+    }
+
+    node = peer->node;
+    p2p_endpoint_to_key(key, sizeof(key), peer->ip, peer->port);
+    now_ms = turbo_hrtime() / 1000000;
+
+    turbo_mutex_lock(&node->mutex);
+    HASH_FIND_STR(node->connect_suppressions, key, suppression);
+    if (suppression) {
+        if (suppression->until_ms > now_ms) {
+            blocked = 1;
+        } else {
+            HASH_DEL(node->connect_suppressions, suppression);
+            free(suppression);
+        }
+    }
+    turbo_mutex_unlock(&node->mutex);
+
+    return blocked;
+}
+
+static void p2p_peer_capture_remote_public_key(p2p_peer_t *peer) {
+    if (!peer || !peer->handshake || !peer->handshake->has_remote_static_public) {
+        return;
+    }
+
+    memcpy(peer->remote_public_key,
+           peer->handshake->remote_static_public,
+           sizeof(peer->remote_public_key));
+    peer->remote_public_key_ready = 1;
+}
+
+static void p2p_peer_reset_security_state(p2p_peer_t *peer) {
+    if (!peer) {
+        return;
+    }
+
+    if (peer->handshake) {
+        p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
+        free(peer->handshake);
+        peer->handshake = NULL;
+    }
+    p2p_crypto_session_destroy(&peer->crypto);
+    memset(peer->remote_public_key, 0, sizeof(peer->remote_public_key));
+    peer->remote_public_key_ready = 0;
 }
 
 void p2p_peer_disconnect(p2p_peer_t *peer) {
@@ -149,6 +300,7 @@ void p2p_peer_disconnect(p2p_peer_t *peer) {
 
     peer->state = P2P_PEER_STATE_DISCONNECTED;
     peer->recv_len = 0;
+    p2p_peer_reset_security_state(peer);
 }
 
 /* =============================================================================
@@ -167,7 +319,7 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
 
     if (peer->state != P2P_PEER_STATE_CONNECTED &&
         peer->state != P2P_PEER_STATE_HANDSHAKING) {
-        TLOG_WARN("[P2P] peer_send: peer not connected (state={})",
+        TLOG_DEBUG("[P2P] peer_send: peer not connected (state={})",
                  p2p_peer_state_str(peer->state));
         return P2P_ERR_NETWORK;
     }
@@ -185,8 +337,8 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
     if (p2p_crypto_session_is_ready(&peer->crypto) &&
         msg->header.type != P2P_MSG_NOISE_HANDSHAKE) {
 
-        /* Allocate buffer for ciphertext (plaintext + tag) */
-        size_t ct_len = frame_len + P2P_TAG_SIZE;
+        /* Allocate buffer for ciphertext: nonce counter + tag + encrypted frame. */
+        size_t ct_len = frame_len + 8 + P2P_TAG_SIZE;
         uint8_t *ct_buf = (uint8_t *)malloc(ct_len + 4);  /* +4 for length prefix */
         if (!ct_buf) {
             free(frame_buf);
@@ -252,30 +404,90 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
         
         size_t consumed = 0;
 
-        int ret = p2p_message_deserialize(peer->recv_buf, peer->recv_len,
-                                           msg, &consumed);
+        int ret = P2P_OK;
+        uint8_t *plain_buf = NULL;
+        size_t plain_len = 0;
+
+        if (p2p_crypto_session_is_ready(&peer->crypto)) {
+            size_t encrypted_len = 0;
+
+            if (peer->recv_len < 4) {
+                free(msg);
+                break;
+            }
+
+            encrypted_len = (size_t)peer->recv_buf[0] |
+                            ((size_t)peer->recv_buf[1] << 8) |
+                            ((size_t)peer->recv_buf[2] << 16) |
+                            ((size_t)peer->recv_buf[3] << 24);
+            if (encrypted_len < 8 + P2P_TAG_SIZE ||
+                encrypted_len > sizeof(((p2p_message_t *)0)->payload.raw) + sizeof(p2p_msg_header_t) + 8 + P2P_TAG_SIZE) {
+                free(msg);
+                return P2P_ERR_PROTOCOL;
+            }
+            if (peer->recv_len < 4 + encrypted_len) {
+                free(msg);
+                break;
+            }
+
+            plain_buf = (uint8_t *)malloc(encrypted_len);
+            if (!plain_buf) {
+                free(msg);
+                return P2P_ERR_NO_MEM;
+            }
+            ret = p2p_crypto_decrypt(&peer->crypto,
+                                     peer->recv_buf + 4,
+                                     encrypted_len,
+                                     plain_buf,
+                                     &plain_len);
+            if (ret != P2P_OK) {
+                free(plain_buf);
+                free(msg);
+                return ret;
+            }
+
+            ret = p2p_message_deserialize(plain_buf, plain_len, msg, &consumed);
+            if (ret == P2P_OK && consumed != plain_len) {
+                ret = P2P_ERR_PROTOCOL;
+            }
+            free(plain_buf);
+            plain_buf = NULL;
+            consumed = 4 + encrypted_len;
+        } else {
+            ret = p2p_message_deserialize(peer->recv_buf, peer->recv_len,
+                                          msg, &consumed);
+        }
         if (ret == P2P_ERR_INVALID_ARG) {
             /* Need more data */
             free(msg);
             break;
         }
         if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] peer_on_data: invalid frame from {}:{}",
-                      peer->ip, peer->port);
+            TLOG_DEBUG("[P2P] peer_on_data: invalid frame from {}:{} (code: {})",
+                      peer->ip, peer->port, ret);
             free(msg);
             return ret;
+        }
+
+        if (consumed == 0 || consumed > peer->recv_len) {
+            TLOG_DEBUG("[P2P] peer_on_data: corrupt frame accounting from {}:{} (consumed={}, recv_len={})",
+                      peer->ip, peer->port, consumed, peer->recv_len);
+            free(msg);
+            return P2P_ERR_PROTOCOL;
+        }
+
+        peer->recv_len -= consumed;
+        if (peer->recv_len > 0) {
+            memmove(peer->recv_buf, peer->recv_buf + consumed, peer->recv_len);
         }
 
         /* Dispatch message */
         p2p_node_dispatch_message(peer->node, peer, msg);
         free(msg);
 
-        /* Remove consumed bytes */
-        if (consumed < peer->recv_len) {
-            memmove(peer->recv_buf, peer->recv_buf + consumed,
-                    peer->recv_len - consumed);
+        if (peer->destroying) {
+            break;
         }
-        peer->recv_len -= consumed;
     }
 
     return P2P_OK;
@@ -320,6 +532,8 @@ static int peer_send_handshake(p2p_peer_t *peer, uint8_t step, const uint8_t *da
     if (len > 0 && len <= sizeof(msg->payload.noise_handshake.data)) {
         memcpy(msg->payload.noise_handshake.data, data, len);
     }
+    msg->header.payload_len =
+        (uint16_t)(offsetof(p2p_noise_handshake_payload_t, data) + len);
     int ret = p2p_peer_send(peer, msg);
     free(msg);
     return ret;
@@ -375,7 +589,7 @@ int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg) {
     const uint8_t *data = msg->payload.noise_handshake.data;
     size_t data_len = msg->payload.noise_handshake.data_len;
 
-    TLOG_DEBUG("[P2P] handshake: received step %u ({} bytes) from {}:{}",
+    TLOG_DEBUG("[P2P] handshake: received step {} ({} bytes) from {}:{}",
               step, data_len, peer->ip, peer->port);
 
     /* Responder receiving step 1 (no handshake state yet) */
@@ -458,6 +672,7 @@ int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg) {
             TLOG_INFO("[P2P] handshake: initiator complete with {}:{}", peer->ip, peer->port);
 
             /* Clean up handshake state */
+            p2p_peer_capture_remote_public_key(peer);
             p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
             free(peer->handshake);
             peer->handshake = NULL;
@@ -489,6 +704,7 @@ int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg) {
             TLOG_INFO("[P2P] handshake: responder complete with {}:{}", peer->ip, peer->port);
 
             /* Clean up handshake state */
+            p2p_peer_capture_remote_public_key(peer);
             p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
             free(peer->handshake);
             peer->handshake = NULL;
@@ -500,56 +716,118 @@ int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg) {
         return P2P_OK;
     }
 
-    TLOG_WARN("[P2P] handshake: unexpected step %u", step);
+    TLOG_WARN("[P2P] handshake: unexpected step {}", step);
     return P2P_ERR_INVALID_ARG;
 }
 
-/* =============================================================================
- * Async Client Callback
- * ============================================================================= */
+static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip) {
+    struct in6_addr addr6;
+    if (ip && inet_pton(AF_INET6, ip, &addr6) == 1) {
+        return TURBO_STREAM_TCP6;
+    }
+    return TURBO_STREAM_TCP4;
+}
 
-static void peer_client_event_cb(async_client_t *client,
-                                  const async_client_event_t *event,
-                                  void *user_data) {
-    (void)client;
-    p2p_peer_t *peer = (p2p_peer_t *)user_data;
+static void p2p_peer_handle_stream_disconnect(p2p_peer_t *peer, int destroy_peer) {
+    uint64_t now_ms = 0;
+
     if (!peer || !peer->node) return;
 
     p2p_node_t *node = peer->node;
-
-    switch (event->type) {
-        case ASYNC_CLIENT_EVENT_CONNECTED:
-            TLOG_DEBUG("[P2P] peer connected: {}:{}", peer->ip, peer->port);
-            turbo_mutex_lock(&node->mutex);
-            peer->state = P2P_PEER_STATE_HANDSHAKING;
-            peer->connect_time = turbo_hrtime();
-            peer->last_seen = peer->connect_time;
-
-            /* Notify node to start handshake */
-            p2p_node_on_peer_connected(node, peer);
-            turbo_mutex_unlock(&node->mutex);
-            break;
-
-        case ASYNC_CLIENT_EVENT_DATA:
-            /* p2p_peer_on_data calls dispatch_message which handles locking */
-            p2p_peer_on_data(peer, event->data, event->length);
-            break;
-
-        case ASYNC_CLIENT_EVENT_ERROR:
-            TLOG_ERROR("[P2P] peer error {}:{}: {}",
-                      peer->ip, peer->port, event->message ? event->message : "unknown");
-            turbo_mutex_lock(&node->mutex);
-            peer->state = P2P_PEER_STATE_DISCONNECTED;
-            p2p_node_on_peer_disconnected(node, peer);
-            turbo_mutex_unlock(&node->mutex);
-            break;
-
-        case ASYNC_CLIENT_EVENT_CLOSED:
-            TLOG_DEBUG("[P2P] peer disconnected: {}:{}", peer->ip, peer->port);
-            turbo_mutex_lock(&node->mutex);
-            peer->state = P2P_PEER_STATE_DISCONNECTED;
-            p2p_node_on_peer_disconnected(node, peer);
-            turbo_mutex_unlock(&node->mutex);
-            break;
+    if (peer->state == P2P_PEER_STATE_DISCONNECTED) {
+        return;
     }
+
+    now_ms = turbo_hrtime() / 1000000;
+    if (peer->keep_entry && !destroy_peer) {
+        peer->reconnect_after_ms = now_ms + P2P_CONNECT_RETRY_MS;
+    }
+
+    p2p_peer_disconnect(peer);
+
+    p2p_node_on_peer_disconnected(node, peer);
+
+    if (destroy_peer) {
+        p2p_peer_destroy(peer);
+    }
+}
+
+void p2p_peer_stream_connect(void *handle, int status, void *arg) {
+    turbo_stream_t *stream = (turbo_stream_t *)handle;
+    p2p_peer_t *peer;
+    p2p_node_t *node;
+
+    (void)arg;
+    if (!stream) return;
+    peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
+    if (!peer || !peer->node) return;
+    if (!p2p_peer_hold(peer)) return;
+    node = peer->node;
+
+    if (status != 0) {
+        TLOG_DEBUG("[P2P] peer connect failed {}:{} status={}", peer->ip, peer->port, status);
+        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+        p2p_peer_release(peer);
+        return;
+    }
+
+    if (turbo_stream_recv_start(stream, p2p_peer_stream_recv) != 0) {
+        TLOG_ERROR("[P2P] failed to start recv for {}:{}", peer->ip, peer->port);
+        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+        p2p_peer_release(peer);
+        return;
+    }
+
+    TLOG_DEBUG("[P2P] peer connected: {}:{}", peer->ip, peer->port);
+    turbo_mutex_lock(&node->mutex);
+    peer->is_connected = 1;
+    peer->reconnect_after_ms = 0;
+    peer->state = P2P_PEER_STATE_HANDSHAKING;
+    peer->connect_time = turbo_hrtime();
+    peer->last_seen = peer->connect_time;
+    turbo_mutex_unlock(&node->mutex);
+    p2p_node_on_peer_connected(node, peer);
+    p2p_peer_release(peer);
+}
+
+int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx) {
+    turbo_stream_t *stream = (turbo_stream_t *)handle;
+    p2p_peer_t *peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
+    (void)peer_ctx;
+
+    if (!peer) {
+        return 0;
+    }
+    if (!p2p_peer_hold(peer)) {
+        return 0;
+    }
+
+    if (!slice || !slice->data || slice->length == 0) {
+        turbo_stream_set_user_data(stream, NULL);
+        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+        p2p_peer_release(peer);
+        return 0;
+    }
+
+    if (p2p_peer_on_data(peer, slice->data, slice->length) != P2P_OK) {
+        p2p_peer_release(peer);
+        return 1;
+    }
+
+    p2p_peer_release(peer);
+    return 0;
+}
+
+void p2p_peer_stream_close(void *handle) {
+    turbo_stream_t *stream = (turbo_stream_t *)handle;
+    p2p_peer_t *peer;
+
+    if (!stream) return;
+    peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
+    if (!peer) return;
+    if (!p2p_peer_hold(peer)) return;
+
+    turbo_stream_set_user_data(stream, NULL);
+    p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+    p2p_peer_release(peer);
 }

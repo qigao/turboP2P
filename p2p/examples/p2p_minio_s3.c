@@ -17,11 +17,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <uv.h>
 #include <tlog.h>
  
-#include <mustache/mustache.h>
-#include <mustache/mustache_json.h>
+#include <mustache.h>
+#include <mustache_json.h>
 #include <turbo_parser.h>
 
 /* S3 XML Templates */
@@ -137,7 +136,7 @@ static void make_dht_key(const char *bucket, const char *object, char *out, size
 
 /* Helper to generate a random upload ID */
 static void generate_upload_id(char *out, size_t size) {
-    snprintf(out, size, "upload-%lx", (unsigned long)uv_hrtime());
+    snprintf(out, size, "upload-%llx", (unsigned long long)turbo_hrtime());
 }
 
 /* 
@@ -391,11 +390,11 @@ void handle_put_object(Req *req, Res *res) {
         char temp_path[256];
         snprintf(temp_path, sizeof(temp_path), "part_%s_%d.dat", upload_id, part_num);
         turbo_fs_buf_t buf = turbo_fs_buf_init(req->body, req->body_len);
-        turbo_fs_write_file_sync(temp_path, &buf);
+        turbo_fs_write_file(temp_path, &buf);
 
         char content_hash[65];
         p2p_put_file(g_node, temp_path, content_hash);
-        turbo_fs_unlink_sync(temp_path);
+        turbo_fs_unlink(temp_path);
 
         /* Log part */
         part_t *p = (part_t *)calloc(1, sizeof(part_t));
@@ -459,14 +458,14 @@ void handle_put_object(Req *req, Res *res) {
     snprintf(temp_path, sizeof(temp_path), "tmp_%s_%s.dat", bucket, object);
     
     turbo_fs_buf_t buf = turbo_fs_buf_init(req->body, req->body_len);
-    if (turbo_fs_write_file_sync(temp_path, &buf) != 0) {
+    if (turbo_fs_write_file(temp_path, &buf) != 0) {
         send_xml(res, INTERNAL_SERVER_ERROR, "<Error><Code>InternalError</Code></Error>");
         return;
     }
 
     char content_hash[65];
     int ret = p2p_put_file(g_node, temp_path, content_hash);
-    turbo_fs_unlink_sync(temp_path);
+    turbo_fs_unlink(temp_path);
 
     if (ret != P2P_OK) {
         send_xml(res, INTERNAL_SERVER_ERROR, "<Error><Code>P2PError</Code></Error>");
@@ -515,7 +514,8 @@ void handle_get_object(Req *req, Res *res) {
     }
 
     char final_path[256];
-    snprintf(final_path, sizeof(final_path), "final_%lx", (unsigned long)uv_hrtime());
+    snprintf(final_path, sizeof(final_path), "final_%llx",
+             (unsigned long long)turbo_hrtime());
 
     if (strncmp(val, "SHARDS:", 7) == 0) {
         /* Reconstruct sharded file or handle Range */
@@ -541,7 +541,7 @@ void handle_get_object(Req *req, Res *res) {
                                     fwrite(buffer, 1, n, fp);
                                 }
                                 fclose(shard_fp);
-                                turbo_fs_unlink_sync(part_path);
+                                turbo_fs_unlink(part_path);
                             }
                         }
                     }
@@ -570,7 +570,7 @@ void handle_get_object(Req *req, Res *res) {
         send_s3_error(res, INTERNAL_SERVER_ERROR, "IOError", "Failed to serve the file pieces.");
     }
     
-    turbo_fs_unlink_sync(final_path);
+    turbo_fs_unlink(final_path);
 }
 
 /* 
@@ -627,7 +627,6 @@ int main(int argc, char **argv) {
     /* Initialize Logger */
     tlog_config_t log_config = {0};
     log_config.min_level = TURBO_LOG_LEVEL_INFO;
-    log_config.async_mode = 1;
     tlog_t *logger = tlog_create(&log_config);
     if (logger) {
         turbo_file_sink_opts_t opts = {0};

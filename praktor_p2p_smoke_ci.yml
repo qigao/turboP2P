@@ -1,0 +1,36 @@
+name: "TurboP2P Smoke CI"
+description: "Run a fast TurboP2P smoke subset via the shared full workflow."
+
+variables:
+  WORKING_DIR: "."
+  CMAKE_PRESET: "linux-release-user"
+  TEST_PRESET: "linux-release-user"
+  BUILD_TARGET: "test_p2p test_mesh_paths"
+  VCPKG_INSTALL_ROOT: "vcpkg_installed"
+  VCPKG_TRIPLET: "x64-linux"
+  VCPKG_COMMAND: "/opt/vcpkg/vcpkg"
+  VCPKG_COMMAND_PREFIX: "env -u LD_PRELOAD VCPKG_FORCE_SYSTEM_BINARIES=1"
+  COMMAND_PREFIX: "env -u LD_PRELOAD"
+  TEST_COMMAND_PREFIX: "env LD_LIBRARY_PATH=/opt/turbonet/lib"
+  BUILD_ARGS: "-j 1"
+  CTEST_ARGS: "-R '^(test_p2p|test_mesh_paths)$'"
+
+tasks:
+  - name: smoke
+    description: "Execute a reduced test subset for quick remote regression checks"
+    uses: "./praktor_p2p_ci.yml"
+    vars:
+      WORKING_DIR: "{{ WORKING_DIR }}"
+      CMAKE_PRESET: "{{ CMAKE_PRESET }}"
+      TEST_PRESET: "{{ TEST_PRESET }}"
+      BUILD_TARGET: "{{ BUILD_TARGET }}"
+      VCPKG_INSTALL_ROOT: "{{ VCPKG_INSTALL_ROOT }}"
+      VCPKG_TRIPLET: "{{ VCPKG_TRIPLET }}"
+      VCPKG_COMMAND: "{{ VCPKG_COMMAND }}"
+      VCPKG_COMMAND_PREFIX: "{{ VCPKG_COMMAND_PREFIX }}"
+      COMMAND_PREFIX: "{{ COMMAND_PREFIX }}"
+      TEST_COMMAND_PREFIX: "{{ TEST_COMMAND_PREFIX }}"
+      BUILD_ARGS: "{{ BUILD_ARGS }}"
+      CTEST_ARGS: "{{ CTEST_ARGS }}"
+    script: |
+      log.info("TurboP2P smoke CI passed via praktor_p2p_ci.yml.");

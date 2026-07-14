@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 
 
 /* =============================================================================
@@ -76,6 +76,34 @@ int tunnel_config_parse_cidr(const char *cidr, tunnel_ip_addr_t *addr, tunnel_ip
     }
   }
 
+  return TUNNEL_OK;
+}
+
+int tunnel_config_parse_fake_dns_range(const char *range, uint32_t *base_ip, uint32_t *mask) {
+  tunnel_ip_addr_t parsed_addr;
+  tunnel_ip_addr_t parsed_mask;
+  uint32_t addr_host;
+  uint32_t mask_host;
+  int family = 0;
+  int ret;
+
+  if (!range || !base_ip || !mask || range[0] == '\0') {
+    return TUNNEL_ERR_INVALID_ARG;
+  }
+
+  ret = tunnel_config_parse_cidr(range, &parsed_addr, &parsed_mask, &family);
+  if (ret != TUNNEL_OK || family != AF_INET) {
+    return TUNNEL_ERR_INVALID_ARG;
+  }
+
+  addr_host = ntohl(parsed_addr.v4);
+  mask_host = ntohl(parsed_mask.v4);
+  if (mask_host == 0) {
+    return TUNNEL_ERR_INVALID_ARG;
+  }
+
+  *base_ip = htonl(addr_host & mask_host);
+  *mask = parsed_mask.v4;
   return TUNNEL_OK;
 }
 
@@ -290,6 +318,33 @@ static char *value_dup(const config_kv_t *kv) {
   return s;
 }
 
+void tunnel_config_clear_parsed_refs(tunnel_config_t *config) {
+  if (!config)
+    return;
+
+  config->tun.name = NULL;
+  config->tun.ipv4_addr = NULL;
+  config->tun.ipv4_netmask = NULL;
+  config->proxy.host = NULL;
+  config->proxy.username = NULL;
+  config->proxy.password = NULL;
+  config->dns.fake_dns_range = NULL;
+}
+
+void tunnel_config_free_parsed_strings(tunnel_config_t *config) {
+  if (!config)
+    return;
+
+  free((void *)config->tun.name);
+  free((void *)config->tun.ipv4_addr);
+  free((void *)config->tun.ipv4_netmask);
+  free((void *)config->proxy.host);
+  free((void *)config->proxy.username);
+  free((void *)config->proxy.password);
+  free((void *)config->dns.fake_dns_range);
+  tunnel_config_clear_parsed_refs(config);
+}
+
 /* =============================================================================
  * Config File Parser
  * ============================================================================= */
@@ -316,6 +371,7 @@ int tunnel_config_parse_file(const char *path, tunnel_config_t *config) {
   char *proxy_host = NULL;
   char *proxy_user = NULL;
   char *proxy_pass = NULL;
+  char *fake_dns_range = NULL;
 
   while (fgets(line, sizeof(line), fp)) {
     if (!parse_line(line, &kv))
@@ -381,6 +437,22 @@ int tunnel_config_parse_file(const char *path, tunnel_config_t *config) {
       config->dns.hijack_dns = (kv.value[0] == '1' || kv.value[0] == 't' || kv.value[0] == 'y');
     } else if (key_matches(&kv, "dns.fake")) {
       config->dns.fake_dns = (kv.value[0] == '1' || kv.value[0] == 't' || kv.value[0] == 'y');
+    } else if (key_matches(&kv, "dns.fake_dns_range")) {
+      uint32_t base_ip = 0;
+      uint32_t mask = 0;
+      free(fake_dns_range);
+      fake_dns_range = NULL;
+      config->dns.fake_dns_range = NULL;
+      fake_dns_range = value_dup(&kv);
+      if (!fake_dns_range ||
+          tunnel_config_parse_fake_dns_range(fake_dns_range, &base_ip, &mask) != TUNNEL_OK) {
+        free(fake_dns_range);
+        fake_dns_range = NULL;
+        fclose(fp);
+        tunnel_config_free_parsed_strings(config);
+        return TUNNEL_ERR_INVALID_ARG;
+      }
+      config->dns.fake_dns_range = fake_dns_range;
     }
 
     /* General settings */
@@ -407,34 +479,55 @@ int tunnel_config_to_string(const tunnel_config_t *config, char *buf, size_t buf
   const char *proxy_types[] = {"none", "socks5", "http", "shadowsocks", "vmess", "trojan"};
   const char *udp_modes[] = {"disabled", "tcp", "native", "fullcone"};
 
-  int written = stbsp_snprintf(
-      buf, buf_len,
+  tstr_t text = tstr_format(
       "# Tunnel Configuration\n"
-      "tun.name = %s\n"
-      "tun.ipv4 = %s\n"
-      "tun.netmask = %s\n"
-      "tun.mtu = %d\n"
+      "tun.name = {}\n"
+      "tun.ipv4 = {}\n"
+      "tun.netmask = {}\n"
+      "tun.mtu = {}\n"
       "\n"
-      "proxy.type = %s\n"
-      "proxy.host = %s\n"
-      "proxy.port = %d\n"
-      "proxy.username = %s\n"
-      "\n"
-      "udp.mode = %s\n"
-      "dns.hijack = %d\n"
-      "dns.fake = %d\n"
-      "\n"
-      "log.level = %d\n"
-      "session.timeout = %d\n",
+      "proxy.type = {}\n"
+      "proxy.host = {}\n"
+      "proxy.port = {}\n"
+      "proxy.username = {}\n",
       config->tun.name ? config->tun.name : "", config->tun.ipv4_addr ? config->tun.ipv4_addr : "",
       config->tun.ipv4_netmask ? config->tun.ipv4_netmask : "", config->tun.mtu,
       proxy_types[config->proxy.type < 6 ? config->proxy.type : 0],
       config->proxy.host ? config->proxy.host : "", config->proxy.port,
-      config->proxy.username ? config->proxy.username : "",
-      udp_modes[config->udp_mode < 4 ? config->udp_mode : 0], config->dns.hijack_dns,
-      config->dns.fake_dns, config->log_level, config->session_timeout);
+      config->proxy.username ? config->proxy.username : "");
+  if (!text) {
+    return TUNNEL_ERR_NO_MEMORY;
+  }
 
-  return written > 0 ? TUNNEL_OK : TUNNEL_ERR_INVALID_ARG;
+  tstr_t updated = tstr_append_format(
+      text,
+      "\n"
+      "udp.mode = {}\n"
+      "dns.hijack = {}\n"
+      "dns.fake = {}\n"
+      "dns.fake_dns_range = {}\n"
+      "\n"
+      "log.level = {}\n"
+      "session.timeout = {}\n",
+      udp_modes[config->udp_mode < 4 ? config->udp_mode : 0], config->dns.hijack_dns,
+      config->dns.fake_dns,
+      config->dns.fake_dns_range ? config->dns.fake_dns_range : "",
+      config->log_level, config->session_timeout);
+  if (!updated) {
+    tstr_free(text);
+    return TUNNEL_ERR_NO_MEMORY;
+  }
+  text = updated;
+
+  size_t text_len = tstr_len(text);
+  if (text_len >= buf_len) {
+    tstr_free(text);
+    return TUNNEL_ERR_INVALID_ARG;
+  }
+
+  memcpy(buf, text, text_len + 1);
+  tstr_free(text);
+  return TUNNEL_OK;
 }
 
 /* =============================================================================

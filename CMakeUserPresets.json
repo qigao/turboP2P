@@ -5,40 +5,150 @@
     ],
     "configurePresets": [
         {
-            "name": "user-paths",
+            "name": "win-paths",
             "hidden": true,
             "cacheVariables": {
-                "EXTERNAL_REPO_ROOT": "c:/projects/cpp/external/",
-                "EXTERNAL_ROOT": "c:/projects/cpp/external/pkgs",
-                "CMAKE_MAKE_PROGRAM": "C:/Users/lockg/scoop/shims/ninja.exe"
+                "TURBO_UTILS_ROOT": "C:/projects/cpp/external/pkgs/turboutils",
+                "TURBO_NET_ROOT": "C:/projects/cpp/external/pkgs/turbonet",
+                "TURBO_HTTP_ROOT": "C:/projects/cpp/external/pkgs/turbohttp",
+                "CMAKE_MAKE_PROGRAM": "C:/Users/lockg/scoop/shims/ninja.exe",
+                "VCPKG_TARGET_TRIPLET": "x64-windows",
+                "VCPKG_MANIFEST_MODE": "OFF",
+                "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed",
+                "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg_installed/x64-windows",
+                "PKG_CONFIG_EXECUTABLE": "${sourceDir}/vcpkg_installed/x64-windows/tools/pkgconf/pkgconf.exe"
             },
             "environment": {
                 "VCPKG_ROOT": "C:/tools/vcpkg"
+            },
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "toolset": {
+                "value": "host=x64",
+                "strategy": "external"
+            }
+        },
+        {
+            "name": "linux-paths",
+            "hidden": true,
+            "cacheVariables": {
+                "VCPKG_TARGET_TRIPLET": "x64-linux",
+                "TURBO_UTILS_ROOT": "/root/dev/release",
+                "TURBO_NET_ROOT": "/opt/turbonet",
+                "TURBO_HTTP_ROOT": "/opt/turbohttp",
+                "CMAKE_MAKE_PROGRAM": "/usr/bin/ninja",
+                "VCPKG_MANIFEST_MODE": "OFF",
+                "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed",
+                "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg_installed/x64-linux",
+                "PKG_CONFIG_EXECUTABLE": "${sourceDir}/vcpkg_installed/x64-linux/tools/pkgconf/pkgconf"
+            },
+            "environment": {
+                "VCPKG_ROOT": "/opt/vcpkg"
             }
         },
         {
             "name": "win-dev-user",
             "displayName": "Developer Build (Windows, User)",
-            "inherits": [
-                "dev-win-msvc-ninja",
-                "user-paths",
-                "pkg-vcpkg"
-            ],
             "cacheVariables": {
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
-            }
+                "ENABLE_SANITIZER_ADDRESS": "ON"
+            },
+            "inherits": [
+                "base-win-dev-user",
+                "win-paths"
+            ]
         },
         {
             "name": "win-release-user",
             "displayName": "Release Build (Windows, User)",
             "inherits": [
-                "release-win-msvc-ninja",
-                "user-paths",
-                "pkg-vcpkg"
-            ],
+                "base-win-release-user",
+                "win-paths"
+            ]
+        },
+        {
+            "name": "linux-dev-user",
+            "displayName": "Developer Build (Linux, User)",
             "cacheVariables": {
-                "VCPKG_TARGET_TRIPLET": "x64-windows"
+                "ENABLE_SANITIZER_ADDRESS": "OFF"
+            },
+            "inherits": [
+                "base-linux-dev-user",
+                "linux-paths"
+            ]
+        },
+        {
+            "name": "linux-release-user",
+            "displayName": "Release Build (Linux, User)",
+            "inherits": [
+                "release-linux-ninja",
+                "linux-paths"
+            ]
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "win-dev-user",
+            "configurePreset": "win-dev-user"
+        },
+        {
+            "name": "win-release-user",
+            "configurePreset": "win-release-user"
+        },
+        {
+            "name": "linux-dev-user",
+            "configurePreset": "linux-dev-user"
+        },
+        {
+            "name": "linux-release-user",
+            "configurePreset": "linux-release-user"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "win-dev-user",
+            "configurePreset": "win-dev-user",
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false
+            },
+            "output": {
+                "outputOnFailure": true
             }
-        } 
+        },
+        {
+            "name": "win-release-user",
+            "configurePreset": "win-release-user",
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false
+            },
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-dev-user",
+            "configurePreset": "linux-dev-user",
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false
+            },
+            "output": {
+                "outputOnFailure": true
+            }
+        },
+        {
+            "name": "linux-release-user",
+            "configurePreset": "linux-release-user",
+            "execution": {
+                "noTestsAction": "error",
+                "stopOnFailure": false
+            },
+            "output": {
+                "outputOnFailure": true
+            }
+        }
     ]
 }

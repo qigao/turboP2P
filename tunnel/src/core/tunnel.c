@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 #include <tlog.h>
 
 /* =============================================================================
@@ -32,6 +32,108 @@ static const char TUNNEL_VERSION_STRING[] = "1.0.0";
  * ============================================================================= */
 
 static int g_initialized = 0;
+
+int tunnel_config_add_include_range(tunnel_t *tunnel, const char *range);
+int tunnel_config_add_exclude_range(tunnel_t *tunnel, const char *range);
+
+static void tunnel_route_rules_free(tunnel_route_rule_t *rule)
+{
+    while (rule) {
+        tunnel_route_rule_t *next = rule->next;
+        free(rule);
+        rule = next;
+    }
+}
+
+static int tunnel_route_config_apply(tunnel_t *tunnel, const tunnel_route_config_t *route)
+{
+    int i;
+    int ret;
+
+    if (!tunnel || !route) return TUNNEL_ERR_INVALID_ARG;
+    if (route->include_count < 0 || route->exclude_count < 0 ||
+        route->include_domain_count < 0 || route->exclude_domain_count < 0) {
+        return TUNNEL_ERR_INVALID_ARG;
+    }
+    if ((route->include_count > 0 && !route->include_ranges) ||
+        (route->exclude_count > 0 && !route->exclude_ranges) ||
+        (route->include_domain_count > 0 && !route->include_domains) ||
+        (route->exclude_domain_count > 0 && !route->exclude_domains)) {
+        return TUNNEL_ERR_INVALID_ARG;
+    }
+    if (route->include_domain_count > 0 || route->exclude_domain_count > 0) {
+        return TUNNEL_ERR_NOT_SUPPORTED;
+    }
+
+    for (i = 0; i < route->include_count; i++) {
+        ret = tunnel_config_add_include_range(tunnel, route->include_ranges[i]);
+        if (ret != TUNNEL_OK) return ret;
+    }
+
+    for (i = 0; i < route->exclude_count; i++) {
+        ret = tunnel_config_add_exclude_range(tunnel, route->exclude_ranges[i]);
+        if (ret != TUNNEL_OK) return ret;
+    }
+
+    return TUNNEL_OK;
+}
+
+static int tunnel_poll_coro_context(coro_context_t *ctx)
+{
+    turbo_loop_t *native_loop;
+
+    if (!ctx) {
+        return 0;
+    }
+
+    native_loop = (turbo_loop_t *)coro_context_native_loop(ctx);
+    if (native_loop) {
+        turbo_loop_poll(native_loop, 0, 0);
+    }
+
+    return coro_context_run(ctx, TURBO_RUN_NOWAIT);
+}
+
+static void tunnel_destroy_allocated(tunnel_t *tunnel, int stop_running)
+{
+    if (!tunnel) return;
+
+    if (stop_running) {
+        tunnel_stop(tunnel);
+    }
+
+    tunnel_fake_dns_destroy(tunnel->fake_dns);
+    tunnel_proxy_destroy(tunnel->proxy);
+    tunnel_nat_destroy(tunnel->nat);
+    tunnel_tun_destroy(tunnel->tun);
+
+    tunnel_route_rules_free(tunnel->include_rules);
+    tunnel_route_rules_free(tunnel->exclude_rules);
+
+    if (tunnel->ctx) {
+        coro_context_destroy(tunnel->ctx);
+    }
+    turbo_mutex_destroy(&tunnel->mutex);
+    free(tunnel);
+}
+
+static int tunnel_create_fake_dns(tunnel_t *tunnel, const tunnel_config_t *config)
+{
+    uint32_t base_ip = htonl(TUNNEL_FAKE_DNS_DEFAULT_BASE);
+    uint32_t mask = htonl(TUNNEL_FAKE_DNS_DEFAULT_MASK);
+
+    if (!tunnel || !config) return TUNNEL_ERR_INVALID_ARG;
+    if (!config->dns.fake_dns) return TUNNEL_OK;
+
+    if (config->dns.fake_dns_range && config->dns.fake_dns_range[0] != '\0') {
+        int ret = tunnel_config_parse_fake_dns_range(config->dns.fake_dns_range,
+                                                     &base_ip, &mask);
+        if (ret != TUNNEL_OK) return ret;
+    }
+
+    tunnel->fake_dns = tunnel_fake_dns_create(tunnel, base_ip, mask, 600);
+    return tunnel->fake_dns ? TUNNEL_OK : TUNNEL_ERR_NO_MEMORY;
+}
 
 /* =============================================================================
  * Library Lifecycle
@@ -66,66 +168,53 @@ tunnel_t* tunnel_create(const tunnel_config_t *config)
     /* Copy configuration */
     memcpy(&tunnel->config, config, sizeof(tunnel_config_t));
 
-    /* Create event loop */
-    tunnel->loop = calloc(1, sizeof(uv_loop_t));
-    if (!tunnel->loop) {
-        free(tunnel);
-        return NULL;
+    if (config->mode != TUNNEL_MODE_PACKET) {
+        tunnel->ctx = coro_context_create(NULL);
+        if (!tunnel->ctx) {
+            free(tunnel);
+            return NULL;
+        }
     }
-
-    if (uv_loop_init(tunnel->loop) != 0) {
-        free(tunnel->loop);
-        free(tunnel);
-        return NULL;
-    }
-    tunnel->owns_loop = 1;
 
     /* Initialize mutex */
-    if (uv_mutex_init(&tunnel->mutex) != 0) {
-        uv_loop_close(tunnel->loop);
-        free(tunnel->loop);
+    turbo_mutex_init(&tunnel->mutex);
+    if (!tunnel->mutex) {
+        if (tunnel->ctx) {
+            coro_context_destroy(tunnel->ctx);
+        }
         free(tunnel);
+        return NULL;
+    }
+
+    if (tunnel_route_config_apply(tunnel, &config->route) != TUNNEL_OK) {
+        tunnel_destroy_allocated(tunnel, 0);
         return NULL;
     }
 
     /* Create TUN device */
     tunnel->tun = tunnel_tun_create(tunnel, &config->tun);
     if (!tunnel->tun) {
-        uv_mutex_destroy(&tunnel->mutex);
-        uv_loop_close(tunnel->loop);
-        free(tunnel->loop);
-        free(tunnel);
+        tunnel_destroy_allocated(tunnel, 0);
         return NULL;
     }
 
     /* Create NAT table */
     tunnel->nat = tunnel_nat_create(tunnel);
     if (!tunnel->nat) {
-        tunnel_tun_destroy(tunnel->tun);
-        uv_mutex_destroy(&tunnel->mutex);
-        uv_loop_close(tunnel->loop);
-        free(tunnel->loop);
-        free(tunnel);
+        tunnel_destroy_allocated(tunnel, 0);
         return NULL;
     }
 
     /* Create proxy client */
     tunnel->proxy = tunnel_proxy_create(tunnel, &config->proxy);
     if (!tunnel->proxy) {
-        tunnel_nat_destroy(tunnel->nat);
-        tunnel_tun_destroy(tunnel->tun);
-        uv_mutex_destroy(&tunnel->mutex);
-        uv_loop_close(tunnel->loop);
-        free(tunnel->loop);
-        free(tunnel);
+        tunnel_destroy_allocated(tunnel, 0);
         return NULL;
     }
 
-    /* Create Fake DNS if enabled */
-    if (config->dns.fake_dns) {
-        uint32_t base_ip = htonl(0xC6120000);  /* 198.18.0.0 */
-        uint32_t mask = htonl(0xFFFE0000);     /* /15 */
-        tunnel->fake_dns = tunnel_fake_dns_create(tunnel, base_ip, mask, 600);
+    if (tunnel_create_fake_dns(tunnel, config) != TUNNEL_OK) {
+        tunnel_destroy_allocated(tunnel, 0);
+        return NULL;
     }
 
     /* Set default log level */
@@ -138,9 +227,24 @@ tunnel_t* tunnel_create(const tunnel_config_t *config)
 
 tunnel_t* tunnel_create_from_file(const char *config_path)
 {
-    (void)config_path;
-    /* TODO: Implement YAML parsing */
-    return NULL;
+    if (!config_path) return NULL;
+
+    tunnel_config_t config;
+    tunnel_config_init(&config);
+
+    int ret = tunnel_config_parse_file(config_path, &config);
+    if (ret != TUNNEL_OK) {
+        tunnel_config_free_parsed_strings(&config);
+        return NULL;
+    }
+
+    tunnel_t *tunnel = tunnel_create(&config);
+    if (tunnel) {
+        tunnel_config_clear_parsed_refs(&tunnel->config);
+    }
+
+    tunnel_config_free_parsed_strings(&config);
+    return tunnel;
 }
 
 tunnel_t* tunnel_create_from_yaml(const char *config_yaml)
@@ -152,39 +256,7 @@ tunnel_t* tunnel_create_from_yaml(const char *config_yaml)
 
 void tunnel_destroy(tunnel_t *tunnel)
 {
-    if (!tunnel) return;
-
-    tunnel_stop(tunnel);
-
-    /* Destroy components */
-    tunnel_fake_dns_destroy(tunnel->fake_dns);
-    tunnel_proxy_destroy(tunnel->proxy);
-    tunnel_nat_destroy(tunnel->nat);
-    tunnel_tun_destroy(tunnel->tun);
-
-    /* Free routing rules */
-    tunnel_route_rule_t *rule = tunnel->include_rules;
-    while (rule) {
-        tunnel_route_rule_t *next = rule->next;
-        free(rule);
-        rule = next;
-    }
-
-    rule = tunnel->exclude_rules;
-    while (rule) {
-        tunnel_route_rule_t *next = rule->next;
-        free(rule);
-        rule = next;
-    }
-
-    /* Destroy event loop */
-    if (tunnel->owns_loop && tunnel->loop) {
-        uv_loop_close(tunnel->loop);
-        free(tunnel->loop);
-    }
-
-    uv_mutex_destroy(&tunnel->mutex);
-    free(tunnel);
+    tunnel_destroy_allocated(tunnel, 1);
 }
 
 /* =============================================================================
@@ -201,6 +273,10 @@ static void tunnel_process_tcp_packet(tunnel_t *tunnel, tunnel_packet_t *pkt)
     key.protocol = TUNNEL_IPPROTO_TCP;
 
     tunnel_session_t *session = tunnel_nat_lookup(tunnel->nat, &key);
+    if (!session) {
+        session = tunnel_nat_lookup_reverse(tunnel->nat, &pkt->ip.dst, &pkt->ip.src,
+                                            TUNNEL_IPPROTO_TCP);
+    }
 
     if (!session) {
         /* New connection - check for SYN */
@@ -297,6 +373,10 @@ static void tunnel_process_dns_packet(tunnel_t *tunnel, tunnel_packet_t *pkt)
 
 static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
 {
+    int should_tunnel = 1;
+
+    turbo_mutex_lock(&tunnel->mutex);
+
     /* Check exclude rules first */
     tunnel_route_rule_t *rule = tunnel->exclude_rules;
     while (rule) {
@@ -304,34 +384,48 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
             uint32_t dst_masked = pkt->ip.dst.addr.v4 & rule->ip.mask.v4;
             uint32_t rule_masked = rule->ip.addr.v4 & rule->ip.mask.v4;
             if (dst_masked == rule_masked) {
-                return 0;  /* Excluded */
+                should_tunnel = 0;
+                break;
             }
         }
         rule = rule->next;
+    }
+
+    if (!should_tunnel) {
+        turbo_mutex_unlock(&tunnel->mutex);
+        return 0;  /* Excluded */
     }
 
     /* Check include rules */
     rule = tunnel->include_rules;
     if (!rule) {
+        turbo_mutex_unlock(&tunnel->mutex);
         return 1;  /* No include rules = tunnel all */
     }
 
+    should_tunnel = 0;
     while (rule) {
         if (rule->type == TUNNEL_ROUTE_IP) {
             uint32_t dst_masked = pkt->ip.dst.addr.v4 & rule->ip.mask.v4;
             uint32_t rule_masked = rule->ip.addr.v4 & rule->ip.mask.v4;
             if (dst_masked == rule_masked) {
-                return 1;  /* Included */
+                should_tunnel = 1;
+                break;
             }
         }
         rule = rule->next;
     }
 
-    return 0;  /* Not matched = bypass */
+    turbo_mutex_unlock(&tunnel->mutex);
+    return should_tunnel;
 }
 
-static void tunnel_on_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t len)
+int tunnel_handle_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t len)
 {
+    if (!tunnel || !data || len == 0) {
+        return TUNNEL_ERR_INVALID_ARG;
+    }
+
     /* Traffic callback */
     if (tunnel->traffic_cb) {
         tunnel->traffic_cb(tunnel, 0, data, len, tunnel->traffic_user_data);
@@ -341,18 +435,23 @@ static void tunnel_on_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t l
     tunnel->stats.packets_rx++;
     tunnel->stats.bytes_rx += len;
 
+    if (tunnel->config.mode == TUNNEL_MODE_PACKET) {
+        return TUNNEL_OK;
+    }
+
     /* Parse IP packet */
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(data, len, &pkt);
     if (ret != TUNNEL_OK) {
         tunnel->stats.protocol_errors++;
-        return;
+        return ret;
     }
 
     /* Check routing rules */
-    if (!tunnel_should_tunnel(tunnel, &pkt)) {
+    ret = tunnel_should_tunnel(tunnel, &pkt);
+    if (!ret) {
         /* Bypass - write directly to TUN (loopback) */
-        return;
+        return TUNNEL_OK;
     }
 
     /* Check for Fake DNS IP and resolve domain */
@@ -388,41 +487,45 @@ static void tunnel_on_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t l
             tunnel->stats.protocol_errors++;
             break;
     }
+
+    return TUNNEL_OK;
 }
 
-/* =============================================================================
- * Timer Callbacks
- * ============================================================================= */
-
-static void tunnel_session_timeout_cb(uv_timer_t *handle)
+static void tunnel_run_maintenance(tunnel_t *tunnel)
 {
-    tunnel_t *tunnel = (tunnel_t *)handle->data;
+    uint64_t now_ms;
+    uint32_t tcp_timeout;
+    uint32_t udp_timeout;
+    int expired;
 
-    uint32_t tcp_timeout = tunnel->config.session_timeout * 1000;
-    uint32_t udp_timeout = TUNNEL_UDP_TIMEOUT_MS;
-
-    if (tcp_timeout == 0) {
-        tcp_timeout = TUNNEL_SESSION_TIMEOUT_MS;
+    if (!tunnel) {
+        return;
     }
 
-    /* Expire old sessions via NAT */
-    int expired = tunnel_nat_evict_expired(tunnel->nat, tcp_timeout, udp_timeout);
-    if (expired > 0) {
-        TLOG_DEBUG("Expired {} sessions", expired);
-        tunnel->stats.timeout_errors += expired;
+    now_ms = turbo_hrtime() / 1000000;
+
+    if (now_ms - tunnel->last_session_maintenance_ms >= 1000) {
+        tcp_timeout = tunnel->config.session_timeout * 1000;
+        udp_timeout = TUNNEL_UDP_TIMEOUT_MS;
+        if (tcp_timeout == 0) {
+            tcp_timeout = TUNNEL_SESSION_TIMEOUT_MS;
+        }
+
+        expired = tunnel_nat_evict_expired(tunnel->nat, tcp_timeout, udp_timeout);
+        if (expired > 0) {
+            TLOG_DEBUG("Expired {} sessions", expired);
+            tunnel->stats.timeout_errors += expired;
+        }
+
+        tunnel->last_session_maintenance_ms = now_ms;
     }
-}
 
-static void tunnel_stats_timer_cb(uv_timer_t *handle)
-{
-    tunnel_t *tunnel = (tunnel_t *)handle->data;
-
-    /* Update uptime */
-    tunnel->stats.uptime_ms = uv_now(tunnel->loop) - tunnel->start_time;
-
-    /* Update session counts */
-    tunnel->stats.tcp_sessions = (uint32_t)tunnel_session_tcp_count(tunnel);
-    tunnel->stats.udp_sessions = (uint32_t)tunnel_session_udp_count(tunnel);
+    if (now_ms - tunnel->last_stats_update_ms >= 5000) {
+        tunnel->stats.uptime_ms = now_ms - tunnel->start_time;
+        tunnel->stats.tcp_sessions = (uint32_t)tunnel_session_tcp_count(tunnel);
+        tunnel->stats.udp_sessions = (uint32_t)tunnel_session_udp_count(tunnel);
+        tunnel->last_stats_update_ms = now_ms;
+    }
 }
 
 /* =============================================================================
@@ -432,7 +535,7 @@ static void tunnel_stats_timer_cb(uv_timer_t *handle)
 static void on_tun_read(tunnel_tun_t *tun, const uint8_t *data, size_t len)
 {
     tunnel_t *tunnel = tun->tunnel;
-    tunnel_on_tun_packet(tunnel, data, len);
+    tunnel_handle_tun_packet(tunnel, data, len);
 }
 
 /* =============================================================================
@@ -462,7 +565,7 @@ int tunnel_start(tunnel_t *tunnel)
     TLOG_INFO("TUN device {} opened", tunnel_tun_get_name(tunnel->tun));
 
     /* Start TUN polling */
-    ret = tunnel_tun_start(tunnel->tun, tunnel->loop);
+    ret = tunnel_tun_start(tunnel->tun);
     if (ret != TUNNEL_OK) {
         TLOG_ERROR("Failed to start TUN polling: {}", ret);
         tunnel_tun_close(tunnel->tun);
@@ -471,18 +574,9 @@ int tunnel_start(tunnel_t *tunnel)
 
     /* Set TUN read callback */
     tunnel_tun_set_read_cb(tunnel->tun, on_tun_read);
-
-    /* Start session timeout timer */
-    uv_timer_init(tunnel->loop, &tunnel->session_timer);
-    tunnel->session_timer.data = tunnel;
-    uv_timer_start(&tunnel->session_timer, tunnel_session_timeout_cb, 1000, 1000);
-
-    /* Start stats timer */
-    uv_timer_init(tunnel->loop, &tunnel->stats_timer);
-    tunnel->stats_timer.data = tunnel;
-    uv_timer_start(&tunnel->stats_timer, tunnel_stats_timer_cb, 5000, 5000);
-
-    tunnel->start_time = uv_now(tunnel->loop);
+    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->last_session_maintenance_ms = tunnel->start_time;
+    tunnel->last_stats_update_ms = tunnel->start_time;
     tunnel->running = 1;
 
     TLOG_INFO("Tunnel started");
@@ -495,10 +589,6 @@ void tunnel_stop(tunnel_t *tunnel)
     if (!tunnel || !tunnel->running) return;
 
     tunnel->stopping = 1;
-
-    /* Stop timers */
-    uv_timer_stop(&tunnel->session_timer);
-    uv_timer_stop(&tunnel->stats_timer);
 
     /* Stop TUN */
     tunnel_tun_stop(tunnel->tun);
@@ -515,6 +605,9 @@ void tunnel_stop(tunnel_t *tunnel)
 
 int tunnel_run(tunnel_t *tunnel)
 {
+    int coro_active;
+    int tun_active;
+
     if (!tunnel) return TUNNEL_ERR_INVALID_ARG;
 
     if (!tunnel->running) {
@@ -526,7 +619,13 @@ int tunnel_run(tunnel_t *tunnel)
 
     /* Run event loop */
     while (tunnel->running && !tunnel->stopping) {
-        uv_run(tunnel->loop, UV_RUN_ONCE);
+        tun_active = tunnel_tun_poll(tunnel->tun);
+        coro_active = tunnel_poll_coro_context(tunnel->ctx);
+        tunnel_run_maintenance(tunnel);
+
+        if (!tun_active && !coro_active) {
+            turbo_sleep_ms(1);
+        }
     }
 
     return TUNNEL_OK;
@@ -534,10 +633,15 @@ int tunnel_run(tunnel_t *tunnel)
 
 int tunnel_poll(tunnel_t *tunnel, int timeout_ms)
 {
+    int active;
+
     if (!tunnel || !tunnel->running) return 0;
 
     (void)timeout_ms;
-    return uv_run(tunnel->loop, UV_RUN_NOWAIT);
+    active = tunnel_tun_poll(tunnel->tun);
+    active += tunnel_poll_coro_context(tunnel->ctx);
+    tunnel_run_maintenance(tunnel);
+    return active;
 }
 
 int tunnel_write_packet(tunnel_t *tunnel, const uint8_t *data, size_t len)
@@ -600,25 +704,25 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
 {
     if (!tunnel || !route) return TUNNEL_ERR_INVALID_ARG;
 
-    /* Free existing rules */
-    tunnel_route_rule_t *rule = tunnel->include_rules;
-    while (rule) {
-        tunnel_route_rule_t *next = rule->next;
-        free(rule);
-        rule = next;
-    }
-    tunnel->include_rules = NULL;
+    tunnel_t parsed;
+    memset(&parsed, 0, sizeof(parsed));
 
-    rule = tunnel->exclude_rules;
-    while (rule) {
-        tunnel_route_rule_t *next = rule->next;
-        free(rule);
-        rule = next;
+    int ret = tunnel_route_config_apply(&parsed, route);
+    if (ret != TUNNEL_OK) {
+        tunnel_route_rules_free(parsed.include_rules);
+        tunnel_route_rules_free(parsed.exclude_rules);
+        return ret;
     }
-    tunnel->exclude_rules = NULL;
 
-    /* Parse and add new rules */
-    /* TODO: Implement CIDR parsing */
+    turbo_mutex_lock(&tunnel->mutex);
+    tunnel_route_rule_t *old_include = tunnel->include_rules;
+    tunnel_route_rule_t *old_exclude = tunnel->exclude_rules;
+    tunnel->include_rules = parsed.include_rules;
+    tunnel->exclude_rules = parsed.exclude_rules;
+    tunnel->config.route = *route;
+    tunnel_route_rules_free(old_include);
+    tunnel_route_rules_free(old_exclude);
+    turbo_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -631,9 +735,9 @@ int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats)
 {
     if (!tunnel || !stats) return TUNNEL_ERR_INVALID_ARG;
 
-    uv_mutex_lock(&tunnel->mutex);
+    turbo_mutex_lock(&tunnel->mutex);
     memcpy(stats, &tunnel->stats, sizeof(tunnel_stats_t));
-    uv_mutex_unlock(&tunnel->mutex);
+    turbo_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -642,10 +746,12 @@ void tunnel_reset_stats(tunnel_t *tunnel)
 {
     if (!tunnel) return;
 
-    uv_mutex_lock(&tunnel->mutex);
+    turbo_mutex_lock(&tunnel->mutex);
     memset(&tunnel->stats, 0, sizeof(tunnel_stats_t));
-    tunnel->start_time = uv_now(tunnel->loop);
-    uv_mutex_unlock(&tunnel->mutex);
+    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->last_session_maintenance_ms = tunnel->start_time;
+    tunnel->last_stats_update_ms = tunnel->start_time;
+    turbo_mutex_unlock(&tunnel->mutex);
 }
 
 /* =============================================================================
@@ -674,9 +780,9 @@ const char* tunnel_session_get_src_addr(tunnel_session_t *session)
 
     if (session->key.src.family == AF_INET) {
         uint32_t ip = ntohl(session->key.src.addr.v4);
-        stbsp_snprintf(g_addr_buf, sizeof(g_addr_buf), "%u.%u.%u.%u",
-                 (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-                 (ip >> 8) & 0xFF, ip & 0xFF);
+        fmt(g_addr_buf, sizeof(g_addr_buf), "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF, ip & 0xFF);
     } else {
         /* TODO: Format IPv6 */
         return "::";
@@ -701,9 +807,9 @@ const char* tunnel_session_get_dst_addr(tunnel_session_t *session)
 
     if (session->key.dst.family == AF_INET) {
         uint32_t ip = ntohl(session->key.dst.addr.v4);
-        stbsp_snprintf(g_addr_buf, sizeof(g_addr_buf), "%u.%u.%u.%u",
-                 (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-                 (ip >> 8) & 0xFF, ip & 0xFF);
+        fmt(g_addr_buf, sizeof(g_addr_buf), "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF, ip & 0xFF);
     } else {
         /* TODO: Format IPv6 */
         return "::";
@@ -774,6 +880,7 @@ void tunnel_config_init(tunnel_config_t *config)
 
     /* Set defaults */
     config->tun.mtu = 1500;
+    config->mode = TUNNEL_MODE_PROXY;
     config->udp_mode = TUNNEL_UDP_OVER_TCP;
     config->tcp_keep_alive = 60;
     config->session_timeout = 300;

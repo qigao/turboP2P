@@ -23,6 +23,7 @@
 #include "tlog.h"
 
 #ifdef _WIN32
+#include <conio.h>
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
 #else
@@ -202,7 +203,6 @@ int main(int argc, char *argv[]) {
     /* Initialize Logger */
     tlog_config_t log_config = {
         .min_level = TURBO_LOG_LEVEL_DEBUG,
-        .async_mode = 1,
         .buffer_size = 64 * 1024
     };
     tlog_t *logger = tlog_create(&log_config);

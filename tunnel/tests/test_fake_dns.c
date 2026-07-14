@@ -3,12 +3,13 @@
  * @brief Tests for Fake DNS domain tracking
  */
 
-#include "unity.h"
+#include <tinytest.h>
 #include "../src/dns/tunnel_fake_dns.h"
 #include "../src/core/tunnel_types.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h> 
-#include <stb_sprintf.h>
+#include <fmt.h>
 
 /* Default Fake DNS configuration */
 #define TEST_BASE_IP    0xC6120000  /* 198.18.0.0 */
@@ -35,7 +36,6 @@ void tearDown(void)
         mock_tunnel = NULL;
     }
 }
-
 /* =============================================================================
  * IP Allocation Tests
  * ============================================================================= */
@@ -44,8 +44,8 @@ void test_fake_dns_get_ip_basic(void)
 {
     uint32_t ip = tunnel_fake_dns_get_ip(dns, "example.com");
 
-    TEST_ASSERT_NOT_EQUAL(0, ip);
-    TEST_ASSERT_EQUAL(1, tunnel_fake_dns_is_fake_ip(dns, ip));
+    check(ip != 0);
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(dns, ip));
 }
 
 void test_fake_dns_get_ip_deterministic(void)
@@ -54,7 +54,7 @@ void test_fake_dns_get_ip_deterministic(void)
     uint32_t ip1 = tunnel_fake_dns_get_ip(dns, "example.com");
     uint32_t ip2 = tunnel_fake_dns_get_ip(dns, "example.com");
 
-    TEST_ASSERT_EQUAL(ip1, ip2);
+    check_int_eq(ip1, ip2);
 }
 
 void test_fake_dns_get_ip_different_domains(void)
@@ -62,7 +62,7 @@ void test_fake_dns_get_ip_different_domains(void)
     uint32_t ip1 = tunnel_fake_dns_get_ip(dns, "example.com");
     uint32_t ip2 = tunnel_fake_dns_get_ip(dns, "google.com");
 
-    TEST_ASSERT_NOT_EQUAL(ip1, ip2);
+    check(ip1 != ip2);
 }
 
 void test_fake_dns_get_ip_in_range(void)
@@ -74,7 +74,7 @@ void test_fake_dns_get_ip_in_range(void)
     uint32_t base = TEST_BASE_IP;
     uint32_t mask = TEST_MASK;
 
-    TEST_ASSERT_EQUAL(base & mask, ip_host & mask);
+    check_int_eq(base & mask, ip_host & mask);
 }
 
 void test_fake_dns_allocate_many(void)
@@ -84,15 +84,15 @@ void test_fake_dns_allocate_many(void)
     uint32_t ips[100];
 
     for (int i = 0; i < 100; i++) {
-        stbsp_snprintf(domain, sizeof(domain), "domain%d.example.com", i);
+        fmt(domain, sizeof(domain), "domain{}.example.com", i);
         ips[i] = tunnel_fake_dns_get_ip(dns, domain);
-        TEST_ASSERT_NOT_EQUAL(0, ips[i]);
+        check(ips[i] != 0);
     }
 
     /* All IPs should be unique */
     for (int i = 0; i < 100; i++) {
         for (int j = i + 1; j < 100; j++) {
-            TEST_ASSERT_NOT_EQUAL(ips[i], ips[j]);
+            check(ips[i] != ips[j]);
         }
     }
 }
@@ -106,8 +106,8 @@ void test_fake_dns_get_domain(void)
     uint32_t ip = tunnel_fake_dns_get_ip(dns, "example.com");
 
     const char *domain = tunnel_fake_dns_get_domain(dns, ip);
-    TEST_ASSERT_NOT_NULL(domain);
-    TEST_ASSERT_EQUAL_STRING("example.com", domain);
+    check_not_null(domain);
+    check_str_eq("example.com", domain);
 }
 
 void test_fake_dns_get_domain_not_found(void)
@@ -116,7 +116,7 @@ void test_fake_dns_get_domain_not_found(void)
     uint32_t fake_ip = htonl(0x08080808);  /* 8.8.8.8 - not in range */
 
     const char *domain = tunnel_fake_dns_get_domain(dns, fake_ip);
-    TEST_ASSERT_NULL(domain);
+    check_null(domain);
 }
 
 void test_fake_dns_get_domain_unallocated(void)
@@ -125,7 +125,7 @@ void test_fake_dns_get_domain_unallocated(void)
     uint32_t fake_ip = htonl(TEST_BASE_IP + 12345);
 
     const char *domain = tunnel_fake_dns_get_domain(dns, fake_ip);
-    TEST_ASSERT_NULL(domain);
+    check_null(domain);
 }
 
 /* =============================================================================
@@ -135,19 +135,19 @@ void test_fake_dns_get_domain_unallocated(void)
 void test_fake_dns_is_fake_ip_yes(void)
 {
     uint32_t ip = tunnel_fake_dns_get_ip(dns, "test.com");
-    TEST_ASSERT_EQUAL(1, tunnel_fake_dns_is_fake_ip(dns, ip));
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(dns, ip));
 }
 
 void test_fake_dns_is_fake_ip_no(void)
 {
     /* 8.8.8.8 should not be fake */
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0x08080808)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0x08080808)));
 
     /* 192.168.1.1 should not be fake */
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0xc0a80101)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0xc0a80101)));
 
     /* 10.0.0.1 should not be fake */
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0x0a000001)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(dns, htonl(0x0a000001)));
 }
 
 void test_fake_dns_is_fake_ip_boundary(void)
@@ -157,12 +157,91 @@ void test_fake_dns_is_fake_ip_boundary(void)
     uint32_t end = base + ~TEST_MASK;
 
     /* Just inside range */
-    TEST_ASSERT_EQUAL(1, tunnel_fake_dns_is_fake_ip(dns, htonl(base)));
-    TEST_ASSERT_EQUAL(1, tunnel_fake_dns_is_fake_ip(dns, htonl(end)));
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(dns, htonl(base)));
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(dns, htonl(end)));
 
     /* Just outside range */
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_is_fake_ip(dns, htonl(base - 1)));
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_is_fake_ip(dns, htonl(end + 1)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(dns, htonl(base - 1)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(dns, htonl(end + 1)));
+}
+
+void test_fake_dns_parse_config_range(void)
+{
+    uint32_t base_ip = 0;
+    uint32_t mask = 0;
+
+    check_int_eq(TUNNEL_OK,
+                 tunnel_config_parse_fake_dns_range("203.0.113.0/24", &base_ip, &mask));
+    check_int_eq(0xcb007100, ntohl(base_ip));
+    check_int_eq(0xffffff00, ntohl(mask));
+}
+
+void test_fake_dns_parse_config_range_canonicalizes_base(void)
+{
+    uint32_t base_ip = 0;
+    uint32_t mask = 0;
+    tunnel_fake_dns_t *custom_dns = NULL;
+    uint32_t ip = 0;
+
+    check_int_eq(TUNNEL_OK,
+                 tunnel_config_parse_fake_dns_range("203.0.113.17/30", &base_ip, &mask));
+    check_int_eq(0xcb007110, ntohl(base_ip));
+    check_int_eq(0xfffffffc, ntohl(mask));
+
+    custom_dns = tunnel_fake_dns_create(mock_tunnel, base_ip, mask, TEST_TTL);
+    check_not_null(custom_dns);
+    ip = tunnel_fake_dns_get_ip(custom_dns, "canonical.example");
+    check_int_eq(0xcb007110, ntohl(ip));
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(custom_dns, htonl(0xcb007110)));
+    check_int_eq(1, tunnel_fake_dns_is_fake_ip(custom_dns, htonl(0xcb007113)));
+    check_int_eq(0, tunnel_fake_dns_is_fake_ip(custom_dns, htonl(0xcb007114)));
+    tunnel_fake_dns_destroy(custom_dns);
+}
+
+void test_fake_dns_parse_config_range_rejects_invalid(void)
+{
+    uint32_t base_ip = 0;
+    uint32_t mask = 0;
+
+    check_int_eq(TUNNEL_ERR_INVALID_ARG,
+                 tunnel_config_parse_fake_dns_range("not-a-cidr", &base_ip, &mask));
+}
+
+void test_fake_dns_parse_config_range_rejects_zero_prefix(void)
+{
+    uint32_t base_ip = 0;
+    uint32_t mask = 0;
+
+    check_int_eq(TUNNEL_ERR_INVALID_ARG,
+                 tunnel_config_parse_fake_dns_range("0.0.0.0/0", &base_ip, &mask));
+}
+
+void test_fake_dns_file_config_persists_range_key(void)
+{
+    const char *path = "test_fake_dns_config.tmp";
+    tunnel_config_t config;
+    FILE *fp = fopen(path, "w");
+
+    check_not_null(fp);
+    if (!fp) {
+        return;
+    }
+
+    fprintf(fp, "proxy.type = none\n");
+    fprintf(fp, "dns.hijack = true\n");
+    fprintf(fp, "dns.fake = true\n");
+    fprintf(fp, "dns.fake_dns_range = 203.0.113.0/24\n");
+    fclose(fp);
+
+    check_int_eq(TUNNEL_OK, tunnel_config_parse_file(path, &config));
+    remove(path);
+
+    check_int_eq(1, config.dns.hijack_dns);
+    check_int_eq(1, config.dns.fake_dns);
+    check_not_null(config.dns.fake_dns_range);
+    check_str_eq("203.0.113.0/24", config.dns.fake_dns_range);
+
+    tunnel_config_free_parsed_strings(&config);
 }
 
 /* =============================================================================
@@ -194,8 +273,8 @@ void test_fake_dns_extract_domain(void)
         domain, sizeof(domain)
     );
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL_STRING("example.com", domain);
+    check_int_eq(TUNNEL_OK, ret);
+    check_str_eq("example.com", domain);
 }
 
 void test_fake_dns_process_query_a_record(void)
@@ -209,8 +288,8 @@ void test_fake_dns_process_query_a_record(void)
         response, &response_len, sizeof(response)
     );
 
-    TEST_ASSERT_EQUAL(1, handled);
-    TEST_ASSERT_GREATER_THAN(sizeof(dns_query_example_com), response_len);
+    check_int_eq(1, handled);
+    check(response_len > sizeof(dns_query_example_com));
 
     /* Response should contain the fake IP */
     uint32_t expected_ip = tunnel_fake_dns_get_ip(dns, "example.com");
@@ -224,7 +303,7 @@ void test_fake_dns_process_query_a_record(void)
             break;
         }
     }
-    TEST_ASSERT_EQUAL(1, found_ip);
+    check_int_eq(1, found_ip);
 }
 
 void test_fake_dns_extract_domain_subdomain(void)
@@ -243,8 +322,8 @@ void test_fake_dns_extract_domain_subdomain(void)
     char domain[256];
     int ret = tunnel_fake_dns_extract_domain(query, sizeof(query), domain, sizeof(domain));
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL_STRING("www.example.com", domain);
+    check_int_eq(TUNNEL_OK, ret);
+    check_str_eq("www.example.com", domain);
 }
 
 void test_fake_dns_extract_domain_long(void)
@@ -274,8 +353,8 @@ void test_fake_dns_extract_domain_long(void)
     char domain[256];
     int ret = tunnel_fake_dns_extract_domain(query, pos, domain, sizeof(domain));
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_GREATER_THAN(100, strlen(domain));
+    check_int_eq(TUNNEL_OK, ret);
+    check(strlen(domain) > 100);
 }
 
 /* =============================================================================
@@ -284,17 +363,17 @@ void test_fake_dns_extract_domain_long(void)
 
 void test_fake_dns_count(void)
 {
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_count(dns));
+    check_int_eq(0, tunnel_fake_dns_count(dns));
 
     tunnel_fake_dns_get_ip(dns, "a.com");
-    TEST_ASSERT_EQUAL(1, tunnel_fake_dns_count(dns));
+    check_int_eq(1, tunnel_fake_dns_count(dns));
 
     tunnel_fake_dns_get_ip(dns, "b.com");
-    TEST_ASSERT_EQUAL(2, tunnel_fake_dns_count(dns));
+    check_int_eq(2, tunnel_fake_dns_count(dns));
 
     /* Same domain doesn't increase count */
     tunnel_fake_dns_get_ip(dns, "a.com");
-    TEST_ASSERT_EQUAL(2, tunnel_fake_dns_count(dns));
+    check_int_eq(2, tunnel_fake_dns_count(dns));
 }
 
 void test_fake_dns_clear(void)
@@ -302,20 +381,20 @@ void test_fake_dns_clear(void)
     tunnel_fake_dns_get_ip(dns, "example.com");
     tunnel_fake_dns_get_ip(dns, "google.com");
 
-    TEST_ASSERT_EQUAL(2, tunnel_fake_dns_count(dns));
+    check_int_eq(2, tunnel_fake_dns_count(dns));
 
     tunnel_fake_dns_clear(dns);
 
-    TEST_ASSERT_EQUAL(0, tunnel_fake_dns_count(dns));
+    check_int_eq(0, tunnel_fake_dns_count(dns));
 
-    /* After clear, same domain gets new IP */
-    uint32_t old_ip = tunnel_fake_dns_get_ip(dns, "example.com");
+    /* After clear, same domain can be allocated again */
+    tunnel_fake_dns_get_ip(dns, "example.com");
     tunnel_fake_dns_clear(dns);
     uint32_t new_ip = tunnel_fake_dns_get_ip(dns, "example.com");
 
     /* IPs might be same or different depending on implementation */
     /* Just verify we can still allocate */
-    TEST_ASSERT_NOT_EQUAL(0, new_ip);
+    check(new_ip != 0);
 }
 
 /* =============================================================================
@@ -328,30 +407,30 @@ void test_fake_dns_stats(void)
 
     /* Initial stats should be zero */
     tunnel_fake_dns_get_stats(dns, &queries, &hits, &allocations);
-    TEST_ASSERT_EQUAL(0, queries);
-    TEST_ASSERT_EQUAL(0, hits);
-    TEST_ASSERT_EQUAL(0, allocations);
+    check_int_eq(0, queries);
+    check_int_eq(0, hits);
+    check_int_eq(0, allocations);
 
     /* First query for domain - allocation */
     tunnel_fake_dns_get_ip(dns, "example.com");
     tunnel_fake_dns_get_stats(dns, &queries, &hits, &allocations);
-    TEST_ASSERT_EQUAL(1, queries);
-    TEST_ASSERT_EQUAL(0, hits);
-    TEST_ASSERT_EQUAL(1, allocations);
+    check_int_eq(1, queries);
+    check_int_eq(0, hits);
+    check_int_eq(1, allocations);
 
     /* Second query for same domain - hit */
     tunnel_fake_dns_get_ip(dns, "example.com");
     tunnel_fake_dns_get_stats(dns, &queries, &hits, &allocations);
-    TEST_ASSERT_EQUAL(2, queries);
-    TEST_ASSERT_EQUAL(1, hits);
-    TEST_ASSERT_EQUAL(1, allocations);
+    check_int_eq(2, queries);
+    check_int_eq(1, hits);
+    check_int_eq(1, allocations);
 
     /* Query for new domain - allocation */
     tunnel_fake_dns_get_ip(dns, "google.com");
     tunnel_fake_dns_get_stats(dns, &queries, &hits, &allocations);
-    TEST_ASSERT_EQUAL(3, queries);
-    TEST_ASSERT_EQUAL(1, hits);
-    TEST_ASSERT_EQUAL(2, allocations);
+    check_int_eq(3, queries);
+    check_int_eq(1, hits);
+    check_int_eq(2, allocations);
 }
 
 /* =============================================================================
@@ -370,7 +449,7 @@ void test_fake_dns_null_domain(void)
 {
     /* Should handle NULL gracefully */
     uint32_t ip = tunnel_fake_dns_get_ip(dns, NULL);
-    TEST_ASSERT_EQUAL(0, ip);
+    check_int_eq(0, ip);
 }
 
 void test_fake_dns_case_sensitivity(void)
@@ -379,17 +458,17 @@ void test_fake_dns_case_sensitivity(void)
     uint32_t ip2 = tunnel_fake_dns_get_ip(dns, "example.com");
 
     /* DNS is case-insensitive, so these should be the same */
-    TEST_ASSERT_EQUAL(ip1, ip2);
+    check_int_eq(ip1, ip2);
 }
 
 void test_fake_dns_special_characters(void)
 {
     /* Domains with hyphens and numbers */
     uint32_t ip1 = tunnel_fake_dns_get_ip(dns, "my-domain-123.example.com");
-    TEST_ASSERT_NOT_EQUAL(0, ip1);
+    check(ip1 != 0);
 
     const char *domain = tunnel_fake_dns_get_domain(dns, ip1);
-    TEST_ASSERT_EQUAL_STRING("my-domain-123.example.com", domain);
+    check_str_eq("my-domain-123.example.com", domain);
 }
 
 void test_fake_dns_very_long_domain(void)
@@ -406,50 +485,61 @@ void test_fake_dns_very_long_domain(void)
     (void)ip;
 }
 
-/* =============================================================================
- * Main
- * ============================================================================= */
+spec("fake dns") {
+    before_each() {
+        setUp();
+    }
 
-int main(void)
-{
-    UNITY_BEGIN();
+    after_each() {
+        tearDown();
+    }
 
-    /* IP allocation */
-    RUN_TEST(test_fake_dns_get_ip_basic);
-    RUN_TEST(test_fake_dns_get_ip_deterministic);
-    RUN_TEST(test_fake_dns_get_ip_different_domains);
-    RUN_TEST(test_fake_dns_get_ip_in_range);
-    RUN_TEST(test_fake_dns_allocate_many);
+    describe("ip allocation") {
+        it("allocates a basic fake ip") { test_fake_dns_get_ip_basic(); }
+        it("returns deterministic ips") { test_fake_dns_get_ip_deterministic(); }
+        it("separates different domains") { test_fake_dns_get_ip_different_domains(); }
+        it("keeps ips inside the configured range") { test_fake_dns_get_ip_in_range(); }
+        it("allocates many unique ips") { test_fake_dns_allocate_many(); }
+    }
 
-    /* Domain lookup */
-    RUN_TEST(test_fake_dns_get_domain);
-    RUN_TEST(test_fake_dns_get_domain_not_found);
-    RUN_TEST(test_fake_dns_get_domain_unallocated);
+    describe("domain lookup") {
+        it("maps fake ip back to domain") { test_fake_dns_get_domain(); }
+        it("returns null for non-fake ips") { test_fake_dns_get_domain_not_found(); }
+        it("returns null for unallocated fake ips") { test_fake_dns_get_domain_unallocated(); }
+    }
 
-    /* Fake IP detection */
-    RUN_TEST(test_fake_dns_is_fake_ip_yes);
-    RUN_TEST(test_fake_dns_is_fake_ip_no);
-    RUN_TEST(test_fake_dns_is_fake_ip_boundary);
+    describe("fake ip detection") {
+        it("detects fake ips") { test_fake_dns_is_fake_ip_yes(); }
+        it("rejects real ips") { test_fake_dns_is_fake_ip_no(); }
+        it("handles range boundaries") { test_fake_dns_is_fake_ip_boundary(); }
+        it("parses configured ranges") { test_fake_dns_parse_config_range(); }
+        it("canonicalizes configured range bases") { test_fake_dns_parse_config_range_canonicalizes_base(); }
+        it("rejects invalid configured ranges") { test_fake_dns_parse_config_range_rejects_invalid(); }
+        it("rejects zero-prefix configured ranges") { test_fake_dns_parse_config_range_rejects_zero_prefix(); }
+        it("persists fake dns range through file config") { test_fake_dns_file_config_persists_range_key(); }
+    }
 
-    /* DNS query processing */
-    RUN_TEST(test_fake_dns_extract_domain);
-    RUN_TEST(test_fake_dns_process_query_a_record);
-    RUN_TEST(test_fake_dns_extract_domain_subdomain);
-    RUN_TEST(test_fake_dns_extract_domain_long);
+    describe("dns query processing") {
+        it("extracts the queried domain") { test_fake_dns_extract_domain(); }
+        it("processes an a-record query") { test_fake_dns_process_query_a_record(); }
+        it("extracts subdomains") { test_fake_dns_extract_domain_subdomain(); }
+        it("extracts long domains") { test_fake_dns_extract_domain_long(); }
+    }
 
-    /* Cache management */
-    RUN_TEST(test_fake_dns_count);
-    RUN_TEST(test_fake_dns_clear);
+    describe("cache management") {
+        it("counts allocations") { test_fake_dns_count(); }
+        it("clears the cache") { test_fake_dns_clear(); }
+    }
 
-    /* Statistics */
-    RUN_TEST(test_fake_dns_stats);
+    describe("statistics") {
+        it("tracks query stats") { test_fake_dns_stats(); }
+    }
 
-    /* Edge cases */
-    RUN_TEST(test_fake_dns_empty_domain);
-    RUN_TEST(test_fake_dns_null_domain);
-    RUN_TEST(test_fake_dns_case_sensitivity);
-    RUN_TEST(test_fake_dns_special_characters);
-    RUN_TEST(test_fake_dns_very_long_domain);
-
-    return UNITY_END();
+    describe("edge cases") {
+        it("handles empty domains") { test_fake_dns_empty_domain(); }
+        it("handles null domains") { test_fake_dns_null_domain(); }
+        it("normalizes case") { test_fake_dns_case_sensitivity(); }
+        it("supports special characters") { test_fake_dns_special_characters(); }
+        it("handles very long domains") { test_fake_dns_very_long_domain(); }
+    }
 }

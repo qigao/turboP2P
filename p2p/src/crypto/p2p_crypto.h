@@ -36,14 +36,25 @@ typedef struct {
     int step;
     uint8_t ephemeral_public[P2P_KEY_SIZE];
     uint8_t ephemeral_secret[P2P_KEY_SIZE];
+    uint8_t local_static_public[P2P_KEY_SIZE];
+    uint8_t local_static_secret[P2P_KEY_SIZE];
     uint8_t remote_public[P2P_KEY_SIZE];
+    uint8_t remote_static_public[P2P_KEY_SIZE];
     uint8_t shared_secret[P2P_KEY_SIZE];
+    uint8_t static_shared_secret[P2P_KEY_SIZE];
+    int has_remote_static_public;
 } p2p_noise_handshake_t;
 
 /**
  * Generate a new identity (keypair)
  */
 int p2p_crypto_generate_identity(p2p_identity_t *identity);
+
+/**
+ * Load an identity from a caller-provided 32-byte secret key.
+ */
+int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
+                                    const uint8_t secret_key[P2P_KEY_SIZE]);
 
 /**
  * Securely wipe memory

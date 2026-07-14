@@ -1,40 +1,36 @@
 {
-  "version": 6,
-  "include": [
-    "presets/ConfigurePresets.json"
-  ],
-  "buildPresets": [
-    {
-      "name": "default-windows",
-      "displayName": "Build (Default, Windows)",
-      "configurePreset": "dev-win-msvc-ninja",
-      "inherits": [
-        "ISWindows"
-      ]
-    },
-    {
-      "name": "release-windows",
-      "displayName": "Build (Default, Windows)",
-      "configurePreset": "release-win-msvc-ninja",
-      "inherits": [
-        "ISWindows"
-      ]
-    },
-    {
-      "name": "default-linux",
-      "displayName": "Build (Default, Linux)",
-      "configurePreset": "release-linux-ninja",
-      "inherits": [
-        "ISLinux"
-      ]
-    },
-    {
-      "name": "default-mac",
-      "displayName": "Build (Default, Mac)",
-      "configurePreset": "release-mac-ninja",
-      "inherits": [
-        "ISMac"
-      ]
-    }
-  ]
+    "version": 6,
+    "include": [
+        "presets/BuildPresets.json",
+        "presets/TestPresets.json"
+    ],
+    "configurePresets": [
+        {
+            "name": "base-win-dev-user",
+            "hidden": true,
+            "displayName": "Developer Build (Windows, Base)",
+            "inherits": [
+                "dev-win-msvc-ninja",
+                "pkg-vcpkg"
+            ]
+        },
+        {
+            "name": "base-win-release-user",
+            "hidden": true,
+            "displayName": "Release Build (Windows, Base)",
+            "inherits": [
+                "release-win-msvc-ninja",
+                "pkg-vcpkg"
+            ]
+        },
+        {
+            "name": "base-linux-dev-user",
+            "hidden": true,
+            "displayName": "Developer Build (Linux, Base)",
+            "inherits": [
+                "dev-linux-ninja",
+                "pkg-vcpkg"
+            ]
+        }
+    ]
 }

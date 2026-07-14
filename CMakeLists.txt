@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-cmake_policy(SET CMP0144 OLD)
-cmake_policy(SET CMP0167 OLD)
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 OLD)
+endif()
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 OLD)
+endif()
 
 project(
   TurboP2P
@@ -23,6 +27,9 @@ set(CMAKE_C_STANDARD 11) # C17 to ensure C11 atomic support
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(MSVC)
+  add_compile_options(/experimental:c11atomics)
+endif()
 # Enable folder organization in IDEs
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set_property(GLOBAL PROPERTY PREDEFINED_TARGETS_FOLDER "cmake")
@@ -34,18 +41,28 @@ enable_testing()
 include(CMakeOptions.cmake)
 include(Sanitizers)
 
-# Find common dependencies used by multiple libraries
-find_package(llhttp CONFIG REQUIRED)
-find_package(libuv CONFIG REQUIRED)
-find_package(kcp CONFIG REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(qjs REQUIRED)
+find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
 find_package(Threads REQUIRED)
-find_package(c-ares CONFIG REQUIRED)
-find_package(cJSON CONFIG REQUIRED)
-find_package(base64 CONFIG REQUIRED)
-find_package(TurboNet CONFIG REQUIRED PATHS ${EXTERNAL_ROOT}/turbonet)
-find_package(Stb REQUIRED)
+find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
+
+if(BUILD_EXAMPLES)
+  # TurboHttp releases from before the TurboUtils package split still refer to
+  # these build-tree target names. Keep the compatibility local to examples;
+  # the aliases are not exported by TurboP2P.
+  if(NOT TARGET TurboNet::Utils)
+    add_library(TurboNet::Utils ALIAS TurboUtils::Core)
+  endif()
+  if(NOT TARGET TurboNet::Parser)
+    add_library(TurboNet::Parser ALIAS TurboUtils::Parser)
+  endif()
+  find_package(TurboHttp REQUIRED PATHS ${TURBO_HTTP_ROOT})
+endif()
+
+if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "")
+  if(TARGET TurboNet::Ice)
+    set(TURBOP2P_ICE_TARGET TurboNet::Ice)
+  endif()
+endif()
 
 # Additional components
 add_subdirectory(vendor)

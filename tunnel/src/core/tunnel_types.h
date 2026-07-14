@@ -7,9 +7,10 @@
 #define TUNNEL_TYPES_H
 
 #include "turbo_tunnel.h"
-#include <turbo_async_client.h>
-#include <uv.h>
-#include <stb_sprintf.h>
+#include <CoroNet/turbo_coro_context.h>
+#include <CoroNet/turbo_stream.h>
+#include <turbo_thread.h>
+#include <fmt.h>
 
 /* =============================================================================
  * Internal Markers
@@ -155,10 +156,6 @@ struct tunnel_tun_s {
     /* Receive buffer */
     uint8_t recv_buf[TUNNEL_RECV_BUF_SIZE];
 
-    /* libuv integration */
-    uv_poll_t poll;                 /* Unix: poll on fd */
-    uv_async_t async;               /* Windows: async notification */
-
     /* Read callback */
     tunnel_tun_read_cb_t read_cb;
 
@@ -171,6 +168,16 @@ struct tunnel_tun_s {
     uint64_t bytes_read;
     uint64_t bytes_written;
 };
+
+TUNNEL_INTERNAL int tunnel_handle_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t len);
+TUNNEL_INTERNAL int tunnel_config_parse_file(const char *path, tunnel_config_t *config);
+TUNNEL_INTERNAL int tunnel_config_parse_cidr(const char *cidr, tunnel_ip_addr_t *addr,
+                                             tunnel_ip_addr_t *mask, int *family);
+TUNNEL_INTERNAL int tunnel_config_parse_fake_dns_range(const char *range,
+                                                       uint32_t *base_ip,
+                                                       uint32_t *mask);
+TUNNEL_INTERNAL void tunnel_config_clear_parsed_refs(tunnel_config_t *config);
+TUNNEL_INTERNAL void tunnel_config_free_parsed_strings(tunnel_config_t *config);
 
 /* =============================================================================
  * Proxy Client Structure
@@ -208,7 +215,7 @@ struct tunnel_proxy_s {
     };
 
     /* Connection pool */
-    async_client_t *pool[8];
+    turbo_stream_t *pool[8];
     int pool_count;
 
     /* Back-reference */
@@ -318,13 +325,7 @@ struct tunnel_s {
     tunnel_route_rule_t *include_rules;
     tunnel_route_rule_t *exclude_rules;
 
-    /* Event loop */
-    uv_loop_t *loop;
-    int owns_loop;                  /* 1 if we created the loop */
-
-    /* Timers */
-    uv_timer_t session_timer;       /* Session timeout check */
-    uv_timer_t stats_timer;         /* Statistics update */
+    coro_context_t *ctx;
 
     /* Callbacks */
     tunnel_log_cb log_cb;
@@ -337,13 +338,15 @@ struct tunnel_s {
     /* Statistics */
     tunnel_stats_t stats;
     uint64_t start_time;
+    uint64_t last_session_maintenance_ms;
+    uint64_t last_stats_update_ms;
 
     /* State */
     int running;
     int stopping;
 
     /* Thread safety */
-    uv_mutex_t mutex;
+    turbo_mutex_t mutex;
 };
 
 /* =============================================================================
@@ -379,18 +382,26 @@ static inline int tunnel_endpoint_to_string(const tunnel_endpoint_t *ep, char *b
 
     if (ep->family == AF_INET) {
         uint32_t ip = ntohl(ep->addr.v4);
-        stbsp_snprintf(buf, (int)len, "%u.%u.%u.%u",
-                 (ip >> 24) & 0xFF,
-                 (ip >> 16) & 0xFF,
-                 (ip >> 8) & 0xFF,
-                 ip & 0xFF);
+        fmt(buf, len, "{}.{}.{}.{}",
+            (ip >> 24) & 0xFF,
+            (ip >> 16) & 0xFF,
+            (ip >> 8) & 0xFF,
+            ip & 0xFF);
     } else if (ep->family == AF_INET6) {
-        /* Simplified IPv6 formatting */
-        stbsp_snprintf(buf, (int)len, "%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
-                 ep->addr.v6[0], ep->addr.v6[1], ep->addr.v6[2], ep->addr.v6[3],
-                 ep->addr.v6[4], ep->addr.v6[5], ep->addr.v6[6], ep->addr.v6[7],
-                 ep->addr.v6[8], ep->addr.v6[9], ep->addr.v6[10], ep->addr.v6[11],
-                 ep->addr.v6[12], ep->addr.v6[13], ep->addr.v6[14], ep->addr.v6[15]);
+        int written;
+
+        /* Eight groups require 39 bytes plus the terminator. */
+        if (len < 40) return -1;
+        written = fmt(buf, len, "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                      ep->addr.v6[0], ep->addr.v6[1], ep->addr.v6[2], ep->addr.v6[3],
+                      ep->addr.v6[4], ep->addr.v6[5], ep->addr.v6[6], ep->addr.v6[7]);
+        if (written <= 0 || (size_t)written >= len) return -1;
+        if (fmt(buf + written, len - (size_t)written,
+                ":{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                ep->addr.v6[8], ep->addr.v6[9], ep->addr.v6[10], ep->addr.v6[11],
+                ep->addr.v6[12], ep->addr.v6[13], ep->addr.v6[14], ep->addr.v6[15]) <= 0) {
+            return -1;
+        }
     } else {
         buf[0] = '\0';
     }

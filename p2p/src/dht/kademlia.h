@@ -87,5 +87,6 @@ kad_node_t **kad_routing_find_closest(kad_routing_table_t *rt, const kad_id_t *t
 int kademlia_store(kademlia_dht_t *dht, const kad_id_t *key, const void *data, size_t len);
 int kademlia_find_value(kademlia_dht_t *dht, const kad_id_t *key, void *buf, size_t *buf_len);
 kad_node_t **kademlia_find_node(kademlia_dht_t *dht, const kad_id_t *target, int count);
+size_t kademlia_storage_count(kademlia_dht_t *dht);
 
 #endif /* P2P_KADEMLIA_H */

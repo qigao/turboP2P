@@ -9,8 +9,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 
+#ifdef _WIN32
+#define strncasecmp _strnicmp
+#endif
 
 /* =============================================================================
  * Base64 Encoding for Basic Auth
@@ -67,29 +70,44 @@ int tunnel_http_build_connect_request(const char *host, int port, const char *us
   /* Build Basic auth header if credentials provided */
   if (username && username[0] != '\0') {
     char credentials[256];
-    stbsp_snprintf(credentials, sizeof(credentials), "%s:%s", username, password ? password : "");
+    const char *password_value = password ? password : "";
+    size_t username_len = strlen(username);
+    size_t password_len = strlen(password_value);
+
+    if (username_len > sizeof(credentials) - 2 ||
+        password_len > sizeof(credentials) - 2 - username_len) {
+      return TUNNEL_ERR_INVALID_ARG;
+    }
+    fmt(credentials, sizeof(credentials), "{}:{}", username, password_value);
 
     char encoded[512];
     base64_encode((const uint8_t *)credentials, strlen(credentials), encoded, sizeof(encoded));
 
-    stbsp_snprintf(auth_header, sizeof(auth_header), "Proxy-Authorization: Basic %s\r\n", encoded);
+    fmt(auth_header, sizeof(auth_header), "Proxy-Authorization: Basic {}\r\n", encoded);
   }
 
   /* Build CONNECT request */
-  int written = stbsp_snprintf((char *)buf, buf_size,
-                         "CONNECT %s:%d HTTP/1.1\r\n"
-                         "Host: %s:%d\r\n"
-                         "%s"
-                         "User-Agent: TurboTunnel/1.0\r\n"
-                         "Proxy-Connection: Keep-Alive\r\n"
-                         "\r\n",
-                         host, port, host, port, auth_header);
+  tstr_t request = tstr_format(
+      "CONNECT {}:{} HTTP/1.1\r\n"
+      "Host: {}:{}\r\n"
+      "{}"
+      "User-Agent: TurboTunnel/1.0\r\n"
+      "Proxy-Connection: Keep-Alive\r\n"
+      "\r\n",
+      host, port, host, port, auth_header);
+  if (!request) {
+    return TUNNEL_ERR_NO_MEMORY;
+  }
 
-  if (written < 0 || (size_t)written >= buf_size) {
+  size_t request_len = tstr_len(request);
+  if (request_len >= buf_size) {
+    tstr_free(request);
     return TUNNEL_ERR_INVALID_ARG;
   }
 
-  *len = (size_t)written;
+  memcpy(buf, request, request_len + 1);
+  tstr_free(request);
+  *len = request_len;
   return TUNNEL_OK;
 }
 

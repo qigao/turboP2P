@@ -9,11 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Generate key from IP:port */
-static void make_key(char *key, size_t key_size, const char *ip, int port) {
-    snprintf(key, key_size, "%s:%d", ip, port);
-}
-
 /* =============================================================================
  * Peer Table Operations
  * ============================================================================= */
@@ -22,7 +17,7 @@ p2p_peer_entry_t *peer_table_find(p2p_peer_entry_t *table, const char *ip, int p
     if (!table || !ip) return NULL;
     
     char key[64];
-    make_key(key, sizeof(key), ip, port);
+    p2p_endpoint_to_key(key, sizeof(key), ip, port);
     
     p2p_peer_entry_t *entry = NULL;
     HASH_FIND_STR(table, key, entry);
@@ -34,13 +29,11 @@ void peer_table_add(p2p_peer_entry_t **table, p2p_peer_t *peer) {
     
     /* Check if already exists */
     char entry_key[64];
-    make_key(entry_key, sizeof(entry_key), peer->ip, peer->port);
+    p2p_endpoint_to_key(entry_key, sizeof(entry_key), peer->ip, peer->port);
     
     p2p_peer_entry_t *existing = NULL;
     HASH_FIND_STR(*table, entry_key, existing);
     if (existing) {
-        /* Update existing entry */
-        existing->peer = peer;
         return;
     }
     
@@ -59,7 +52,7 @@ void peer_table_remove(p2p_peer_entry_t **table, const char *ip, int port) {
     if (!table || !*table || !ip) return;
     
     char key[64];
-    make_key(key, sizeof(key), ip, port);
+    p2p_endpoint_to_key(key, sizeof(key), ip, port);
     
     p2p_peer_entry_t *entry = NULL;
     HASH_FIND_STR(*table, key, entry);

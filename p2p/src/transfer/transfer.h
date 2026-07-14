@@ -51,6 +51,7 @@ typedef struct {
 } p2p_in_flight_entry_t;
 
 typedef struct p2p_transfer_s {
+    struct p2p_transfer_manager_s *manager;
     uint32_t id;
     uint32_t remote_id;                 /* Remote peer's transfer ID (for dir transfers) */
     p2p_id_t file_id;
@@ -98,6 +99,9 @@ typedef struct p2p_transfer_s {
     p2p_in_flight_entry_t in_flight[P2P_PARALLEL_CHUNKS];  /* Chunks currently requested */
     uint8_t in_flight_count;                  /* Number of in-flight requests */
     uint8_t parallel_enabled;                 /* Enable parallel requests */
+    uint8_t destroying;
+    uint32_t ref_count;
+    turbo_mutex_t mutex;
 
     struct p2p_transfer_s *next;
 } p2p_transfer_t;
@@ -115,16 +119,22 @@ void p2p_transfer_manager_destroy(p2p_transfer_manager_t *mgr);
 p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_dir_t dir);
 void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer);
 p2p_transfer_t* p2p_transfer_find_by_id(p2p_transfer_manager_t *mgr, uint32_t id);
+void p2p_transfer_release(p2p_transfer_t *transfer);
 
 int p2p_transfer_open_file(p2p_transfer_t *transfer, const char *mode);
 void p2p_transfer_close_file(p2p_transfer_t *transfer);
+int p2p_transfer_open_file_locked(p2p_transfer_t *transfer, const char *mode);
+void p2p_transfer_close_file_locked(p2p_transfer_t *transfer);
 
 void p2p_transfer_update_progress(p2p_transfer_t *transfer, size_t bytes);
 void p2p_transfer_complete(p2p_transfer_t *transfer, int success, const char *error);
+void p2p_transfer_snapshot_peer_info(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
 
 size_t p2p_transfer_calc_chunk_count(size_t file_size, size_t chunk_size);
 size_t p2p_transfer_get_chunk_offset(p2p_transfer_t *transfer, uint32_t chunk_index);
 size_t p2p_transfer_get_chunk_size(p2p_transfer_t *transfer, uint32_t chunk_index);
+size_t p2p_transfer_get_chunk_offset_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
+size_t p2p_transfer_get_chunk_size_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
 
 /* p2p_transfer_status_t is defined in p2p.h (public API) */
 
@@ -140,6 +150,10 @@ int p2p_transfer_init_bitmap(p2p_transfer_t *transfer);
 void p2p_transfer_free_bitmap(p2p_transfer_t *transfer);
 void p2p_transfer_mark_chunk_done(p2p_transfer_t *transfer, uint32_t chunk_index);
 uint32_t p2p_transfer_next_chunk(p2p_transfer_t *transfer);
+int p2p_transfer_init_bitmap_locked(p2p_transfer_t *transfer);
+void p2p_transfer_free_bitmap_locked(p2p_transfer_t *transfer);
+void p2p_transfer_mark_chunk_done_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
+uint32_t p2p_transfer_next_chunk_locked(p2p_transfer_t *transfer);
 
 /* Parallel chunk requests */
 void p2p_transfer_enable_parallel(p2p_transfer_t *transfer, int enable);
@@ -147,10 +161,16 @@ int p2p_transfer_add_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index);
 void p2p_transfer_remove_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index);
 int p2p_transfer_is_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index);
 uint32_t p2p_transfer_get_next_to_request(p2p_transfer_t *transfer);
+int p2p_transfer_add_in_flight_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
+void p2p_transfer_remove_in_flight_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
+int p2p_transfer_is_in_flight_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
+uint32_t p2p_transfer_get_next_to_request_locked(p2p_transfer_t *transfer);
 
 /* Timeout and retry */
 int p2p_transfer_check_timeouts(p2p_transfer_t *transfer, uint32_t *timed_out_chunks,
                                  uint8_t *count, uint8_t max_count);
+int p2p_transfer_check_timeouts_locked(p2p_transfer_t *transfer, uint32_t *timed_out_chunks,
+                                        uint8_t *count, uint8_t max_count);
 void p2p_transfer_manager_tick(p2p_transfer_manager_t *mgr, p2p_node_t *node);
 
 /* Multi-source download */
@@ -163,5 +183,13 @@ void p2p_transfer_source_failed(p2p_transfer_t *transfer, p2p_peer_t *peer);
 int p2p_transfer_add_in_flight_multi(p2p_transfer_t *transfer, uint32_t chunk_index,
                                       uint8_t source_index);
 uint8_t p2p_transfer_get_chunk_source(p2p_transfer_t *transfer, uint32_t chunk_index);
+int p2p_transfer_source_add_locked(p2p_transfer_t *transfer, p2p_peer_t *peer);
+void p2p_transfer_source_remove_locked(p2p_transfer_t *transfer, p2p_peer_t *peer);
+p2p_peer_t* p2p_transfer_select_source_locked(p2p_transfer_t *transfer);
+void p2p_transfer_source_received_locked(p2p_transfer_t *transfer, p2p_peer_t *peer, size_t bytes);
+void p2p_transfer_source_failed_locked(p2p_transfer_t *transfer, p2p_peer_t *peer);
+int p2p_transfer_add_in_flight_multi_locked(p2p_transfer_t *transfer, uint32_t chunk_index,
+                                             uint8_t source_index);
+uint8_t p2p_transfer_get_chunk_source_locked(p2p_transfer_t *transfer, uint32_t chunk_index);
 
 #endif /* P2P_TRANSFER_H */

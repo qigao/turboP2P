@@ -222,59 +222,38 @@ int tunnel_tun_configure(tunnel_tun_t *tun)
     return TUNNEL_OK;
 }
 
-/* =============================================================================
- * libuv Integration
- * ============================================================================= */
-
-static void on_tun_poll(uv_poll_t *handle, int status, int events)
+int tunnel_tun_start(tunnel_tun_t *tun)
 {
-    tunnel_tun_t *tun = (tunnel_tun_t *)handle->data;
-
-    if (status < 0) {
-        return;
-    }
-
-    if (events & UV_READABLE) {
-        /* Read packets from TUN */
-        ssize_t n = read(tun->fd, tun->recv_buf, sizeof(tun->recv_buf));
-        if (n > 0) {
-            tun->packets_read++;
-            tun->bytes_read += n;
-
-            /* Call read callback */
-            if (tun->read_cb) {
-                tun->read_cb(tun, tun->recv_buf, n);
-            }
-        }
-    }
-}
-
-int tunnel_tun_start(tunnel_tun_t *tun, uv_loop_t *loop)
-{
-    if (!tun || !loop || tun->fd < 0) return TUNNEL_ERR_INVALID_ARG;
-
-    /* Initialize poll handle */
-    int ret = uv_poll_init(loop, &tun->poll, tun->fd);
-    if (ret < 0) {
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
-
-    tun->poll.data = tun;
-
-    /* Start polling for read events */
-    ret = uv_poll_start(&tun->poll, UV_READABLE, on_tun_poll);
-    if (ret < 0) {
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
-
-    return TUNNEL_OK;
+    return (!tun || tun->fd < 0) ? TUNNEL_ERR_INVALID_ARG : TUNNEL_OK;
 }
 
 void tunnel_tun_stop(tunnel_tun_t *tun)
 {
-    if (!tun) return;
+    (void)tun;
+}
 
-    uv_poll_stop(&tun->poll);
+int tunnel_tun_poll(tunnel_tun_t *tun)
+{
+    int processed = 0;
+    int n;
+
+    if (!tun || tun->fd < 0) {
+        return 0;
+    }
+
+    for (;;) {
+        n = tunnel_tun_read(tun, tun->recv_buf, sizeof(tun->recv_buf));
+        if (n <= 0) {
+            break;
+        }
+
+        processed++;
+        if (tun->read_cb) {
+            tun->read_cb(tun, tun->recv_buf, (size_t)n);
+        }
+    }
+
+    return processed;
 }
 
 /* =============================================================================

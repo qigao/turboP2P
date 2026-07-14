@@ -3,7 +3,7 @@
  * @brief Session lifecycle management implementation
  *
  * Manages session lifecycle and integrates with proxy connections
- * using netcore's async_client via the tunnel_proxy abstraction.
+ * using CoroNet streams via the tunnel_proxy abstraction.
  */
 
 #include "tunnel_session.h"
@@ -194,10 +194,8 @@ static void on_proxy_connect(tunnel_proxy_conn_t *conn, int status, void *user_d
     tunnel_session_t *session = (tunnel_session_t *)user_data;
     if (!session || !session->tunnel) return;
 
-    tunnel_t *tunnel = session->tunnel;
-
     if (status != TUNNEL_OK) {
-        TLOG_ERROR("Proxy connect failed for session, status={}", status);
+        TLOG_DEBUG("Proxy connect failed for session, status={}", status);
         session->state = TUNNEL_SESSION_ERROR;
         session->tcp.state = TUNNEL_TCP_CLOSED;
 
@@ -384,7 +382,7 @@ tunnel_session_t* tunnel_session_tcp_syn(tunnel_t *tunnel,
     );
 
     if (!session->proxy_conn) {
-        TLOG_ERROR("Failed to create proxy connection");
+        TLOG_DEBUG("Failed to create proxy connection");
         tunnel_session_destroy(session);
         return NULL;
     }

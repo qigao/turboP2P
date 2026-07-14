@@ -46,9 +46,6 @@ typedef enum {
  * Forward Declarations
  * ============================================================================= */
 
-struct async_client_s;
-typedef struct async_client_s async_client_t;
-
 /* Forward declaration for callbacks */
 typedef struct tunnel_proxy_conn_s tunnel_proxy_conn_t;
 
@@ -99,8 +96,8 @@ struct tunnel_proxy_conn_s {
     int target_port;
     int is_udp;
 
-    /* Underlying netcore connection */
-    async_client_t *client;
+    /* Underlying CoroNet stream */
+    turbo_stream_t *stream;
 
     /* Callbacks */
     tunnel_proxy_connect_cb connect_cb;
@@ -117,6 +114,10 @@ struct tunnel_proxy_conn_s {
 
     /* Back-reference to session (if any) */
     void *session;
+
+    /* Callback guards */
+    int connect_notified;
+    int close_notified;
 };
 
 /* =============================================================================

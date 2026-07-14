@@ -5,7 +5,7 @@ project(mesh C)
 # =============================================================================
 
 # Mesh library sources
-set(MESH_LIB_SOURCES src/mesh.c src/stb_sprintf.c include/turbo_mesh.h)
+set(MESH_LIB_SOURCES src/mesh.c include/turbo_mesh.h)
 
 # Build as shared library (DLL on Windows)
 add_library(mesh SHARED ${MESH_LIB_SOURCES})
@@ -22,7 +22,16 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link libraries
-target_link_libraries(mesh PUBLIC TurboNet::Utils TurboP2P::P2P)
+target_link_libraries(mesh PUBLIC TurboUtils::Core TurboP2P::P2P)
+
+if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "" OR
+   NOT TARGET ${TURBOP2P_ICE_TARGET})
+  message(FATAL_ERROR "mesh requires the TurboNet ICE target")
+endif()
+
+target_link_libraries(mesh PRIVATE ${TURBOP2P_ICE_TARGET})
+target_compile_definitions(mesh PUBLIC MESH_HAS_TURBO_ICE=1)
+target_compile_definitions(mesh PRIVATE MESH_HAS_TURBO_ICE_CLOSE=1)
 
 set_property(TARGET mesh PROPERTY FOLDER "mesh")
 set_target_properties(
@@ -49,5 +58,9 @@ install(
 # Examples
 # =============================================================================
 
-add_subdirectory(examples)
-add_subdirectory(tests)
+if(BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+if(BUILD_TESTS)
+  add_subdirectory(tests)
+endif()

@@ -79,19 +79,24 @@ TUNNEL_INTERNAL void tunnel_tun_close(tunnel_tun_t *tun);
 TUNNEL_INTERNAL int tunnel_tun_configure(tunnel_tun_t *tun);
 
 /**
- * Start TUN event polling
- * Integrates TUN into libuv event loop.
+ * Start TUN processing.
  * @param tun TUN handle
- * @param loop libuv event loop
  * @return TUNNEL_OK on success
  */
-TUNNEL_INTERNAL int tunnel_tun_start(tunnel_tun_t *tun, uv_loop_t *loop);
+TUNNEL_INTERNAL int tunnel_tun_start(tunnel_tun_t *tun);
 
 /**
- * Stop TUN event polling
+ * Stop TUN processing
  * @param tun TUN handle
  */
 TUNNEL_INTERNAL void tunnel_tun_stop(tunnel_tun_t *tun);
+
+/**
+ * Poll TUN for pending packets
+ * @param tun TUN handle
+ * @return Number of packets processed
+ */
+TUNNEL_INTERNAL int tunnel_tun_poll(tunnel_tun_t *tun);
 
 /**
  * Read packet from TUN

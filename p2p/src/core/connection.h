@@ -33,7 +33,7 @@ struct p2p_connection_s {
 
 /* Connection lifecycle */
 p2p_connection_t *p2p_connection_create_outbound(void *client_handle);
-p2p_connection_t *p2p_connection_create_inbound(void *server_handle, void *conn_handle);
+p2p_connection_t *p2p_connection_create_inbound(void *conn_handle);
 void p2p_connection_destroy(p2p_connection_t *conn);
 
 /* Connection operations */

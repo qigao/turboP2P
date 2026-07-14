@@ -9,8 +9,110 @@
 #include "../transfer/sender.h"
 #include "../transfer/receiver.h"
 #include <tlog.h>
+#include <stddef.h>
 #include <string.h>
 #include <time.h>
+
+static int p2p_ip_is_publishable(const char *ip) {
+    return ip && ip[0] != '\0' &&
+           strcmp(ip, "0.0.0.0") != 0 &&
+           strcmp(ip, "::") != 0;
+}
+
+static int p2p_send_owned_message(p2p_peer_t *peer, p2p_message_t *msg) {
+    int ret = P2P_ERR_INVALID_ARG;
+
+    if (peer && msg) {
+        ret = p2p_peer_send(peer, msg);
+    }
+    free(msg);
+    return ret;
+}
+
+static void p2p_init_dht_response_message(p2p_message_t *response, uint32_t request_id) {
+    if (!response) {
+        return;
+    }
+
+    response->header.type = P2P_MSG_DHT_RESPONSE;
+    response->header.request_id = request_id;
+    response->header.payload_len = offsetof(p2p_dht_response_payload_t, data);
+    response->payload.dht_response.found = 0;
+    response->payload.dht_response.data_len = 0;
+    response->payload.dht_response.node_count = 0;
+}
+
+static p2p_message_t *p2p_create_dht_response_message(uint32_t request_id) {
+    p2p_message_t *response = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+
+    if (!response) {
+        return NULL;
+    }
+
+    p2p_init_dht_response_message(response, request_id);
+    return response;
+}
+
+static void p2p_fill_dht_response_nodes_locked(p2p_node_t *node,
+                                               const kad_id_t *target,
+                                               p2p_message_t *response) {
+    kad_node_t **closest = NULL;
+    int count = 0;
+
+    if (!node || !target || !response) {
+        return;
+    }
+
+    closest = kademlia_find_node(node->kad_dht, target, KADEMLIA_K);
+    if (closest) {
+        for (; closest[count] && count < KADEMLIA_K; count++) {
+            memcpy(response->payload.dht_response.nodes[count].id,
+                   closest[count]->id.bytes,
+                   KADEMLIA_ID_BYTES);
+            strncpy(response->payload.dht_response.nodes[count].ip,
+                    closest[count]->ip,
+                    P2P_MAX_IP - 1);
+            response->payload.dht_response.nodes[count].port = closest[count]->port;
+        }
+        free(closest);
+    }
+    response->payload.dht_response.node_count = (uint8_t)count;
+}
+
+static void p2p_import_dht_response_nodes_locked(p2p_node_t *node,
+                                                 const p2p_dht_response_payload_t *res) {
+    if (!node || !res) {
+        return;
+    }
+
+    for (int i = 0; i < res->node_count; i++) {
+        p2p_node_add_route_locked(node, res->nodes[i].id, res->nodes[i].ip, res->nodes[i].port);
+    }
+}
+
+static void p2p_fill_dht_get_response_locked(p2p_node_t *node,
+                                             const kad_id_t *key,
+                                             p2p_message_t *response) {
+    size_t data_len = 0;
+
+    if (!node || !key || !response) {
+        return;
+    }
+
+    data_len = sizeof(response->payload.dht_response.data);
+    if (kademlia_find_value(node->kad_dht, key,
+                            response->payload.dht_response.data,
+                            &data_len) == 0) {
+        response->payload.dht_response.found = 1;
+        response->payload.dht_response.data_len = (uint16_t)data_len;
+        response->payload.dht_response.node_count = 0;
+        response->header.payload_len =
+            (uint16_t)(offsetof(p2p_dht_response_payload_t, data) + data_len);
+        return;
+    }
+
+    p2p_fill_dht_response_nodes_locked(node, key, response);
+}
 
 /* =============================================================================
  * Dispatch Function
@@ -66,7 +168,7 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
             }
             break;
         default:
-            TLOG_DEBUG("[P2P] No handler for msg type %s", p2p_message_type_name(type));
+            TLOG_DEBUG("[P2P] No handler for msg type {}", p2p_message_type_name(type));
             break;
     }
 }
@@ -75,16 +177,39 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
  * Core Handlers
  * ============================================================================= */
 
+static void p2p_publish_peer_route(p2p_node_t *node, const p2p_ping_payload_t *ping) {
+    if (!node || !ping || ping->port == 0 || !p2p_ip_is_publishable(ping->ip)) {
+        return;
+    }
+
+    p2p_node_add_route_locked(node, ping->node_id, ping->ip, ping->port);
+}
+
 int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    p2p_ping_payload_t reply_ping = {0};
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
+    turbo_mutex_lock(&node->mutex);
     /* Sync identity */
     memcpy(peer->id, msg->payload.ping.node_id, P2P_DHT_KEY_SIZE);
+    p2p_publish_peer_route(node, &msg->payload.ping);
     
     /* Sync Vivaldi coordinates */
     memcpy(peer->coord.coords, msg->payload.ping.coords, sizeof(double)*4);
     peer->coord.height = msg->payload.ping.height;
     peer->coord.error = msg->payload.ping.error;
+
+    memcpy(reply_ping.node_id, node->id, P2P_DHT_KEY_SIZE);
+    if (p2p_ip_is_publishable(node->ip)) {
+        strncpy(reply_ping.ip, node->ip, P2P_MAX_IP - 1);
+    }
+    reply_ping.port = (uint16_t)node->port;
+    reply_ping.timestamp = msg->payload.ping.timestamp;
+    memcpy(reply_ping.coords, node->coord.coords, sizeof(double) * 4);
+    reply_ping.height = node->coord.height;
+    reply_ping.error = node->coord.error;
+    turbo_mutex_unlock(&node->mutex);
 
     /* Send PONG reply */
     p2p_message_t *reply = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
@@ -92,27 +217,24 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     reply->header.type = P2P_MSG_PONG;
     reply->header.request_id = msg->header.request_id;
-    
-    memcpy(reply->payload.ping.node_id, node->id, P2P_DHT_KEY_SIZE);
-    strncpy(reply->payload.ping.ip, node->ip, P2P_MAX_IP - 1);
-    reply->payload.ping.port = (uint16_t)node->port;
-    
-    /* Include our Vivaldi coords */
-    memcpy(reply->payload.ping.coords, node->coord.coords, sizeof(double)*4);
-    reply->payload.ping.height = node->coord.height;
-    reply->payload.ping.error = node->coord.error;
+    reply->header.payload_len = sizeof(p2p_ping_payload_t);
+    memcpy(&reply->payload.ping, &reply_ping, sizeof(reply_ping));
 
-    int ret = p2p_peer_send(peer, reply);
-    free(reply);
-    return ret;
+    return p2p_send_owned_message(peer, reply);
 }
 
 int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    p2p_peer_info_ex_t peer_info = {0};
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
     /* Update RTT and Vivaldi */
     uint64_t now = turbo_hrtime() / 1000000;
     uint64_t rtt = now - msg->payload.ping.timestamp;
+
+    turbo_mutex_lock(&node->mutex);
+    memcpy(peer->id, msg->payload.ping.node_id, P2P_DHT_KEY_SIZE);
+    p2p_publish_peer_route(node, &msg->payload.ping);
     
     peer->avg_rtt_ms = (peer->avg_rtt_ms == 0) ? rtt : (uint64_t)(peer->avg_rtt_ms * 0.8 + rtt * 0.2);
     
@@ -122,8 +244,10 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     remote_coord.error = msg->payload.ping.error;
     
     vivaldi_update(&node->coord, &remote_coord, (double)rtt);
+    p2p_peer_fill_info_ex_locked(peer, &peer_info);
+    turbo_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] PONG from %s:%d (RTT=%llu ms)", peer->ip, peer->port, rtt);
+    TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)", peer_info.ip, peer_info.port, rtt);
     return P2P_OK;
 }
 
@@ -132,50 +256,43 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
  * ============================================================================= */
 
 int p2p_handle_dht_find_node(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    p2p_message_t *response = NULL;
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
     kad_id_t target;
     memcpy(target.bytes, msg->payload.dht_find_node.target_id, KADEMLIA_ID_BYTES);
 
-    /* Find closest nodes in our routing table */
-    kad_node_t **closest = kademlia_find_node(node->kad_dht, &target, KADEMLIA_K);
-    
-    p2p_message_t *response = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    response = p2p_create_dht_response_message(msg->header.request_id);
     if (!response) return P2P_ERR_NO_MEM;
 
-    response->header.type = P2P_MSG_DHT_RESPONSE;
-    response->header.request_id = msg->header.request_id;
-    response->payload.dht_response.found = 0;
+    /* Find closest nodes in our routing table */
+    turbo_mutex_lock(&node->mutex);
+    p2p_fill_dht_response_nodes_locked(node, &target, response);
+    turbo_mutex_unlock(&node->mutex);
 
-    int count = 0;
-    if (closest) {
-        for (; closest[count] && count < KADEMLIA_K; count++) {
-            memcpy(response->payload.dht_response.nodes[count].id, closest[count]->id.bytes, KADEMLIA_ID_BYTES);
-            strncpy(response->payload.dht_response.nodes[count].ip, closest[count]->ip, P2P_MAX_IP - 1);
-            response->payload.dht_response.nodes[count].port = closest[count]->port;
-        }
-        free(closest);
-    }
-    response->payload.dht_response.node_count = (uint8_t)count;
-
-    int ret = p2p_peer_send(peer, response);
-    free(response);
-    return ret;
+    return p2p_send_owned_message(peer, response);
 }
 
 int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    int ret = 0;
+    p2p_peer_info_ex_t peer_info = {0};
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    p2p_peer_get_info_ex(peer, &peer_info);
 
     kad_id_t key;
     memcpy(key.bytes, msg->payload.dht_store.key, KADEMLIA_ID_BYTES);
 
     /* Store value locally */
-    int ret = kademlia_store(node->kad_dht, &key, 
-                             msg->payload.dht_store.data, 
-                             msg->payload.dht_store.data_len);
+    turbo_mutex_lock(&node->mutex);
+    ret = kademlia_store(node->kad_dht, &key,
+                         msg->payload.dht_store.data,
+                         msg->payload.dht_store.data_len);
+    turbo_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] DHT STORE from %s:%d (key=%.8s, len=%u) -> %s",
-              peer->ip, peer->port, (char*)key.bytes, msg->payload.dht_store.data_len,
+    TLOG_DEBUG("[P2P] DHT STORE from {}:{} (len={}) -> {}",
+              peer_info.ip, peer_info.port, msg->payload.dht_store.data_len,
               ret == 0 ? "OK" : "ERR");
 
     /* We could send an ACK, but Kademlia usually doesn't require one for STORE */
@@ -183,67 +300,36 @@ int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t
 }
 
 int p2p_handle_dht_get(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    p2p_message_t *response = NULL;
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
     kad_id_t key;
     memcpy(key.bytes, msg->payload.dht_find_node.target_id, KADEMLIA_ID_BYTES);
 
-    p2p_message_t *response = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    response = p2p_create_dht_response_message(msg->header.request_id);
     if (!response) return P2P_ERR_NO_MEM;
 
-    response->header.type = P2P_MSG_DHT_RESPONSE;
-    response->header.request_id = msg->header.request_id;
-
     /* Try to find value locally */
-    size_t data_len = sizeof(response->payload.dht_response.data);
-    if (kademlia_find_value(node->kad_dht, &key, 
-                            response->payload.dht_response.data, 
-                            &data_len) == 0) {
-        response->payload.dht_response.found = 1;
-        response->payload.dht_response.data_len = (uint16_t)data_len;
-        response->payload.dht_response.node_count = 0;
-    } else {
-        /* Not found, return closest nodes */
-        response->payload.dht_response.found = 0;
-        kad_node_t **closest = kademlia_find_node(node->kad_dht, &key, KADEMLIA_K);
-        int count = 0;
-        if (closest) {
-            for (; closest[count] && count < KADEMLIA_K; count++) {
-                memcpy(response->payload.dht_response.nodes[count].id, closest[count]->id.bytes, KADEMLIA_ID_BYTES);
-                strncpy(response->payload.dht_response.nodes[count].ip, closest[count]->ip, P2P_MAX_IP - 1);
-                response->payload.dht_response.nodes[count].port = closest[count]->port;
-            }
-            free(closest);
-        }
-        response->payload.dht_response.node_count = (uint8_t)count;
-    }
+    turbo_mutex_lock(&node->mutex);
+    p2p_fill_dht_get_response_locked(node, &key, response);
+    turbo_mutex_unlock(&node->mutex);
 
-    int ret = p2p_peer_send(peer, response);
-    free(response);
-    return ret;
+    return p2p_send_owned_message(peer, response);
 }
 
 int p2p_handle_dht_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
+    p2p_peer_info_ex_t peer_info = {0};
+
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    p2p_peer_get_info_ex(peer, &peer_info);
 
     const p2p_dht_response_payload_t *res = &msg->payload.dht_response;
-    TLOG_DEBUG("[P2P] DHT RESPONSE from %s:%d (%u nodes)", 
-              peer->ip, peer->port, res->node_count);
+    turbo_mutex_lock(&node->mutex);
+    TLOG_DEBUG("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
+              peer_info.ip, peer_info.port, res->node_count);
 
-    /* In a professional implementation, we'd update p2p_node_t's active_lookup state.
-     * For now, we contribute discovered nodes to our routing table. */
-    for (int i = 0; i < res->node_count; i++) {
-        kad_node_t discovered;
-        memcpy(discovered.id.bytes, res->nodes[i].id, KADEMLIA_ID_BYTES);
-        strncpy(discovered.ip, res->nodes[i].ip, sizeof(discovered.ip) - 1);
-        discovered.port = res->nodes[i].port;
-        discovered.last_seen = (uint64_t)time(NULL);
-
-        kad_routing_add_node(node->kad_dht->routing, &discovered);
-    }
-
-    /* Advance iterative lookup logic */
-    p2p_dht_lookup_on_response(node, peer, msg);
-
-    return P2P_OK;
+    p2p_import_dht_response_nodes_locked(node, res);
+    turbo_mutex_unlock(&node->mutex);
+    return p2p_dht_lookup_on_response(node, peer, msg);
 }

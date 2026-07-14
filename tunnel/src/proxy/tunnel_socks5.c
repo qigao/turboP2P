@@ -5,6 +5,7 @@
 
 #include "../core/tunnel_types.h"
 #include "tunnel_proxy.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 

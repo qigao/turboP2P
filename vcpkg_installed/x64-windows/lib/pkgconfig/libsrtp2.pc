@@ -1,0 +1,13 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${pcfiledir}/../..
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libsrtp2
+Version: 2.7.0
+Description: Library for SRTP (Secure Realtime Transport Protocol)
+
+Libs: "-L${libdir}" -lsrtp2
+Libs.private: -lws2_32
+Cflags: "-I${includedir}"
+

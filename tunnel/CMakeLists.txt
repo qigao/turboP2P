@@ -9,7 +9,6 @@ set(TUNNEL_LIB_SOURCES
     # Core tunnel implementation
     src/core/tunnel.c
     src/core/tunnel_config.c
-    src/stb_sprintf.c
     # DNS modules
     src/dns/tunnel_fake_dns.c
     # NAT and session management
@@ -36,8 +35,11 @@ target_include_directories(
   tunnel_objs
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${Stb_INCLUDE_DIR})
-target_link_libraries(tunnel_objs PUBLIC  TurboNet::Utils TurboNet::Core)
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(tunnel_objs PUBLIC TurboUtils::Core TurboNet::CoroNet)
+if(WIN32)
+  target_link_libraries(tunnel_objs PUBLIC ws2_32)
+endif()
 set_target_properties(
   tunnel_objs
   PROPERTIES VERSION 1.0.0
@@ -56,10 +58,13 @@ target_include_directories(
   tunnel
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${Stb_INCLUDE_DIR})
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link libraries
-target_link_libraries(tunnel PUBLIC TurboNet::Utils TurboNet::Core)
+target_link_libraries(tunnel PUBLIC TurboUtils::Core TurboNet::CoroNet)
+if(WIN32)
+  target_link_libraries(tunnel PUBLIC ws2_32)
+endif()
 
 set_property(TARGET tunnel PROPERTY FOLDER "tunnel")
 set_target_properties(
@@ -87,10 +92,14 @@ install(
 # Examples
 # =============================================================================
 
-add_subdirectory(examples)
+if(BUILD_EXAMPLES)
+  add_subdirectory(examples)
+endif()
 
 # =============================================================================
 # Tests
 # =============================================================================
 
-add_subdirectory(tests)
+if(BUILD_TESTS)
+  add_subdirectory(tests)
+endif()

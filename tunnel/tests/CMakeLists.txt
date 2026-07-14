@@ -1,5 +1,5 @@
 # =============================================================================
-# Tunnel Tests (using Unity framework)
+# Tunnel Tests
 # =============================================================================
 
 # Enable testing
@@ -11,34 +11,36 @@ set(TUNNEL_TEST_SOURCES
     test_ip_stack.c
     test_nat.c
     test_session.c
+    test_tunnel.c
     test_socks5.c)
 
 # Create test executables
 foreach(test_source ${TUNNEL_TEST_SOURCES})
     get_filename_component(test_name ${test_source} NAME_WE)
-    
+
     add_executable(${test_name}
         ${test_source}
         $<TARGET_OBJECTS:tunnel_objs>)
-    
+
     target_include_directories(${test_name}
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
-                ${CMAKE_CURRENT_SOURCE_DIR}/../src
-                ${CMAKE_SOURCE_DIR}/vendor/unity)
-    
+                ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+
     target_link_libraries(${test_name}
-        PRIVATE TurboNet::Utils
-                TurboNet::Core
-                libuv::uv
-                unity)  # Link Unity framework if available
-    
+        PRIVATE TurboUtils::Core
+                TurboNet::CoroNet
+                TurboUtils::TinyTest)
+
+    if(WIN32)
+        target_link_libraries(${test_name} PRIVATE ws2_32)
+    endif()
+
     # Set folder for IDE organization
     set_target_properties(${test_name} PROPERTIES
         FOLDER "tunnel/tests"
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-    
+
     # Add test
     add_test(NAME ${test_name}
         COMMAND ${test_name})
 endforeach()
- 

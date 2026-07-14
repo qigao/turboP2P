@@ -6,6 +6,7 @@
 /* File functions */
 p2p_file_t* p2p_file_create(const char *key, const char *filepath);
 p2p_file_t* p2p_file_find(p2p_node_t *node, const char *key);
+p2p_file_t* p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id);
 int p2p_file_download(p2p_node_t *node, p2p_file_t *file, const char *output_path);
 void p2p_file_free(p2p_file_t *file);
 p2p_file_t* p2p_file_find_by_id(p2p_file_t *list, const p2p_id_t id);

@@ -5,38 +5,317 @@
 
 #include "p2p.h"
 #include "../internal.h"
+#include "../core/node.h"
+#include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
+
+static void p2p_set_manual_connect_suppression_locked(p2p_node_t *node,
+                                                      const char *ip,
+                                                      int port,
+                                                      uint64_t until_ms) {
+    p2p_connect_suppression_t *suppression = NULL;
+    char key[96];
+
+    if (!node || !ip) {
+        return;
+    }
+
+    p2p_endpoint_to_key(key, sizeof(key), ip, port);
+    HASH_FIND_STR(node->connect_suppressions, key, suppression);
+    if (!suppression) {
+        suppression = (p2p_connect_suppression_t *)calloc(1, sizeof(*suppression));
+        if (!suppression) {
+            return;
+        }
+        strncpy(suppression->key, key, sizeof(suppression->key) - 1);
+        strncpy(suppression->ip, ip, sizeof(suppression->ip) - 1);
+        suppression->port = port;
+        HASH_ADD_STR(node->connect_suppressions, key, suppression);
+    }
+
+    suppression->until_ms = until_ms;
+}
+
+static void p2p_clear_manual_connect_suppression_locked(p2p_node_t *node,
+                                                        const char *ip,
+                                                        int port) {
+    p2p_connect_suppression_t *suppression = NULL;
+    char key[96];
+
+    if (!node || !ip) {
+        return;
+    }
+
+    p2p_endpoint_to_key(key, sizeof(key), ip, port);
+    HASH_FIND_STR(node->connect_suppressions, key, suppression);
+    if (!suppression) {
+        return;
+    }
+
+    HASH_DEL(node->connect_suppressions, suppression);
+    free(suppression);
+}
+
+static void p2p_remove_peer_from_routing_locked(p2p_node_t *node, p2p_peer_t *peer) {
+    if (!node || !node->kad_dht || !node->kad_dht->routing || !peer) {
+        return;
+    }
+
+    p2p_node_remove_route_locked(node, NULL, peer->ip, peer->port);
+
+    if (!p2p_id_is_zero(peer->id)) {
+        p2p_node_remove_route_locked(node, peer->id, NULL, 0);
+    }
+}
+
+static void p2p_mark_manual_disconnect_locked(p2p_node_t *node, p2p_peer_t *peer) {
+    if (!node || !peer) {
+        return;
+    }
+
+    peer->keep_entry = 0;
+    p2p_set_manual_connect_suppression_locked(node, peer->ip, peer->port,
+                                              (turbo_hrtime() / 1000000) +
+                                                  P2P_MANUAL_DISCONNECT_SUPPRESS_MS);
+    p2p_remove_peer_from_routing_locked(node, peer);
+}
+
+static int p2p_send_dht_store_to_peer(p2p_peer_t *peer,
+                                      const kad_id_t *key,
+                                      const void *data,
+                                      size_t len) {
+    p2p_message_t *msg = NULL;
+    int ret = 0;
+
+    if (!peer || !peer->is_connected || !key || !data || len == 0 ||
+        len > sizeof(((p2p_dht_store_payload_t *)0)->data)) {
+        return 0;
+    }
+
+    msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    if (!msg) {
+        return 0;
+    }
+
+    p2p_message_init(msg, P2P_MSG_DHT_PUT);
+    memcpy(msg->payload.dht_store.key, key->bytes, KADEMLIA_ID_BYTES);
+    msg->payload.dht_store.data_len = (uint16_t)len;
+    memcpy(msg->payload.dht_store.data, data, len);
+    msg->header.payload_len =
+        (uint16_t)(offsetof(p2p_dht_store_payload_t, data) + len);
+
+    ret = (p2p_peer_send(peer, msg) == P2P_OK) ? 1 : 0;
+    free(msg);
+    return ret;
+}
+
+static int p2p_send_dht_store_to_connected_peers(p2p_node_t *node,
+                                                 const kad_id_t *key,
+                                                 const void *data,
+                                                 size_t len) {
+    p2p_peer_t **peers = NULL;
+    size_t count = 0;
+    int sent = 0;
+
+    if (!node || !key || !data || len == 0 || len > sizeof(((p2p_dht_store_payload_t *)0)->data)) {
+        return 0;
+    }
+
+    peers = p2p_node_snapshot_connected_peers(node, &count);
+    if (count > 0 && !peers) {
+        return 0;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        if (peers[i]) {
+            sent += p2p_send_dht_store_to_peer(peers[i], key, data, len);
+            p2p_peer_release(peers[i]);
+        }
+    }
+    free(peers);
+
+    return sent;
+}
+
+static p2p_peer_t *p2p_prepare_connect_peer_locked(p2p_node_t *node,
+                                                   const char *ip,
+                                                   int port,
+                                                   int force_retry) {
+    p2p_peer_t *peer = NULL;
+
+    if (!node || !ip) {
+        return NULL;
+    }
+
+    peer = p2p_node_find_peer_by_endpoint_locked(node, ip, port);
+    if (!peer) {
+        return NULL;
+    }
+    peer->keep_entry = 1;
+    if (force_retry) {
+        peer->reconnect_after_ms = 0;
+    }
+
+    return peer;
+}
+
+static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
+                                int force_retry) {
+    p2p_peer_t *existing_peer = NULL;
+    p2p_peer_t *peer = NULL;
+    int added_to_table = 0;
+    int ret = 0;
+
+    if (!node || !ip) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    if (force_retry) {
+        p2p_clear_manual_connect_suppression_locked(node, ip, port);
+    }
+    peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
+    turbo_mutex_unlock(&node->mutex);
+    if (peer) {
+        return p2p_peer_connect(peer);
+    }
+
+    peer = p2p_peer_create(node, ip, port);
+    if (!peer) {
+        return P2P_ERR_NO_MEM;
+    }
+    peer->keep_entry = 1;
+
+    turbo_mutex_lock(&node->mutex);
+    existing_peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
+    if (existing_peer) {
+        turbo_mutex_unlock(&node->mutex);
+        p2p_peer_destroy(peer);
+        return p2p_peer_connect(existing_peer);
+    }
+    p2p_node_add_peer_locked(node, peer);
+    added_to_table = 1;
+    turbo_mutex_unlock(&node->mutex);
+
+    ret = p2p_peer_connect(peer);
+    if (ret != P2P_OK) {
+        if (added_to_table) {
+            turbo_mutex_lock(&node->mutex);
+            p2p_node_remove_peer_by_endpoint_locked(node, ip, port);
+            turbo_mutex_unlock(&node->mutex);
+        }
+        p2p_peer_destroy(peer);
+        return ret;
+    }
+    return P2P_OK;
+}
+
+static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
+                                                   const p2p_dht_lookup_t *lookup,
+                                                   const kad_id_t *key,
+                                                   const void *data,
+                                                   size_t len) {
+    p2p_peer_t **peers = NULL;
+    size_t count = 0;
+    int sent = 0;
+
+    if (!node || !lookup || !key || !data || len == 0) {
+        return 0;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    if (lookup->candidate_count > 0) {
+        peers = (p2p_peer_t **)calloc((size_t)lookup->candidate_count, sizeof(*peers));
+    }
+    if (lookup->candidate_count > 0 && !peers) {
+        turbo_mutex_unlock(&node->mutex);
+        return 0;
+    }
+
+    for (int i = 0; i < lookup->candidate_count; i++) {
+        p2p_peer_t *peer = p2p_node_find_peer_by_endpoint_locked(node,
+                                                                 lookup->candidates[i].ip,
+                                                                 lookup->candidates[i].port);
+        if (!peer) {
+            continue;
+        }
+        if (!p2p_peer_hold_locked(peer)) {
+            continue;
+        }
+        peers[count++] = peer;
+    }
+    turbo_mutex_unlock(&node->mutex);
+
+    for (size_t i = 0; i < count; i++) {
+        if (peers[i]) {
+            sent += p2p_send_dht_store_to_peer(peers[i], key, data, len);
+            p2p_peer_release(peers[i]);
+        }
+    }
+    free(peers);
+
+    return sent;
+}
+
+typedef struct {
+    p2p_node_t *node;
+    kad_id_t key;
+    size_t len;
+    uint8_t data[sizeof(((p2p_dht_store_payload_t *)0)->data)];
+} p2p_pending_put_t;
+
+static void p2p_dht_put_lookup_complete(void *result, void *user_data) {
+    p2p_pending_put_t *put = (p2p_pending_put_t *)user_data;
+    p2p_dht_lookup_t *lookup = (p2p_dht_lookup_t *)result;
+
+    if (!lookup || !put || !put->node) {
+        return;
+    }
+
+    (void)p2p_send_dht_store_to_lookup_candidates(put->node, lookup, &put->key,
+                                                  put->data, put->len);
+}
+
+static int p2p_try_get_local_dht_value(p2p_node_t *node,
+                                       const kad_id_t *key,
+                                       void *buf,
+                                       size_t *buf_len) {
+    int found = -1;
+
+    if (!node || !key || !buf || !buf_len) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    found = kademlia_find_value(node->kad_dht, key, buf, buf_len);
+    turbo_mutex_unlock(&node->mutex);
+
+    return (found == 0) ? P2P_OK : P2P_ERR_NOT_FOUND;
+}
+
+static int p2p_dht_lookup_is_active(p2p_node_t *node, uint32_t request_id) {
+    int active = 0;
+
+    if (!node) {
+        return 0;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    active = p2p_dht_lookup_find(node, request_id) != NULL;
+    turbo_mutex_unlock(&node->mutex);
+
+    return active;
+}
 
 /* =============================================================================
  * Node Lifecycle
  * ============================================================================= */
 
 p2p_node_t *p2p_create(const char *ip, int port) {
-    if (!ip) return NULL;
-
-    p2p_node_t *node = (p2p_node_t *)calloc(1, sizeof(p2p_node_t));
-    if (!node) return NULL;
-
-    strncpy(node->ip, ip, sizeof(node->ip) - 1);
-    node->port = port;
-
-    /* Initialize Peer Table */
-    node->peers_table = NULL;
-    node->peer_count = 0;
-
-    /* Initialize Kademlia DHT */
-    node->kad_dht = kademlia_create(ip, (uint16_t)port);
-    if (!node->kad_dht) {
-        free(node);
-        return NULL;
-    }
-
-    /* Initialize node mutex */
-    turbo_mutex_init(&node->mutex);
-
-    return node;
+    return p2p_node_create(ip, port);
 }
 
 void p2p_destroy(p2p_node_t *node) {
@@ -47,90 +326,125 @@ void p2p_destroy(p2p_node_t *node) {
 }
 
 int p2p_start(p2p_node_t *node) {
+    int ret = 0;
+
     if (!node) return P2P_ERR_INVALID_ARG;
-    
-    turbo_mutex_lock(&node->mutex);
-    
-    /* Start server */
-    int ret = p2p_node_start_server(node);
+
+    ret = p2p_node_start_server(node);
     if (ret != P2P_OK) {
-        turbo_mutex_unlock(&node->mutex);
         return ret;
     }
 
-    /* Gossip start */
     p2p_gossip_start(node);
-    
-    turbo_mutex_unlock(&node->mutex);
 
     /* Event loop blocking run */
-    uv_run(uv_default_loop(), UV_RUN_DEFAULT);
+    coro_context_run(node->ctx, TURBO_RUN_DEFAULT);
 
     return P2P_OK;
 }
 
 int p2p_start_nonblocking(p2p_node_t *node) {
-    if (!node) return P2P_ERR_INVALID_ARG;
-    
-    turbo_mutex_lock(&node->mutex);
+    int ret = 0;
 
-    /* Start server */
-    int ret = p2p_node_start_server(node);
+    if (!node) return P2P_ERR_INVALID_ARG;
+
+    ret = p2p_node_start_server(node);
     if (ret != P2P_OK) {
-        turbo_mutex_unlock(&node->mutex);
         return ret;
     }
 
     p2p_gossip_start(node);
-    
+    return P2P_OK;
+}
+
+coro_context_t *p2p_get_loop(p2p_node_t *node) {
+    return node ? node->ctx : NULL;
+}
+
+int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]) {
+    if (!node || !id_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    memcpy(id_out, node->id, P2P_HASH_SIZE);
     turbo_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
-struct uv_loop_s *p2p_get_loop(p2p_node_t *node) {
-    (void)node;
-    return (struct uv_loop_s *)uv_default_loop();
+int p2p_node_get_public_key(p2p_node_t *node,
+                            uint8_t public_key_out[P2P_KEY_SIZE]) {
+    if (!node || !public_key_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    memcpy(public_key_out, node->crypto.identity.public_key, P2P_KEY_SIZE);
+    turbo_mutex_unlock(&node->mutex);
+    return P2P_OK;
 }
 
-int p2p_connect(p2p_node_t *node, const char *ip, int port) {
-    if (!node || !ip) return P2P_ERR_INVALID_ARG;
+int p2p_node_set_private_key(p2p_node_t *node,
+                             const uint8_t secret_key[P2P_KEY_SIZE]) {
+    int ret = P2P_OK;
 
-    /* Use hash table for O(1) existence check */
+    if (!node || !secret_key) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
     turbo_mutex_lock(&node->mutex);
-    if (peer_table_find(node->peers_table, ip, port)) {
-        turbo_mutex_unlock(&node->mutex);
-        return P2P_OK;
+    if (node->server || node->peer_count > 0) {
+        ret = P2P_ERR_INVALID_STATE;
+    } else {
+        ret = p2p_crypto_identity_from_secret(&node->crypto.identity, secret_key);
     }
     turbo_mutex_unlock(&node->mutex);
+    return ret;
+}
 
-    p2p_peer_t *peer = p2p_peer_create(node, ip, port);
-    if (!peer) return P2P_ERR_NO_MEM;
+int p2p_generate_private_key(uint8_t secret_key_out[P2P_KEY_SIZE]) {
+    p2p_identity_t identity = {0};
+    int ret = P2P_OK;
 
-    int ret = p2p_peer_connect(peer);
+    if (!secret_key_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    ret = p2p_crypto_generate_identity(&identity);
     if (ret != P2P_OK) {
-        p2p_peer_destroy(peer);
         return ret;
     }
 
-    /* Add to hash table */
-    turbo_mutex_lock(&node->mutex);
-    peer_table_add(&node->peers_table, peer);
-    turbo_mutex_unlock(&node->mutex);
-    
-    /* Add to Kademlia routing table */
-    kad_id_t peer_id;
-    char id_buf[64];
-    snprintf(id_buf, sizeof(id_buf), "%s:%d", ip, port);
-    kad_id_from_data(id_buf, strlen(id_buf), &peer_id);
-    
-    kad_node_t knode;
-    memcpy(&knode.id, &peer_id, sizeof(kad_id_t));
-    strncpy(knode.ip, ip, sizeof(knode.ip) - 1);
-    knode.port = (uint16_t)port;
-    
-    kad_routing_add_node(node->kad_dht->routing, &knode);
-
+    memcpy(secret_key_out, identity.secret_key, P2P_KEY_SIZE);
+    p2p_crypto_wipe(&identity, sizeof(identity));
     return P2P_OK;
+}
+
+int p2p_public_key_from_private_key(const uint8_t secret_key[P2P_KEY_SIZE],
+                                    uint8_t public_key_out[P2P_KEY_SIZE]) {
+    p2p_identity_t identity = {0};
+    int ret = P2P_OK;
+
+    if (!secret_key || !public_key_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    ret = p2p_crypto_identity_from_secret(&identity, secret_key);
+    if (ret != P2P_OK) {
+        return ret;
+    }
+
+    memcpy(public_key_out, identity.public_key, P2P_KEY_SIZE);
+    p2p_crypto_wipe(&identity, sizeof(identity));
+    return P2P_OK;
+}
+
+int p2p_connect(p2p_node_t *node, const char *ip, int port) {
+    return p2p_connect_internal(node, ip, port, 1);
+}
+
+int p2p_connect_candidate(p2p_node_t *node, const char *ip, int port) {
+    return p2p_connect_internal(node, ip, port, 0);
 }
 
 /* =============================================================================
@@ -166,14 +480,23 @@ int p2p_broadcast(p2p_node_t *node, const void *data, size_t len) {
  * ============================================================================= */
 
 int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len) {
-    if (!node || !key || !data) return P2P_ERR_INVALID_ARG;
-
-    turbo_mutex_lock(&node->mutex);
+    int ret = P2P_OK;
+    p2p_pending_put_t *pending = NULL;
+    p2p_dht_lookup_t *lookup = NULL;
     kad_id_t kkey;
+
+    if (!node || !key || !data) return P2P_ERR_INVALID_ARG;
+    if (len == 0 || len > sizeof(((p2p_dht_store_payload_t *)0)->data)) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
     kad_id_from_data(key, strlen(key), &kkey);
-    
+    turbo_mutex_lock(&node->mutex);
+
     /* Store locally first */
     kademlia_store(node->kad_dht, &kkey, data, len);
+    turbo_mutex_unlock(&node->mutex);
+    (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
 
     /* Professional Kademlia: 
      * 1. Start iterative FIND_NODE for the key
@@ -181,21 +504,55 @@ int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len)
      */
     
     /* For now, just start iterative lookup for the neighborhood */
-    int ret = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_FIND_NODE);
-    turbo_mutex_unlock(&node->mutex);
+    lookup = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_FIND_NODE);
+    if (lookup) {
+        pending = (p2p_pending_put_t *)calloc(1, sizeof(p2p_pending_put_t));
+        if (pending) {
+            pending->node = node;
+            pending->key = kkey;
+            pending->len = len;
+            memcpy(pending->data, data, len);
+            lookup->callback = p2p_dht_put_lookup_complete;
+            lookup->cleanup = free;
+            lookup->user_data = pending;
+        } else {
+            p2p_dht_lookup_finish(node, lookup);
+            ret = P2P_ERR_NO_MEM;
+        }
+    } else {
+        ret = P2P_OK;
+    }
     return ret;
 }
 
+int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size_t len) {
+    kad_id_t kkey;
+
+    if (!node || !key || !data) return P2P_ERR_INVALID_ARG;
+    if (len == 0 || len > sizeof(((p2p_dht_store_payload_t *)0)->data)) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    kad_id_from_data(key, strlen(key), &kkey);
+    turbo_mutex_lock(&node->mutex);
+    kademlia_store(node->kad_dht, &kkey, data, len);
+    turbo_mutex_unlock(&node->mutex);
+
+    (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
+    return P2P_OK;
+}
+
 int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
+    uint64_t deadline_ms = 0;
+    int ret = 0;
+    p2p_dht_lookup_t *lookup = NULL;
+    uint32_t request_id = 0;
+    kad_id_t kkey;
+
     if (!node || !key || !buf || !buf_len) return P2P_ERR_INVALID_ARG;
 
-    turbo_mutex_lock(&node->mutex);
-    kad_id_t kkey;
     kad_id_from_data(key, strlen(key), &kkey);
-
-    /* Try local first */
-    if (kademlia_find_value(node->kad_dht, &kkey, buf, buf_len) == 0) {
-        turbo_mutex_unlock(&node->mutex);
+    if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
         return P2P_OK;
     }
 
@@ -203,42 +560,149 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
      * 1. Start iterative FIND_VALUE for the key
      * 2. This will return either the value or closer nodes.
      */
-    int ret = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_GET);
+    /*
+     * This API is synchronous from the caller's point of view: P2P_OK means
+     * buf contains a value right now. We can still kick off an async lookup as
+     * a side effect, but we must not claim success until a value is present.
+     */
+    lookup = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_GET);
+    if (lookup) {
+        request_id = lookup->request_id;
+        ret = P2P_OK;
+    } else {
+        ret = P2P_ERR_NOT_FOUND;
+    }
+    if (ret != P2P_OK) {
+        return ret;
+    }
+
+    deadline_ms = (turbo_hrtime() / 1000000) + P2P_DHT_GET_TIMEOUT_MS;
+    while ((turbo_hrtime() / 1000000) < deadline_ms) {
+        coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
+
+        if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
+            return P2P_OK;
+        }
+        if (!p2p_dht_lookup_is_active(node, request_id)) {
+            return P2P_ERR_NOT_FOUND;
+        }
+
+        turbo_sleep_ms(10);
+    }
+
+    if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
+        return P2P_OK;
+    }
+    return P2P_ERR_NOT_FOUND;
+}
+
+int p2p_dht_get_cached(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
+    kad_id_t kkey;
+
+    if (!node || !key || !buf || !buf_len) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    kad_id_from_data(key, strlen(key), &kkey);
+    return p2p_try_get_local_dht_value(node, &kkey, buf, buf_len);
+}
+
+size_t p2p_dht_get_entry_count(p2p_node_t *node) {
+    size_t count = 0;
+
+    if (!node) {
+        return 0;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    count = kademlia_storage_count(node->kad_dht);
     turbo_mutex_unlock(&node->mutex);
-    return ret;
+    return count;
 }
 
 /* =============================================================================
  * Peer Information
  * ============================================================================= */
 
+static void p2p_copy_peer_info_legacy(p2p_peer_info_t *dst,
+                                      const p2p_peer_info_ex_t *src) {
+    if (!dst || !src) {
+        return;
+    }
+
+    strncpy(dst->ip, src->ip, sizeof(dst->ip) - 1);
+    dst->ip[sizeof(dst->ip) - 1] = '\0';
+    dst->port = src->port;
+    dst->is_connected = src->is_connected;
+}
+
 int p2p_get_peer_count(p2p_node_t *node) {
+    p2p_peer_info_ex_t *infos = NULL;
+    size_t count = 0;
+
     if (!node) return 0;
+    infos = p2p_node_snapshot_peer_info_ex(node, &count);
+    if (count > 0 && !infos) {
+        return 0;
+    }
+    free(infos);
+    return (int)count;
+}
+
+void p2p_disconnect_peer(p2p_peer_t *peer) {
+    p2p_node_t *node = NULL;
+
+    if (!peer || !peer->node) {
+        return;
+    }
+    if (!p2p_peer_hold(peer)) {
+        return;
+    }
+
+    node = peer->node;
     turbo_mutex_lock(&node->mutex);
-    int count = peer_table_count(node->peers_table);
+    p2p_mark_manual_disconnect_locked(node, peer);
     turbo_mutex_unlock(&node->mutex);
-    return count;
+
+    p2p_peer_disconnect(peer);
+    p2p_node_on_peer_disconnected(node, peer);
+    p2p_peer_destroy(peer);
+    p2p_peer_release(peer);
+}
+
+int p2p_get_peer_info_ex(p2p_node_t *node, int index, p2p_peer_info_ex_t *info) {
+    p2p_peer_info_ex_t *infos = NULL;
+    size_t count = 0;
+
+    if (!node || !info || index < 0) return P2P_ERR_INVALID_ARG;
+    infos = p2p_node_snapshot_peer_info_ex(node, &count);
+    if (count > 0 && !infos) {
+        return P2P_ERR_NO_MEM;
+    }
+    if ((size_t)index >= count) {
+        free(infos);
+        return P2P_ERR_NOT_FOUND;
+    }
+
+    *info = infos[index];
+    free(infos);
+    return P2P_OK;
 }
 
 int p2p_get_peer_info(p2p_node_t *node, int index, p2p_peer_info_t *info) {
-    if (!node || !info || index < 0) return P2P_ERR_INVALID_ARG;
+    p2p_peer_info_ex_t info_ex = {0};
+    int ret = P2P_OK;
 
-    int i = 0;
-    p2p_peer_entry_t *curr, *tmp;
-    turbo_mutex_lock(&node->mutex);
-    HASH_ITER(hh, node->peers_table, curr, tmp) {
-        if (i == index) {
-            strncpy(info->ip, curr->peer->ip, sizeof(info->ip) - 1);
-            info->port = curr->peer->port;
-            info->is_connected = curr->peer->is_connected;
-            turbo_mutex_unlock(&node->mutex);
-            return P2P_OK;
-        }
-        i++;
+    if (!node || !info || index < 0) {
+        return P2P_ERR_INVALID_ARG;
     }
-    turbo_mutex_unlock(&node->mutex);
+    ret = p2p_get_peer_info_ex(node, index, &info_ex);
+    if (ret != P2P_OK) {
+        return ret;
+    }
 
-    return P2P_ERR_NOT_FOUND;
+    p2p_copy_peer_info_legacy(info, &info_ex);
+    return P2P_OK;
 }
 
 /* =============================================================================
@@ -278,7 +742,7 @@ int p2p_get_file(p2p_node_t *node, const char key[65], const char *output_path) 
     kad_id_t file_id;
     kad_id_from_data(key, strlen(key), &file_id);
     
-    return p2p_dht_lookup_start(node, file_id.bytes, P2P_MSG_DHT_GET);
+    return p2p_dht_lookup_start(node, file_id.bytes, P2P_MSG_DHT_GET) ? P2P_OK : P2P_ERR_NOT_FOUND;
 }
 
 /* =============================================================================
@@ -286,17 +750,15 @@ int p2p_get_file(p2p_node_t *node, const char key[65], const char *output_path) 
  * ============================================================================= */
 
 int p2p_subscribe(p2p_node_t *node, const char *topic) {
+    p2p_message_t *msg = NULL;
+
     if (!node || !topic) return P2P_ERR_INVALID_ARG;
-    
-    turbo_mutex_lock(&node->mutex);
     if (!p2p_topic_find_or_create(node, topic)) {
-        turbo_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
-    p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
     if (!msg) {
-        turbo_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
@@ -304,52 +766,47 @@ int p2p_subscribe(p2p_node_t *node, const char *topic) {
     /* Payload setup would go here */
     p2p_node_broadcast(node, msg);
     free(msg);
-    turbo_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
 int p2p_unsubscribe(p2p_node_t *node, const char *topic) {
+    p2p_message_t *msg = NULL;
+    int ret = P2P_OK;
+
     if (!node || !topic) return P2P_ERR_INVALID_ARG;
-    
-    turbo_mutex_lock(&node->mutex);
-    int ret = p2p_node_remove_topic(node, topic);
+    ret = p2p_node_remove_topic(node, topic);
     if (ret != P2P_OK) {
-        turbo_mutex_unlock(&node->mutex);
         return ret;
     }
 
-    p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
     if (!msg) {
-        turbo_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
     p2p_message_init(msg, P2P_MSG_PUBSUB_UNSUB);
     p2p_node_broadcast(node, msg);
     free(msg);
-    turbo_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
 int p2p_publish(p2p_node_t *node, const char *topic, const void *data, size_t len) {
+    p2p_message_t *msg = NULL;
+
     if (!node || !topic || !data || len == 0) return P2P_ERR_INVALID;
-    
-    turbo_mutex_lock(&node->mutex);
-    if (!p2p_topic_find(node, topic)) {
-        turbo_mutex_unlock(&node->mutex);
+
+    if (!p2p_topic_exists(node, topic)) {
         return P2P_ERR_NOT_FOUND;
     }
 
-    p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
+    msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
     if (!msg) {
-        turbo_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
     p2p_message_init(msg, P2P_MSG_PUBSUB_PUBLISH);
     p2p_node_broadcast(node, msg);
     free(msg);
-    turbo_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -357,10 +814,98 @@ int p2p_publish(p2p_node_t *node, const char *topic, const void *data, size_t le
  * Utility implementation
  * ============================================================================= */
 
+int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info) {
+    p2p_node_t *node = NULL;
+
+    if (!peer || !info) return P2P_ERR_INVALID_ARG;
+
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+    p2p_peer_fill_info_ex_locked(peer, info);
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
+    return P2P_OK;
+}
+
+int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info) {
+    p2p_peer_info_ex_t info_ex = {0};
+
+    if (!info) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    if (p2p_peer_get_info_ex(peer, &info_ex) != P2P_OK) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    p2p_copy_peer_info_legacy(info, &info_ex);
+    return P2P_OK;
+}
+
 int p2p_peer_get_address(p2p_peer_t *peer, char *ip_out, int *port_out) {
-    if (!peer || !ip_out || !port_out) return P2P_ERR_INVALID_ARG;
-    strncpy(ip_out, peer->ip, P2P_MAX_IP - 1);
-    *port_out = peer->port;
+    p2p_peer_info_ex_t info = {0};
+
+    if (!ip_out || !port_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    if (p2p_peer_get_info_ex(peer, &info) != P2P_OK) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    strncpy(ip_out, info.ip, P2P_MAX_IP - 1);
+    ip_out[P2P_MAX_IP - 1] = '\0';
+    *port_out = info.port;
+    return P2P_OK;
+}
+
+int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]) {
+    p2p_node_t *node = NULL;
+
+    if (!peer || !id_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+    if (p2p_id_is_zero(peer->id)) {
+        if (node) {
+            turbo_mutex_unlock(&node->mutex);
+        }
+        return P2P_ERR_NOT_FOUND;
+    }
+    memcpy(id_out, peer->id, P2P_HASH_SIZE);
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
+    return P2P_OK;
+}
+
+int p2p_peer_get_public_key(p2p_peer_t *peer,
+                            uint8_t public_key_out[P2P_KEY_SIZE]) {
+    p2p_node_t *node = NULL;
+
+    if (!peer || !public_key_out) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+    if (!peer->remote_public_key_ready) {
+        if (node) {
+            turbo_mutex_unlock(&node->mutex);
+        }
+        return P2P_ERR_NOT_FOUND;
+    }
+    memcpy(public_key_out, peer->remote_public_key, P2P_KEY_SIZE);
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
     return P2P_OK;
 }
 
@@ -385,9 +930,7 @@ int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
     }
 
     /* Broadcast */
-    turbo_mutex_lock(&node->mutex);
     p2p_node_broadcast(node, msg);
-    turbo_mutex_unlock(&node->mutex);
     free(msg);
     return P2P_OK;
 }

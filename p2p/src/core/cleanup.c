@@ -4,6 +4,8 @@
  */
 
 #include "../internal.h"
+#include "../transfer/transfer.h"
+#include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
 
 /* =============================================================================
@@ -57,13 +59,26 @@ void p2p_cleanup_server(p2p_node_t *node) {
     p2p_node_stop_server(node);
 }
 
+void p2p_cleanup_context(p2p_node_t *node) {
+    int max_drain = 500;
+
+    if (!node || !node->ctx) return;
+
+    coro_context_stop(node->ctx);
+    while (max_drain-- > 0 && coro_context_alive(node->ctx)) {
+        coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
+        turbo_sleep_ms(1);
+    }
+    coro_context_destroy(node->ctx);
+    node->ctx = NULL;
+}
+
 void p2p_cleanup_topics(p2p_node_t *node) {
+    p2p_topic_t *topic = NULL;
+
     if (!node) return;
-    
-    turbo_mutex_lock(&node->mutex);
-    p2p_topic_t *topic = node->topics;
-    node->topics = NULL;
-    turbo_mutex_unlock(&node->mutex);
+
+    topic = p2p_node_detach_topics(node);
 
     while (topic) {
         p2p_topic_t *next = topic->next_topic;
@@ -73,10 +88,12 @@ void p2p_cleanup_topics(p2p_node_t *node) {
 }
 
 void p2p_cleanup_files(p2p_node_t *node) {
+    p2p_file_t *file = NULL;
+
     if (!node) return;
-    
+
     /* 1. Clear DHT files first (some may be local aliases) */
-    p2p_file_t *file = node->dht_files;
+    file = p2p_node_detach_dht_files(node);
     while (file) {
         p2p_file_t *next = file->next;
         /* Only free if it's not a local file (local files are freed below) */
@@ -85,34 +102,76 @@ void p2p_cleanup_files(p2p_node_t *node) {
         }
         file = next;
     }
-    node->dht_files = NULL;
 
     /* 2. Free all local files */
-    file = node->local_files;
+    file = p2p_node_detach_local_files(node);
     while (file) {
         p2p_file_t *next = file->next_file;
         p2p_file_free(file);
         file = next;
     }
-    node->local_files = NULL;
 }
 
 void p2p_cleanup_downloads(p2p_node_t *node) {
+    p2p_download_t *download = NULL;
+
     if (!node) return;
-    
-    p2p_download_t *download = node->downloads;
+
+    download = p2p_node_detach_downloads(node);
     while (download) {
         p2p_download_t *next = download->next;
-        
+
         if (download->fp) {
             fclose(download->fp);
         }
-        
+
         free(download);
         download = next;
     }
-    
-    node->downloads = NULL;
+}
+
+void p2p_cleanup_transfers(p2p_node_t *node) {
+    p2p_transfer_manager_t *mgr = NULL;
+
+    if (!node || !node->transfers) {
+        return;
+    }
+
+    mgr = node->transfers;
+    node->transfers = NULL;
+    p2p_transfer_manager_destroy(mgr);
+    free(mgr);
+}
+
+void p2p_cleanup_lookup(p2p_node_t *node) {
+    p2p_dht_lookup_t *lookup = NULL;
+    p2p_dht_lookup_t *tmp = NULL;
+
+    if (!node || !node->dht_lookups) return;
+
+    HASH_ITER(hh, node->dht_lookups, lookup, tmp) {
+        HASH_DEL(node->dht_lookups, lookup);
+        if (lookup->cleanup && lookup->user_data) {
+            lookup->cleanup(lookup->user_data);
+        }
+        free(lookup);
+    }
+    node->dht_lookups = NULL;
+}
+
+static void p2p_cleanup_connect_suppressions(p2p_node_t *node) {
+    p2p_connect_suppression_t *suppression = NULL;
+    p2p_connect_suppression_t *tmp = NULL;
+
+    if (!node || !node->connect_suppressions) {
+        return;
+    }
+
+    HASH_ITER(hh, node->connect_suppressions, suppression, tmp) {
+        HASH_DEL(node->connect_suppressions, suppression);
+        free(suppression);
+    }
+    node->connect_suppressions = NULL;
 }
 
 void p2p_cleanup_dht(p2p_node_t *node) {
@@ -137,7 +196,11 @@ void p2p_destroy_clean(p2p_node_t *node) {
     p2p_cleanup_topics(node);
     p2p_cleanup_files(node);
     p2p_cleanup_downloads(node);
+    p2p_cleanup_transfers(node);
+    p2p_cleanup_lookup(node);
+    p2p_cleanup_connect_suppressions(node);
     p2p_cleanup_dht(node);
+    p2p_cleanup_context(node);
     
     turbo_mutex_destroy(&node->mutex);
     free(node);

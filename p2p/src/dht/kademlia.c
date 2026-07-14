@@ -46,13 +46,13 @@ int kad_id_distance_cmp(const kad_id_t *target, const kad_id_t *a, const kad_id_
 int kad_id_prefix_len(const kad_id_t *a, const kad_id_t *b) {
     int prefix = 0;
     for (int i = 0; i < KADEMLIA_ID_BYTES; i++) {
-        uint8_t xor = a->bytes[i] ^ b->bytes[i];
-        if (xor == 0) {
+        uint8_t diff = a->bytes[i] ^ b->bytes[i];
+        if (diff == 0) {
             prefix += 8;
         } else {
             /* Count leading zeros in XOR byte */
             for (int bit = 7; bit >= 0; bit--) {
-                if (xor & (1 << bit)) break;
+                if (diff & (1 << bit)) break;
                 prefix++;
             }
             break;
@@ -348,4 +348,21 @@ int kademlia_find_value(kademlia_dht_t *dht, const kad_id_t *key, void *buf, siz
 kad_node_t **kademlia_find_node(kademlia_dht_t *dht, const kad_id_t *target, int count) {
     if (!dht || !target) return NULL;
     return kad_routing_find_closest(dht->routing, target, count);
+}
+
+size_t kademlia_storage_count(kademlia_dht_t *dht) {
+    size_t count = 0;
+    kad_value_t *val = NULL;
+
+    if (!dht) {
+        return 0;
+    }
+
+    val = dht->storage;
+    while (val) {
+        count++;
+        val = val->next;
+    }
+
+    return count;
 }

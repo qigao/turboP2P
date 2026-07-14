@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -44,7 +44,7 @@ static p2p_dir_entry_t* create_entry(const char *relative_path, size_t file_size
 static int scan_dir_recursive(const char *base_path, const char *rel_prefix,
                                p2p_dir_scan_t *scan) {
     char search_path[P2P_MAX_FILEPATH];
-    stbsp_snprintf(search_path, sizeof(search_path), "%s\\*", base_path);
+    fmt(search_path, sizeof(search_path), "{}\\*", base_path);
 
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA(search_path, &fd);
@@ -59,10 +59,10 @@ static int scan_dir_recursive(const char *base_path, const char *rel_prefix,
         char rel_path[P2P_MAX_RELATIVE_PATH];
 
         if (rel_prefix[0]) {
-            stbsp_snprintf(full_path, sizeof(full_path), "%s\\%s", base_path, fd.cFileName);
-            stbsp_snprintf(rel_path, sizeof(rel_path), "%s/%s", rel_prefix, fd.cFileName);
+            fmt(full_path, sizeof(full_path), "{}\\{}", base_path, fd.cFileName);
+            fmt(rel_path, sizeof(rel_path), "{}/{}", rel_prefix, fd.cFileName);
         } else {
-            stbsp_snprintf(full_path, sizeof(full_path), "%s\\%s", base_path, fd.cFileName);
+            fmt(full_path, sizeof(full_path), "{}\\{}", base_path, fd.cFileName);
             strncpy(rel_path, fd.cFileName, sizeof(rel_path) - 1);
         }
 
@@ -108,10 +108,10 @@ static int scan_dir_recursive(const char *base_path, const char *rel_prefix,
         char rel_path[P2P_MAX_RELATIVE_PATH];
 
         if (rel_prefix[0]) {
-            stbsp_snprintf(full_path, sizeof(full_path), "%s/%s", base_path, ent->d_name);
-            stbsp_snprintf(rel_path, sizeof(rel_path), "%s/%s", rel_prefix, ent->d_name);
+            fmt(full_path, sizeof(full_path), "{}/{}", base_path, ent->d_name);
+            fmt(rel_path, sizeof(rel_path), "{}/{}", rel_prefix, ent->d_name);
         } else {
-            stbsp_snprintf(full_path, sizeof(full_path), "%s/%s", base_path, ent->d_name);
+            fmt(full_path, sizeof(full_path), "{}/{}", base_path, ent->d_name);
             strncpy(rel_path, ent->d_name, sizeof(rel_path) - 1);
         }
 

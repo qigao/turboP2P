@@ -1,0 +1,17 @@
+node_name: eu-bootstrap
+network_id: dev-mesh
+virtual_ip: 10.42.0.1
+advertise_ip: 161.97.65.129
+virtual_prefix: 16
+identity_secret_hex: 0101010101010101010101010101010101010101010101010101010101010101
+listen_port: 9993
+bootstrap_peers: []
+ice_enabled: true
+stun_servers:
+  - stun:161.97.65.129:3479
+# Example pinned route for downstream nodes:
+# route_rules:
+#   - 10.42.0.0/24=10.42.0.1,pin
+# Optional direct-peer admission allowlist:
+# peer_allow_cidrs:
+#   - 10.42.0.2/32

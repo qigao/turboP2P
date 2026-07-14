@@ -3,36 +3,12 @@
   "version-semver": "0.1.0",
   "dependencies": [
     {
-      "name": "libuv",
-      "version>=": "1.48.0"
-    },
-    {
-      "name": "llhttp",
-      "version>=": "9.1.3"
-    }, 
-    {
       "name": "nanobench",
       "version>=": "4.3.11"
     },
     {
       "name": "xxhash",
       "version>=": "0.8.3"
-    },
-    {
-      "name": "kcp",
-      "version>=": "1.7"
-    },
-    {
-      "name": "quickjs-ng",
-      "version>=": "0.10.1"
-    },
-    {
-      "name": "c-ares",
-      "version>=": "1.34.1"
-    },
-    {
-      "name": "libpq",
-      "version>=": "16.0"
     },
     {
       "name": "openssl",
@@ -43,32 +19,7 @@
       "version>=": "1.7.16"
     },
     {
-      "name": "aklomp-base64",
-      "version>=": "0.5.2"
-    },
-    {
-      "name": "usrsctp"
-    },
-    {
-      "name": "libsrtp"
-    },
-    {
-      "name": "opus"
-    },
-    {
-      "name": "libvpx"
-    },
-    {
-      "name": "stb"
-    },
-    {
-      "name": "miniaudio"
-    },
-    {
-      "name": "x265"
-    },
-    {
-      "name": "openh264"
+      "name": "zstd"
     }
   ],
   "builtin-baseline": "b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01"

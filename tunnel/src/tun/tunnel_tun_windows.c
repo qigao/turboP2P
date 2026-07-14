@@ -15,7 +15,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <objbase.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
+#include <turbo_thread.h>
 
 /* Wintun API typedefs */
 typedef void *WINTUN_ADAPTER_HANDLE;
@@ -83,9 +84,6 @@ typedef struct {
     WINTUN_ADAPTER_HANDLE adapter;
     WINTUN_SESSION_HANDLE session;
     HANDLE read_event;
-    volatile int running;
-    uv_thread_t read_thread;
-    uv_async_t async;
 } tun_windows_t;
 
 /* =============================================================================
@@ -143,7 +141,7 @@ static int run_netsh_command(const char *fmt, ...)
     PROCESS_INFORMATION pi;
 
     char full_cmd[1100];
-    stbsp_snprintf(full_cmd, sizeof(full_cmd), "netsh %s", cmd);
+    fmt(full_cmd, sizeof(full_cmd), "netsh {}", cmd);
 
     if (!CreateProcessA(NULL, full_cmd, NULL, NULL, FALSE,
                         CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
@@ -269,8 +267,7 @@ void tunnel_tun_close(tunnel_tun_t *tun)
 
     tun_windows_t *win = (tun_windows_t *)tun->handle;
 
-    /* Stop read thread */
-    win->running = 0;
+    /* Wake any pending wait on the session read event before teardown. */
     if (win->read_event) {
         SetEvent(win->read_event);
     }
@@ -341,114 +338,43 @@ int tunnel_tun_configure(tunnel_tun_t *tun)
     return TUNNEL_OK;
 }
 
-/* =============================================================================
- * Read Thread
- * ============================================================================= */
-
-static void read_thread_func(void *arg)
+int tunnel_tun_start(tunnel_tun_t *tun)
 {
-    tunnel_tun_t *tun = (tunnel_tun_t *)arg;
-    tun_windows_t *win = (tun_windows_t *)tun->handle;
-
-    while (win->running) {
-        /* Wait for packet */
-        DWORD result = WaitForSingleObject(win->read_event, 100);
-        if (result != WAIT_OBJECT_0) {
-            continue;
-        }
-
-        if (!win->running) break;
-
-        /* Read packets */
-        for (;;) {
-            DWORD packet_size;
-            BYTE *packet = WintunReceivePacket(win->session, &packet_size);
-            if (!packet) break;
-
-            /* Copy to receive buffer */
-            if (packet_size <= sizeof(tun->recv_buf)) {
-                memcpy(tun->recv_buf, packet, packet_size);
-                tun->packets_read++;
-                tun->bytes_read += packet_size;
-
-                /* Signal main thread */
-                if (tun->read_cb) {
-                    tun->read_cb(tun, tun->recv_buf, packet_size);
-                }
-            }
-
-            WintunReleaseReceivePacket(win->session, packet);
-        }
-    }
-}
-
-/* =============================================================================
- * libuv Integration
- * ============================================================================= */
-
-static void on_async_packet(uv_async_t *handle)
-{
-    tunnel_tun_t *tun = (tunnel_tun_t *)handle->data;
-    tun_windows_t *win = (tun_windows_t *)tun->handle;
-
-    /* Process any pending packets */
-    for (;;) {
-        DWORD packet_size;
-        BYTE *packet = WintunReceivePacket(win->session, &packet_size);
-        if (!packet) break;
-
-        if (packet_size <= sizeof(tun->recv_buf)) {
-            memcpy(tun->recv_buf, packet, packet_size);
-            tun->packets_read++;
-            tun->bytes_read += packet_size;
-
-            if (tun->read_cb) {
-                tun->read_cb(tun, tun->recv_buf, packet_size);
-            }
-        }
-
-        WintunReleaseReceivePacket(win->session, packet);
-    }
-}
-
-int tunnel_tun_start(tunnel_tun_t *tun, uv_loop_t *loop)
-{
-    if (!tun || !loop || !tun->handle) return TUNNEL_ERR_INVALID_ARG;
+    if (!tun || !tun->handle) return TUNNEL_ERR_INVALID_ARG;
 
     tun_windows_t *win = (tun_windows_t *)tun->handle;
     if (!win->session) return TUNNEL_ERR_TUN_CONFIG;
-
-    /* Initialize async handle for cross-thread notification */
-    if (uv_async_init(loop, &win->async, on_async_packet) != 0) {
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
-    win->async.data = tun;
-
-    /* Start read thread */
-    win->running = 1;
-    if (uv_thread_create(&win->read_thread, read_thread_func, tun) != 0) {
-        win->running = 0;
-        uv_close((uv_handle_t *)&win->async, NULL);
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
 
     return TUNNEL_OK;
 }
 
 void tunnel_tun_stop(tunnel_tun_t *tun)
 {
-    if (!tun || !tun->handle) return;
+    (void)tun;
+}
 
-    tun_windows_t *win = (tun_windows_t *)tun->handle;
+int tunnel_tun_poll(tunnel_tun_t *tun)
+{
+    int processed = 0;
+    int n;
 
-    /* Signal thread to stop */
-    win->running = 0;
+    if (!tun || !tun->handle) {
+        return 0;
+    }
 
-    /* Wait for thread to exit */
-    uv_thread_join(&win->read_thread);
+    for (;;) {
+        n = tunnel_tun_read(tun, tun->recv_buf, sizeof(tun->recv_buf));
+        if (n <= 0) {
+            break;
+        }
 
-    /* Close async handle */
-    uv_close((uv_handle_t *)&win->async, NULL);
+        processed++;
+        if (tun->read_cb) {
+            tun->read_cb(tun, tun->recv_buf, (size_t)n);
+        }
+    }
+
+    return processed;
 }
 
 /* =============================================================================

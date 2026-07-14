@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+typedef struct coro_context_s coro_context_t;
+
 /* Opaque handles - forward declarations only */
 typedef struct p2p_node_s p2p_node_t;
 typedef struct p2p_peer_s p2p_peer_t;
@@ -52,14 +54,58 @@ CXX_C_API int p2p_start(p2p_node_t *node);
 
 /**
  * Start server and gossip (non-blocking)
- * Use this with p2p_get_loop() + uv_run() for custom event loop integration
+ * Use this with p2p_get_loop() + coro_context_run() for custom event loop integration
  */
 CXX_C_API int p2p_start_nonblocking(p2p_node_t *node);
 
 /**
- * Get the event loop for integration
+ * Get the CoroNet context for integration
  */
-CXX_C_API struct uv_loop_s *p2p_get_loop(p2p_node_t *node);
+CXX_C_API coro_context_t *p2p_get_loop(p2p_node_t *node);
+
+/**
+ * Copy this node's stable P2P id.
+ * @param node Node
+ * @param id_out Output buffer of P2P_HASH_SIZE bytes
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]);
+
+/**
+ * Copy this node's static public key.
+ * @param node Node
+ * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_node_get_public_key(p2p_node_t *node,
+                                      uint8_t public_key_out[P2P_KEY_SIZE]);
+
+/**
+ * Set this node's static identity secret.
+ * Must be called before the node is started or connected.
+ * @param node Node
+ * @param secret_key 32-byte private key material
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_node_set_private_key(p2p_node_t *node,
+                                       const uint8_t secret_key[P2P_KEY_SIZE]);
+
+/**
+ * Generate a new 32-byte private key for stable node identity.
+ * @param secret_key_out Output buffer of P2P_KEY_SIZE bytes
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_generate_private_key(uint8_t secret_key_out[P2P_KEY_SIZE]);
+
+/**
+ * Derive the static public key for a 32-byte private key.
+ * @param secret_key Private key material
+ * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_public_key_from_private_key(
+    const uint8_t secret_key[P2P_KEY_SIZE],
+    uint8_t public_key_out[P2P_KEY_SIZE]);
 
 /**
  * Connect to bootstrap peer
@@ -106,6 +152,28 @@ CXX_C_API void p2p_set_peer_callbacks(p2p_node_t *node,
  * @return P2P_OK on success
  */
 CXX_C_API int p2p_peer_get_address(p2p_peer_t *peer, char *ip_out, int *port_out);
+
+/**
+ * Copy a peer's advertised P2P id.
+ * @param peer Peer
+ * @param id_out Output buffer of P2P_HASH_SIZE bytes
+ * @return P2P_OK on success, P2P_ERR_NOT_FOUND if the peer has not announced an id yet
+ */
+CXX_C_API int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]);
+
+/**
+ * Copy a peer's static public key learned during the handshake.
+ * @param peer Peer
+ * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
+ * @return P2P_OK on success, P2P_ERR_NOT_FOUND if the peer used an old handshake
+ */
+CXX_C_API int p2p_peer_get_public_key(p2p_peer_t *peer,
+                                      uint8_t public_key_out[P2P_KEY_SIZE]);
+
+/**
+ * Disconnect a peer transport
+ */
+CXX_C_API void p2p_disconnect_peer(p2p_peer_t *peer);
 
 /**
  * Send message to peer
@@ -179,6 +247,11 @@ CXX_C_API int p2p_publish(p2p_node_t *node, const char *topic, const void *data,
 CXX_C_API int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len);
 
 /**
+ * Store value locally and replicate only to currently connected peers.
+ */
+CXX_C_API int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size_t len);
+
+/**
  * Get value from DHT network
  * @param node Node
  * @param key Key (string)
@@ -187,6 +260,16 @@ CXX_C_API int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, s
  * @return P2P_OK on success
  */
 CXX_C_API int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
+
+/**
+ * Get a value already present in the local DHT cache without network waiting.
+ */
+CXX_C_API int p2p_dht_get_cached(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
+
+/**
+ * Count locally cached DHT entries currently stored on this node.
+ */
+CXX_C_API size_t p2p_dht_get_entry_count(p2p_node_t *node);
 
 /* =============================================================================
  * Peer Information
@@ -201,6 +284,28 @@ typedef struct {
     int is_connected;
 } p2p_peer_info_t;
 
+typedef struct {
+    char ip[P2P_MAX_IP];
+    int port;
+    int is_connected;
+} p2p_peer_info_ex_t;
+
+/**
+ * Snapshot peer address and connection state
+ * @param peer The peer
+ * @param info Output peer info
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info);
+
+/**
+ * Snapshot peer address and connection state without IPv4-sized truncation
+ * @param peer The peer
+ * @param info Output peer info
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
+
 /**
  * Get peer count
  */
@@ -214,6 +319,15 @@ CXX_C_API int p2p_get_peer_count(p2p_node_t *node);
  * @return P2P_OK on success
  */
 CXX_C_API int p2p_get_peer_info(p2p_node_t *node, int index, p2p_peer_info_t *info);
+
+/**
+ * Get extended peer info by index without IPv4-sized truncation
+ * @param node Node
+ * @param index Peer index (0 to count-1)
+ * @param info Output peer info
+ * @return P2P_OK on success
+ */
+CXX_C_API int p2p_get_peer_info_ex(p2p_node_t *node, int index, p2p_peer_info_ex_t *info);
 
 /* =============================================================================
  * Utility

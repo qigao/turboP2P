@@ -3,14 +3,14 @@
  * @brief TurboNet Tunnel - High-performance tun2proxy implementation
  *
  * A lightweight tunnel that captures packets from TUN device and routes them
- * through various proxy protocols (SOCKS5, HTTP, Shadowsocks, etc.)
+ * through proxy protocols.
  *
  * Features:
- * - TUN device packet capture (IPv4/IPv6)
- * - Multiple proxy protocols (SOCKS5, HTTP CONNECT, Shadowsocks)
- * - TCP and UDP support (with multiple UDP relay modes)
+ * - TUN device packet capture
+ * - Implemented proxy protocols: SOCKS5 CONNECT, HTTP CONNECT, direct TCP
+ * - TCP support and partial UDP session plumbing
  * - NAT session management with connection tracking
- * - Zero-copy packet processing via netcore
+ * - Packet processing via CoroNet streams
  * - Cross-platform (Linux, macOS, Windows, Android, iOS)
  *
  * Architecture:
@@ -32,13 +32,13 @@
  * │         ┌──────────────────┼──────────────────┐                 │
  * │         ▼                  ▼                  ▼                 │
  * │   ┌──────────┐      ┌──────────┐       ┌──────────┐            │
- * │   │  SOCKS5  │      │   HTTP   │       │Shadowsocks│           │
- * │   │  Client  │      │  CONNECT │       │  Client   │           │
+ * │   │  SOCKS5  │      │   HTTP   │       │  Direct  │            │
+ * │   │  Client  │      │  CONNECT │       │   TCP    │            │
  * │   └────┬─────┘      └────┬─────┘       └────┬─────┘            │
  * │        └─────────────────┼─────────────────┘                   │
  * │                          │                                      │
  * │                    ┌─────▼─────┐                                │
- * │                    │  netcore  │  (TCP/UDP/KCP/TLS)             │
+ * │                    │ CoroNet   │  (TCP/TLS streams)             │
  * │                    └─────┬─────┘                                │
  * │                          │                                      │
  * └──────────────────────────┼──────────────────────────────────────┘
@@ -107,9 +107,14 @@ typedef enum {
 typedef enum {
     TUNNEL_UDP_DISABLED = 0,        /* UDP not tunneled */
     TUNNEL_UDP_OVER_TCP,            /* UDP encapsulated in TCP */
-    TUNNEL_UDP_NATIVE,              /* Native UDP (SOCKS5 UDP ASSOCIATE) */
-    TUNNEL_UDP_FULLCONE,            /* Full cone NAT mode */
+    TUNNEL_UDP_NATIVE,              /* Native UDP mode (transport incomplete) */
+    TUNNEL_UDP_FULLCONE,            /* Full cone NAT mode (transport incomplete) */
 } tunnel_udp_mode_t;
+
+typedef enum {
+    TUNNEL_MODE_PROXY = 0,          /* Parse TUN packets into sessions/proxy */
+    TUNNEL_MODE_PACKET,             /* Forward raw IP packets only */
+} tunnel_mode_t;
 
 /* =============================================================================
  * Session State
@@ -204,9 +209,9 @@ typedef struct {
     int include_count;
     const char **exclude_ranges;    /* IP ranges to bypass */
     int exclude_count;
-    const char **include_domains;   /* Domains to tunnel */
+    const char **include_domains;   /* Reserved; non-empty domain rules are rejected */
     int include_domain_count;
-    const char **exclude_domains;   /* Domains to bypass */
+    const char **exclude_domains;   /* Reserved; non-empty domain rules are rejected */
     int exclude_domain_count;
 } tunnel_route_config_t;
 
@@ -218,6 +223,7 @@ typedef struct {
     tunnel_proxy_config_t proxy;    /* Proxy server config */
     tunnel_dns_config_t dns;        /* DNS config */
     tunnel_route_config_t route;    /* Routing config */
+    tunnel_mode_t mode;             /* Packet handling mode */
     tunnel_udp_mode_t udp_mode;     /* UDP relay mode */
     int tcp_keep_alive;             /* TCP keep-alive interval (seconds) */
     int session_timeout;            /* Session timeout (seconds) */
@@ -308,14 +314,15 @@ CXX_C_API void tunnel_shutdown(void);
 CXX_C_API tunnel_t* tunnel_create(const tunnel_config_t *config);
 
 /**
- * Create tunnel from YAML config file
- * @param config_path Path to YAML config file
+ * Create tunnel from key-value config file
+ * @param config_path Path to config file
  * @return Tunnel handle or NULL on error
  */
 CXX_C_API tunnel_t* tunnel_create_from_file(const char *config_path);
 
 /**
  * Create tunnel from YAML config string
+ * Currently a placeholder; returns NULL until YAML parsing is implemented.
  * @param config_yaml YAML config string
  * @return Tunnel handle or NULL on error
  */
@@ -358,7 +365,7 @@ CXX_C_API int tunnel_run(tunnel_t *tunnel);
 /**
  * Run single iteration of event loop (non-blocking)
  * @param tunnel Tunnel handle
- * @param timeout_ms Maximum wait time (-1 for blocking)
+ * @param timeout_ms Reserved; currently ignored and the call is non-blocking
  * @return Number of events processed
  */
 CXX_C_API int tunnel_poll(tunnel_t *tunnel, int timeout_ms);

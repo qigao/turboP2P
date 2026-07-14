@@ -7,13 +7,13 @@
  * 3. Test bootstrap connection
  */
 
-#include <unity.h>
+#include <tinytest.h>
 #include <turbo_mesh.h>
 #include <p2p.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <uv.h>
+#include <CoroNet/turbo_coro_context.h>
 #include <tlog.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -29,6 +29,40 @@ static int g_peer_disconnected_count = 0;
 static int g_packet_received_count = 0;
 static char g_last_peer_ip[64];
 static int g_last_peer_port = 0;
+static tlog_t *g_test_logger = NULL;
+
+typedef struct {
+    int packet_received_count;
+} mesh_packet_counter_t;
+
+static void mesh_test_logger_init(void) {
+    if (g_test_logger) {
+        return;
+    }
+
+    tlog_config_t log_config = {0};
+    log_config.min_level = TURBO_LOG_LEVEL_INFO;
+    g_test_logger = tlog_create(&log_config);
+    if (!g_test_logger) {
+        return;
+    }
+
+    turbo_console_sink_opts_t opts = {0};
+    opts.output = stdout;
+    opts.use_colors = 1;
+    turbo_log_sink_t *sink = turbo_sink_console_create(&opts);
+    tlog_add_sink(g_test_logger, sink);
+    tlog_set_default(g_test_logger);
+}
+
+static void test_logger_shutdown_all(void) {
+    if (!g_test_logger) {
+        return;
+    }
+
+    tlog_destroy(g_test_logger);
+    g_test_logger = NULL;
+}
 
 void setUp(void) {
     /* Reset counters */
@@ -68,6 +102,66 @@ static void on_packet_received(const uint8_t *data, size_t len, void *user_data)
     printf("[TEST] Packet received: %zu bytes (count: %d)\n", len, g_packet_received_count);
 }
 
+static void on_packet_received_counting(const uint8_t *data, size_t len, void *user_data) {
+    mesh_packet_counter_t *counter = (mesh_packet_counter_t *)user_data;
+
+    (void)data;
+    if (counter) {
+        counter->packet_received_count++;
+        printf("[TEST] Packet received: %zu bytes (count: %d)\n",
+               len, counter->packet_received_count);
+    }
+}
+static void mesh_test_build_ipv4_packet(uint8_t *packet, size_t len,
+                                        uint8_t src_a, uint8_t src_b,
+                                        uint8_t src_c, uint8_t src_d,
+                                        uint8_t dst_a, uint8_t dst_b,
+                                        uint8_t dst_c, uint8_t dst_d) {
+    memset(packet, 0, len);
+    packet[0] = 0x45;
+    packet[8] = 64;
+    packet[9] = 1;
+    packet[12] = src_a;
+    packet[13] = src_b;
+    packet[14] = src_c;
+    packet[15] = src_d;
+    packet[16] = dst_a;
+    packet[17] = dst_b;
+    packet[18] = dst_c;
+    packet[19] = dst_d;
+}
+
+static int mesh_test_find_peer_info(mesh_network_t *mesh, const char *virtual_ip,
+                                    mesh_peer_info_t *info) {
+    mesh_peer_info_t current;
+    int peer_count = mesh_get_peer_count(mesh);
+
+    for (int i = 0; i < peer_count; i++) {
+        if (mesh_get_peer_info(mesh, i, &current) != MESH_OK) {
+            continue;
+        }
+
+        if (strcmp(current.virtual_ip, virtual_ip) == 0) {
+            if (info) {
+                *info = current;
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void mesh_test_stop_destroy(mesh_network_t **mesh_ptr) {
+    if (!mesh_ptr || !*mesh_ptr) {
+        return;
+    }
+
+    mesh_stop(*mesh_ptr);
+    mesh_destroy(*mesh_ptr);
+    *mesh_ptr = NULL;
+}
+
 /* =============================================================================
  * Test Cases
  * ============================================================================= */
@@ -90,7 +184,7 @@ void test_mesh_create_destroy(void) {
 
     /* Create mesh */
     mesh_network_t *mesh = mesh_create(&config);
-    TEST_ASSERT_NOT_NULL(mesh);
+    check_not_null(mesh);
 
     /* Destroy mesh */
     mesh_destroy(mesh);
@@ -106,7 +200,7 @@ void test_p2p_node_creation(void) {
 
     /* Create P2P node */
     p2p_node_t *node = p2p_create("127.0.0.1", 29993);
-    TEST_ASSERT_NOT_NULL(node);
+    check_not_null(node);
 
     printf("[TEST] ✓ P2P node created on port 29993\n");
 
@@ -124,12 +218,12 @@ void test_p2p_two_nodes_connect(void) {
 
     /* Create node 1 (server) */
     p2p_node_t *node1 = p2p_create("127.0.0.1", 30001);
-    TEST_ASSERT_NOT_NULL(node1);
+    check_not_null(node1);
     printf("[TEST] Node 1 created on port 30001\n");
 
     /* Create node 2 (client) */
     p2p_node_t *node2 = p2p_create("127.0.0.1", 30002);
-    TEST_ASSERT_NOT_NULL(node2);
+    check_not_null(node2);
     printf("[TEST] Node 2 created on port 30002\n");
 
     /* Start node 1 in background (we need to test if p2p_start works) */
@@ -159,11 +253,11 @@ void test_mesh_start_stop(void) {
     config.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh = mesh_create(&config);
-    TEST_ASSERT_NOT_NULL(mesh);
+    check_not_null(mesh);
 
     /* Start mesh */
     int ret = mesh_start(mesh);
-    TEST_ASSERT_EQUAL(MESH_OK, ret);
+    check_int_eq(MESH_OK, ret);
     printf("[TEST] ✓ Mesh started\n");
 
     /* Wait a bit for P2P thread to start */
@@ -172,7 +266,7 @@ void test_mesh_start_stop(void) {
     /* Get stats */
     mesh_stats_t stats;
     ret = mesh_get_stats(mesh, &stats);
-    TEST_ASSERT_EQUAL(MESH_OK, ret);
+    check_int_eq(MESH_OK, ret);
     printf("[TEST] Mesh stats: peers=%u, tx=%llu, rx=%llu\n",
            stats.peer_count, (unsigned long long)stats.packets_tx, (unsigned long long)stats.packets_rx);
 
@@ -191,18 +285,18 @@ void test_p2p_server_listening(void) {
 
     /* Create P2P node */
     p2p_node_t *node = p2p_create("127.0.0.1", 31001);
-    TEST_ASSERT_NOT_NULL(node);
+    check_not_null(node);
     printf("[TEST] ✓ P2P node created on port 31001\n");
 
     /* Start P2P server */
     int ret = p2p_start_nonblocking(node);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    check_int_eq(P2P_OK, ret);
     printf("[TEST] ✓ P2P server started\n");
 
     /* Poll a few times to ensure server is running */
-    struct uv_loop_s *loop = p2p_get_loop(node);
+    coro_context_t *ctx = p2p_get_loop(node);
     for (int i = 0; i < 3; i++) {
-        uv_run(loop, UV_RUN_NOWAIT);
+        coro_context_run(ctx, TURBO_RUN_NOWAIT);
         sleep_ms(100);
     }
 
@@ -242,7 +336,7 @@ void test_p2p_peer_callbacks(void) {
 
     /* Create server node */
     p2p_node_t *server = p2p_create("127.0.0.1", 32001);
-    TEST_ASSERT_NOT_NULL(server);
+    check_not_null(server);
 
     /* Set callbacks */
     p2p_set_peer_callbacks(server, test_p2p_peer_connected_cb,
@@ -251,12 +345,12 @@ void test_p2p_peer_callbacks(void) {
 
     /* Start server */
     int ret = p2p_start_nonblocking(server);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    check_int_eq(P2P_OK, ret);
     printf("[TEST] ✓ Server started on port 32001\n");
 
     /* Create client node */
     p2p_node_t *client = p2p_create("127.0.0.1", 32002);
-    TEST_ASSERT_NOT_NULL(client);
+    check_not_null(client);
 
     /* Set callbacks on client too */
     p2p_set_peer_callbacks(client, test_p2p_peer_connected_cb,
@@ -264,7 +358,7 @@ void test_p2p_peer_callbacks(void) {
 
     /* Start client */
     ret = p2p_start_nonblocking(client);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    check_int_eq(P2P_OK, ret);
     printf("[TEST] ✓ Client started on port 32002\n");
 
     /* Wait for server to be ready */
@@ -273,16 +367,16 @@ void test_p2p_peer_callbacks(void) {
     /* Client connects to server */
     printf("[TEST] Client connecting to server...\n");
     ret = p2p_connect(client, "127.0.0.1", 32001);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    check_int_eq(P2P_OK, ret);
 
     /* Wait for connection */
     printf("[TEST] Waiting for connection (up to 5 seconds)...\n");
-    struct uv_loop_s *server_loop = p2p_get_loop(server);
-    struct uv_loop_s *client_loop = p2p_get_loop(client);
+    coro_context_t *server_ctx = p2p_get_loop(server);
+    coro_context_t *client_ctx = p2p_get_loop(client);
 
     for (int i = 0; i < 50; i++) {  /* 5 seconds max */
-        uv_run(server_loop, UV_RUN_NOWAIT);
-        uv_run(client_loop, UV_RUN_NOWAIT);
+        coro_context_run(server_ctx, TURBO_RUN_NOWAIT);
+        coro_context_run(client_ctx, TURBO_RUN_NOWAIT);
         sleep_ms(100);
 
         if (g_peer_connected_count > 0) {
@@ -298,7 +392,7 @@ void test_p2p_peer_callbacks(void) {
 
     if (g_peer_connected_count > 0) {
         printf("[TEST] ✓ SUCCESS: P2P callbacks working!\n");
-        TEST_ASSERT_GREATER_THAN(0, g_peer_connected_count);
+        check(g_peer_connected_count > 0);
     } else {
         printf("[TEST] ✗ FAILURE: No peer connection callbacks triggered!\n");
         printf("[TEST] This indicates P2P layer is not connecting properly.\n");
@@ -318,29 +412,24 @@ void test_dht_put_get(void) {
 
     /* Create node */
     p2p_node_t *node = p2p_create("127.0.0.1", 33001);
-    TEST_ASSERT_NOT_NULL(node);
-
-    /* Start node */
-    int ret = p2p_start_nonblocking(node);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
-    printf("[TEST] ✓ Node started\n");
+    check_not_null(node);
 
     /* Put value in DHT */
     const char *key = "test_key";
     const char *value = "test_value";
-    ret = p2p_dht_put(node, key, value, strlen(value) + 1);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    int ret = p2p_dht_put(node, key, value, strlen(value) + 1);
+    check_int_eq(P2P_OK, ret);
     printf("[TEST] ✓ DHT put: %s = %s\n", key, value);
 
     /* Get value from DHT */
     char buffer[256];
     size_t buffer_len = sizeof(buffer);
     ret = p2p_dht_get(node, key, buffer, &buffer_len);
-    TEST_ASSERT_EQUAL(P2P_OK, ret);
+    check_int_eq(P2P_OK, ret);
     printf("[TEST] ✓ DHT get: %s = %s\n", key, buffer);
 
     /* Verify value matches */
-    TEST_ASSERT_EQUAL_STRING(value, buffer);
+    check_str_eq(value, buffer);
     printf("[TEST] ✓ DHT value matches!\n");
 
     /* Cleanup */
@@ -353,6 +442,11 @@ void test_dht_put_get(void) {
  */
 void test_virtual_ip_dht_registration(void) {
     printf("\n[TEST] test_virtual_ip_dht_registration\n");
+    mesh_stats_t stats;
+    char vip_key[128];
+    char routes_key[128];
+    char buffer[1024];
+    size_t buffer_len = 0;
 
     /* Create mesh node */
     mesh_config_t config;
@@ -360,22 +454,39 @@ void test_virtual_ip_dht_registration(void) {
     config.virtual_ip = "10.42.0.99";
     config.virtual_prefix = 16;
     config.listen_port = 34001;
+    config.network_id = "default";
 
     mesh_network_t *mesh = mesh_create(&config);
-    TEST_ASSERT_NOT_NULL(mesh);
+    check_not_null(mesh);
     printf("[TEST] ✓ Mesh created with virtual IP: %s\n", config.virtual_ip);
 
     /* Start mesh */
     int ret = mesh_start(mesh);
-    TEST_ASSERT_EQUAL(MESH_OK, ret);
+    check_int_eq(MESH_OK, ret);
     printf("[TEST] ✓ Mesh started on port %d\n", config.listen_port);
 
-    /* Wait for DHT registration */
-    sleep_ms(500);
-    mesh_poll(mesh, 100);
+    /* Registration is local and synchronous; one poll is enough to flush startup work. */
+    mesh_poll(mesh, 0);
 
-    printf("[TEST] ✓ Virtual IP should be registered in DHT\n");
-    printf("[TEST] Note: Check mesh.c:mesh_start() for DHT registration logic\n");
+    check_int_eq(MESH_OK, mesh_get_stats(mesh, &stats));
+    check(stats.dht_entries >= 1);
+
+    snprintf(vip_key, sizeof(vip_key), "mesh:%s:ip:%s", config.network_id, config.virtual_ip);
+    buffer_len = sizeof(buffer);
+    check_int_eq(MESH_OK, mesh_get_cached_dht_value(mesh, vip_key, buffer, &buffer_len));
+    check_str_eq("10.42.0.99", buffer);
+
+    for (int i = 0; i < 100; i++) {
+        mesh_poll(mesh, 0);
+    }
+
+    snprintf(routes_key, sizeof(routes_key), "mesh:%s:routes:%s",
+             config.network_id, config.virtual_ip);
+    buffer_len = sizeof(buffer);
+    check_int_eq(MESH_OK, mesh_get_cached_dht_value(mesh, routes_key, buffer, &buffer_len));
+    check_str_eq("", buffer);
+
+    printf("[TEST] ✓ Virtual IP should be registered in cached DHT\n");
 
     /* Cleanup */
     mesh_stop(mesh);
@@ -420,7 +531,7 @@ void test_packet_routing(void) {
     config1.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
-    TEST_ASSERT_NOT_NULL(mesh1);
+    check_not_null(mesh1);
 
     mesh_config_t config2;
     mesh_config_init(&config2);
@@ -434,10 +545,11 @@ void test_packet_routing(void) {
     config2.bootstrap_count = 1;
 
     mesh_network_t *mesh2 = mesh_create(&config2);
-    TEST_ASSERT_NOT_NULL(mesh2);
+    check_not_null(mesh2);
 
-    /* Start both */
+    /* Start bootstrap first and give its listener one poll cycle before connecting. */
     mesh_start(mesh1);
+    mesh_poll(mesh1, 0);
     mesh_start(mesh2);
     printf("[TEST] ✓ Both mesh nodes started\n");
 
@@ -502,10 +614,10 @@ void test_mesh_two_nodes_connect(void) {
     config1.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
-    TEST_ASSERT_NOT_NULL(mesh1);
+    check_not_null(mesh1);
 
     int ret = mesh_start(mesh1);
-    TEST_ASSERT_EQUAL(MESH_OK, ret);
+    check_int_eq(MESH_OK, ret);
     printf("[TEST] ✓ Node 1 (10.42.0.1) started on port 19995\n");
 
     /* Wait for node 1 to be ready */
@@ -526,10 +638,10 @@ void test_mesh_two_nodes_connect(void) {
     config2.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh2 = mesh_create(&config2);
-    TEST_ASSERT_NOT_NULL(mesh2);
+    check_not_null(mesh2);
 
     ret = mesh_start(mesh2);
-    TEST_ASSERT_EQUAL(MESH_OK, ret);
+    check_int_eq(MESH_OK, ret);
     printf("[TEST] ✓ Node 2 (10.42.0.2) started on port 19996\n");
     printf("[TEST] ✓ Node 2 attempting to connect to 127.0.0.1:19995\n");
 
@@ -586,7 +698,7 @@ void test_hello_handshake(void) {
     config1.on_peer_disconnected = on_peer_disconnected;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
-    TEST_ASSERT_NOT_NULL(mesh1);
+    check_not_null(mesh1);
     mesh_start(mesh1);
     printf("[TEST] ✓ Node 1 (10.42.0.100) started on port 20001\n");
 
@@ -606,7 +718,7 @@ void test_hello_handshake(void) {
     config2.on_peer_disconnected = on_peer_disconnected;
 
     mesh_network_t *mesh2 = mesh_create(&config2);
-    TEST_ASSERT_NOT_NULL(mesh2);
+    check_not_null(mesh2);
     mesh_start(mesh2);
     printf("[TEST] ✓ Node 2 (10.42.0.200) started on port 20002\n");
 
@@ -617,8 +729,9 @@ void test_hello_handshake(void) {
         mesh_poll(mesh2, 100);
         sleep_ms(100);
 
-        if (g_peer_connected_count >= 2) {
-            printf("[TEST] ✓ Peers connected after %d iterations\n", i + 1);
+        if (mesh_find_peer(mesh1, "10.42.0.200") &&
+            mesh_find_peer(mesh2, "10.42.0.100")) {
+            printf("[TEST] ✓ HELLO exchange completed after %d iterations\n", i + 1);
             break;
         }
     }
@@ -630,7 +743,7 @@ void test_hello_handshake(void) {
     mesh_peer_info_t info1;
     if (mesh_get_peer_info(mesh1, 0, &info1) == MESH_OK) {
         printf("[TEST] Node 1 peer virtual IP: %s\n", info1.virtual_ip);
-        TEST_ASSERT_EQUAL_STRING("10.42.0.200", info1.virtual_ip);
+        check_str_eq("10.42.0.200", info1.virtual_ip);
         printf("[TEST] ✓ Node 1 peer has correct virtual IP!\n");
     }
 
@@ -638,7 +751,7 @@ void test_hello_handshake(void) {
     mesh_peer_info_t info2;
     if (mesh_get_peer_info(mesh2, 0, &info2) == MESH_OK) {
         printf("[TEST] Node 2 peer virtual IP: %s\n", info2.virtual_ip);
-        TEST_ASSERT_EQUAL_STRING("10.42.0.100", info2.virtual_ip);
+        check_str_eq("10.42.0.100", info2.virtual_ip);
         printf("[TEST] ✓ Node 2 peer has correct virtual IP!\n");
     }
 
@@ -665,7 +778,7 @@ void test_virtual_ip_lookup(void) {
     config1.listen_port = 20101;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
-    TEST_ASSERT_NOT_NULL(mesh1);
+    check_not_null(mesh1);
     mesh_start(mesh1);
     sleep_ms(500);
 
@@ -679,7 +792,7 @@ void test_virtual_ip_lookup(void) {
     config2.bootstrap_count = 1;
 
     mesh_network_t *mesh2 = mesh_create(&config2);
-    TEST_ASSERT_NOT_NULL(mesh2);
+    check_not_null(mesh2);
     mesh_start(mesh2);
 
     /* Wait for connection and HELLO exchange */
@@ -695,7 +808,7 @@ void test_virtual_ip_lookup(void) {
     mesh_peer_t *peer1 = mesh_find_peer(mesh1, "10.42.1.2");
     if (peer1) {
         printf("[TEST] ✓ Node 1 found peer with virtual IP 10.42.1.2\n");
-        TEST_ASSERT_NOT_NULL(peer1);
+        check_not_null(peer1);
     } else {
         printf("[TEST] ⚠ Node 1 could not find peer 10.42.1.2\n");
     }
@@ -703,14 +816,14 @@ void test_virtual_ip_lookup(void) {
     mesh_peer_t *peer2 = mesh_find_peer(mesh2, "10.42.1.1");
     if (peer2) {
         printf("[TEST] ✓ Node 2 found peer with virtual IP 10.42.1.1\n");
-        TEST_ASSERT_NOT_NULL(peer2);
+        check_not_null(peer2);
     } else {
         printf("[TEST] ⚠ Node 2 could not find peer 10.42.1.1\n");
     }
 
     /* Test lookup for non-existent peer */
     mesh_peer_t *peer_none = mesh_find_peer(mesh1, "10.42.1.99");
-    TEST_ASSERT_NULL(peer_none);
+    check_null(peer_none);
     printf("[TEST] ✓ Lookup for non-existent peer returns NULL\n");
 
     /* Cleanup */
@@ -760,7 +873,7 @@ void test_packet_routing_with_hello(void) {
     config1.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
-    TEST_ASSERT_NOT_NULL(mesh1);
+    check_not_null(mesh1);
     mesh_start(mesh1);
     printf("[TEST] ✓ Node 1 (10.42.2.1) started\n");
     sleep_ms(1000);
@@ -778,7 +891,7 @@ void test_packet_routing_with_hello(void) {
     config2.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh2 = mesh_create(&config2);
-    TEST_ASSERT_NOT_NULL(mesh2);
+    check_not_null(mesh2);
     mesh_start(mesh2);
     printf("[TEST] ✓ Node 2 (10.42.2.2) started\n");
 
@@ -812,7 +925,7 @@ void test_packet_routing_with_hello(void) {
         }
 
         if (g_packet_received_count > 0) {
-            TEST_ASSERT_GREATER_THAN(0, g_packet_received_count);
+            check(g_packet_received_count > 0);
             printf("[TEST] ✓ SUCCESS: End-to-end packet routing works!\n");
         } else {
             printf("[TEST] ⚠ WARNING: No packets received\n");
@@ -841,62 +954,1337 @@ void test_packet_routing_with_hello(void) {
     printf("[TEST] ✓ End-to-end packet routing test completed\n");
 }
 
-/* =============================================================================
- * Test Runner
- * ============================================================================= */
+void test_route_learning(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20301"};
+    mesh_route_info_t route_info;
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    int found_node3_from_node2 = 0;
+    int found_node2_from_node3 = 0;
 
-int main(void) {
-    UNITY_BEGIN();
+    printf("\n[TEST] test_route_learning\n");
 
-    /* Initialize Logger */
-    tlog_config_t log_config = {0};
-    log_config.min_level = TURBO_LOG_LEVEL_INFO;
-    tlog_t *logger = tlog_create(&log_config);
-    if (logger) {
-        turbo_console_sink_opts_t opts = {0};
-        opts.output = stdout;
-        opts.use_colors = 1;
-        turbo_log_sink_t *sink = turbo_sink_console_create(&opts);
-        tlog_add_sink(logger, sink);
-        tlog_set_default(logger);
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.3.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20301;
+
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    check_int_eq(MESH_OK, mesh_start(leader));
+    sleep_ms(500);
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.3.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20302;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    check_int_eq(MESH_OK, mesh_start(node2));
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.3.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20303;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    check_int_eq(MESH_OK, mesh_start(node3));
+
+    for (int i = 0; i < 80; i++) {
+        mesh_poll(leader, 100);
+        mesh_poll(node2, 100);
+        mesh_poll(node3, 100);
+        sleep_ms(100);
+
+        found_node3_from_node2 = 0;
+        found_node2_from_node3 = 0;
+
+        for (int j = 0; j < mesh_get_route_count(node2); j++) {
+            if (mesh_get_route_info(node2, j, &route_info) != MESH_OK) {
+                continue;
+            }
+            if (strcmp(route_info.dest_ip, "10.42.3.3") == 0) {
+                found_node3_from_node2 = 1;
+                break;
+            }
+        }
+
+        for (int j = 0; j < mesh_get_route_count(node3); j++) {
+            if (mesh_get_route_info(node3, j, &route_info) != MESH_OK) {
+                continue;
+            }
+            if (strcmp(route_info.dest_ip, "10.42.3.2") == 0) {
+                found_node2_from_node3 = 1;
+                break;
+            }
+        }
+
+        if (found_node3_from_node2 && found_node2_from_node3) {
+            break;
+        }
     }
 
-    TLOG_INFO("=================================================================");
-    TLOG_INFO("  Mesh VPN Unit Tests");
-    TLOG_INFO("=================================================================");
+    printf("[TEST] node2 routes=%d node3 routes=%d\n",
+           mesh_get_route_count(node2), mesh_get_route_count(node3));
 
-    /* Basic lifecycle tests */
-    printf("--- Basic Lifecycle Tests ---\n");
-    RUN_TEST(test_mesh_create_destroy);
-    RUN_TEST(test_p2p_node_creation);
-    RUN_TEST(test_mesh_start_stop);
+    found_node3_from_node2 = 0;
+    found_node2_from_node3 = 0;
+    for (int i = 0; i < mesh_get_route_count(node2); i++) {
+        if (mesh_get_route_info(node2, i, &route_info) != MESH_OK) {
+            continue;
+        }
 
-    /* P2P connection tests */
-    printf("\n--- P2P Connection Tests ---\n");
-    RUN_TEST(test_p2p_server_listening);
-    RUN_TEST(test_p2p_peer_callbacks);  /* KEY TEST: This will show if P2P connects! */
-    RUN_TEST(test_p2p_two_nodes_connect);
+        if (strcmp(route_info.dest_ip, "10.42.3.3") == 0) {
+            found_node3_from_node2 = 1;
+            check_str_eq("10.42.3.1", route_info.next_hop_virtual_ip);
+            check_int_eq(1, route_info.hop_count);
+            break;
+        }
+    }
 
-    /* DHT tests */
-    printf("\n--- DHT Tests ---\n");
-    RUN_TEST(test_dht_put_get);
-    RUN_TEST(test_virtual_ip_dht_registration);
+    for (int i = 0; i < mesh_get_route_count(node3); i++) {
+        if (mesh_get_route_info(node3, i, &route_info) != MESH_OK) {
+            continue;
+        }
 
-    /* Mesh networking tests */
-    printf("\n--- Mesh Networking Tests ---\n");
-    RUN_TEST(test_packet_routing);
-    RUN_TEST(test_mesh_two_nodes_connect);
+        if (strcmp(route_info.dest_ip, "10.42.3.2") == 0) {
+            found_node2_from_node3 = 1;
+            check_str_eq("10.42.3.1", route_info.next_hop_virtual_ip);
+            check_int_eq(1, route_info.hop_count);
+            break;
+        }
+    }
 
-    /* HELLO handshake tests */
-    printf("\n--- HELLO Handshake Tests ---\n");
-    RUN_TEST(test_hello_handshake);
-    RUN_TEST(test_virtual_ip_lookup);
-    RUN_TEST(test_packet_routing_with_hello);
+    check(found_node3_from_node2);
+    check(found_node2_from_node3);
 
-    TLOG_INFO("=================================================================");
-    TLOG_INFO("  Test Summary");
-    TLOG_INFO("=================================================================");
+    mesh_stop(node3);
+    mesh_destroy(node3);
+    mesh_stop(node2);
+    mesh_destroy(node2);
+    mesh_stop(leader);
+    mesh_destroy(leader);
 
-    tlog_destroy(tlog_get_default());
-    return UNITY_END();
+    printf("[TEST] ✓ Route learning test completed\n");
+}
+
+static void mesh_test_poll_many(mesh_network_t **nodes, int node_count,
+                                int iterations, int timeout_ms, int sleep_between_ms) {
+    for (int i = 0; i < iterations; i++) {
+        for (int j = 0; j < node_count; j++) {
+            if (nodes[j]) {
+                mesh_poll(nodes[j], timeout_ms);
+            }
+        }
+        if (sleep_between_ms > 0) {
+            sleep_ms(sleep_between_ms);
+        }
+    }
+}
+
+static int mesh_test_find_route(mesh_network_t *mesh, const char *dest_ip,
+                                mesh_route_info_t *route_info) {
+    mesh_route_info_t current;
+    int route_count = mesh_get_route_count(mesh);
+
+    for (int i = 0; i < route_count; i++) {
+        if (mesh_get_route_info(mesh, i, &current) != MESH_OK) {
+            continue;
+        }
+
+        if (strcmp(current.dest_ip, dest_ip) == 0) {
+            if (route_info) {
+                *route_info = current;
+            }
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int mesh_test_is_ice_progress_state(const char *state) {
+    return state &&
+           (strcmp(state, "GATHERING") == 0 ||
+            strcmp(state, "CONNECTING") == 0 ||
+            strcmp(state, "CONNECTED") == 0 ||
+            strcmp(state, "COMPLETED") == 0);
+}
+
+static int mesh_test_wait_for_min_peers(mesh_network_t **nodes, int node_count,
+                                        int expected_per_node, int iterations) {
+    for (int i = 0; i < iterations; i++) {
+        int ready = 1;
+
+        mesh_test_poll_many(nodes, node_count, 1, 100, 50);
+        for (int j = 0; j < node_count; j++) {
+            if (!nodes[j]) {
+                continue;
+            }
+            if (mesh_get_peer_count(nodes[j]) < expected_per_node) {
+                ready = 0;
+            }
+        }
+
+        if (ready) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+void test_connect_peer_uses_advertise_ip(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20401"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_peer_info_t info;
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int connect_started = 0;
+    int direct_found = 0;
+    int announced_direct = 0;
+
+    printf("\n[TEST] test_connect_peer_uses_advertise_ip\n");
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.4.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20401;
+    leader_cfg.advertise_ip = "127.0.0.1";
+
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.4.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20402;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.4.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20403;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3_cfg.advertise_ip = "127.0.0.1";
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    for (int i = 0; leader_started && node2_started && node3_started && i < 80; i++) {
+        int direct_seen_this_round = 0;
+        mesh_poll(leader, 100);
+        mesh_poll(node2, 100);
+        mesh_poll(node3, 100);
+        sleep_ms(100);
+
+        if (!connect_started && mesh_connect_peer(node2, "10.42.4.3") == MESH_OK) {
+            connect_started = 1;
+        }
+
+        for (int j = 0; j < mesh_get_peer_count(node2); j++) {
+            if (mesh_get_peer_info(node2, j, &info) != MESH_OK) {
+                continue;
+            }
+            if (strcmp(info.virtual_ip, "10.42.4.3") == 0 &&
+                strcmp(info.real_ip, "127.0.0.1:20403") == 0) {
+                direct_seen_this_round = 1;
+                break;
+            }
+        }
+
+        if (direct_seen_this_round) {
+            announced_direct = 1;
+            break;
+        }
+    }
+
+    if (node2_started) {
+        for (int i = 0; i < mesh_get_peer_count(node2); i++) {
+            if (mesh_get_peer_info(node2, i, &info) != MESH_OK) {
+                continue;
+            }
+
+            fprintf(stderr, "[TEST] node2 peer[%d]: vip=%s real=%s connected=%d\n",
+                    i, info.virtual_ip, info.real_ip, info.is_connected);
+
+            if (strcmp(info.virtual_ip, "10.42.4.3") == 0 &&
+                strcmp(info.real_ip, "127.0.0.1:20403") == 0) {
+                direct_found = 1;
+                break;
+            }
+        }
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(connect_started);
+    check(announced_direct);
+    check(direct_found);
+
+    printf("[TEST] ✓ connect_peer advertise_ip test completed\n");
+}
+
+void test_ice_signaling_two_nodes(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20891"};
+    mesh_network_t *node1 = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_diag_info_t diag1;
+    mesh_diag_info_t diag2;
+    mesh_packet_counter_t node1_packets = {0};
+    uint8_t packet[60];
+    int node1_started = 0;
+    int node2_started = 0;
+    int auth_seen = 0;
+    int candidate_seen = 0;
+    int eoc_seen = 0;
+    int checks_started = 0;
+    int ice_connected = 0;
+    int packet_sent = 0;
+    int packet_delivered = 0;
+
+    printf("\n[TEST] test_ice_signaling_two_nodes\n");
+
+    mesh_config_t cfg1;
+    mesh_config_init(&cfg1);
+    cfg1.virtual_ip = "10.42.9.11";
+    cfg1.virtual_prefix = 16;
+    cfg1.listen_port = 20891;
+    cfg1.enable_ice = 1;
+    cfg1.ice_allow_loopback = 1;
+    cfg1.on_packet_received = on_packet_received_counting;
+    cfg1.user_data = &node1_packets;
+
+    mesh_config_t cfg2;
+    mesh_config_init(&cfg2);
+    cfg2.virtual_ip = "10.42.9.12";
+    cfg2.virtual_prefix = 16;
+    cfg2.listen_port = 20892;
+    cfg2.bootstrap_peers = bootstrap_peers;
+    cfg2.bootstrap_count = 1;
+    cfg2.enable_ice = 1;
+    cfg2.ice_allow_loopback = 1;
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 9, 12,
+                                10, 42, 9, 11);
+
+    node1 = mesh_create(&cfg1);
+    check_not_null(node1);
+    node1_started = (mesh_start(node1) == MESH_OK);
+    check(node1_started);
+    sleep_ms(300);
+
+    node2 = mesh_create(&cfg2);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+    check(node2_started);
+
+    memset(&diag1, 0, sizeof(diag1));
+    memset(&diag2, 0, sizeof(diag2));
+    for (int i = 0; i < 150; i++) {
+        mesh_poll(node1, 100);
+        mesh_poll(node2, 100);
+        sleep_ms(40);
+
+        mesh_get_diag_info(node1, &diag1);
+        mesh_get_diag_info(node2, &diag2);
+
+        auth_seen = (diag1.ice_auth_messages_tx > 0 && diag1.ice_auth_messages_rx > 0 &&
+                     diag2.ice_auth_messages_tx > 0 && diag2.ice_auth_messages_rx > 0);
+        candidate_seen = (diag1.ice_candidate_messages_tx > 0 && diag1.ice_candidate_messages_rx > 0 &&
+                          diag2.ice_candidate_messages_tx > 0 && diag2.ice_candidate_messages_rx > 0);
+        eoc_seen = (diag1.ice_end_of_candidates_tx > 0 && diag1.ice_end_of_candidates_rx > 0 &&
+                    diag2.ice_end_of_candidates_tx > 0 && diag2.ice_end_of_candidates_rx > 0);
+        checks_started = (diag1.ice_checks_started > 0 && diag2.ice_checks_started > 0 &&
+                          diag1.ice_last_check_local_candidate_count > 0 &&
+                          diag1.ice_last_check_remote_candidate_count > 0 &&
+                          diag2.ice_last_check_local_candidate_count > 0 &&
+                          diag2.ice_last_check_remote_candidate_count > 0);
+        ice_connected = (diag1.ice_connected_peer_count == 1 &&
+                         diag2.ice_connected_peer_count == 1 &&
+                         diag1.last_ice_selected_local_endpoint[0] != '\0' &&
+                         diag1.last_ice_selected_remote_endpoint[0] != '\0' &&
+                         diag2.last_ice_selected_local_endpoint[0] != '\0' &&
+                         diag2.last_ice_selected_remote_endpoint[0] != '\0');
+
+        if (diag1.ice_peer_count == 1 && diag2.ice_peer_count == 1 &&
+            auth_seen && candidate_seen && eoc_seen && checks_started &&
+            ice_connected) {
+            break;
+        }
+    }
+
+    if (ice_connected) {
+        packet_sent = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+        for (int i = 0; packet_sent && i < 50; i++) {
+            mesh_poll(node1, 100);
+            mesh_poll(node2, 100);
+            sleep_ms(20);
+            if (node1_packets.packet_received_count > 0) {
+                packet_delivered = 1;
+                break;
+            }
+        }
+    }
+
+    if (node2) {
+        mesh_stop(node2);
+    }
+    if (node1) {
+        mesh_stop(node1);
+    }
+    sleep_ms(200);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&node1);
+
+    check_int_eq(1, diag1.ice_enabled);
+    check_int_eq(1, diag2.ice_enabled);
+    check_int_eq(1, diag1.ice_peer_count);
+    check_int_eq(1, diag2.ice_peer_count);
+    check(auth_seen);
+    check(candidate_seen);
+    check(eoc_seen);
+    check(checks_started);
+    check(ice_connected);
+    check(diag1.ice_candidate_messages_tx >= diag1.ice_last_check_local_candidate_count);
+    check(diag2.ice_candidate_messages_tx >= diag2.ice_last_check_local_candidate_count);
+    check(diag1.ice_candidate_messages_rx >= diag1.ice_last_check_remote_candidate_count);
+    check(diag2.ice_candidate_messages_rx >= diag2.ice_last_check_remote_candidate_count);
+    check_int_eq(1, (int)diag1.peer_connect_events);
+    check_int_eq(1, (int)diag2.peer_connect_events);
+    check(packet_sent);
+    check(packet_delivered);
+
+    printf("[TEST] ✓ ice signaling two-node test completed\n");
+}
+
+void test_routed_ice_direct_path_three_nodes(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20801"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    mesh_diag_info_t diag2;
+    mesh_diag_info_t diag3;
+    mesh_route_info_t route_info;
+    mesh_peer_info_t leader_peer_after;
+    mesh_peer_info_t direct_peer_after;
+    mesh_packet_counter_t node3_packets = {0};
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int peers_ready = 0;
+    int relay_ready = 0;
+    int kick_send_ok = 0;
+    int ice_connected = 0;
+    int direct_peer_ready = 0;
+    int leader_peer_found = 0;
+    int routed_signaling_seen = 0;
+    int direct_send_ok = 0;
+    int direct_packet_delivered = 0;
+    int relay_bytes_stayed_zero = 0;
+
+    printf("\n[TEST] test_routed_ice_direct_path_three_nodes\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 8, 2,
+                                10, 42, 8, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.8.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20801;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(300);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.8.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20802;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2_cfg.enable_ice = 1;
+    node2_cfg.ice_allow_loopback = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.8.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20803;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3_cfg.enable_ice = 1;
+    node3_cfg.ice_allow_loopback = 1;
+    node3_cfg.on_packet_received = on_packet_received_counting;
+    node3_cfg.user_data = &node3_packets;
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    nodes[2] = node3;
+
+    if (leader_started && node2_started && node3_started) {
+        peers_ready = mesh_test_wait_for_min_peers(nodes, 3, 1, 60);
+    }
+
+    for (int i = 0; peers_ready && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_route(node2, "10.42.8.3", &route_info) &&
+            strcmp(route_info.next_hop_virtual_ip, "10.42.8.1") == 0 &&
+            route_info.hop_count == 1) {
+            relay_ready = 1;
+            break;
+        }
+    }
+
+    if (relay_ready) {
+        kick_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+    }
+
+    memset(&diag2, 0, sizeof(diag2));
+    memset(&diag3, 0, sizeof(diag3));
+    for (int i = 0; kick_send_ok && i < 120; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        mesh_get_diag_info(node2, &diag2);
+        mesh_get_diag_info(node3, &diag3);
+        routed_signaling_seen = (diag2.ice_auth_messages_tx > 0 &&
+                                 diag2.ice_candidate_messages_tx > 0 &&
+                                 diag3.ice_auth_messages_rx > 0 &&
+                                 diag3.ice_candidate_messages_rx > 0);
+        ice_connected = (diag2.ice_connected_peer_count >= 1 &&
+                         diag3.ice_connected_peer_count >= 1);
+        direct_peer_ready = mesh_test_find_peer_info(node2, "10.42.8.3", &direct_peer_after) &&
+                            direct_peer_after.is_connected &&
+                            strcmp(direct_peer_after.real_ip, "127.0.0.1:20803") != 0;
+        if (routed_signaling_seen && ice_connected && direct_peer_ready) {
+            break;
+        }
+    }
+
+    if (direct_peer_ready) {
+        mesh_reset_stats(node2);
+        node3_packets.packet_received_count = 0;
+        direct_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+        for (int i = 0; direct_send_ok && i < 40; i++) {
+            mesh_test_poll_many(nodes, 3, 1, 100, 50);
+            if (node3_packets.packet_received_count > 0) {
+                direct_packet_delivered = 1;
+                break;
+            }
+        }
+        leader_peer_found = mesh_test_find_peer_info(node2, "10.42.8.1", &leader_peer_after);
+        relay_bytes_stayed_zero = leader_peer_found && ((int)leader_peer_after.bytes_tx == 0);
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(peers_ready);
+    check(relay_ready);
+    check(kick_send_ok);
+    check(routed_signaling_seen);
+    check(ice_connected);
+    check(direct_peer_ready);
+    check(direct_send_ok);
+    check(direct_packet_delivered);
+    check(leader_peer_found);
+    check(relay_bytes_stayed_zero);
+    check(diag2.ice_auth_messages_tx > 0);
+    check(diag2.ice_candidate_messages_tx > 0);
+    check(diag3.ice_auth_messages_rx > 0);
+    check(diag3.ice_candidate_messages_rx > 0);
+
+    printf("[TEST] ✓ routed ice direct path three-node test completed\n");
+}
+
+void test_direct_path_preferred_over_relay(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20701"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    mesh_route_info_t route_info = {0};
+    mesh_peer_info_t direct_peer_before = {0};
+    mesh_peer_info_t leader_peer_after = {0};
+    mesh_peer_info_t direct_peer_after = {0};
+    mesh_packet_counter_t node3_packets = {0};
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int peers_ready = 0;
+    int relay_ready = 0;
+    int direct_connect_started = 0;
+    int direct_ready = 0;
+    int direct_send_ok = 0;
+    int direct_packet_delivered = 0;
+    int fallback_route_ready = 0;
+    int fallback_send_ok = 0;
+    int leader_peer_found = 0;
+    int direct_peer_found = 0;
+    int relay_bytes_stayed_zero = 0;
+    int leader_peer_found_after_fallback = 0;
+    int relay_bytes_after_fallback = 0;
+    int direct_peer_gone = 0;
+
+    printf("\n[TEST] test_direct_path_preferred_over_relay\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 7, 2,
+                                10, 42, 7, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.7.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20701;
+    leader_cfg.advertise_ip = "127.0.0.1";
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.7.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20702;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.7.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20703;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3_cfg.advertise_ip = "127.0.0.1";
+    node3_cfg.on_packet_received = on_packet_received_counting;
+    node3_cfg.user_data = &node3_packets;
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    nodes[2] = node3;
+
+    if (leader_started && node2_started && node3_started) {
+        peers_ready = mesh_test_wait_for_min_peers(nodes, 3, 1, 60);
+    }
+
+    for (int i = 0; peers_ready && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_route(node2, "10.42.7.3", &route_info) &&
+            strcmp(route_info.next_hop_virtual_ip, "10.42.7.1") == 0 &&
+            route_info.hop_count == 1) {
+            relay_ready = 1;
+            break;
+        }
+    }
+
+    if (relay_ready) {
+        direct_connect_started = (mesh_connect_peer(node2, "10.42.7.3") == MESH_OK);
+    }
+
+    for (int i = 0; direct_connect_started && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_peer_info(node2, "10.42.7.3", &direct_peer_before) &&
+            strcmp(direct_peer_before.real_ip, "127.0.0.1:20703") == 0 &&
+            direct_peer_before.is_connected) {
+            direct_ready = 1;
+            break;
+        }
+    }
+
+    if (direct_ready) {
+        leader_peer_found = mesh_test_find_peer_info(node2, "10.42.7.1", &leader_peer_after);
+        mesh_reset_stats(node2);
+        node3_packets.packet_received_count = 0;
+        direct_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+
+        for (int i = 0; direct_send_ok && i < 20; i++) {
+            mesh_test_poll_many(nodes, 3, 1, 100, 50);
+            if (node3_packets.packet_received_count > 0) {
+                break;
+            }
+        }
+
+        leader_peer_found = mesh_test_find_peer_info(node2, "10.42.7.1", &leader_peer_after);
+        direct_peer_found = mesh_test_find_peer_info(node2, "10.42.7.3", &direct_peer_after);
+        direct_packet_delivered = (node3_packets.packet_received_count > 0);
+        relay_bytes_stayed_zero = leader_peer_found && ((int)leader_peer_after.bytes_tx == 0);
+    }
+
+    if (direct_ready) {
+        mesh_disconnect_peer(node2, mesh_find_peer(node2, "10.42.7.3"));
+
+        for (int i = 0; i < 40; i++) {
+            mesh_test_poll_many(nodes, 3, 1, 100, 50);
+            if (!mesh_find_peer(node2, "10.42.7.3") &&
+                mesh_test_find_route(node2, "10.42.7.3", &route_info) &&
+                strcmp(route_info.next_hop_virtual_ip, "10.42.7.1") == 0) {
+                fallback_route_ready = 1;
+                break;
+            }
+        }
+    }
+
+    if (fallback_route_ready) {
+        direct_peer_gone = (mesh_find_peer(node2, "10.42.7.3") == NULL);
+        mesh_reset_stats(node2);
+        node3_packets.packet_received_count = 0;
+        fallback_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+
+        for (int i = 0; fallback_send_ok && i < 20; i++) {
+            mesh_test_poll_many(nodes, 3, 1, 100, 50);
+            if (node3_packets.packet_received_count > 0) {
+                break;
+            }
+        }
+
+        leader_peer_found_after_fallback = mesh_test_find_peer_info(node2, "10.42.7.1",
+                                                                    &leader_peer_after);
+        relay_bytes_after_fallback = leader_peer_found_after_fallback &&
+                                     (leader_peer_after.bytes_tx > 0);
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(peers_ready);
+    check(relay_ready);
+    check(direct_connect_started);
+    check(direct_ready);
+    check(direct_send_ok);
+    check(direct_packet_delivered);
+    check(leader_peer_found);
+    check(direct_peer_found);
+    check(direct_peer_after.bytes_tx > 0);
+    check(relay_bytes_stayed_zero);
+    check(fallback_route_ready);
+    check(direct_peer_gone);
+    check(fallback_send_ok);
+    check(node3_packets.packet_received_count > 0);
+    check(leader_peer_found_after_fallback);
+    check(relay_bytes_after_fallback);
+    check_str_eq("127.0.0.1:20703", direct_peer_before.real_ip);
+    check(direct_peer_before.is_connected);
+    check_str_eq("10.42.7.1", route_info.next_hop_virtual_ip);
+
+    printf("[TEST] ✓ direct path preferred over relay test completed\n");
+}
+
+void test_pinned_route_overrides_direct_path(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20711"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    mesh_route_info_t route_info;
+    mesh_route_rule_info_t rule_info;
+    mesh_peer_info_t leader_peer_after;
+    mesh_peer_info_t direct_peer_after;
+    mesh_packet_counter_t node3_packets = {0};
+    mesh_route_rule_t node2_rules[] = {
+        {"10.42.11.3/32", "10.42.11.1", MESH_ROUTE_RULE_PINNED},
+    };
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int peers_ready = 0;
+    int relay_ready = 0;
+    int direct_connect_started = 0;
+    int direct_ready = 0;
+    int rule_count_ok = 0;
+    int rule_info_ok = 0;
+    int pinned_send_ok = 0;
+    int pinned_packet_delivered = 0;
+    int leader_peer_found = 0;
+    int direct_peer_found = 0;
+    int pinned_used = 0;
+    int direct_unused = 0;
+    int leader_stopped = 0;
+    int direct_still_ready = 0;
+    int pinned_fail_no_fallback = 0;
+
+    printf("\n[TEST] test_pinned_route_overrides_direct_path\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 11, 2,
+                                10, 42, 11, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.11.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20711;
+    leader_cfg.advertise_ip = "127.0.0.1";
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.11.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20712;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2_cfg.route_rules = node2_rules;
+    node2_cfg.route_rule_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.11.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20713;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3_cfg.advertise_ip = "127.0.0.1";
+    node3_cfg.on_packet_received = on_packet_received_counting;
+    node3_cfg.user_data = &node3_packets;
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    nodes[2] = node3;
+
+    if (leader_started && node2_started && node3_started) {
+        peers_ready = mesh_test_wait_for_min_peers(nodes, 3, 1, 60);
+    }
+
+    for (int i = 0; peers_ready && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_route(node2, "10.42.11.3", &route_info) &&
+            strcmp(route_info.next_hop_virtual_ip, "10.42.11.1") == 0 &&
+            route_info.hop_count == 1) {
+            relay_ready = 1;
+            break;
+        }
+    }
+
+    if (relay_ready) {
+        direct_connect_started = (mesh_connect_peer(node2, "10.42.11.3") == MESH_OK);
+    }
+
+    for (int i = 0; direct_connect_started && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_peer_info(node2, "10.42.11.3", &direct_peer_after) &&
+            strcmp(direct_peer_after.real_ip, "127.0.0.1:20713") == 0 &&
+            direct_peer_after.is_connected) {
+            direct_ready = 1;
+            break;
+        }
+    }
+
+    rule_count_ok = (mesh_get_route_rule_count(node2) == 1);
+    if (rule_count_ok && mesh_get_route_rule_info(node2, 0, &rule_info) == MESH_OK) {
+        rule_info_ok = 1;
+    }
+
+    if (direct_ready) {
+        mesh_reset_stats(node2);
+        node3_packets.packet_received_count = 0;
+        pinned_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+
+        for (int i = 0; pinned_send_ok && i < 20; i++) {
+            mesh_test_poll_many(nodes, 3, 1, 100, 50);
+            if (node3_packets.packet_received_count > 0) {
+                pinned_packet_delivered = 1;
+                break;
+            }
+        }
+
+        leader_peer_found = mesh_test_find_peer_info(node2, "10.42.11.1", &leader_peer_after);
+        direct_peer_found = mesh_test_find_peer_info(node2, "10.42.11.3", &direct_peer_after);
+        pinned_used = leader_peer_found && (leader_peer_after.bytes_tx > 0);
+        direct_unused = direct_peer_found && ((int)direct_peer_after.bytes_tx == 0);
+    }
+
+    if (direct_ready) {
+        mesh_test_stop_destroy(&leader);
+        nodes[0] = NULL;
+        leader_stopped = 1;
+
+        for (int i = 0; i < 40; i++) {
+            mesh_test_poll_many(&nodes[1], 2, 1, 100, 50);
+            if (!mesh_find_peer(node2, "10.42.11.1") &&
+                mesh_test_find_peer_info(node2, "10.42.11.3", &direct_peer_after) &&
+                direct_peer_after.is_connected) {
+                direct_still_ready = 1;
+                break;
+            }
+        }
+    }
+
+    if (direct_still_ready) {
+        mesh_reset_stats(node2);
+        node3_packets.packet_received_count = 0;
+        pinned_fail_no_fallback =
+            (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_ERR_NOT_FOUND);
+        mesh_test_poll_many(&nodes[1], 2, 4, 100, 50);
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(peers_ready);
+    check(relay_ready);
+    check(direct_connect_started);
+    check(direct_ready);
+    check(rule_count_ok);
+    check(rule_info_ok);
+    check_str_eq("10.42.11.3/32", rule_info.dest_cidr);
+    check_str_eq("10.42.11.1", rule_info.next_hop_virtual_ip);
+    check_uint_eq(MESH_ROUTE_RULE_PINNED, rule_info.flags);
+    check(pinned_send_ok);
+    check(pinned_packet_delivered);
+    check(leader_peer_found);
+    check(direct_peer_found);
+    check(pinned_used);
+    check(direct_unused);
+    check(leader_stopped);
+    check(direct_still_ready);
+    check(pinned_fail_no_fallback);
+    check_int_eq(0, node3_packets.packet_received_count);
+
+    printf("[TEST] ✓ pinned route overrides direct path test completed\n");
+}
+
+void test_peer_admission_allowlist(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20721"};
+    const char *leader_allow_cidrs[] = {"10.42.14.2/32"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    mesh_peer_info_t leader_peer_info;
+    mesh_peer_info_t node2_peer_info;
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int allowed_connected = 0;
+    int denied_rejected = 0;
+    int leader_only_has_allowed_peer = 0;
+    int denied_connect_blocked = 0;
+    int denied_send_blocked = 0;
+
+    printf("\n[TEST] test_peer_admission_allowlist\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 14, 1,
+                                10, 42, 14, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.14.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20721;
+    leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
+    leader_cfg.peer_allow_count = 1;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.14.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20722;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.14.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20723;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    nodes[2] = node3;
+
+    for (int i = 0; leader_started && node2_started && node3_started && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+
+        if (mesh_test_find_peer_info(leader, "10.42.14.2", &leader_peer_info) &&
+            mesh_test_find_peer_info(node2, "10.42.14.1", &node2_peer_info) &&
+            leader_peer_info.is_connected && node2_peer_info.is_connected) {
+            allowed_connected = 1;
+        }
+
+        if (!mesh_test_find_peer_info(leader, "10.42.14.3", NULL) &&
+            mesh_get_peer_count(node3) == 0) {
+            denied_rejected = 1;
+        }
+
+        if (allowed_connected && denied_rejected) {
+            break;
+        }
+    }
+
+    if (allowed_connected) {
+        leader_only_has_allowed_peer = (mesh_get_peer_count(leader) == 1);
+        denied_connect_blocked = (mesh_connect_peer(leader, "10.42.14.3") == MESH_ERR_NOT_FOUND);
+        denied_send_blocked = (mesh_send_packet(leader, packet, sizeof(packet)) == MESH_ERR_NOT_FOUND);
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(allowed_connected);
+    check(denied_rejected);
+    check(leader_only_has_allowed_peer);
+    check(denied_connect_blocked);
+    check(denied_send_blocked);
+    check_str_eq("10.42.14.2", leader_peer_info.virtual_ip);
+    check_str_eq("10.42.14.1", node2_peer_info.virtual_ip);
+
+    printf("[TEST] ✓ peer admission allowlist test completed\n");
+}
+
+void test_peer_admission_allowlist_blocks_relay_forwarding(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20731"};
+    const char *leader_allow_cidrs[] = {"10.42.15.2/32"};
+    mesh_route_rule_t leader_rules[] = {
+        {"10.42.15.3/32", "10.42.15.2", MESH_ROUTE_RULE_PINNED},
+    };
+    mesh_route_rule_t node2_rules[] = {
+        {"10.42.15.3/32", "10.42.15.1", MESH_ROUTE_RULE_PINNED},
+    };
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *nodes[2] = {NULL};
+    mesh_peer_info_t node2_peer_before = {0};
+    mesh_peer_info_t leader_peer_after = {0};
+    mesh_stats_t leader_stats = {0};
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int peers_ready = 0;
+    int node2_send_ok = 0;
+    int leader_peer_found = 0;
+
+    printf("\n[TEST] test_peer_admission_allowlist_blocks_relay_forwarding\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 15, 2,
+                                10, 42, 15, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.15.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20731;
+    leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
+    leader_cfg.peer_allow_count = 1;
+    leader_cfg.route_rules = leader_rules;
+    leader_cfg.route_rule_count = 1;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.15.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20732;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2_cfg.route_rules = node2_rules;
+    node2_cfg.route_rule_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+
+    for (int i = 0; leader_started && node2_started && i < 60; i++) {
+        mesh_test_poll_many(nodes, 2, 1, 100, 50);
+        if (mesh_test_find_peer_info(leader, "10.42.15.2", &leader_peer_after) &&
+            mesh_test_find_peer_info(node2, "10.42.15.1", &node2_peer_before) &&
+            leader_peer_after.is_connected && node2_peer_before.is_connected) {
+            peers_ready = 1;
+            break;
+        }
+    }
+
+    if (peers_ready) {
+        mesh_reset_stats(leader);
+        mesh_reset_stats(node2);
+        node2_send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+        mesh_test_poll_many(nodes, 2, 10, 100, 50);
+        leader_peer_found = mesh_test_find_peer_info(leader, "10.42.15.2",
+                                                     &leader_peer_after);
+        check_int_eq(MESH_OK, mesh_get_stats(leader, &leader_stats));
+    }
+
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(peers_ready);
+    check(node2_send_ok);
+    check(leader_peer_found);
+    check(leader_peer_after.bytes_rx > 0);
+    check_int_eq(0, (int)leader_peer_after.bytes_tx);
+    check_int_eq(0, (int)leader_stats.packets_tx);
+
+    printf("[TEST] ✓ peer admission allowlist relay forwarding test completed\n");
+}
+
+void test_peer_admission_allowlist_blocks_learned_routes(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:20741"};
+    const char *node2_allow_cidrs[] = {"10.42.16.1/32"};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *node3 = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    uint8_t packet[60];
+    int leader_started = 0;
+    int node2_started = 0;
+    int node3_started = 0;
+    int peers_ready = 0;
+    int disallowed_route_absent = 0;
+    int denied_connect_blocked = 0;
+    int denied_send_blocked = 0;
+
+    printf("\n[TEST] test_peer_admission_allowlist_blocks_learned_routes\n");
+
+    mesh_test_build_ipv4_packet(packet, sizeof(packet),
+                                10, 42, 16, 2,
+                                10, 42, 16, 3);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.16.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20741;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    leader_started = (mesh_start(leader) == MESH_OK);
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.16.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 20742;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2_cfg.peer_allow_cidrs = node2_allow_cidrs;
+    node2_cfg.peer_allow_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    node2_started = (mesh_start(node2) == MESH_OK);
+
+    mesh_config_t node3_cfg;
+    mesh_config_init(&node3_cfg);
+    node3_cfg.virtual_ip = "10.42.16.3";
+    node3_cfg.virtual_prefix = 16;
+    node3_cfg.listen_port = 20743;
+    node3_cfg.bootstrap_peers = bootstrap_peers;
+    node3_cfg.bootstrap_count = 1;
+    node3 = mesh_create(&node3_cfg);
+    check_not_null(node3);
+    node3_started = (mesh_start(node3) == MESH_OK);
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    nodes[2] = node3;
+
+    for (int i = 0; leader_started && node2_started && node3_started && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        if (mesh_test_find_peer_info(node2, "10.42.16.1", NULL) &&
+            mesh_test_find_peer_info(leader, "10.42.16.2", NULL) &&
+            mesh_test_find_peer_info(leader, "10.42.16.3", NULL)) {
+            peers_ready = 1;
+        }
+        if (peers_ready && !mesh_test_find_route(node2, "10.42.16.3", NULL)) {
+            disallowed_route_absent = 1;
+        }
+        if (peers_ready && disallowed_route_absent && i > 20) {
+            break;
+        }
+    }
+
+    if (peers_ready) {
+        denied_connect_blocked =
+            (mesh_connect_peer(node2, "10.42.16.3") == MESH_ERR_NOT_FOUND);
+        denied_send_blocked =
+            (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_ERR_NOT_FOUND);
+    }
+
+    mesh_test_stop_destroy(&node3);
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(node3_started);
+    check(peers_ready);
+    check(disallowed_route_absent);
+    check(denied_connect_blocked);
+    check(denied_send_blocked);
+
+    printf("[TEST] ✓ peer admission allowlist learned route test completed\n");
+}
+
+spec("mesh vpn") {
+    before_all() {
+        mesh_test_logger_init();
+        TLOG_INFO("=================================================================");
+        TLOG_INFO("  Mesh VPN Unit Tests");
+        TLOG_INFO("=================================================================");
+    }
+
+    after_all() {
+        TLOG_INFO("=================================================================");
+        TLOG_INFO("  Test Summary");
+        TLOG_INFO("=================================================================");
+        test_logger_shutdown_all();
+    }
+
+    before_each() {
+        setUp();
+    }
+
+    after_each() {
+        tearDown();
+    }
+
+    describe("basic lifecycle") {
+        it("creates and destroys mesh") { test_mesh_create_destroy(); }
+        it("creates a p2p node") { test_p2p_node_creation(); }
+        it("starts and stops mesh") { test_mesh_start_stop(); }
+    }
+
+    describe("p2p connectivity") {
+        it("starts a listening server") { test_p2p_server_listening(); }
+        it("fires peer callbacks on connect") { test_p2p_peer_callbacks(); }
+        it("connects two nodes") { test_p2p_two_nodes_connect(); }
+    }
+
+    describe("dht integration") {
+        it("puts and gets values") { test_dht_put_get(); }
+        it("registers virtual ip data") { test_virtual_ip_dht_registration(); }
+    }
+
+    describe("mesh networking") {
+        it("routes packets end to end") { test_packet_routing(); }
+        it("connects two mesh nodes") { test_mesh_two_nodes_connect(); }
+    }
+
+    describe("hello handshake") {
+        it("completes the hello handshake") { test_hello_handshake(); }
+        it("looks up virtual ips") { test_virtual_ip_lookup(); }
+        it("routes packets after hello") { test_packet_routing_with_hello(); }
+        it("learns relay routes") { test_route_learning(); }
+        it("connects directly using advertise ip") { test_connect_peer_uses_advertise_ip(); }
+    }
+
+    describe("policy") {
+        it("blocks direct admission by allowlist") {
+            test_peer_admission_allowlist();
+        }
+        it("blocks learned routes by admission allowlist") {
+            test_peer_admission_allowlist_blocks_learned_routes();
+        }
+        it("blocks relay forwarding by admission allowlist") {
+            test_peer_admission_allowlist_blocks_relay_forwarding();
+        }
+    }
 }

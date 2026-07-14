@@ -1,5 +1,8 @@
 # Mesh VPN - Decentralized P2P Network
 
+> Current implementation status moved to [MESH_STATUS.md](C:/projects/cpp/turbonet/turbo-p2p/mesh/MESH_STATUS.md).
+> This README still contains older design intent and historical wording.
+
 A lightweight, decentralized alternative to ZeroTier built on TurboNet.
 
 ## 🎯 What is it?

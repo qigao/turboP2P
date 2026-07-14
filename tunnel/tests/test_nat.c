@@ -3,7 +3,7 @@
  * @brief Tests for tunnel NAT table and session lookup
  */
 
-#include "unity.h"
+#include <tinytest.h>
 #include "../src/nat/tunnel_nat.h"
 #include "../src/core/tunnel_types.h"
 #include <string.h>
@@ -74,7 +74,7 @@ void test_nat_hash_deterministic(void)
     uint32_t hash1 = tunnel_nat_hash(&key);
     uint32_t hash2 = tunnel_nat_hash(&key);
 
-    TEST_ASSERT_EQUAL(hash1, hash2);
+    check_int_eq(hash1, hash2);
 }
 
 void test_nat_hash_different_keys(void)
@@ -88,7 +88,7 @@ void test_nat_hash_different_keys(void)
 
     /* Different keys should (usually) have different hashes */
     /* Note: collisions are possible, so this isn't strictly required */
-    TEST_ASSERT_NOT_EQUAL(hash1, hash2);
+    check(hash1 != hash2);
 }
 
 void test_nat_hash_protocol_matters(void)
@@ -100,7 +100,7 @@ void test_nat_hash_protocol_matters(void)
     uint32_t hash_tcp = tunnel_nat_hash(&key_tcp);
     uint32_t hash_udp = tunnel_nat_hash(&key_udp);
 
-    TEST_ASSERT_NOT_EQUAL(hash_tcp, hash_udp);
+    check(hash_tcp != hash_udp);
 }
 
 /* =============================================================================
@@ -114,11 +114,11 @@ void test_nat_insert_and_lookup(void)
 
     tunnel_session_t *session = create_mock_session(&key);
     int ret = tunnel_nat_insert(nat, session);
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
+    check_int_eq(TUNNEL_OK, ret);
 
     tunnel_session_t *found = tunnel_nat_lookup(nat, &key);
-    TEST_ASSERT_NOT_NULL(found);
-    TEST_ASSERT_EQUAL_PTR(session, found);
+    check_not_null(found);
+    check_ptr_eq(session, found);
 
     /* Cleanup */
     tunnel_nat_remove(nat, session);
@@ -131,7 +131,7 @@ void test_nat_lookup_not_found(void)
     make_key(&key, 0x0a000001, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
 
     tunnel_session_t *found = tunnel_nat_lookup(nat, &key);
-    TEST_ASSERT_NULL(found);
+    check_null(found);
 }
 
 void test_nat_insert_multiple(void)
@@ -144,17 +144,17 @@ void test_nat_insert_multiple(void)
         make_key(&keys[i], 0x0a000001, 10000 + i, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
         sessions[i] = create_mock_session(&keys[i]);
         int ret = tunnel_nat_insert(nat, sessions[i]);
-        TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
+        check_int_eq(TUNNEL_OK, ret);
     }
 
     /* Verify all can be found */
     for (int i = 0; i < 10; i++) {
         tunnel_session_t *found = tunnel_nat_lookup(nat, &keys[i]);
-        TEST_ASSERT_NOT_NULL(found);
-        TEST_ASSERT_EQUAL_PTR(sessions[i], found);
+        check_not_null(found);
+        check_ptr_eq(sessions[i], found);
     }
 
-    TEST_ASSERT_EQUAL(10, tunnel_nat_session_count(nat));
+    check_int_eq(10, tunnel_nat_session_count(nat));
 
     /* Cleanup */
     for (int i = 0; i < 10; i++) {
@@ -171,13 +171,13 @@ void test_nat_remove(void)
     tunnel_session_t *session = create_mock_session(&key);
     tunnel_nat_insert(nat, session);
 
-    TEST_ASSERT_EQUAL(1, tunnel_nat_session_count(nat));
+    check_int_eq(1, tunnel_nat_session_count(nat));
 
     tunnel_nat_remove(nat, session);
-    TEST_ASSERT_EQUAL(0, tunnel_nat_session_count(nat));
+    check_int_eq(0, tunnel_nat_session_count(nat));
 
     tunnel_session_t *found = tunnel_nat_lookup(nat, &key);
-    TEST_ASSERT_NULL(found);
+    check_null(found);
 
     free(session);
 }
@@ -192,7 +192,7 @@ void test_session_key_compare_equal(void)
     make_key(&key1, 0x0a000001, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
     make_key(&key2, 0x0a000001, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
 
-    TEST_ASSERT_EQUAL(0, tunnel_session_key_compare(&key1, &key2));
+    check_int_eq(0, tunnel_session_key_compare(&key1, &key2));
 }
 
 void test_session_key_compare_different_port(void)
@@ -201,7 +201,7 @@ void test_session_key_compare_different_port(void)
     make_key(&key1, 0x0a000001, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
     make_key(&key2, 0x0a000001, 12346, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
 
-    TEST_ASSERT_NOT_EQUAL(0, tunnel_session_key_compare(&key1, &key2));
+    check(tunnel_session_key_compare(&key1, &key2) != 0);
 }
 
 void test_session_key_compare_different_ip(void)
@@ -210,7 +210,7 @@ void test_session_key_compare_different_ip(void)
     make_key(&key1, 0x0a000001, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
     make_key(&key2, 0x0a000002, 12345, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
 
-    TEST_ASSERT_NOT_EQUAL(0, tunnel_session_key_compare(&key1, &key2));
+    check(tunnel_session_key_compare(&key1, &key2) != 0);
 }
 
 void test_session_key_copy(void)
@@ -220,7 +220,7 @@ void test_session_key_copy(void)
 
     tunnel_session_key_copy(&dst, &src);
 
-    TEST_ASSERT_EQUAL(0, tunnel_session_key_compare(&src, &dst));
+    check_int_eq(0, tunnel_session_key_compare(&src, &dst));
 }
 
 /* =============================================================================
@@ -235,11 +235,11 @@ void test_nat_reverse_key(void)
     tunnel_nat_reverse_key(&key, &reverse);
 
     /* Reverse should have src/dst swapped */
-    TEST_ASSERT_EQUAL(key.src.addr.v4, reverse.dst.addr.v4);
-    TEST_ASSERT_EQUAL(key.src.port, reverse.dst.port);
-    TEST_ASSERT_EQUAL(key.dst.addr.v4, reverse.src.addr.v4);
-    TEST_ASSERT_EQUAL(key.dst.port, reverse.src.port);
-    TEST_ASSERT_EQUAL(key.protocol, reverse.protocol);
+    check_int_eq(key.src.addr.v4, reverse.dst.addr.v4);
+    check_int_eq(key.src.port, reverse.dst.port);
+    check_int_eq(key.dst.addr.v4, reverse.src.addr.v4);
+    check_int_eq(key.dst.port, reverse.src.port);
+    check_int_eq(key.protocol, reverse.protocol);
 }
 
 void test_nat_lookup_reverse(void)
@@ -255,8 +255,8 @@ void test_nat_lookup_reverse(void)
     tunnel_endpoint_t src = key.dst;
 
     tunnel_session_t *found = tunnel_nat_lookup_reverse(nat, &dst, &src, TUNNEL_IPPROTO_TCP);
-    TEST_ASSERT_NOT_NULL(found);
-    TEST_ASSERT_EQUAL_PTR(session, found);
+    check_not_null(found);
+    check_ptr_eq(session, found);
 
     tunnel_nat_remove(nat, session);
     free(session);
@@ -271,22 +271,22 @@ void test_nat_alloc_udp_port(void)
     uint16_t port1 = tunnel_nat_alloc_udp_port(nat);
     uint16_t port2 = tunnel_nat_alloc_udp_port(nat);
 
-    TEST_ASSERT_NOT_EQUAL(0, port1);
-    TEST_ASSERT_NOT_EQUAL(0, port2);
-    TEST_ASSERT_NOT_EQUAL(port1, port2);
+    check(port1 != 0);
+    check(port2 != 0);
+    check(port1 != port2);
 
     /* Ports should be in valid range */
-    TEST_ASSERT_GREATER_OR_EQUAL(TUNNEL_NAT_UDP_PORT_MIN, port1);
-    TEST_ASSERT_LESS_OR_EQUAL(TUNNEL_NAT_UDP_PORT_MAX, port1);
+    check(port1 >= TUNNEL_NAT_UDP_PORT_MIN);
+    check(port1 <= TUNNEL_NAT_UDP_PORT_MAX);
 }
 
 void test_nat_free_udp_port(void)
 {
     uint16_t port = tunnel_nat_alloc_udp_port(nat);
-    TEST_ASSERT_EQUAL(1, tunnel_nat_udp_port_in_use(nat, port));
+    check_int_eq(1, tunnel_nat_udp_port_in_use(nat, port));
 
     tunnel_nat_free_udp_port(nat, port);
-    TEST_ASSERT_EQUAL(0, tunnel_nat_udp_port_in_use(nat, port));
+    check_int_eq(0, tunnel_nat_udp_port_in_use(nat, port));
 }
 
 void test_nat_udp_port_reuse(void)
@@ -297,7 +297,7 @@ void test_nat_udp_port_reuse(void)
     /* Freed port can be reused */
     uint16_t port2 = tunnel_nat_alloc_udp_port(nat);
     /* Note: may or may not be same port depending on implementation */
-    TEST_ASSERT_NOT_EQUAL(0, port2);
+    check(port2 != 0);
 }
 
 /* =============================================================================
@@ -317,13 +317,13 @@ void test_nat_touch_moves_to_front(void)
     tunnel_nat_insert(nat, s2);
 
     /* s2 should be newest (front of LRU), s1 should be oldest */
-    TEST_ASSERT_EQUAL_PTR(s1, tunnel_nat_get_oldest(nat));
+    check_ptr_eq(s1, tunnel_nat_get_oldest(nat));
 
     /* Touch s1 to move it to front */
     tunnel_nat_touch(nat, s1);
 
     /* Now s2 should be oldest */
-    TEST_ASSERT_EQUAL_PTR(s2, tunnel_nat_get_oldest(nat));
+    check_ptr_eq(s2, tunnel_nat_get_oldest(nat));
 
     tunnel_nat_remove(nat, s1);
     tunnel_nat_remove(nat, s2);
@@ -343,22 +343,22 @@ void test_nat_evict_oldest(void)
         tunnel_nat_insert(nat, sessions[i]);
     }
 
-    TEST_ASSERT_EQUAL(5, tunnel_nat_session_count(nat));
+    check_int_eq(5, tunnel_nat_session_count(nat));
 
     /* Evict to keep only 3 sessions */
     int evicted = tunnel_nat_evict_oldest(nat, 3);
-    TEST_ASSERT_EQUAL(2, evicted);
-    TEST_ASSERT_EQUAL(3, tunnel_nat_session_count(nat));
+    check_int_eq(2, evicted);
+    check_int_eq(3, tunnel_nat_session_count(nat));
 
     /* Oldest sessions (0, 1) should be gone */
     tunnel_session_key_t key0;
     make_key(&key0, 0x0a000001, 1000, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
-    TEST_ASSERT_NULL(tunnel_nat_lookup(nat, &key0));
+    check_null(tunnel_nat_lookup(nat, &key0));
 
     /* Newest sessions (2, 3, 4) should remain */
     tunnel_session_key_t key4;
     make_key(&key4, 0x0a000001, 1004, 0x08080808, 80, TUNNEL_IPPROTO_TCP);
-    TEST_ASSERT_NOT_NULL(tunnel_nat_lookup(nat, &key4));
+    check_not_null(tunnel_nat_lookup(nat, &key4));
 
     /* Cleanup remaining */
     for (int i = 2; i < 5; i++) {
@@ -391,9 +391,9 @@ void test_nat_stats(void)
     uint64_t lookups, hits, misses, evictions;
     tunnel_nat_get_stats(nat, &lookups, &hits, &misses, &evictions);
 
-    TEST_ASSERT_EQUAL(3, lookups);
-    TEST_ASSERT_EQUAL(1, hits);
-    TEST_ASSERT_EQUAL(2, misses);
+    check_int_eq(3, lookups);
+    check_int_eq(1, hits);
+    check_int_eq(2, misses);
 
     tunnel_nat_remove(nat, session);
     free(session);
@@ -401,7 +401,7 @@ void test_nat_stats(void)
 
 void test_nat_load_factor(void)
 {
-    TEST_ASSERT_FLOAT_WITHIN(0.001, 0.0, tunnel_nat_load_factor(nat));
+    check_double_eq(tunnel_nat_load_factor(nat), 0.0, 0.001);
 
     /* Insert some sessions */
     for (int i = 0; i < 100; i++) {
@@ -412,8 +412,8 @@ void test_nat_load_factor(void)
     }
 
     double load = tunnel_nat_load_factor(nat);
-    TEST_ASSERT_TRUE(load > 0.0);
-    TEST_ASSERT_TRUE(load < 1.0);
+    check_true(load > 0.0);
+    check_true(load < 1.0);
 
     /* Cleanup */
     tunnel_nat_clear(nat);
@@ -434,7 +434,7 @@ void test_endpoint_format_ipv4(void)
     char buf[64];
     tunnel_endpoint_format(&ep, buf, sizeof(buf));
 
-    TEST_ASSERT_EQUAL_STRING("192.168.1.1:8080", buf);
+    check_str_eq("192.168.1.1:8080", buf);
 }
 
 void test_endpoint_parse_ipv4(void)
@@ -442,10 +442,10 @@ void test_endpoint_parse_ipv4(void)
     tunnel_endpoint_t ep;
     int ret = tunnel_endpoint_parse("10.0.0.1:443", &ep);
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(AF_INET, ep.family);
-    TEST_ASSERT_EQUAL(htonl(0x0a000001), ep.addr.v4);
-    TEST_ASSERT_EQUAL(443, ep.port);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(AF_INET, ep.family);
+    check_int_eq(htonl(0x0a000001), ep.addr.v4);
+    check_int_eq(443, ep.port);
 }
 
 void test_endpoint_compare_equal(void)
@@ -457,7 +457,7 @@ void test_endpoint_compare_equal(void)
     };
     tunnel_endpoint_t b = a;
 
-    TEST_ASSERT_EQUAL(0, tunnel_endpoint_compare(&a, &b));
+    check_int_eq(0, tunnel_endpoint_compare(&a, &b));
 }
 
 void test_endpoint_compare_different(void)
@@ -473,56 +473,64 @@ void test_endpoint_compare_different(void)
         .port = 81,
     };
 
-    TEST_ASSERT_NOT_EQUAL(0, tunnel_endpoint_compare(&a, &b));
+    check(tunnel_endpoint_compare(&a, &b) != 0);
 }
 
-/* =============================================================================
- * Main
- * ============================================================================= */
+spec("tunnel nat") {
+    before_each() {
+        setUp();
+    }
 
-int main(void)
-{
-    UNITY_BEGIN();
+    after_each() {
+        tearDown();
+    }
 
-    /* Hash function */
-    RUN_TEST(test_nat_hash_deterministic);
-    RUN_TEST(test_nat_hash_different_keys);
-    RUN_TEST(test_nat_hash_protocol_matters);
+    describe("hashing") {
+        it("is deterministic") { test_nat_hash_deterministic(); }
+        it("changes for different keys") { test_nat_hash_different_keys(); }
+        it("includes protocol in the hash") { test_nat_hash_protocol_matters(); }
+    }
 
-    /* Insert and lookup */
-    RUN_TEST(test_nat_insert_and_lookup);
-    RUN_TEST(test_nat_lookup_not_found);
-    RUN_TEST(test_nat_insert_multiple);
-    RUN_TEST(test_nat_remove);
+    describe("insert and lookup") {
+        it("inserts and finds sessions") { test_nat_insert_and_lookup(); }
+        it("returns null on miss") { test_nat_lookup_not_found(); }
+        it("handles multiple sessions") { test_nat_insert_multiple(); }
+        it("removes a session") { test_nat_remove(); }
+    }
 
-    /* Session key */
-    RUN_TEST(test_session_key_compare_equal);
-    RUN_TEST(test_session_key_compare_different_port);
-    RUN_TEST(test_session_key_compare_different_ip);
-    RUN_TEST(test_session_key_copy);
+    describe("session keys") {
+        it("compares equal keys") { test_session_key_compare_equal(); }
+        it("detects different ports") { test_session_key_compare_different_port(); }
+        it("detects different ips") { test_session_key_compare_different_ip(); }
+        it("copies keys") { test_session_key_copy(); }
+    }
 
-    /* Reverse NAT */
-    RUN_TEST(test_nat_reverse_key);
-    RUN_TEST(test_nat_lookup_reverse);
+    describe("reverse nat") {
+        it("reverses keys") { test_nat_reverse_key(); }
+        it("looks up reverse flows") { test_nat_lookup_reverse(); }
+    }
 
-    /* UDP port allocation */
-    RUN_TEST(test_nat_alloc_udp_port);
-    RUN_TEST(test_nat_free_udp_port);
-    RUN_TEST(test_nat_udp_port_reuse);
+    describe("udp ports") {
+        it("allocates udp ports") { test_nat_alloc_udp_port(); }
+        it("frees udp ports") { test_nat_free_udp_port(); }
+        it("reuses freed udp ports") { test_nat_udp_port_reuse(); }
+    }
 
-    /* LRU */
-    RUN_TEST(test_nat_touch_moves_to_front);
-    RUN_TEST(test_nat_evict_oldest);
+    describe("lru") {
+        it("touch moves entries to the front") { test_nat_touch_moves_to_front(); }
+        it("evicts the oldest entries") { test_nat_evict_oldest(); }
+    }
 
-    /* Statistics */
-    RUN_TEST(test_nat_stats);
-    RUN_TEST(test_nat_load_factor);
+    describe("statistics") {
+        it("tracks nat stats") { test_nat_stats(); }
+        it("reports load factor") { test_nat_load_factor(); }
+    }
 
-    /* Endpoint utilities */
-    RUN_TEST(test_endpoint_format_ipv4);
-    RUN_TEST(test_endpoint_parse_ipv4);
-    RUN_TEST(test_endpoint_compare_equal);
-    RUN_TEST(test_endpoint_compare_different);
-
-    return UNITY_END();
+    describe("endpoint utilities") {
+        it("formats ipv4 endpoints") { test_endpoint_format_ipv4(); }
+        it("parses ipv4 endpoints") { test_endpoint_parse_ipv4(); }
+        it("compares equal endpoints") { test_endpoint_compare_equal(); }
+        it("compares different endpoints") { test_endpoint_compare_different(); }
+    }
 }
+

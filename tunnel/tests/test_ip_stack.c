@@ -3,7 +3,7 @@
  * @brief Tests for tunnel IP stack (packet parsing and building)
  */
 
-#include "unity.h"
+#include <tinytest.h>
 #include "../src/stack/tunnel_ip_stack.h"
 #include <string.h> 
 void setUp(void) {}
@@ -83,22 +83,22 @@ void test_ipv4_parse_header_tcp(void)
     tunnel_ip_header_t hdr;
     int ret = tunnel_ipv4_parse_header(ipv4_tcp_syn, sizeof(ipv4_tcp_syn), &hdr);
 
-    TEST_ASSERT_EQUAL(20, ret);
-    TEST_ASSERT_EQUAL(4, hdr.version);
-    TEST_ASSERT_EQUAL(20, hdr.header_len);
-    TEST_ASSERT_EQUAL(60, hdr.total_len);
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_TCP, hdr.protocol);
-    TEST_ASSERT_EQUAL(64, hdr.ttl);
-    TEST_ASSERT_EQUAL(0x1c46, hdr.id);
-    TEST_ASSERT_EQUAL(1, hdr.dont_fragment);
-    TEST_ASSERT_EQUAL(0, hdr.more_fragments);
-    TEST_ASSERT_EQUAL(0, hdr.frag_offset);
+    check_int_eq(20, ret);
+    check_int_eq(4, hdr.version);
+    check_int_eq(20, hdr.header_len);
+    check_int_eq(60, hdr.total_len);
+    check_int_eq(TUNNEL_IPPROTO_TCP, hdr.protocol);
+    check_int_eq(64, hdr.ttl);
+    check_int_eq(0x1c46, hdr.id);
+    check_int_eq(1, hdr.dont_fragment);
+    check_int_eq(0, hdr.more_fragments);
+    check_int_eq(0, hdr.frag_offset);
 
-    TEST_ASSERT_EQUAL(AF_INET, hdr.src.family);
-    TEST_ASSERT_EQUAL(0xc0a80164, ntohl(hdr.src.addr.v4));  /* 192.168.1.100 */
+    check_int_eq(AF_INET, hdr.src.family);
+    check_int_eq(0xc0a80164, ntohl(hdr.src.addr.v4));  /* 192.168.1.100 */
 
-    TEST_ASSERT_EQUAL(AF_INET, hdr.dst.family);
-    TEST_ASSERT_EQUAL(0x5db8d822, ntohl(hdr.dst.addr.v4));  /* 93.184.216.34 */
+    check_int_eq(AF_INET, hdr.dst.family);
+    check_int_eq(0x5db8d822, ntohl(hdr.dst.addr.v4));  /* 93.184.216.34 */
 }
 
 void test_ipv4_parse_header_udp(void)
@@ -106,11 +106,11 @@ void test_ipv4_parse_header_udp(void)
     tunnel_ip_header_t hdr;
     int ret = tunnel_ipv4_parse_header(ipv4_udp_dns, sizeof(ipv4_udp_dns), &hdr);
 
-    TEST_ASSERT_EQUAL(20, ret);
-    TEST_ASSERT_EQUAL(4, hdr.version);
-    TEST_ASSERT_EQUAL(41, hdr.total_len);
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_UDP, hdr.protocol);
-    TEST_ASSERT_EQUAL(0xabcd, hdr.id);
+    check_int_eq(20, ret);
+    check_int_eq(4, hdr.version);
+    check_int_eq(41, hdr.total_len);
+    check_int_eq(TUNNEL_IPPROTO_UDP, hdr.protocol);
+    check_int_eq(0xabcd, hdr.id);
 }
 
 void test_ipv4_parse_header_too_short(void)
@@ -119,7 +119,7 @@ void test_ipv4_parse_header_too_short(void)
     uint8_t short_pkt[10] = {0x45, 0x00};
 
     int ret = tunnel_ipv4_parse_header(short_pkt, sizeof(short_pkt), &hdr);
-    TEST_ASSERT_LESS_THAN(0, ret);
+    check(ret < 0);
 }
 
 void test_ipv4_parse_header_wrong_version(void)
@@ -128,7 +128,7 @@ void test_ipv4_parse_header_wrong_version(void)
     uint8_t pkt[20] = {0x60};  /* IPv6 version */
 
     int ret = tunnel_ipv4_parse_header(pkt, sizeof(pkt), &hdr);
-    TEST_ASSERT_LESS_THAN(0, ret);
+    check(ret < 0);
 }
 
 /* =============================================================================
@@ -140,23 +140,23 @@ void test_ipv6_parse_header_tcp(void)
     tunnel_ip_header_t hdr;
     int ret = tunnel_ipv6_parse_header(ipv6_tcp, sizeof(ipv6_tcp), &hdr);
 
-    TEST_ASSERT_EQUAL(40, ret);
-    TEST_ASSERT_EQUAL(6, hdr.version);
-    TEST_ASSERT_EQUAL(40, hdr.header_len);
-    TEST_ASSERT_EQUAL(60, hdr.total_len);  /* 40 + 20 payload */
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_TCP, hdr.protocol);
-    TEST_ASSERT_EQUAL(64, hdr.ttl);
+    check_int_eq(40, ret);
+    check_int_eq(6, hdr.version);
+    check_int_eq(40, hdr.header_len);
+    check_int_eq(60, hdr.total_len);  /* 40 + 20 payload */
+    check_int_eq(TUNNEL_IPPROTO_TCP, hdr.protocol);
+    check_int_eq(64, hdr.ttl);
 
-    TEST_ASSERT_EQUAL(AF_INET6, hdr.src.family);
-    TEST_ASSERT_EQUAL(AF_INET6, hdr.dst.family);
+    check_int_eq(AF_INET6, hdr.src.family);
+    check_int_eq(AF_INET6, hdr.dst.family);
 
     /* Check src: 2001:db8::1 */
-    TEST_ASSERT_EQUAL_HEX8(0x20, hdr.src.addr.v6[0]);
-    TEST_ASSERT_EQUAL_HEX8(0x01, hdr.src.addr.v6[1]);
-    TEST_ASSERT_EQUAL_HEX8(0x01, hdr.src.addr.v6[15]);
+    check_uint_eq(0x20, hdr.src.addr.v6[0]);
+    check_uint_eq(0x01, hdr.src.addr.v6[1]);
+    check_uint_eq(0x01, hdr.src.addr.v6[15]);
 
     /* Check dst: 2001:db8::2 */
-    TEST_ASSERT_EQUAL_HEX8(0x02, hdr.dst.addr.v6[15]);
+    check_uint_eq(0x02, hdr.dst.addr.v6[15]);
 }
 
 /* =============================================================================
@@ -171,15 +171,15 @@ void test_tcp_parse_header_syn(void)
 
     int ret = tunnel_tcp_parse_header(tcp_data, tcp_len, &hdr);
 
-    TEST_ASSERT_EQUAL(40, ret);  /* Header with options */
-    TEST_ASSERT_EQUAL(49160, hdr.src_port);
-    TEST_ASSERT_EQUAL(80, hdr.dst_port);
-    TEST_ASSERT_EQUAL(1, hdr.seq);
-    TEST_ASSERT_EQUAL(0, hdr.ack);
-    TEST_ASSERT_EQUAL(40, hdr.header_len);
-    TEST_ASSERT_EQUAL(TUNNEL_TCP_SYN, hdr.flags);
-    TEST_ASSERT_EQUAL(65535, hdr.window);
-    TEST_ASSERT_EQUAL(20, hdr.options_len);
+    check_int_eq(40, ret);  /* Header with options */
+    check_int_eq(49160, hdr.src_port);
+    check_int_eq(80, hdr.dst_port);
+    check_int_eq(1, hdr.seq);
+    check_int_eq(0, hdr.ack);
+    check_int_eq(40, hdr.header_len);
+    check_int_eq(TUNNEL_TCP_SYN, hdr.flags);
+    check_int_eq(65535, hdr.window);
+    check_int_eq(20, hdr.options_len);
 }
 
 void test_tcp_parse_header_ack(void)
@@ -190,14 +190,14 @@ void test_tcp_parse_header_ack(void)
 
     int ret = tunnel_tcp_parse_header(tcp_data, tcp_len, &hdr);
 
-    TEST_ASSERT_EQUAL(20, ret);
-    TEST_ASSERT_EQUAL(8080, hdr.src_port);
-    TEST_ASSERT_EQUAL(80, hdr.dst_port);
-    TEST_ASSERT_EQUAL(10, hdr.seq);
-    TEST_ASSERT_EQUAL(20, hdr.ack);
-    TEST_ASSERT_EQUAL(TUNNEL_TCP_ACK | TUNNEL_TCP_PSH, hdr.flags);
-    TEST_ASSERT_EQUAL(4096, hdr.window);
-    TEST_ASSERT_EQUAL(0, hdr.options_len);
+    check_int_eq(20, ret);
+    check_int_eq(8080, hdr.src_port);
+    check_int_eq(80, hdr.dst_port);
+    check_int_eq(10, hdr.seq);
+    check_int_eq(20, hdr.ack);
+    check_int_eq(TUNNEL_TCP_ACK | TUNNEL_TCP_PSH, hdr.flags);
+    check_int_eq(4096, hdr.window);
+    check_int_eq(0, hdr.options_len);
 }
 
 /* =============================================================================
@@ -212,10 +212,10 @@ void test_udp_parse_header(void)
 
     int ret = tunnel_udp_parse_header(udp_data, udp_len, &hdr);
 
-    TEST_ASSERT_EQUAL(8, ret);
-    TEST_ASSERT_EQUAL(49152, hdr.src_port);
-    TEST_ASSERT_EQUAL(53, hdr.dst_port);
-    TEST_ASSERT_EQUAL(21, hdr.length);
+    check_int_eq(8, ret);
+    check_int_eq(49152, hdr.src_port);
+    check_int_eq(53, hdr.dst_port);
+    check_int_eq(21, hdr.length);
 }
 
 /* =============================================================================
@@ -227,13 +227,13 @@ void test_ip_parse_full_tcp(void)
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(ipv4_tcp_syn, sizeof(ipv4_tcp_syn), &pkt);
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(4, pkt.ip.version);
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_TCP, pkt.ip.protocol);
-    TEST_ASSERT_EQUAL(49160, pkt.tcp.src_port);
-    TEST_ASSERT_EQUAL(80, pkt.tcp.dst_port);
-    TEST_ASSERT_EQUAL(TUNNEL_TCP_SYN, pkt.tcp.flags);
-    TEST_ASSERT_EQUAL(0, pkt.payload_len);  /* SYN has no payload */
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(4, pkt.ip.version);
+    check_int_eq(TUNNEL_IPPROTO_TCP, pkt.ip.protocol);
+    check_int_eq(49160, pkt.tcp.src_port);
+    check_int_eq(80, pkt.tcp.dst_port);
+    check_int_eq(TUNNEL_TCP_SYN, pkt.tcp.flags);
+    check_int_eq(0, pkt.payload_len);  /* SYN has no payload */
 }
 
 void test_ip_parse_full_udp(void)
@@ -241,13 +241,13 @@ void test_ip_parse_full_udp(void)
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(ipv4_udp_dns, sizeof(ipv4_udp_dns), &pkt);
 
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(4, pkt.ip.version);
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_UDP, pkt.ip.protocol);
-    TEST_ASSERT_EQUAL(49152, pkt.udp.src_port);
-    TEST_ASSERT_EQUAL(53, pkt.udp.dst_port);
-    TEST_ASSERT_EQUAL(13, pkt.payload_len);
-    TEST_ASSERT_NOT_NULL(pkt.payload);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(4, pkt.ip.version);
+    check_int_eq(TUNNEL_IPPROTO_UDP, pkt.ip.protocol);
+    check_int_eq(49152, pkt.udp.src_port);
+    check_int_eq(53, pkt.udp.dst_port);
+    check_int_eq(13, pkt.payload_len);
+    check_not_null(pkt.payload);
 }
 
 /* =============================================================================
@@ -258,7 +258,7 @@ void test_ip_checksum_zero(void)
 {
     uint8_t data[] = {0x00, 0x00};
     uint16_t csum = tunnel_ip_checksum(data, sizeof(data));
-    TEST_ASSERT_EQUAL_HEX16(0xFFFF, csum);
+    check_uint_eq(0xFFFF, csum);
 }
 
 void test_ip_checksum_simple(void)
@@ -273,7 +273,7 @@ void test_ip_checksum_simple(void)
     };
 
     uint16_t csum = tunnel_ip_checksum(header, sizeof(header));
-    TEST_ASSERT_NOT_EQUAL(0, csum);
+    check(csum != 0);
 }
 
 /* =============================================================================
@@ -302,17 +302,17 @@ void test_ip_build_tcp_syn(void)
                                    65535,          /* window */
                                    NULL, 0);       /* no payload */
 
-    TEST_ASSERT_GREATER_THAN(0, len);
-    TEST_ASSERT_EQUAL(40, len);  /* 20 IP + 20 TCP */
+    check(len > 0);
+    check_int_eq(40, len);  /* 20 IP + 20 TCP */
 
     /* Verify we can parse what we built */
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(buf, len, &pkt);
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(12345, pkt.tcp.src_port);
-    TEST_ASSERT_EQUAL(80, pkt.tcp.dst_port);
-    TEST_ASSERT_EQUAL(1000, pkt.tcp.seq);
-    TEST_ASSERT_EQUAL(TUNNEL_TCP_SYN, pkt.tcp.flags);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(12345, pkt.tcp.src_port);
+    check_int_eq(80, pkt.tcp.dst_port);
+    check_int_eq(1000, pkt.tcp.seq);
+    check_int_eq(TUNNEL_TCP_SYN, pkt.tcp.flags);
 }
 
 void test_ip_build_tcp_data(void)
@@ -339,13 +339,13 @@ void test_ip_build_tcp_data(void)
                                    32768,
                                    (const uint8_t *)payload, payload_len);
 
-    TEST_ASSERT_EQUAL(40 + (int)payload_len, len);
+    check_int_eq(40 + (int)payload_len, len);
 
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(buf, len, &pkt);
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(payload_len, pkt.payload_len);
-    TEST_ASSERT_EQUAL_MEMORY(payload, pkt.payload, payload_len);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(payload_len, pkt.payload_len);
+    check_mem_eq(payload, pkt.payload, payload_len);
 }
 
 void test_ip_build_udp(void)
@@ -368,15 +368,15 @@ void test_ip_build_udp(void)
                                    &src, &dst,
                                    payload, sizeof(payload));
 
-    TEST_ASSERT_EQUAL(28 + 4, len);  /* 20 IP + 8 UDP + 4 payload */
+    check_int_eq(28 + 4, len);  /* 20 IP + 8 UDP + 4 payload */
 
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(buf, len, &pkt);
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(TUNNEL_IPPROTO_UDP, pkt.ip.protocol);
-    TEST_ASSERT_EQUAL(5000, pkt.udp.src_port);
-    TEST_ASSERT_EQUAL(53, pkt.udp.dst_port);
-    TEST_ASSERT_EQUAL(4, pkt.payload_len);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(TUNNEL_IPPROTO_UDP, pkt.ip.protocol);
+    check_int_eq(5000, pkt.udp.src_port);
+    check_int_eq(53, pkt.udp.dst_port);
+    check_int_eq(4, pkt.payload_len);
 }
 
 void test_ip_build_tcp_rst(void)
@@ -394,13 +394,13 @@ void test_ip_build_tcp_rst(void)
     };
 
     int len = tunnel_ip_build_tcp_rst(buf, sizeof(buf), &src, &dst, 999);
-    TEST_ASSERT_GREATER_THAN(0, len);
+    check(len > 0);
 
     tunnel_packet_t pkt;
     int ret = tunnel_ip_parse(buf, len, &pkt);
-    TEST_ASSERT_EQUAL(TUNNEL_OK, ret);
-    TEST_ASSERT_EQUAL(TUNNEL_TCP_RST, pkt.tcp.flags);
-    TEST_ASSERT_EQUAL(999, pkt.tcp.seq);
+    check_int_eq(TUNNEL_OK, ret);
+    check_int_eq(TUNNEL_TCP_RST, pkt.tcp.flags);
+    check_int_eq(999, pkt.tcp.seq);
 }
 
 /* =============================================================================
@@ -411,7 +411,7 @@ void test_ip_is_fragment_no(void)
 {
     tunnel_packet_t pkt;
     tunnel_ip_parse(ipv4_tcp_syn, sizeof(ipv4_tcp_syn), &pkt);
-    TEST_ASSERT_EQUAL(0, tunnel_ip_is_fragment(&pkt));
+    check_int_eq(0, tunnel_ip_is_fragment(&pkt));
 }
 
 void test_ip_is_fragment_yes(void)
@@ -427,50 +427,55 @@ void test_ip_is_fragment_yes(void)
 
     tunnel_packet_t pkt;
     tunnel_ip_parse(frag_pkt, 20, &pkt);
-    TEST_ASSERT_EQUAL(1, tunnel_ip_is_fragment(&pkt));
+    check_int_eq(1, tunnel_ip_is_fragment(&pkt));
 }
 
-/* =============================================================================
- * Main
- * ============================================================================= */
+spec("tunnel ip stack") {
+    before_each() {
+        setUp();
+    }
 
-int main(void)
-{
-    UNITY_BEGIN();
+    after_each() {
+        tearDown();
+    }
 
-    /* IPv4 parsing */
-    RUN_TEST(test_ipv4_parse_header_tcp);
-    RUN_TEST(test_ipv4_parse_header_udp);
-    RUN_TEST(test_ipv4_parse_header_too_short);
-    RUN_TEST(test_ipv4_parse_header_wrong_version);
+    describe("ipv4 parsing") {
+        it("parses a tcp header") { test_ipv4_parse_header_tcp(); }
+        it("parses a udp header") { test_ipv4_parse_header_udp(); }
+        it("rejects short packets") { test_ipv4_parse_header_too_short(); }
+        it("rejects the wrong version") { test_ipv4_parse_header_wrong_version(); }
+    }
 
-    /* IPv6 parsing */
-    RUN_TEST(test_ipv6_parse_header_tcp);
+    describe("ipv6 parsing") {
+        it("parses an ipv6 tcp header") { test_ipv6_parse_header_tcp(); }
+    }
 
-    /* TCP parsing */
-    RUN_TEST(test_tcp_parse_header_syn);
-    RUN_TEST(test_tcp_parse_header_ack);
+    describe("transport parsing") {
+        it("parses a syn packet") { test_tcp_parse_header_syn(); }
+        it("parses an ack packet") { test_tcp_parse_header_ack(); }
+        it("parses a udp header") { test_udp_parse_header(); }
+    }
 
-    /* UDP parsing */
-    RUN_TEST(test_udp_parse_header);
+    describe("full packet parsing") {
+        it("parses a full tcp packet") { test_ip_parse_full_tcp(); }
+        it("parses a full udp packet") { test_ip_parse_full_udp(); }
+    }
 
-    /* Full packet parsing */
-    RUN_TEST(test_ip_parse_full_tcp);
-    RUN_TEST(test_ip_parse_full_udp);
+    describe("checksums") {
+        it("computes checksum for zero data") { test_ip_checksum_zero(); }
+        it("computes checksum for a simple header") { test_ip_checksum_simple(); }
+    }
 
-    /* Checksum */
-    RUN_TEST(test_ip_checksum_zero);
-    RUN_TEST(test_ip_checksum_simple);
+    describe("packet building") {
+        it("builds a tcp syn") { test_ip_build_tcp_syn(); }
+        it("builds tcp data") { test_ip_build_tcp_data(); }
+        it("builds udp data") { test_ip_build_udp(); }
+        it("builds a tcp rst") { test_ip_build_tcp_rst(); }
+    }
 
-    /* Packet building */
-    RUN_TEST(test_ip_build_tcp_syn);
-    RUN_TEST(test_ip_build_tcp_data);
-    RUN_TEST(test_ip_build_udp);
-    RUN_TEST(test_ip_build_tcp_rst);
-
-    /* Fragment detection */
-    RUN_TEST(test_ip_is_fragment_no);
-    RUN_TEST(test_ip_is_fragment_yes);
-
-    return UNITY_END();
+    describe("fragment detection") {
+        it("detects non-fragments") { test_ip_is_fragment_no(); }
+        it("detects fragments") { test_ip_is_fragment_yes(); }
+    }
 }
+

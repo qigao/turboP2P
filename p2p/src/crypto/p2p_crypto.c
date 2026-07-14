@@ -50,6 +50,15 @@ int p2p_crypto_generate_identity(p2p_identity_t *identity) {
     return P2P_OK;
 }
 
+int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
+                                    const uint8_t secret_key[P2P_KEY_SIZE]) {
+    if (!identity || !secret_key) return P2P_ERR_INVALID_ARG;
+
+    memcpy(identity->secret_key, secret_key, P2P_KEY_SIZE);
+    crypto_x25519_public_key(identity->public_key, identity->secret_key);
+    return P2P_OK;
+}
+
 /* =============================================================================
  * Memory Wiping
  * ============================================================================= */
@@ -177,6 +186,8 @@ int p2p_noise_init_initiator(p2p_noise_handshake_t *hs,
     /* Generate ephemeral keypair */
     p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
     crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
+    memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
+    memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);
 
     /* Store remote public if known (for pre-authentication) */
     if (remote_public) {
@@ -197,6 +208,8 @@ int p2p_noise_init_responder(p2p_noise_handshake_t *hs,
     /* Generate ephemeral keypair */
     p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
     crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
+    memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
+    memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);
 
     return P2P_OK;
 }
@@ -207,14 +220,23 @@ int p2p_noise_write_message(p2p_noise_handshake_t *hs,
 
     if (max_len < P2P_KEY_SIZE) return P2P_ERR_INVALID_ARG;
 
-    /* Both sides just send their ephemeral public key */
+    /* New peers append their static public key. Old peers accept the first
+     * 32 bytes and ignore the extension, so this stays wire-compatible. */
     memcpy(out, hs->ephemeral_public, P2P_KEY_SIZE);
     *out_len = P2P_KEY_SIZE;
+    if (max_len >= P2P_KEY_SIZE * 2) {
+        memcpy(out + P2P_KEY_SIZE, hs->local_static_public, P2P_KEY_SIZE);
+        *out_len = P2P_KEY_SIZE * 2;
+    }
 
     if (hs->is_initiator) {
-        hs->step = 1; /* Sent first message */
+        if (hs->step < 1) {
+            hs->step = 1; /* Sent first message */
+        }
     } else {
-        hs->step = 2; /* Sent response */
+        if (hs->step < 2) {
+            hs->step = 2; /* Sent response */
+        }
     }
 
     return P2P_OK;
@@ -231,6 +253,13 @@ int p2p_noise_read_message(p2p_noise_handshake_t *hs,
 
     /* Perform ECDH to derive shared secret */
     crypto_x25519(hs->shared_secret, hs->ephemeral_secret, hs->remote_public);
+    if (len >= P2P_KEY_SIZE * 2) {
+        memcpy(hs->remote_static_public, data + P2P_KEY_SIZE, P2P_KEY_SIZE);
+        crypto_x25519(hs->static_shared_secret,
+                      hs->local_static_secret,
+                      hs->remote_static_public);
+        hs->has_remote_static_public = 1;
+    }
 
     if (hs->is_initiator) {
         hs->step = 3; /* Received response, handshake complete */
@@ -268,8 +297,17 @@ int p2p_noise_split(const p2p_noise_handshake_t *hs, p2p_crypto_session_t *sess)
      */
     uint8_t tx_input[64], rx_input[64];
 
-    memcpy(tx_input, hs->shared_secret, 32);
-    memcpy(rx_input, hs->shared_secret, 32);
+    if (hs->has_remote_static_public) {
+        uint8_t identity_input[P2P_KEY_SIZE * 2];
+        memcpy(identity_input, hs->shared_secret, P2P_KEY_SIZE);
+        memcpy(identity_input + P2P_KEY_SIZE, hs->static_shared_secret, P2P_KEY_SIZE);
+        crypto_blake2b(tx_input, 32, identity_input, sizeof(identity_input));
+        memcpy(rx_input, tx_input, 32);
+        p2p_crypto_wipe(identity_input, sizeof(identity_input));
+    } else {
+        memcpy(tx_input, hs->shared_secret, 32);
+        memcpy(rx_input, hs->shared_secret, 32);
+    }
 
     if (hs->is_initiator) {
         /* Initiator: tx=init->resp, rx=resp->init */

@@ -5,7 +5,7 @@
  * This example demonstrates:
  * - Creating a mesh network with virtual IP
  * - Auto peer discovery via DHT
- * - Encrypted tunneling via WebRTC DataChannel
+ * - Stream transport via TurboNet::CoroNet
  * - Zero-config mesh routing
  *
  * Usage:
@@ -13,10 +13,10 @@
  *   mesh_vpn 10.42.0.1 16
  *
  *   # Node 2 (connect to node 1)
- *   mesh_vpn 10.42.0.2 16 127.0.0.1:9993
+ *   mesh_vpn 10.42.0.2 16 127.0.0.1:9993 203.0.113.10
  *
  *   # Node 3 (connect to node 1)
- *   mesh_vpn 10.42.0.3 16 127.0.0.1:9993
+ *   mesh_vpn 10.42.0.3 16 127.0.0.1:9993 203.0.113.11
  *
  * Now all nodes can ping each other:
  *   ping 10.42.0.1
@@ -293,7 +293,6 @@ int main(int argc, char *argv[]) {
     /* Initialize Logger */
     tlog_config_t log_config = {
         .min_level = TURBO_LOG_LEVEL_DEBUG,
-        .async_mode = 1,
         .buffer_size = 64 * 1024
     };
     tlog_t *logger = tlog_create(&log_config);
@@ -308,11 +307,11 @@ int main(int argc, char *argv[]) {
     }
 
     if (argc < 3) {
-        printf("Usage: %s <virtual_ip> <prefix> [bootstrap_peer]\n", argv[0]);
+        printf("Usage: %s <virtual_ip> <prefix> [bootstrap_peer] [advertise_ip]\n", argv[0]);
         printf("\nExamples:\n");
         printf("  Node 1: %s 10.42.0.1 16              (listens on port 9993)\n", argv[0]);
-        printf("  Node 2: %s 10.42.0.2 16 10.42.0.1    (listens on port 9994)\n", argv[0]);
-        printf("  Node 3: %s 10.42.0.3 16 10.42.0.1    (listens on port 9995)\n", argv[0]);
+        printf("  Node 2: %s 10.42.0.2 16 10.42.0.1:9993 203.0.113.10\n", argv[0]);
+        printf("  Node 3: %s 10.42.0.3 16 10.42.0.1:9993 203.0.113.11\n", argv[0]);
         printf("\nNote: Port is auto-derived from last IP octet (9992 + last_octet)\n");
         printf("\nAfter setup, ping other nodes:\n");
         printf("  ping 10.42.0.2\n");
@@ -322,6 +321,7 @@ int main(int argc, char *argv[]) {
     const char *virtual_ip = argv[1];
     uint8_t prefix = (uint8_t)atoi(argv[2]);
     const char *bootstrap_ip = (argc >= 4) ? argv[3] : NULL;
+    const char *advertise_ip = (argc >= 5) ? argv[4] : NULL;
 
     /* Auto-derive port from virtual IP last octet */
     unsigned int a, b, c, d;
@@ -337,6 +337,9 @@ int main(int argc, char *argv[]) {
     printf("Listen Port: %d\n", listen_port);
     if (bootstrap_ip) {
         printf("Bootstrap: %s\n", bootstrap_ip);
+    }
+    if (advertise_ip) {
+        printf("Advertise IP: %s\n", advertise_ip);
     }
     printf("\n");
 
@@ -376,6 +379,7 @@ int main(int argc, char *argv[]) {
     tun_config.tun.mtu = 1500;
 
     /* No proxy - use mesh */
+    tun_config.mode = TUNNEL_MODE_PACKET;
     tun_config.proxy.type = TUNNEL_PROXY_NONE;
 
     /* Create tunnel */
@@ -396,6 +400,7 @@ int main(int argc, char *argv[]) {
     mesh_config.virtual_ip = virtual_ip;
     mesh_config.virtual_prefix = prefix;
     mesh_config.listen_port = listen_port;  /* Use calculated port */
+    mesh_config.advertise_ip = advertise_ip;
 
     /* Bootstrap peers */
     const char *bootstrap_peers[1];

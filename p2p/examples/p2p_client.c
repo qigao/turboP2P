@@ -12,26 +12,30 @@
  */
 
 #include "../include/p2p.h"
+#include <CoroNet/turbo_coro_context.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <uv.h>
 #include <tlog.h>
+#include <turbo_thread.h>
 
 #define MAX_MESSAGE_LEN 1024
 
-/* Global state */
+#ifdef _WIN32
+#define p2p_strdup _strdup
+#else
+#define p2p_strdup strdup
+#endif
+
 typedef struct {
-    uv_async_t async;
     p2p_node_t *node;
-    char command[MAX_MESSAGE_LEN];
-    int has_command;
     int should_exit;
 } stdin_context_t;
 
 /* Forward declarations */
 void handle_command(p2p_node_t *node, const char *cmd);
 void show_help(void);
+static void process_stdin_command(void *arg1, void *arg2);
 
 /* Message callback */
 void on_message(p2p_node_t *node, p2p_peer_t *peer, const void *data, size_t len, void *user_data) {
@@ -45,44 +49,30 @@ void on_message(p2p_node_t *node, p2p_peer_t *peer, const void *data, size_t len
     fflush(stdout);
 }
 
-/* stdin thread - reads commands and signals event loop */
+/* stdin thread - reads commands and posts them into CoroNet loop */
 void stdin_thread(void *arg) {
     stdin_context_t *ctx = (stdin_context_t *)arg;
     char buffer[MAX_MESSAGE_LEN];
 
     while (!ctx->should_exit) {
         if (fgets(buffer, sizeof(buffer), stdin)) {
-            /* Remove newline */
             buffer[strcspn(buffer, "\n")] = 0;
 
-            /* Copy command and signal */
-            strncpy(ctx->command, buffer, sizeof(ctx->command) - 1);
-            ctx->has_command = 1;
-            uv_async_send(&ctx->async);
+            char *command = p2p_strdup(buffer);
+            if (!command) {
+                continue;
+            }
 
-            /* Exit if quit command */
-            if (strcmp(buffer, "quit") == 0 || strcmp(buffer, "exit") == 0) {
+            if (coro_post(p2p_get_loop(ctx->node), process_stdin_command, ctx->node,
+                          command) != 0) {
+                free(command);
+                continue;
+            }
+
+            if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0) {
                 ctx->should_exit = 1;
                 break;
             }
-        }
-    }
-}
-
-/* Async callback - processes commands in event loop */
-void on_stdin_command(uv_async_t *handle) {
-    stdin_context_t *ctx = (stdin_context_t *)handle->data;
-
-    if (ctx->has_command) {
-        handle_command(ctx->node, ctx->command);
-        ctx->has_command = 0;
-
-        /* Stop event loop if exit requested */
-        if (ctx->should_exit) {
-            uv_stop(p2p_get_loop(ctx->node));
-        } else {
-            printf("p2p> ");
-            fflush(stdout);
         }
     }
 }
@@ -190,7 +180,8 @@ void cmd_upload_multi(p2p_node_t *node, const char* args) {
     
     /* Simulate API call to Initiate */
     char upload_id[64];
-    snprintf(upload_id, sizeof(upload_id), "up-%lx", (unsigned long)uv_hrtime());
+    snprintf(upload_id, sizeof(upload_id), "up-%llx",
+             (unsigned long long)turbo_hrtime());
 
     /* 2. Split and Upload Parts */
     FILE *fp = fopen(filepath, "rb");
@@ -355,6 +346,26 @@ void handle_command(p2p_node_t *node, const char *cmd) {
     }
 }
 
+static void process_stdin_command(void *arg1, void *arg2) {
+    p2p_node_t *node = (p2p_node_t *)arg1;
+    char *cmd = (char *)arg2;
+
+    if (!node || !cmd) {
+        free(cmd);
+        return;
+    }
+
+    handle_command(node, cmd);
+    if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+        coro_context_stop(p2p_get_loop(node));
+    } else {
+        printf("p2p> ");
+        fflush(stdout);
+    }
+
+    free(cmd);
+}
+
 /* Main */
 int main(int argc, char *argv[]) {
     if (argc < 3) {
@@ -375,7 +386,6 @@ int main(int argc, char *argv[]) {
     /* Initialize Logger */
     tlog_config_t log_config = {0};
     log_config.min_level = TURBO_LOG_LEVEL_DEBUG;
-    log_config.async_mode = 1;
     tlog_t *logger = tlog_create(&log_config);
     if (logger) {
         turbo_file_sink_opts_t opts = {0};
@@ -415,19 +425,13 @@ int main(int argc, char *argv[]) {
     printf("Node: %s:%s\n", argv[1], argv[2]);
     printf("Type 'help' for commands.\n\n");
 
-    /* Setup stdin async handler */
     stdin_context_t stdin_ctx;
     stdin_ctx.node = node;
-    stdin_ctx.has_command = 0;
     stdin_ctx.should_exit = 0;
 
-    uv_loop_t *loop = p2p_get_loop(node);
-    uv_async_init(loop, &stdin_ctx.async, on_stdin_command);
-    stdin_ctx.async.data = &stdin_ctx;
-
     /* Start stdin thread */
-    uv_thread_t stdin_tid;
-    uv_thread_create(&stdin_tid, stdin_thread, &stdin_ctx);
+    turbo_thread_t stdin_tid = NULL;
+    turbo_thread_create(&stdin_tid, stdin_thread, &stdin_ctx);
 
     printf("p2p> ");
     fflush(stdout);
@@ -436,14 +440,13 @@ int main(int argc, char *argv[]) {
     if (p2p_start(node) != P2P_OK) {
         TLOG_ERROR("Failed to start node");
         stdin_ctx.should_exit = 1;
-        uv_thread_join(&stdin_tid);
+        turbo_thread_join(&stdin_tid);
         p2p_destroy(node);
         return 1;
     }
 
     /* Cleanup */
-    uv_thread_join(&stdin_tid);
-    uv_close((uv_handle_t *)&stdin_ctx.async, NULL);
+    turbo_thread_join(&stdin_tid);
     p2p_destroy(node);
     tlog_destroy(tlog_get_default());
 

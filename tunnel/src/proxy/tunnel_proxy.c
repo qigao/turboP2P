@@ -1,27 +1,26 @@
 /**
  * @file tunnel_proxy.c
- * @brief Proxy client implementation using netcore
- *
- * Uses netcore's async_client for proxy connections (SOCKS5, HTTP CONNECT, etc.)
+ * @brief Proxy client implementation using CoroNet streams.
  */
 #if defined(_MSC_VER) && !defined(__clang__)
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #endif
+
 #include "tunnel_proxy.h"
 #include "../core/tunnel_types.h"
+#include <CoroNet/turbo_stream.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <turbo_async_client.h>
-
 
 /* =============================================================================
  * Forward Declarations
  * ============================================================================= */
 
-static void proxy_conn_on_event(async_client_t *client, const async_client_event_t *event,
-                                void *user_data);
+static void proxy_conn_on_connect(void *handle, int status, void *peer);
+static int proxy_conn_on_recv(void *handle, const mem_slice_t *slice, void *peer);
+static void proxy_conn_on_close(void *handle);
 static void proxy_conn_process_handshake(tunnel_proxy_conn_t *conn, const uint8_t *data,
                                          size_t len);
 static void proxy_conn_send_greeting(tunnel_proxy_conn_t *conn);
@@ -29,16 +28,56 @@ static void proxy_conn_send_auth(tunnel_proxy_conn_t *conn);
 static void proxy_conn_send_connect(tunnel_proxy_conn_t *conn);
 
 /* =============================================================================
+ * Helpers
+ * ============================================================================= */
+
+static turbo_stream_kind_t proxy_stream_kind_for_host(const char *host, int use_tls) {
+  if (use_tls) {
+    return TURBO_STREAM_TLS;
+  }
+  if (host && strchr(host, ':')) {
+    return TURBO_STREAM_TCP6;
+  }
+  return TURBO_STREAM_TCP4;
+}
+
+static void proxy_conn_notify_connect(tunnel_proxy_conn_t *conn, int status) {
+  if (!conn || conn->connect_notified || !conn->connect_cb) {
+    return;
+  }
+  conn->connect_notified = 1;
+  conn->connect_cb(conn, status, conn->user_data);
+}
+
+static void proxy_conn_notify_close(tunnel_proxy_conn_t *conn) {
+  if (!conn || conn->close_notified || !conn->close_cb) {
+    return;
+  }
+  conn->close_notified = 1;
+  conn->close_cb(conn, conn->user_data);
+}
+
+static int proxy_conn_stream_send(tunnel_proxy_conn_t *conn, const uint8_t *data, size_t len) {
+  if (!conn || !conn->stream) {
+    return TUNNEL_ERR_NETWORK;
+  }
+  return turbo_stream_send(conn->stream, (const char *)data, len) == 0 ? TUNNEL_OK
+                                                                        : TUNNEL_ERR_NETWORK;
+}
+
+/* =============================================================================
  * Proxy Client Lifecycle
  * ============================================================================= */
 
 tunnel_proxy_t *tunnel_proxy_create(tunnel_t *tunnel, const tunnel_proxy_config_t *config) {
-  if (!tunnel || !config)
+  if (!tunnel || !config) {
     return NULL;
+  }
 
   tunnel_proxy_t *proxy = calloc(1, sizeof(tunnel_proxy_t));
-  if (!proxy)
+  if (!proxy) {
     return NULL;
+  }
 
   proxy->tunnel = tunnel;
   proxy->type = config->type;
@@ -61,7 +100,6 @@ tunnel_proxy_t *tunnel_proxy_create(tunnel_t *tunnel, const tunnel_proxy_config_
   }
   proxy->tls_verify = config->tls_verify;
 
-  /* Copy protocol-specific settings */
   switch (config->type) {
   case TUNNEL_PROXY_SHADOWSOCKS:
     if (config->shadowsocks.method) {
@@ -94,14 +132,14 @@ tunnel_proxy_t *tunnel_proxy_create(tunnel_t *tunnel, const tunnel_proxy_config_
 }
 
 void tunnel_proxy_destroy(tunnel_proxy_t *proxy) {
-  if (!proxy)
+  if (!proxy) {
     return;
+  }
 
-  /* Close any pooled connections */
   for (int i = 0; i < proxy->pool_count; i++) {
     if (proxy->pool[i]) {
-      async_client_close(proxy->pool[i]);
-      async_client_destroy(proxy->pool[i]);
+      turbo_stream_close(proxy->pool[i]);
+      turbo_stream_destroy(proxy->pool[i]);
       proxy->pool[i] = NULL;
     }
   }
@@ -110,20 +148,19 @@ void tunnel_proxy_destroy(tunnel_proxy_t *proxy) {
 }
 
 int tunnel_proxy_set_config(tunnel_proxy_t *proxy, const tunnel_proxy_config_t *config) {
-  if (!proxy || !config)
+  if (!proxy || !config) {
     return TUNNEL_ERR_INVALID_ARG;
+  }
 
-  /* Close existing connections */
   for (int i = 0; i < proxy->pool_count; i++) {
     if (proxy->pool[i]) {
-      async_client_close(proxy->pool[i]);
-      async_client_destroy(proxy->pool[i]);
+      turbo_stream_close(proxy->pool[i]);
+      turbo_stream_destroy(proxy->pool[i]);
       proxy->pool[i] = NULL;
     }
   }
   proxy->pool_count = 0;
 
-  /* Update configuration */
   proxy->type = config->type;
 
   if (config->host) {
@@ -143,6 +180,14 @@ int tunnel_proxy_set_config(tunnel_proxy_t *proxy, const tunnel_proxy_config_t *
     proxy->password[0] = '\0';
   }
 
+  proxy->use_tls = config->use_tls;
+  proxy->tls_verify = config->tls_verify;
+  if (config->tls_sni) {
+    strncpy(proxy->tls_sni, config->tls_sni, sizeof(proxy->tls_sni) - 1);
+  } else {
+    proxy->tls_sni[0] = '\0';
+  }
+
   return TUNNEL_OK;
 }
 
@@ -152,109 +197,122 @@ int tunnel_proxy_set_config(tunnel_proxy_t *proxy, const tunnel_proxy_config_t *
 
 static tunnel_proxy_conn_t *proxy_conn_create(tunnel_proxy_t *proxy) {
   tunnel_proxy_conn_t *conn = calloc(1, sizeof(tunnel_proxy_conn_t));
-  if (!conn)
+  if (!conn) {
     return NULL;
+  }
 
   conn->proxy = proxy;
   conn->state = TUNNEL_PROXY_STATE_INIT;
   conn->handshake_state = PROXY_HANDSHAKE_INIT;
-
   return conn;
 }
 
 static void proxy_conn_destroy(tunnel_proxy_conn_t *conn) {
-  if (!conn)
+  if (!conn) {
     return;
+  }
 
-  if (conn->client) {
-    async_client_close(conn->client);
-    async_client_destroy(conn->client);
-    conn->client = NULL;
+  if (conn->stream) {
+    turbo_stream_set_user_data(conn->stream, NULL);
+    turbo_stream_destroy(conn->stream);
+    conn->stream = NULL;
   }
 
   free(conn);
 }
 
 /* =============================================================================
- * Netcore Event Callback
+ * CoroNet Callbacks
  * ============================================================================= */
 
-static void proxy_conn_on_event(async_client_t *client, const async_client_event_t *event,
-                                void *user_data) {
-  tunnel_proxy_conn_t *conn = (tunnel_proxy_conn_t *)user_data;
-  (void)client;
+static void proxy_conn_on_connect(void *handle, int status, void *peer) {
+  turbo_stream_t *stream = (turbo_stream_t *)handle;
+  tunnel_proxy_conn_t *conn = (tunnel_proxy_conn_t *)turbo_stream_get_user_data(stream);
+  (void)peer;
 
-  switch (event->type) {
-  case ASYNC_CLIENT_EVENT_CONNECTED:
-    conn->state = TUNNEL_PROXY_STATE_HANDSHAKING;
+  if (!conn) {
+    return;
+  }
 
-    /* Start protocol handshake */
-    switch (conn->proxy->type) {
-    case TUNNEL_PROXY_SOCKS5:
-      proxy_conn_send_greeting(conn);
-      break;
-
-    case TUNNEL_PROXY_HTTP:
-      proxy_conn_send_connect(conn);
-      break;
-
-    case TUNNEL_PROXY_NONE:
-      /* Direct connection, already done */
-      conn->state = TUNNEL_PROXY_STATE_ESTABLISHED;
-      conn->handshake_state = PROXY_HANDSHAKE_COMPLETE;
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_OK, conn->user_data);
-      }
-      break;
-
-    default:
-      conn->state = TUNNEL_PROXY_STATE_ERROR;
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_ERR_NOT_SUPPORTED, conn->user_data);
-      }
-      break;
-    }
-    break;
-
-  case ASYNC_CLIENT_EVENT_DATA:
-    if (conn->state == TUNNEL_PROXY_STATE_ESTABLISHED) {
-      /* Tunnel established, forward data to application */
-      if (conn->data_cb) {
-        const uint8_t *data =
-            event->slice ? (const uint8_t *)event->slice->data : (const uint8_t *)event->data;
-        size_t len = event->slice ? event->slice->length : event->length;
-        conn->data_cb(conn, data, len, conn->user_data);
-      }
-    } else {
-      /* Still handshaking, process protocol response */
-      const uint8_t *data =
-          event->slice ? (const uint8_t *)event->slice->data : (const uint8_t *)event->data;
-      size_t len = event->slice ? event->slice->length : event->length;
-      proxy_conn_process_handshake(conn, data, len);
-    }
-    break;
-
-  case ASYNC_CLIENT_EVENT_CLOSED:
-    conn->state = TUNNEL_PROXY_STATE_CLOSED;
-    if (conn->close_cb) {
-      conn->close_cb(conn, conn->user_data);
-    }
-    break;
-
-  case ASYNC_CLIENT_EVENT_ERROR:
+  if (status != 0) {
     conn->state = TUNNEL_PROXY_STATE_ERROR;
-    if (conn->state == TUNNEL_PROXY_STATE_CONNECTING ||
-        conn->state == TUNNEL_PROXY_STATE_HANDSHAKING) {
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_ERR_NETWORK, conn->user_data);
-      }
-    } else {
-      if (conn->close_cb) {
-        conn->close_cb(conn, conn->user_data);
-      }
-    }
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+    return;
+  }
+
+  if (turbo_stream_recv_start(stream, proxy_conn_on_recv) != 0) {
+    conn->state = TUNNEL_PROXY_STATE_ERROR;
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+    turbo_stream_close(stream);
+    return;
+  }
+
+  conn->state = TUNNEL_PROXY_STATE_HANDSHAKING;
+
+  switch (conn->proxy->type) {
+  case TUNNEL_PROXY_SOCKS5:
+    proxy_conn_send_greeting(conn);
+    break;
+
+  case TUNNEL_PROXY_HTTP:
+    proxy_conn_send_connect(conn);
+    break;
+
+  case TUNNEL_PROXY_NONE:
+    conn->state = TUNNEL_PROXY_STATE_ESTABLISHED;
+    conn->handshake_state = PROXY_HANDSHAKE_COMPLETE;
+    proxy_conn_notify_connect(conn, TUNNEL_OK);
+    break;
+
+  default:
+    conn->state = TUNNEL_PROXY_STATE_ERROR;
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NOT_SUPPORTED);
     break;
   }
+}
+
+static int proxy_conn_on_recv(void *handle, const mem_slice_t *slice, void *peer) {
+  tunnel_proxy_conn_t *conn =
+      (tunnel_proxy_conn_t *)turbo_stream_get_user_data((turbo_stream_t *)handle);
+  (void)peer;
+
+  if (!conn || !slice) {
+    return 0;
+  }
+
+  if (conn->state == TUNNEL_PROXY_STATE_ESTABLISHED) {
+    if (conn->data_cb) {
+      conn->data_cb(conn, (const uint8_t *)slice->data, slice->length, conn->user_data);
+    }
+  } else {
+    proxy_conn_process_handshake(conn, (const uint8_t *)slice->data, slice->length);
+  }
+
+  return 0;
+}
+
+static void proxy_conn_on_close(void *handle) {
+  tunnel_proxy_conn_t *conn =
+      (tunnel_proxy_conn_t *)turbo_stream_get_user_data((turbo_stream_t *)handle);
+
+  if (!conn) {
+    return;
+  }
+
+  conn->stream = NULL;
+
+  if (!conn->connect_notified &&
+      (conn->state == TUNNEL_PROXY_STATE_CONNECTING ||
+       conn->state == TUNNEL_PROXY_STATE_HANDSHAKING ||
+       conn->state == TUNNEL_PROXY_STATE_AUTHENTICATING ||
+       conn->state == TUNNEL_PROXY_STATE_REQUESTING)) {
+    conn->state = TUNNEL_PROXY_STATE_ERROR;
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+    return;
+  }
+
+  conn->state = TUNNEL_PROXY_STATE_CLOSED;
+  proxy_conn_notify_close(conn);
 }
 
 /* =============================================================================
@@ -267,13 +325,16 @@ static void proxy_conn_send_greeting(tunnel_proxy_conn_t *conn) {
 
   if (tunnel_socks5_build_greeting(conn, buf, &len) != TUNNEL_OK) {
     conn->state = TUNNEL_PROXY_STATE_ERROR;
-    if (conn->connect_cb) {
-      conn->connect_cb(conn, TUNNEL_ERR_PROXY_CONNECT, conn->user_data);
-    }
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_CONNECT);
     return;
   }
 
-  async_client_send(conn->client, (const char *)buf, len);
+  if (proxy_conn_stream_send(conn, buf, len) != TUNNEL_OK) {
+    conn->state = TUNNEL_PROXY_STATE_ERROR;
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+    return;
+  }
+
   conn->handshake_state = PROXY_HANDSHAKE_GREETING_SENT;
 }
 
@@ -283,25 +344,26 @@ static void proxy_conn_send_auth(tunnel_proxy_conn_t *conn) {
 
   if (tunnel_socks5_build_auth_request(conn->proxy, buf, &len) != TUNNEL_OK) {
     conn->state = TUNNEL_PROXY_STATE_ERROR;
-    if (conn->connect_cb) {
-      conn->connect_cb(conn, TUNNEL_ERR_PROXY_AUTH, conn->user_data);
-    }
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_AUTH);
     return;
   }
 
-  async_client_send(conn->client, (const char *)buf, len);
+  if (proxy_conn_stream_send(conn, buf, len) != TUNNEL_OK) {
+    conn->state = TUNNEL_PROXY_STATE_ERROR;
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+    return;
+  }
+
   conn->handshake_state = PROXY_HANDSHAKE_AUTH_SENT;
 }
 
 static void proxy_conn_send_connect(tunnel_proxy_conn_t *conn) {
   if (conn->proxy->type == TUNNEL_PROXY_SOCKS5) {
-    /* SOCKS5 connect request */
     uint8_t buf[263];
     size_t len;
-
-    /* Determine if host is IP or domain */
     int is_ip = 0;
     unsigned int a, b, c, d;
+
     if (sscanf(conn->target_host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
       is_ip = 1;
     }
@@ -309,17 +371,18 @@ static void proxy_conn_send_connect(tunnel_proxy_conn_t *conn) {
     if (tunnel_socks5_build_connect_request(conn->target_host, conn->target_port, !is_ip, buf,
                                             &len) != TUNNEL_OK) {
       conn->state = TUNNEL_PROXY_STATE_ERROR;
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_ERR_PROXY_CONNECT, conn->user_data);
-      }
+      proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_CONNECT);
       return;
     }
 
-    async_client_send(conn->client, (const char *)buf, len);
-    conn->handshake_state = PROXY_HANDSHAKE_CONNECT_SENT;
+    if (proxy_conn_stream_send(conn, buf, len) != TUNNEL_OK) {
+      conn->state = TUNNEL_PROXY_STATE_ERROR;
+      proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+      return;
+    }
 
+    conn->handshake_state = PROXY_HANDSHAKE_CONNECT_SENT;
   } else if (conn->proxy->type == TUNNEL_PROXY_HTTP) {
-    /* HTTP CONNECT request */
     uint8_t buf[2048];
     size_t len;
 
@@ -327,13 +390,16 @@ static void proxy_conn_send_connect(tunnel_proxy_conn_t *conn) {
                                           conn->proxy->username, conn->proxy->password, buf, &len,
                                           sizeof(buf)) != TUNNEL_OK) {
       conn->state = TUNNEL_PROXY_STATE_ERROR;
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_ERR_PROXY_CONNECT, conn->user_data);
-      }
+      proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_CONNECT);
       return;
     }
 
-    async_client_send(conn->client, (const char *)buf, len);
+    if (proxy_conn_stream_send(conn, buf, len) != TUNNEL_OK) {
+      conn->state = TUNNEL_PROXY_STATE_ERROR;
+      proxy_conn_notify_connect(conn, TUNNEL_ERR_NETWORK);
+      return;
+    }
+
     conn->handshake_state = PROXY_HANDSHAKE_CONNECT_SENT;
   }
 }
@@ -344,113 +410,91 @@ static void proxy_conn_send_connect(tunnel_proxy_conn_t *conn) {
 
 static void proxy_conn_process_handshake(tunnel_proxy_conn_t *conn, const uint8_t *data,
                                          size_t len) {
-  /* Buffer incoming data */
-  if (conn->recv_len + len <= sizeof(conn->recv_buf)) {
-    memcpy(conn->recv_buf + conn->recv_len, data, len);
-    conn->recv_len += len;
-  } else {
-    /* Buffer overflow */
+  if (conn->recv_len + len > sizeof(conn->recv_buf)) {
     conn->state = TUNNEL_PROXY_STATE_ERROR;
-    if (conn->connect_cb) {
-      conn->connect_cb(conn, TUNNEL_ERR_PROXY_CONNECT, conn->user_data);
-    }
+    proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_CONNECT);
     return;
   }
+
+  memcpy(conn->recv_buf + conn->recv_len, data, len);
+  conn->recv_len += len;
 
   if (conn->proxy->type == TUNNEL_PROXY_SOCKS5) {
     switch (conn->handshake_state) {
     case PROXY_HANDSHAKE_GREETING_SENT: {
-      /* Expecting method selection response (2 bytes) */
-      if (conn->recv_len < 2)
-        return; /* Need more data */
-
       uint8_t method;
-      int ret = tunnel_socks5_parse_greeting_response(conn->recv_buf, conn->recv_len, &method);
-      if (ret != TUNNEL_OK) {
-        conn->state = TUNNEL_PROXY_STATE_ERROR;
-        if (conn->connect_cb) {
-          conn->connect_cb(conn, TUNNEL_ERR_PROXY_CONNECT, conn->user_data);
-        }
+
+      if (conn->recv_len < 2) {
         return;
       }
 
-      conn->recv_len = 0; /* Clear buffer */
+      if (tunnel_socks5_parse_greeting_response(conn->recv_buf, conn->recv_len, &method) !=
+          TUNNEL_OK) {
+        conn->state = TUNNEL_PROXY_STATE_ERROR;
+        proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_CONNECT);
+        return;
+      }
+
+      conn->recv_len = 0;
 
       if (method == 0xFF) {
-        /* No acceptable method */
         conn->state = TUNNEL_PROXY_STATE_ERROR;
-        if (conn->connect_cb) {
-          conn->connect_cb(conn, TUNNEL_ERR_PROXY_AUTH, conn->user_data);
-        }
+        proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_AUTH);
         return;
       }
 
       if (method == 0x02) {
-        /* Username/password auth required */
         proxy_conn_send_auth(conn);
       } else {
-        /* No auth, proceed to connect */
         proxy_conn_send_connect(conn);
       }
       break;
     }
 
-    case PROXY_HANDSHAKE_AUTH_SENT: {
-      /* Expecting auth response (2 bytes) */
-      if (conn->recv_len < 2)
+    case PROXY_HANDSHAKE_AUTH_SENT:
+      if (conn->recv_len < 2) {
         return;
+      }
 
-      int ret = tunnel_socks5_parse_auth_response(conn->recv_buf, conn->recv_len);
-      if (ret != TUNNEL_OK) {
+      if (tunnel_socks5_parse_auth_response(conn->recv_buf, conn->recv_len) != TUNNEL_OK) {
         conn->state = TUNNEL_PROXY_STATE_ERROR;
-        if (conn->connect_cb) {
-          conn->connect_cb(conn, TUNNEL_ERR_PROXY_AUTH, conn->user_data);
-        }
+        proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_AUTH);
         return;
       }
 
       conn->recv_len = 0;
       proxy_conn_send_connect(conn);
       break;
-    }
 
     case PROXY_HANDSHAKE_CONNECT_SENT: {
-      /* Expecting connect response (at least 10 bytes) */
-      if (conn->recv_len < 10)
-        return;
-
       uint8_t rep;
       tunnel_endpoint_t bind_addr;
-      int ret =
-          tunnel_socks5_parse_connect_response(conn->recv_buf, conn->recv_len, &rep, &bind_addr);
-      if (ret != TUNNEL_OK) {
+
+      if (conn->recv_len < 10) {
+        return;
+      }
+
+      if (tunnel_socks5_parse_connect_response(conn->recv_buf, conn->recv_len, &rep, &bind_addr) !=
+          TUNNEL_OK) {
         conn->state = TUNNEL_PROXY_STATE_ERROR;
-        if (conn->connect_cb) {
-          conn->connect_cb(conn, TUNNEL_ERR_PROXY_REFUSED, conn->user_data);
-        }
+        proxy_conn_notify_connect(conn, TUNNEL_ERR_PROXY_REFUSED);
         return;
       }
 
       conn->recv_len = 0;
       conn->state = TUNNEL_PROXY_STATE_ESTABLISHED;
       conn->handshake_state = PROXY_HANDSHAKE_COMPLETE;
-
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, TUNNEL_OK, conn->user_data);
-      }
+      proxy_conn_notify_connect(conn, TUNNEL_OK);
       break;
     }
 
     default:
       break;
     }
-
   } else if (conn->proxy->type == TUNNEL_PROXY_HTTP) {
-    /* HTTP: Look for end of headers */
     int ret = tunnel_http_parse_response(conn, conn->recv_buf, conn->recv_len);
 
     if (ret == TUNNEL_ERR_TIMEOUT) {
-      /* Incomplete, need more data */
       return;
     }
 
@@ -458,18 +502,13 @@ static void proxy_conn_process_handshake(tunnel_proxy_conn_t *conn, const uint8_
 
     if (ret != TUNNEL_OK) {
       conn->state = TUNNEL_PROXY_STATE_ERROR;
-      if (conn->connect_cb) {
-        conn->connect_cb(conn, ret, conn->user_data);
-      }
+      proxy_conn_notify_connect(conn, ret);
       return;
     }
 
     conn->state = TUNNEL_PROXY_STATE_ESTABLISHED;
     conn->handshake_state = PROXY_HANDSHAKE_COMPLETE;
-
-    if (conn->connect_cb) {
-      conn->connect_cb(conn, TUNNEL_OK, conn->user_data);
-    }
+    proxy_conn_notify_connect(conn, TUNNEL_OK);
   }
 }
 
@@ -481,57 +520,52 @@ tunnel_proxy_conn_t *tunnel_proxy_connect_tcp(tunnel_proxy_t *proxy, const char 
                                               int target_port, tunnel_proxy_connect_cb connect_cb,
                                               tunnel_proxy_data_cb data_cb,
                                               tunnel_proxy_close_cb close_cb, void *user_data) {
-  if (!proxy || !target_host)
+  const char *connect_host;
+  int connect_port;
+  turbo_stream_kind_t kind;
+
+  if (!proxy || !target_host || !proxy->tunnel || !proxy->tunnel->ctx) {
     return NULL;
+  }
 
   tunnel_proxy_conn_t *conn = proxy_conn_create(proxy);
-  if (!conn)
+  if (!conn) {
     return NULL;
+  }
 
-  /* Store target */
   strncpy(conn->target_host, target_host, sizeof(conn->target_host) - 1);
   conn->target_port = target_port;
   conn->is_udp = 0;
-
-  /* Store callbacks */
   conn->connect_cb = connect_cb;
   conn->data_cb = data_cb;
   conn->close_cb = close_cb;
   conn->user_data = user_data;
 
-  /* Determine connection target and transport */
-  const char *connect_host;
-  int connect_port;
-
   if (proxy->type == TUNNEL_PROXY_NONE) {
-    /* Direct connection */
     connect_host = target_host;
     connect_port = target_port;
+    kind = proxy_stream_kind_for_host(target_host, 0);
   } else {
-    /* Connect to proxy server */
     connect_host = proxy->host;
     connect_port = proxy->port;
+    kind = proxy_stream_kind_for_host(proxy->host, proxy->use_tls);
   }
-  /* Create netcore async client */
-  conn->client = async_client_create(proxy_conn_on_event, conn);
-  if (!conn->client) {
+
+  conn->stream = turbo_stream_create(proxy->tunnel->ctx, kind);
+  if (!conn->stream) {
     proxy_conn_destroy(conn);
     return NULL;
   }
 
-  /* Set connection timeout */
-  async_client_set_connect_timeout(conn->client, 30000); /* 30 seconds */
+  turbo_stream_set_user_data(conn->stream, conn);
+  if (kind == TURBO_STREAM_TLS) {
+    const char *sni = proxy->tls_sni[0] ? proxy->tls_sni : connect_host;
+    turbo_stream_tls_set_sni(conn->stream, sni);
+  }
 
-  /* Start connection */
   conn->state = TUNNEL_PROXY_STATE_CONNECTING;
-  
-  char connect_url[256];
-  const char *scheme = proxy->use_tls ? "tls" : "tcp";
-  snprintf(connect_url, sizeof(connect_url), "%s://%s:%d", scheme, connect_host, connect_port);
-
-  async_client_status_t status = async_client_connect(conn->client, connect_url);
-
-  if (status != ASYNC_CLIENT_STATUS_OK) {
+  if (turbo_stream_connect(conn->stream, connect_host, (unsigned short)connect_port,
+                           proxy_conn_on_connect, proxy_conn_on_close) != 0) {
     proxy_conn_destroy(conn);
     return NULL;
   }
@@ -547,45 +581,46 @@ tunnel_proxy_conn_t *tunnel_proxy_connect_udp(tunnel_proxy_t *proxy,
                                               tunnel_proxy_connect_cb connect_cb,
                                               tunnel_proxy_data_cb data_cb,
                                               tunnel_proxy_close_cb close_cb, void *user_data) {
-  if (!proxy)
+  turbo_stream_kind_t kind;
+
+  if (!proxy || !proxy->tunnel || !proxy->tunnel->ctx) {
     return NULL;
+  }
 
   tunnel_proxy_conn_t *conn = proxy_conn_create(proxy);
-  if (!conn)
+  if (!conn) {
     return NULL;
+  }
 
   conn->is_udp = 1;
-
-  /* Store callbacks */
   conn->connect_cb = connect_cb;
   conn->data_cb = data_cb;
   conn->close_cb = close_cb;
   conn->user_data = user_data;
 
-  /* For SOCKS5, establish TCP connection for UDP ASSOCIATE */
-  /* For SOCKS5, establish TCP connection for UDP ASSOCIATE */
-  if (proxy->type == TUNNEL_PROXY_SOCKS5) {
-    conn->client = async_client_create(proxy_conn_on_event, conn);
-    if (!conn->client) {
-      proxy_conn_destroy(conn);
-      return NULL;
-    }
-
+  if (proxy->type != TUNNEL_PROXY_SOCKS5) {
     conn->state = TUNNEL_PROXY_STATE_CONNECTING;
-    
-    char connect_url[256];
-    const char *scheme = proxy->use_tls ? "tls" : "tcp";
-    snprintf(connect_url, sizeof(connect_url), "%s://%s:%d", scheme, proxy->host, proxy->port);
-    
-    async_client_status_t status = async_client_connect(conn->client, connect_url);
+    return conn;
+  }
 
-    if (status != ASYNC_CLIENT_STATUS_OK) {
-      proxy_conn_destroy(conn);
-      return NULL;
-    }
-  } else {
-    /* For other protocols, UDP is typically encapsulated in TCP */
-    conn->state = TUNNEL_PROXY_STATE_CONNECTING;
+  kind = proxy_stream_kind_for_host(proxy->host, proxy->use_tls);
+  conn->stream = turbo_stream_create(proxy->tunnel->ctx, kind);
+  if (!conn->stream) {
+    proxy_conn_destroy(conn);
+    return NULL;
+  }
+
+  turbo_stream_set_user_data(conn->stream, conn);
+  if (kind == TURBO_STREAM_TLS) {
+    const char *sni = proxy->tls_sni[0] ? proxy->tls_sni : proxy->host;
+    turbo_stream_tls_set_sni(conn->stream, sni);
+  }
+
+  conn->state = TUNNEL_PROXY_STATE_CONNECTING;
+  if (turbo_stream_connect(conn->stream, proxy->host, (unsigned short)proxy->port,
+                           proxy_conn_on_connect, proxy_conn_on_close) != 0) {
+    proxy_conn_destroy(conn);
+    return NULL;
   }
 
   return conn;
@@ -600,32 +635,28 @@ int tunnel_proxy_send(tunnel_proxy_conn_t *conn, const uint8_t *data, size_t len
     return TUNNEL_ERR_INVALID_ARG;
   }
 
-  async_client_status_t status = async_client_send(conn->client, (const char *)data, len);
-  return (status == ASYNC_CLIENT_STATUS_OK) ? TUNNEL_OK : TUNNEL_ERR_NETWORK;
+  return proxy_conn_stream_send(conn, data, len);
 }
 
 int tunnel_proxy_send_udp(tunnel_proxy_conn_t *conn, const tunnel_endpoint_t *dst,
                           const uint8_t *data, size_t len) {
-  if (!conn || !dst || !data)
+  if (!conn || !dst || !data) {
     return TUNNEL_ERR_INVALID_ARG;
+  }
 
   if (conn->proxy->type == TUNNEL_PROXY_SOCKS5) {
-    /* Wrap in SOCKS5 UDP header */
     uint8_t buf[65536];
     size_t out_len;
-
     int ret = tunnel_socks5_wrap_udp(conn, dst, data, len, buf, &out_len);
+
     if (ret != TUNNEL_OK) {
       return ret;
     }
 
-    /* Send via UDP socket to relay address */
-    /* TODO: Create UDP socket to relay address */
-    return TUNNEL_ERR_NOT_SUPPORTED;
-  } else {
-    /* Other protocols: send as-is or encapsulate */
-    return tunnel_proxy_send(conn, data, len);
+    return tunnel_proxy_send(conn, buf, out_len);
   }
+
+  return tunnel_proxy_send(conn, data, len);
 }
 
 /* =============================================================================
@@ -633,13 +664,13 @@ int tunnel_proxy_send_udp(tunnel_proxy_conn_t *conn, const tunnel_endpoint_t *ds
  * ============================================================================= */
 
 void tunnel_proxy_conn_close(tunnel_proxy_conn_t *conn) {
-  if (!conn)
+  if (!conn) {
     return;
+  }
 
   conn->state = TUNNEL_PROXY_STATE_CLOSED;
-
-  if (conn->client) {
-    async_client_close(conn->client);
+  if (conn->stream) {
+    turbo_stream_close(conn->stream);
   }
 }
 

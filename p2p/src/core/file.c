@@ -37,18 +37,70 @@ void p2p_file_free(p2p_file_t *file) {
  * ============================================================================= */
 
 p2p_file_t* p2p_file_find(p2p_node_t *node, const char *key) {
+    p2p_file_t *file = NULL;
+
     if (!node || !key) return NULL;
 
+    turbo_mutex_lock(&node->mutex);
     /* Check local files */
-    p2p_file_t *file = node->local_files;
+    file = node->local_files;
     while (file) {
         if (strcmp(file->filename, key) == 0) {
+            turbo_mutex_unlock(&node->mutex);
             return file;
         }
         file = file->next;
     }
+    turbo_mutex_unlock(&node->mutex);
 
     return NULL;
+}
+
+void p2p_node_add_dht_file(p2p_node_t *node, p2p_file_t *file) {
+    if (!node || !file) {
+        return;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    p2p_file_list_add(&node->dht_files, file);
+    turbo_mutex_unlock(&node->mutex);
+}
+
+int p2p_node_search_dht_files(p2p_node_t *node, const char *filename,
+                              p2p_file_t **results, int max_results) {
+    int count = 0;
+    p2p_file_t *file = NULL;
+
+    if (!node || !filename || !results) {
+        return -1;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    file = node->dht_files;
+    while (file && count < max_results) {
+        if (strcmp(file->filename, filename) == 0) {
+            results[count++] = file;
+        }
+        file = file->next;
+    }
+    turbo_mutex_unlock(&node->mutex);
+
+    return count;
+}
+
+p2p_file_t *p2p_node_detach_dht_files(p2p_node_t *node) {
+    p2p_file_t *files = NULL;
+
+    if (!node) {
+        return NULL;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    files = node->dht_files;
+    node->dht_files = NULL;
+    turbo_mutex_unlock(&node->mutex);
+
+    return files;
 }
 
 int p2p_file_download(p2p_node_t *node, p2p_file_t *file, const char *output_path) {
@@ -151,32 +203,23 @@ void p2p_file_list_destroy(p2p_file_t *list) {
  * ============================================================================= */
 
 int p2p_file_announce(p2p_node_t *node, p2p_file_t *file) {
+    int ret = P2P_OK;
+
     if (!node || !file) return -1;
 
     /* For now, just add to local DHT list */
-    p2p_file_list_add(&node->dht_files, file);
+    p2p_node_add_dht_file(node, file);
 
     /* Professional Kademlia: Announce to K closest nodes to file->hash */
     kad_id_t file_id;
     memcpy(file_id.bytes, file->id, KADEMLIA_ID_BYTES);
     
     /* Simulate DHT STORE to neighborhood */
-    return p2p_dht_lookup_start(node, file_id.bytes, P2P_MSG_DHT_PUT);
+    ret = p2p_dht_lookup_start(node, file_id.bytes, P2P_MSG_DHT_PUT) ? P2P_OK : P2P_ERR_NOT_FOUND;
+    return ret;
 }
 
 int p2p_file_search(p2p_node_t *node, const char *filename,
                     p2p_file_t **results, int max_results) {
-    if (!node || !filename || !results) return -1;
-
-    int count = 0;
-    p2p_file_t *file = node->dht_files;
-
-    while (file && count < max_results) {
-        if (strcmp(file->filename, filename) == 0) {
-            results[count++] = file;
-        }
-        file = file->next;
-    }
-
-    return count;
+    return p2p_node_search_dht_files(node, filename, results, max_results);
 }

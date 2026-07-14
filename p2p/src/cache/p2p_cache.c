@@ -3,14 +3,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+#include <limits.h>
 #include <tlog.h>
-#include <stb_sprintf.h>
 
 #ifdef _WIN32
 #include <sys/stat.h>
 #include <windows.h>
 #include <direct.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 

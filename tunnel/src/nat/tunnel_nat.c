@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 
 
 /* =============================================================================
@@ -160,18 +160,18 @@ char *tunnel_session_key_format(const tunnel_session_key_t *key, char *buf, size
 
   if (key->src.family == AF_INET) {
     uint32_t ip = ntohl(key->src.addr.v4);
-    stbsp_snprintf(src_ip, sizeof(src_ip), "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-             (ip >> 8) & 0xFF, ip & 0xFF);
+    fmt(src_ip, sizeof(src_ip), "{}.{}.{}.{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF, ip & 0xFF);
     ip = ntohl(key->dst.addr.v4);
-    stbsp_snprintf(dst_ip, sizeof(dst_ip), "%u.%u.%u.%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
-             (ip >> 8) & 0xFF, ip & 0xFF);
+    fmt(dst_ip, sizeof(dst_ip), "{}.{}.{}.{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF, ip & 0xFF);
   } else {
-    stbsp_snprintf(src_ip, sizeof(src_ip), "[IPv6]");
-    stbsp_snprintf(dst_ip, sizeof(dst_ip), "[IPv6]");
+    fmt(src_ip, sizeof(src_ip), "[IPv6]");
+    fmt(dst_ip, sizeof(dst_ip), "[IPv6]");
   }
 
-  stbsp_snprintf(buf, len, "%s:%u -> %s:%u [%s]", src_ip, key->src.port, dst_ip, key->dst.port,
-           key->protocol == TUNNEL_IPPROTO_TCP ? "TCP" : "UDP");
+  fmt(buf, len, "{}:{} -> {}:{} [{}]", src_ip, key->src.port, dst_ip, key->dst.port,
+      key->protocol == TUNNEL_IPPROTO_TCP ? "TCP" : "UDP");
 
   return buf;
 }
@@ -196,10 +196,10 @@ int tunnel_endpoint_compare(const tunnel_endpoint_t *a, const tunnel_endpoint_t 
 char *tunnel_endpoint_format(const tunnel_endpoint_t *ep, char *buf, size_t len) {
   if (ep->family == AF_INET) {
     uint32_t ip = ntohl(ep->addr.v4);
-    stbsp_snprintf(buf, len, "%u.%u.%u.%u:%u", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF,
-             ip & 0xFF, ep->port);
+    fmt(buf, len, "{}.{}.{}.{}:{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF, ip & 0xFF, ep->port);
   } else {
-    stbsp_snprintf(buf, len, "[::%%%d]:%u", ep->family, ep->port);
+    fmt(buf, len, "[::%{}]:{}", ep->family, ep->port);
   }
   return buf;
 }

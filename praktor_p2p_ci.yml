@@ -1,0 +1,55 @@
+name: "TurboP2P CI"
+description: "Configure, build, and test TurboP2P with CMake presets via Praktor."
+
+variables:
+  WORKING_DIR: "."
+  CMAKE_PRESET: "linux-release-user"
+  TEST_PRESET: "linux-release-user"
+  BUILD_TARGET: "test_p2p test_mesh test_mesh_faults test_mesh_multihop test_mesh_paths test_fake_dns test_ip_stack test_nat test_session test_tunnel test_socks5"
+  VCPKG_INSTALL_ROOT: "vcpkg_installed"
+  VCPKG_TRIPLET: "x64-linux"
+  VCPKG_COMMAND: "/opt/vcpkg/vcpkg"
+  VCPKG_COMMAND_PREFIX: "env -u LD_PRELOAD VCPKG_FORCE_SYSTEM_BINARIES=1"
+  COMMAND_PREFIX: "env -u LD_PRELOAD"
+  TEST_COMMAND_PREFIX: "env LD_LIBRARY_PATH=/opt/turbonet/lib"
+  BUILD_ARGS: "-j 1"
+  CTEST_ARGS: ""
+
+tasks:
+  - name: vcpkg_install
+    description: "Install manifest dependencies before configure"
+    timeout: "20m"
+    working_dir: "{{ WORKING_DIR }}"
+    command: "{{ VCPKG_COMMAND_PREFIX }} {{ VCPKG_COMMAND }} install --x-manifest-root=. --x-install-root={{ VCPKG_INSTALL_ROOT }} --triplet {{ VCPKG_TRIPLET }}"
+
+  - name: configure
+    description: "Run CMake configure with the selected preset"
+    depends_on: [vcpkg_install]
+    timeout: "5m"
+    working_dir: "{{ WORKING_DIR }}"
+    command: "{{ COMMAND_PREFIX }} cmake --preset {{ CMAKE_PRESET }} --fresh"
+
+  - name: build
+    description: "Build the selected target"
+    depends_on: [configure]
+    timeout: "20m"
+    working_dir: "{{ WORKING_DIR }}"
+    command: "{{ COMMAND_PREFIX }} cmake --build --preset {{ CMAKE_PRESET }} --target {{ BUILD_TARGET }} {{ BUILD_ARGS }}"
+
+  - name: test
+    description: "Run ctest with the selected preset"
+    depends_on: [build]
+    timeout: "10m"
+    working_dir: "{{ WORKING_DIR }}"
+    command: "{{ TEST_COMMAND_PREFIX }} ctest --preset {{ TEST_PRESET }} {{ CTEST_ARGS }}"
+
+  - name: finish_report
+    description: "Report the executed preset pair"
+    depends_on: [test]
+    script: |
+      log.info(
+        "TurboP2P CI passed: configure/build preset '" +
+          ctx.get("CMAKE_PRESET") +
+          "', test preset '" +
+          ctx.get("TEST_PRESET") +
+          "'.");

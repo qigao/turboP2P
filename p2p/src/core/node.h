@@ -10,6 +10,7 @@ void p2p_node_destroy(p2p_node_t *node);
 /* File management */
 void p2p_node_add_file(p2p_node_t *node, p2p_file_t *file);
 void p2p_node_remove_file(p2p_node_t *node, const char *key);
+p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id);
 
 /* Network */
 void p2p_node_broadcast(p2p_node_t *node, p2p_message_t *msg);

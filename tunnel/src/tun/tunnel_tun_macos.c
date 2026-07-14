@@ -23,7 +23,7 @@
 #include <net/if_utun.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <stb_sprintf.h>
+#include <fmt.h>
 
 /* utun control name */
 #define UTUN_CONTROL_NAME "com.apple.net.utun_control"
@@ -152,7 +152,7 @@ int tunnel_tun_open(tunnel_tun_t *tun)
     socklen_t name_len = sizeof(tun->name);
     if (getsockopt(fd, SYSPROTO_CONTROL, UTUN_OPT_IFNAME, tun->name, &name_len) < 0) {
         /* Construct name from unit number */
-        stbsp_snprintf(tun->name, sizeof(tun->name), "utun%u", sc.sc_unit - 1);
+        fmt(tun->name, sizeof(tun->name), "utun{}", sc.sc_unit - 1);
     }
 
     tun->fd = fd;
@@ -189,7 +189,7 @@ static int run_ifconfig(const char *fmt, ...)
     va_end(args);
 
     char full_cmd[1100];
-    stbsp_snprintf(full_cmd, sizeof(full_cmd), "/sbin/ifconfig %s", cmd);
+    fmt(full_cmd, sizeof(full_cmd), "/sbin/ifconfig {}", cmd);
 
     return system(full_cmd);
 }
@@ -203,7 +203,7 @@ static int run_route(const char *fmt, ...)
     va_end(args);
 
     char full_cmd[1100];
-    stbsp_snprintf(full_cmd, sizeof(full_cmd), "/sbin/route %s", cmd);
+    fmt(full_cmd, sizeof(full_cmd), "/sbin/route {}", cmd);
 
     return system(full_cmd);
 }
@@ -246,63 +246,38 @@ int tunnel_tun_configure(tunnel_tun_t *tun)
     return TUNNEL_OK;
 }
 
-/* =============================================================================
- * libuv Integration
- * ============================================================================= */
-
-static void on_tun_poll(uv_poll_t *handle, int status, int events)
+int tunnel_tun_start(tunnel_tun_t *tun)
 {
-    tunnel_tun_t *tun = (tunnel_tun_t *)handle->data;
-
-    if (status < 0) {
-        return;
-    }
-
-    if (events & UV_READABLE) {
-        /* Read packets from utun */
-        /* utun prepends a 4-byte protocol header (AF_INET or AF_INET6) */
-        uint8_t buf[TUNNEL_RECV_BUF_SIZE];
-        ssize_t n = read(tun->fd, buf, sizeof(buf));
-
-        if (n > 4) {
-            /* Skip the 4-byte protocol header */
-            memcpy(tun->recv_buf, buf + 4, n - 4);
-            tun->packets_read++;
-            tun->bytes_read += n - 4;
-
-            if (tun->read_cb) {
-                tun->read_cb(tun, tun->recv_buf, n - 4);
-            }
-        }
-    }
-}
-
-int tunnel_tun_start(tunnel_tun_t *tun, uv_loop_t *loop)
-{
-    if (!tun || !loop || tun->fd < 0) return TUNNEL_ERR_INVALID_ARG;
-
-    /* Initialize poll handle */
-    int ret = uv_poll_init(loop, &tun->poll, tun->fd);
-    if (ret < 0) {
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
-
-    tun->poll.data = tun;
-
-    /* Start polling for read events */
-    ret = uv_poll_start(&tun->poll, UV_READABLE, on_tun_poll);
-    if (ret < 0) {
-        return TUNNEL_ERR_TUN_CONFIG;
-    }
-
-    return TUNNEL_OK;
+    return (!tun || tun->fd < 0) ? TUNNEL_ERR_INVALID_ARG : TUNNEL_OK;
 }
 
 void tunnel_tun_stop(tunnel_tun_t *tun)
 {
-    if (!tun) return;
+    (void)tun;
+}
 
-    uv_poll_stop(&tun->poll);
+int tunnel_tun_poll(tunnel_tun_t *tun)
+{
+    int processed = 0;
+    int n;
+
+    if (!tun || tun->fd < 0) {
+        return 0;
+    }
+
+    for (;;) {
+        n = tunnel_tun_read(tun, tun->recv_buf, sizeof(tun->recv_buf));
+        if (n <= 0) {
+            break;
+        }
+
+        processed++;
+        if (tun->read_cb) {
+            tun->read_cb(tun, tun->recv_buf, (size_t)n);
+        }
+    }
+
+    return processed;
 }
 
 /* =============================================================================
