@@ -87,6 +87,7 @@ listen_port: 9994
 bootstrap_peers:
   - 161.97.65.129:9993
 ice_enabled: true
+stream_enabled: false
 stun_servers:
   - stun:161.97.65.129:3479
 route_rules:
@@ -119,6 +120,18 @@ Stable identity notes:
 - `meshctl init` writes a starter config file with a freshly generated `identity_secret_hex`
 - if unset, the node uses an ephemeral identity and its mesh node id changes on restart
 - `meshctl status` / `dump` report whether identity is configured, but do not print the secret
+
+Stream admission notes:
+
+- `stream_enabled` defaults to `false`
+- enabling it advertises Stream V1 only after the current P2P handshake
+  lifecycle; the simplified Noise-like handshake is not standard Noise and is
+  not sufficient production authentication for a dedicated data connection
+- both peers must enable it and complete identity-bound HELLO before
+  `mesh_peer_stream_ready()` succeeds
+- this gate does not yet create a daemon media/data stream; the internal secure
+  bind also requires a one-time MMP ticket and RFC 9266 TLS channel binding,
+  which are not yet wired into CoroNet/meshd
 
 Current route-policy format:
 

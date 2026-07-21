@@ -58,6 +58,7 @@ extern "C" {
 #define MESH_CAP_SELECTED_PAIR_IP   (1u << 1)
 #define MESH_CAP_SIGNED_ROUTES      (1u << 2) /* Reserved */
 #define MESH_CAP_POLICY_EPOCH       (1u << 3) /* Reserved */
+#define MESH_CAP_STREAM_V1          (1u << 4)
 #define MESH_CAP_LOCAL_DEFAULT      (0u)
 
 /* =============================================================================
@@ -123,6 +124,9 @@ typedef struct {
 
 /**
  * Mesh network configuration
+ *
+ * Every array/count pair requires a non-negative count. A positive count
+ * requires a non-NULL array; invalid pairs make mesh_create() fail.
  */
 typedef struct {
     const char *virtual_ip;         /* Our virtual IP (e.g., "10.42.0.5") */
@@ -308,6 +312,67 @@ typedef struct {
     char last_ice_selected_remote_endpoint[64];
 } mesh_diag_info_t;
 
+typedef enum {
+    MESH_PATH_TRACE_KIND_NONE = 0,
+    MESH_PATH_TRACE_KIND_POLICY,
+    MESH_PATH_TRACE_KIND_DIRECT,
+    MESH_PATH_TRACE_KIND_LEARNED,
+} mesh_path_trace_kind_t;
+
+typedef enum {
+    MESH_PATH_TRACE_HYSTERESIS_STABLE = 0,
+    MESH_PATH_TRACE_HYSTERESIS_POLICY,
+    MESH_PATH_TRACE_HYSTERESIS_UNAVAILABLE,
+    MESH_PATH_TRACE_HYSTERESIS_INSUFFICIENT_GAIN,
+    MESH_PATH_TRACE_HYSTERESIS_WINDOW,
+    MESH_PATH_TRACE_HYSTERESIS_READY,
+    MESH_PATH_TRACE_HYSTERESIS_HARD_FAIL,
+} mesh_path_trace_hysteresis_t;
+
+typedef enum {
+    MESH_PATH_TRACE_METRIC_AUTHENTICATED_STREAM = 1u << 0,
+} mesh_path_trace_metric_provenance_t;
+
+typedef enum {
+    MESH_PATH_TRACE_RECOMMENDED_AVAILABLE = 1u << 0,
+    MESH_PATH_TRACE_POLICY_FORCED = 1u << 1,
+    MESH_PATH_TRACE_DIFFERS = 1u << 2,
+    MESH_PATH_TRACE_SWITCH_READY = 1u << 3,
+    MESH_PATH_TRACE_HARD_FAIL = 1u << 4,
+} mesh_path_trace_flags_t;
+
+#define MESH_PATH_TRACE_API_VERSION_V1 1u
+#define MESH_PATH_TRACE_PAGE_MAX 32u
+
+typedef struct {
+    uint32_t version;
+    uint32_t flags;
+    uint64_t sequence;
+    uint64_t observed_at_ms;
+    char dest_ip[16];
+    char current_next_hop_ip[16];
+    char recommended_next_hop_ip[16];
+    mesh_path_trace_kind_t current_kind;
+    mesh_path_trace_kind_t recommended_kind;
+    uint32_t current_cost;
+    uint32_t recommended_cost;
+    uint32_t current_metric_provenance;
+    uint32_t recommended_metric_provenance;
+    uint32_t candidate_count;
+    mesh_path_trace_hysteresis_t hysteresis;
+} mesh_path_trace_record_v1_t;
+
+typedef struct {
+    uint32_t version;
+    uint32_t returned_count;
+    uint64_t oldest_sequence;
+    uint64_t latest_sequence;
+    uint64_t next_after_sequence;
+    uint64_t overwrites;
+    int has_more;
+    int gap_detected;
+} mesh_path_trace_page_v1_t;
+
 /* =============================================================================
  * Lifecycle API
  * ============================================================================= */
@@ -386,6 +451,29 @@ CXX_C_API int mesh_ice_enable(mesh_network_t *mesh);
  * @return MESH_OK or MESH_ERR_INVALID_ARG
  */
 CXX_C_API int mesh_ice_disable(mesh_network_t *mesh);
+
+/**
+ * Enable authenticated Stream V1 admission and advertise its capability.
+ *
+ * This operation is idempotent. It only enables admission; it does not create
+ * a stream or add a second reader to the P2P transport. Call from the mesh
+ * event-loop thread.
+ *
+ * @param mesh Mesh handle
+ * @return MESH_OK or MESH_ERR_INVALID_ARG
+ */
+CXX_C_API int mesh_stream_admission_enable(mesh_network_t *mesh);
+
+/**
+ * Disable Stream V1 admission and revoke it from every current peer.
+ *
+ * This operation is idempotent and does not disconnect P2P peers. Call from
+ * the mesh event-loop thread.
+ *
+ * @param mesh Mesh handle
+ * @return MESH_OK or MESH_ERR_INVALID_ARG
+ */
+CXX_C_API int mesh_stream_admission_disable(mesh_network_t *mesh);
 
 /* =============================================================================
  * Packet Routing API
@@ -579,6 +667,16 @@ CXX_C_API int mesh_get_node_id(mesh_network_t *mesh, char *buf, size_t buf_len);
 CXX_C_API int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *info);
 
 /**
+ * Check whether a direct peer passed authenticated Stream V1 admission.
+ * Admission requires a live P2P-authenticated connection, an identity-bound
+ * HELLO for the current protocol major, and bilateral MESH_CAP_STREAM_V1.
+ * This does not create a stream or transfer data.
+ * @param peer Direct peer handle
+ * @return Non-zero when a stream transport may be attached
+ */
+CXX_C_API int mesh_peer_stream_ready(const mesh_peer_t *peer);
+
+/**
  * Find peer by virtual IP
  * @param mesh Mesh handle
  * @param virtual_ip Virtual IP address
@@ -621,6 +719,18 @@ CXX_C_API int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats);
  * @return MESH_OK on success
  */
 CXX_C_API int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info);
+
+/**
+ * Read a bounded page from the local owner-loop path trace.
+ * after_sequence is an exclusive cursor. The returned records are ordered
+ * from oldest to newest and contain no packet payload or key material.
+ * Call from the mesh event-loop thread or while the runtime is stopped.
+ */
+CXX_C_API int mesh_get_path_trace_v1(mesh_network_t *mesh,
+                                    uint64_t after_sequence,
+                                    mesh_path_trace_record_v1_t *records,
+                                    size_t record_capacity,
+                                    mesh_path_trace_page_v1_t *page);
 
 /**
  * Read a value already present in the local mesh DHT cache.

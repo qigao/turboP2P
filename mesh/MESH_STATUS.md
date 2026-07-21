@@ -1,6 +1,6 @@
 # Mesh Status
 
-Current status of the `mesh/` stack as of 2026-04-25.
+Current status of the `mesh/` stack as of 2026-07-15.
 
 This file is the operational truth. Older design docs in this folder still contain historical WebRTC/ICE wording and should not be treated as the current implementation.
 
@@ -15,6 +15,10 @@ This file is the operational truth. Older design docs in this folder still conta
 - Topology: direct peers and learned routes are now separated cleanly
 - Operator policy: config-driven pinned route rules are working
 - Admission control: config-driven peer allowlists by virtual IP and stable node identity are working
+- Stream admission: default-off `STREAM_V1` capability requires the P2P
+  handshake lifecycle, identity-bound HELLO, current protocol major, and
+  bilateral negotiation; this gate is not production authentication because
+  the current handshake is simplified Noise-like rather than standard Noise
 - Packet policy: static CIDR/protocol/port rules can filter outbound, inbound, relay-forwarded, and local-egress packets
 - MagicDNS: local static mesh-name records are configurable; full tailnet DNS is not product complete
 
@@ -292,6 +296,191 @@ Still needed:
 
 - stronger route / peer / DHT dump surfaces
 - richer health heuristics once larger-topology and churn data exists
+- the internal `mesh_mgmt_codec` now bounds and canonicalizes the structural
+  MMP/1 envelope before authentication or signature verification, but it is not installed,
+  network-connected, schema-complete, authenticated, or an implementation of
+  `mesh-agent`
+- the internal `mesh_mgmt_crypto` adapter now verifies RFC 8032 Ed25519 vectors
+  through OpenSSL EVP and BLAKE2b-256 through Monocypher; key generation,
+  persistence and secure storage remain outside this adapter
+- the internal `mesh_mgmt_envelope` now freezes all 14 MMP/1.0 common-header
+  field IDs, canonicalizes their fixed-width values, verifies payload hashes,
+  and signs/verifies the domain-separated frame before returning any borrowed
+  payload view; certificate/clock/sequence/ACL and message-specific schemas
+  remain outside this layer, and it is not connected to a network handler
+- the internal direct-trust certificate validator now freezes a 14-field
+  canonical certificate, verifies its domain-separated issuer signature,
+  mesh/time validity, and mandatory node transport/data identity bindings
+- the internal HELLO state machine now freezes HELLO/HELLO_ACK payload fields,
+  intersects versions/features/resource limits, detects signed downgrade or
+  identity mismatch, binds ACK/post-handshake frames to the HELLO origin
+  session/incarnation, and gates every post-handshake kind until mutual ACK
+- the internal replay gate now provides an allocation-bounded message-ID cache,
+  RFC 1982 sequence ordering, live-entry-preserving capacity failure, and
+  non-mutating prepare followed by generation-checked commit
+- the internal raw-frame dispatcher now owns structural decode, envelope
+  verification, session/feature binding, replay commit, and typed observer
+  event ordering; it has no callback or network side effect and explicitly
+  rejects FORWARD/COMMAND kinds without consuming replay state
+- the internal `mesh_mgmt_transport` now preserves fragmented and coalesced
+  MMP frames with one fixed 16 KiB buffer plus one retained chunk capped at 16 KiB,
+  returns generation-bound borrowed receipts, releases each recv chunk exactly
+  once, and becomes terminal on malformed length/canonical frame or I/O
+  ambiguity; its CoroNet adapter accepts only an already-open TLS 1.3 socket,
+  never owns the socket, rejects raw TCP before transport state, and passes a
+  real TLS 1.3 loopback frame exchange
+- the internal `mesh_mgmt_connection` now owns one adjacent transport plus
+  dispatcher, binds every receive to the authenticated transport peer ID,
+  keeps borrowed typed-event views alive through a synchronous consumer, and
+  commits the exact receipt only after delivery; dispatch rejection and
+  consumer rejection consume the frame then make the connection terminal,
+  while HELLO/HELLO_ACK use send-before-state-commit and close on ambiguity.
+  It exposes stable transport/dispatch-stage/consumer diagnostics, emits no
+  duplicate hot-path logs, rejects outgoing FORWARD/COMMAND traffic before IO,
+  and never owns the caller's CoroNet socket
+- the internal `mesh_mgmt_peer` now drives HELLO/HELLO_ACK without retaining a
+  private key: synchronous builders lend signed frames, while the driver
+  independently verifies the local HELLO certificate/config/transport binding
+  and requires the ACK to exactly match the accepted negotiation and original
+  local session binding. It commits the received HELLO before building ACK and
+  becomes terminal without retry on builder, signature, binding, or send failure
+- the internal `mesh_mgmt_peer_signer` now supplies the production-shaped
+  HELLO/HELLO_ACK builder contract: it verifies the caller-loaded Ed25519 seed
+  against the direct-trust certificate and mesh/node/transport identity, uses
+  TurboUtils system CSPRNG for every message ID, advances sequence only after a
+  complete signed frame exists, caps handshake frame TTL at 60 seconds, and
+  securely wipes its copied seed and frame buffer on destroy. Clock and entropy
+  remain injectable for deterministic failure tests; key generation,
+  persistence, OS-backed loading, and post-handshake message builders remain at
+  the future agent boundary
+- the internal `mesh_mgmt_p2p_adapter` now accepts only peers whose encrypted
+  P2P handshake exposes a static public key, uses that exact 32-byte key as the
+  remote transport identity, borrows one complete `P2P_MSG_CUSTOM` MMP frame
+  only for the synchronous callback, and keeps legacy custom payloads outside
+  MMP by magic classification. The per-peer `mesh_mgmt_p2p_peer` composition
+  root additionally verifies the local P2P public key against the certificate
+  transport binding and combines adapter, signer and handshake driver; a real
+  two-node encrypted P2P regression completes bilateral signed HELLO/ACK
+- the internal `mesh_mgmt_agent_router` now owns the exclusive peer/message
+  callback boundary for one P2P node and a bounded `turbo_vec_t` table of up to
+  64 per-peer MMP runtimes. It validates the local transport identity and
+  signer/dispatch templates before installation, creates connection IDs from a
+  CSPRNG-backed 128-bit process namespace plus a checked monotonic sequence,
+  routes legacy custom payloads without changing MMP state, fails closed on an
+  unknown MMP peer or protocol failure, and wipes each short-lived signer on
+  disconnect. The real two-node regression also covers callback ownership,
+  cleanup, legacy muxing, and a reconnect with a fresh connection ID
+- the internal `mesh_mgmt_endpoint_pool` now keeps a bounded identity-keyed
+  endpoint fact source: local static records outrank explicitly verified
+  discovery records; stale, expired, conflicting, and capacity-exhausting
+  updates fail closed. Owner-loop ticks provide single-flight dial state,
+  bounded connect timeout, capped exponential backoff with CSPRNG jitter, and
+  protocol-failure quarantine requiring explicit reset. Expired discovery
+  records are not redialed after their active connection closes. A real P2P
+  regression composes this pool with router established/closed callbacks and
+  automatically reconnects with a fresh MMP connection ID
+- the internal `mesh_mgmt_endpoint_record` now freezes exact 8-field canonical
+  IPv4/IPv6 payloads and verifies the MMP envelope, direct-trust certificate,
+  mesh/node/principal/transport bindings, expiry and bounded TTL before creating
+  the only record type accepted by `apply_verified`. Hostnames, multicast,
+  IPv4-mapped IPv6, wrong DHT-owner binding, tamper and stale records fail
+  closed. Its DHT key builder/parser additionally freezes the exact 139-byte
+  lowercase `mgmt:<mesh>:node:<node>` owner key and rejects aliases or zero IDs.
+  Iterative DHT lookup/refresh and anti-entropy integration, daemon timers/config,
+  and bootstrap/relay selection remain absent
+- the internal `mesh_mgmt_endpoint_publisher` validates the local transport,
+  management-key and certificate binding once, builds the exact signed endpoint
+  frame with a CSPRNG message ID and caller-owned monotonic record epoch, then
+  stores it locally and pushes it only to currently connected peers. Encode,
+  entropy, certificate-lifetime and signing failures do not advance the epoch;
+  successful publication and remote cached consumption are covered by a real
+  two-node test. Iterative lookup, periodic refresh, anti-entropy and epoch
+  persistence remain daemon-owner work
+- the internal `mesh_mgmt_agent_runtime` now composes a dedicated P2P node and
+  listener, the callback router, and the endpoint pool on one caller-driven
+  event loop. It requires an explicit nonzero listen port and every retry/
+  timeout limit, copies the caller-provided transport key into the P2P node,
+  validates all static bootstraps before binding, defaults unknown signed
+  inbound identities to rejection, and permits them only through an explicit
+  admission callback. Stop disables redial, disconnects peers, unregisters
+  callbacks, and destroys the owned node; the stopped instance is terminal.
+  Its endpoint-frame entry verifies raw signed input before mutating dial state.
+  A second entry consumes an exact frame already present in the local P2P DHT
+  cache under the canonical owner key, but deliberately never starts the
+  synchronous network lookup from inside the owner API; cache miss fails closed
+  and certificate/trust material remains caller-owned. A third entry publishes
+  the local signed endpoint frame using an explicit first record epoch.
+  Real two-node regressions cover connected-peer push, remote cached consumption,
+  tamper without endpoint-state mutation, signed establishment, explicit
+  admission, shutdown, backoff, and reconstruction on the same identity/port
+- management-listener port exclusivity is still blocked in CoroNet on Windows:
+  the IOCP TCP listener enables `SO_REUSEADDR` and exposes no exclusive-listen
+  option, and a regression probe demonstrated that two listeners can bind the
+  same host/port. The runtime propagates ordinary bind failures but cannot yet
+  guarantee occupied-port fail-fast. This needs an upstream cross-platform
+  exclusive listener option and a cross-process regression before deployment
+- the internal `mesh_stream_mgmt_ticket` now freezes exact canonical MMP
+  request/issued schemas, gates both kinds on negotiated capability, derives
+  initiator identity from the authenticated node session, requires the
+  fail-closed `OPERATOR` role baseline, and is the only MMP delivery-side
+  issuance path into the responder ticket store; response correlation, both endpoint identities,
+  stream claims, expiry and the 60-second hard TTL are verified before use
+- the internal `mesh_stream_codec` now provides allocation-free length-first
+  framing for future reliable streams, with a 256 KiB hard ceiling, canonical
+  bounded metadata, raw borrowed payload views, exact partial-input
+  requirements, and one-frame-at-a-time consumption; it remains uninstalled
+  and is not connected to P2P, CoroNet, TurboMedia, or the mesh data path
+- the internal receiver-side `mesh_stream_session` now binds OPEN to a
+  pre-authorized stream ID/epoch/class/size policy, enforces exact sequence and
+  offset progression, uses bounded absolute flow-control credit, and separates
+  receive/control prepare from generation-checked commit; it remains
+  transport-agnostic and has no application or media callback
+- the internal `mesh_stream_transport` now owns a one-frame bounded receive
+  window, releases each CoroNet recv chunk exactly once, drives synchronous
+  application acceptance before session commit, sends ACCEPT/WINDOW_UPDATE
+  before control commit, configures a send HWM, and fails terminally on
+  protocol/application/I/O ambiguity; its CoroNet entry now rejects raw TCP
+  and incomplete/non-TLS-1.3 sockets before allocating transport state
+- the internal `mesh_stream_channel` now requires an immutable admission
+  snapshot containing remote identity, authenticated generation, stream ID,
+  and stream epoch; when supplied by the authenticated peer owner, stale
+  disconnect work cannot revoke a newer channel, while close, revoke, and
+  terminal failures preserve diagnostics and release transport-owned memory
+  without taking ownership of the CoroNet socket
+- the internal `mesh_stream_registry` now enforces fixed total/per-peer channel
+  quotas, rejects duplicate admitted stream tuples, retains terminal diagnostics
+  until explicit release, and uses registry-plus-slot generations to reject
+  stale handles across both slot reuse and registry reinitialization; peer
+  revoke is restricted to an exact remote identity and admission generation
+- the internal `mesh_stream_bind` now implements an exact-length, three-message
+  Ed25519 transcript bind over a one-time, responder-owned ticket; mesh/node
+  identities, initiator/responder roles, stream/epoch, admission generation,
+  expiry, and the RFC 9266 `tls-exporter` value are signed, while a bounded
+  `ISSUED -> CHALLENGE -> CONSUMED` table retains replay tombstones until
+  expiry; tamper, replay, wrong-channel, expiry, role-reflection, truncation,
+  capacity, and invalidation tests pass
+- CoroNet now exports the fixed 32-byte RFC 9266 binding only for fully-open
+  TLS 1.3 sockets. The mesh adapter derives it directly, sends all three bind
+  messages in order, invalidates on send ambiguity, and creates a short-lived
+  authorization bound to role, remote node, admission generation, stream,
+  expiry, and that exact connection; channel/registry admission rejects raw
+  TCP, missing authorization, expired claims, or cross-connection reuse; a
+  real TLS 1.3 loopback regression completes mutual bind before registry
+  OPEN/DATA/CLOSE and verifies both endpoints receive the same authorization
+  binding
+- `meshd` and `meshctl` now accept default-off `stream_enabled`; enabling it
+  advertises `MESH_CAP_STREAM_V1` only after the P2P handshake lifecycle and
+  `mesh_peer_stream_ready()` additionally requires identity-bound HELLO,
+  bilateral capability negotiation, a current protocol major, and a live
+  direct peer; disconnect revokes admission before callbacks, while actual
+  DHT endpoint lookup/refresh orchestration, stream listener ownership,
+  ticket-event orchestration, runtime TLS bind/transfer
+  orchestration, multi-node transfer, and TurboMedia wiring remain absent
+- multi-level certificate chains, rotation/revocation, message-specific payload
+  schemas beyond Stream ticket delivery and endpoint records, command journal, product-level
+  ACL/role authorization, replay persistence, the deployable management-agent
+  service, secure persistent key loading, exclusive listener binding and
+  external configuration remain unimplemented
 
 ### 4. Policy / identity
 
@@ -410,6 +599,42 @@ Not yet verified at product scale:
 - 20+ nodes
 - churn under load
 - route convergence under larger topologies
+
+### 8. Deferred TODO inventory: optional WASM execution
+
+TurboWASM/TurboRuntime integration is deferred and is not part of the current
+Mesh RPC, data-plane, or node baseline.
+
+Scope, if this item is activated later:
+
+- only explicitly enrolled compute nodes advertise `compute.wasm.v1`; relay,
+  exit, DNS, and ordinary edge nodes do not acquire a TurboWASM dependency
+- MMP keeps its typed management operations and never exposes shell, argv,
+  arbitrary export names, or arbitrary host functions
+- the node accepts only a signed manifest and content-addressed module digest;
+  effective capabilities are the intersection of the request and immutable
+  local policy
+- execution runs in a separate low-privilege executor process with bounded
+  memory, deadline, control-flow, host-call, input, output, and audit quotas
+- cancellation, replay-safe job identity, crash recovery, result persistence,
+  and process-tree cleanup have end-to-end tests before the capability can be
+  enabled
+
+Activation requires an approved additive compute protocol and completion of
+the relevant identity, command-journal, policy, and audit prerequisites. Until
+then, TurboWASM remains inventory only and no build or deployment dependency is
+added to `TurboP2P::Mesh`, `meshd`, or `mesh-agent`.
+
+### 9. M3 distributed object storage
+
+[`M3_DISTRIBUTED_STORAGE_DESIGN.md`](M3_DISTRIBUTED_STORAGE_DESIGN.md) now defines a proposed
+M3 service above Mesh: Raft-consistent metadata over CoroNet, immutable chunk replicas over Mesh
+bulk streams, and an Iris HTTP/S3-shaped gateway. It is deliberately not part of Mesh core.
+
+No M3 runtime, Raft state machine, durable chunk store, replication, repair, GC, server-side
+SigV4 verifier, or production-safe streaming gateway exists in this repository. The current
+`p2p_minio_s3` example and `p2p_put_file()` / `p2p_get_file()` path remain incomplete integration
+prototypes and must not be described as distributed storage.
 
 ## Current Product Readiness
 

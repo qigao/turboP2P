@@ -4,6 +4,7 @@
  */
 
 #include "turbo_mesh.h"
+#include "mesh_path_optimizer.h"
 #include <fmt.h>
 #include <p2p.h>
 #include <turbo_coro.h>
@@ -27,6 +28,7 @@
 #define MESH_ICE_SHUTDOWN_DRAIN_MS 3500
 #define MESH_ICE_CLOSE_DRAIN_MS 1000
 #define MESH_LEARNED_ROUTE_TTL_MS 60000
+#define MESH_STREAM_METRICS_REFRESH_MS 1000U
 
 /* =============================================================================
  * Internal Structures
@@ -45,9 +47,13 @@ typedef struct mesh_peer_s {
     p2p_peer_t *p2p_peer;
     int is_connected;
     int announced;
+    int transport_authenticated;
     uint64_t bytes_tx;
     uint64_t bytes_rx;
     uint64_t last_seen_ms;
+    uint32_t stream_srtt_ms;
+    uint32_t stream_rttvar_ms;
+    int stream_metrics_fresh;
     turbo_ice_agent_t *ice_agent;
     char ice_local_ufrag[32];
     char ice_local_pwd[64];
@@ -95,6 +101,18 @@ typedef enum {
     MESH_NEXT_HOP_DIRECT,
     MESH_NEXT_HOP_LEARNED
 } mesh_next_hop_kind_t;
+
+typedef struct {
+    mesh_next_hop_kind_t kind;
+    mesh_peer_t *peer;
+    mesh_route_t *route;
+    const struct mesh_route_rule_entry_s *rule;
+} mesh_path_candidate_t;
+
+typedef struct {
+    mesh_path_candidate_t candidates[MESH_PATH_METRIC_CANDIDATE_LIMIT];
+    size_t candidate_count;
+} mesh_path_snapshot_t;
 
 typedef struct {
     mesh_next_hop_kind_t kind;
@@ -174,6 +192,7 @@ typedef struct mesh_network_s {
     char **bootstrap_peers;
     int bootstrap_count;
     int ice_enabled;
+    int stream_enabled;
     int ice_allow_loopback;
     char **ice_stun_servers;
     int ice_stun_count;
@@ -238,6 +257,17 @@ typedef struct mesh_network_s {
     uint32_t ice_checks_started;
     uint32_t ice_last_check_local_candidate_count;
     uint32_t ice_last_check_remote_candidate_count;
+    uint64_t stream_metrics_last_refresh_ms;
+    mesh_path_observer_store_t path_observer;
+    mesh_path_trace_store_t path_trace;
+    uint64_t path_metric_observations;
+    uint64_t path_metric_recommendation_mismatches;
+    mesh_path_metric_kind_t last_current_path_kind;
+    mesh_path_metric_kind_t last_recommended_path_kind;
+    uint32_t last_current_path_cost;
+    uint32_t last_recommended_path_cost;
+    int last_recommended_path_available;
+    int last_path_policy_forced;
     char last_reconnect_reason[64];
     char last_direct_attempt_endpoint[64];
     char last_active_relay_next_hop_virtual_ip[16];
@@ -517,17 +547,58 @@ static int mesh_p2p_peer_id_matches(p2p_peer_t *p2p_peer, const char *node_id) {
     return strcmp(peer_id_hex, node_id) == 0;
 }
 
+static int mesh_p2p_peer_identity_is_verified(p2p_peer_t *p2p_peer,
+                                              const char *node_id) {
+    uint8_t peer_id[P2P_KEY_SIZE];
+    char peer_id_hex[65] = {0};
+
+    if (!p2p_peer || !mesh_node_id_is_valid(node_id) ||
+        p2p_peer_get_public_key(p2p_peer, peer_id) != P2P_OK) {
+        return 0;
+    }
+
+    mesh_bytes_to_hex(peer_id, sizeof(peer_id), peer_id_hex,
+                      sizeof(peer_id_hex));
+    return strcmp(peer_id_hex, node_id) == 0;
+}
+
 static uint32_t mesh_local_capabilities(const mesh_network_t *mesh) {
     uint32_t capabilities = MESH_CAP_LOCAL_DEFAULT;
 
     if (mesh && mesh->ice_enabled) {
         capabilities |= MESH_CAP_SELECTED_PAIR_IP;
     }
+    if (mesh && mesh->stream_enabled) {
+        capabilities |= MESH_CAP_STREAM_V1;
+    }
     return capabilities;
 }
 
 static int mesh_peer_has_capability(const mesh_peer_t *peer, uint32_t capability) {
     return peer && (peer->negotiated_capabilities & capability) == capability;
+}
+
+static int mesh_peer_stream_binding_is_valid(const mesh_peer_t *peer) {
+    return peer && peer->mesh && peer->mesh->stream_enabled &&
+           peer->transport_authenticated && peer->announced &&
+           peer->is_connected &&
+           peer->protocol_major == MESH_PROTOCOL_MAJOR &&
+           mesh_p2p_peer_identity_is_verified(peer->p2p_peer, peer->peer_id);
+}
+
+static void mesh_peer_refresh_negotiated_capabilities(mesh_peer_t *peer) {
+    uint32_t negotiated;
+
+    if (!peer || !peer->mesh) {
+        return;
+    }
+
+    negotiated = mesh_local_capabilities(peer->mesh) & peer->capabilities;
+    if ((negotiated & MESH_CAP_STREAM_V1) != 0u &&
+        !mesh_peer_stream_binding_is_valid(peer)) {
+        negotiated &= ~MESH_CAP_STREAM_V1;
+    }
+    peer->negotiated_capabilities = negotiated;
 }
 
 static uint32_t mesh_parse_hello_capabilities(const char *payload) {
@@ -921,6 +992,43 @@ static uint64_t mesh_now_ms(void) {
     return turbo_hrtime() / 1000000;
 }
 
+static int mesh_refresh_stream_metrics(mesh_network_t *mesh) {
+    mesh_peer_t *peer = NULL;
+    uint64_t now_ms = 0;
+
+    if (!mesh) {
+        return 0;
+    }
+
+    now_ms = mesh_now_ms();
+    if (mesh->stream_metrics_last_refresh_ms != 0 &&
+        now_ms >= mesh->stream_metrics_last_refresh_ms &&
+        now_ms - mesh->stream_metrics_last_refresh_ms <
+            MESH_STREAM_METRICS_REFRESH_MS) {
+        return 0;
+    }
+    mesh->stream_metrics_last_refresh_ms = now_ms;
+
+    for (peer = mesh->peers; peer; peer = peer->next) {
+        p2p_peer_stream_metrics_t metrics = {0};
+
+        peer->stream_metrics_fresh = 0;
+        peer->stream_srtt_ms = 0;
+        peer->stream_rttvar_ms = 0;
+        if (!peer->is_connected || !peer->p2p_peer ||
+            p2p_peer_get_stream_metrics(peer->p2p_peer, &metrics) != P2P_OK ||
+            metrics.sample_count == 0 || !metrics.is_fresh) {
+            continue;
+        }
+
+        peer->stream_srtt_ms = metrics.srtt_ms;
+        peer->stream_rttvar_ms = metrics.rttvar_ms;
+        peer->stream_metrics_fresh = 1;
+    }
+
+    return 1;
+}
+
 static int mesh_ip_is_unspecified(const char *ip) {
     return ip == NULL || ip[0] == '\0' ||
            strcmp(ip, "0.0.0.0") == 0 ||
@@ -1240,6 +1348,7 @@ static mesh_peer_t *mesh_peer_create(mesh_network_t *mesh, p2p_peer_t *p2p_peer)
     peer = mesh_find_peer_by_p2p(mesh, p2p_peer);
     if (peer) {
         peer->is_connected = 1;
+        peer->transport_authenticated = 1;
         return peer;
     }
 
@@ -1248,6 +1357,7 @@ static mesh_peer_t *mesh_peer_create(mesh_network_t *mesh, p2p_peer_t *p2p_peer)
         TLOG_INFO("Reusing mesh peer for real endpoint: {}", real_ip);
         peer->p2p_peer = p2p_peer;
         peer->is_connected = 1;
+        peer->transport_authenticated = 1;
         strncpy(peer->real_ip, real_ip, sizeof(peer->real_ip) - 1);
         peer->real_ip[sizeof(peer->real_ip) - 1] = '\0';
         return peer;
@@ -1266,6 +1376,7 @@ static mesh_peer_t *mesh_peer_create(mesh_network_t *mesh, p2p_peer_t *p2p_peer)
     TLOG_DEBUG("Temporary virtual IP: {} (will be updated by HELLO)", peer->virtual_ip);
 
     peer->is_connected = 1;
+    peer->transport_authenticated = 1;
     peer->p2p_peer = p2p_peer;
 
     /* Add to mesh peer list */
@@ -1339,6 +1450,8 @@ static void mesh_peer_remove(mesh_network_t *mesh, mesh_peer_t *peer) {
             peer->p2p_peer = NULL;
             peer->is_connected = 0;
             peer->announced = 0;
+            peer->transport_authenticated = 0;
+            peer->negotiated_capabilities = 0;
             peer->next = mesh->retired_peers;
             mesh->retired_peers = peer;
             return;
@@ -2066,8 +2179,7 @@ static void mesh_ice_handle_auth(mesh_peer_t *peer, const char *payload) {
     }
     if (parsed == 4 && capabilities <= UINT32_MAX) {
         peer->capabilities = (uint32_t)capabilities;
-        peer->negotiated_capabilities =
-            mesh_local_capabilities(peer->mesh) & peer->capabilities;
+        mesh_peer_refresh_negotiated_capabilities(peer);
     }
 
     strncpy(peer->ice_remote_ufrag, ufrag, sizeof(peer->ice_remote_ufrag) - 1);
@@ -2479,37 +2591,266 @@ static mesh_route_t *mesh_learned_route_find_connected(mesh_network_t *mesh,
     return route;
 }
 
-static mesh_next_hop_result_t mesh_next_hop_resolve(mesh_network_t *mesh,
-                                                    const char *dest_ip,
-                                                    int include_policy) {
-    mesh_next_hop_result_t result;
+static void mesh_path_snapshot_add(mesh_path_snapshot_t *snapshot,
+                                   mesh_next_hop_kind_t kind,
+                                   mesh_peer_t *peer,
+                                   mesh_route_t *route,
+                                   const mesh_route_rule_entry_t *rule) {
+    mesh_path_candidate_t *candidate = NULL;
 
-    memset(&result, 0, sizeof(result));
+    if (!snapshot ||
+        snapshot->candidate_count >= MESH_PATH_METRIC_CANDIDATE_LIMIT) {
+        return;
+    }
+
+    candidate = &snapshot->candidates[snapshot->candidate_count++];
+    candidate->kind = kind;
+    candidate->peer = peer;
+    candidate->route = route;
+    candidate->rule = rule;
+}
+
+static mesh_path_snapshot_t mesh_path_snapshot_build(mesh_network_t *mesh,
+                                                     const char *dest_ip,
+                                                     int include_policy) {
+    mesh_path_snapshot_t snapshot;
+    const mesh_route_rule_entry_t *rule = NULL;
+    mesh_peer_t *peer = NULL;
+    mesh_route_t *route = NULL;
+
+    memset(&snapshot, 0, sizeof(snapshot));
     if (!mesh || !dest_ip) {
-        return result;
+        return snapshot;
     }
 
     if (include_policy) {
-        result.rule = mesh_control_route_match(mesh, dest_ip);
-        if (result.rule) {
-            result.kind = MESH_NEXT_HOP_POLICY;
-            result.peer = mesh_route_rule_next_hop_find(mesh, result.rule);
+        rule = mesh_control_route_match(mesh, dest_ip);
+        if (rule) {
+            mesh_path_snapshot_add(&snapshot, MESH_NEXT_HOP_POLICY,
+                                   mesh_route_rule_next_hop_find(mesh, rule),
+                                   NULL, rule);
+        }
+    }
+
+    peer = mesh_direct_peer_find(mesh, dest_ip);
+    if (peer) {
+        mesh_path_snapshot_add(&snapshot, MESH_NEXT_HOP_DIRECT, peer, NULL, NULL);
+    }
+
+    route = mesh_learned_route_find_connected(mesh, dest_ip);
+    if (route) {
+        mesh_path_snapshot_add(&snapshot, MESH_NEXT_HOP_LEARNED,
+                               route->next_hop, route, NULL);
+    }
+
+    return snapshot;
+}
+
+static mesh_next_hop_result_t mesh_path_snapshot_select(
+    const mesh_path_snapshot_t *snapshot) {
+    mesh_next_hop_result_t result;
+    size_t i = 0;
+
+    memset(&result, 0, sizeof(result));
+    if (!snapshot) {
+        return result;
+    }
+
+    for (i = 0; i < snapshot->candidate_count; i++) {
+        const mesh_path_candidate_t *candidate = &snapshot->candidates[i];
+
+        /* Operator policy is exclusive: an unavailable pinned next hop must
+         * fail closed instead of silently selecting a lower-priority path. */
+        if (candidate->kind == MESH_NEXT_HOP_POLICY || candidate->peer) {
+            result.kind = candidate->kind;
+            result.peer = candidate->peer;
+            result.route = candidate->route;
+            result.rule = candidate->rule;
             return result;
         }
     }
 
-    result.peer = mesh_direct_peer_find(mesh, dest_ip);
-    if (result.peer) {
-        result.kind = MESH_NEXT_HOP_DIRECT;
-        return result;
+    return result;
+}
+
+static mesh_path_metric_kind_t mesh_path_metric_kind_from_next_hop(
+    mesh_next_hop_kind_t kind) {
+    switch (kind) {
+        case MESH_NEXT_HOP_POLICY:
+            return MESH_PATH_METRIC_KIND_POLICY;
+        case MESH_NEXT_HOP_DIRECT:
+            return MESH_PATH_METRIC_KIND_DIRECT;
+        case MESH_NEXT_HOP_LEARNED:
+            return MESH_PATH_METRIC_KIND_LEARNED;
+        default:
+            return MESH_PATH_METRIC_KIND_NONE;
+    }
+}
+
+static void mesh_path_metric_candidate_set(
+    mesh_path_metric_candidate_t *candidate,
+    mesh_path_metric_kind_t kind,
+    mesh_peer_t *peer,
+    uint32_t identity,
+    uint32_t hop_count) {
+    if (!candidate) {
+        return;
     }
 
-    result.route = mesh_learned_route_find_connected(mesh, dest_ip);
-    if (result.route) {
-        result.kind = MESH_NEXT_HOP_LEARNED;
-        result.peer = result.route->next_hop;
-        return result;
+    memset(candidate, 0, sizeof(*candidate));
+    candidate->kind = kind;
+    candidate->eligible = peer != NULL && peer->is_connected;
+    candidate->identity = identity;
+    candidate->tie_break = identity;
+    candidate->hop_count = hop_count;
+    if (peer && peer->stream_metrics_fresh) {
+        candidate->available_metrics = MESH_PATH_METRIC_AVAILABLE_RTT;
+        candidate->srtt_ms = peer->stream_srtt_ms;
+        candidate->rttvar_ms = peer->stream_rttvar_ms;
+        candidate->metric_provenance =
+            MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM;
     }
+}
+
+static uint32_t mesh_path_identity(const mesh_next_hop_result_t *path) {
+    if (!path) {
+        return 0;
+    }
+    if (path->peer) {
+        return ip_str_to_uint32(path->peer->virtual_ip);
+    }
+    if (path->rule) {
+        return ip_str_to_uint32(path->rule->next_hop_virtual_ip);
+    }
+    if (path->route) {
+        return ip_str_to_uint32(path->route->next_hop_virtual_ip);
+    }
+    return 0;
+}
+
+static int mesh_path_metric_candidate_contains(
+    const mesh_path_metric_candidate_t *candidates,
+    size_t candidate_count,
+    mesh_path_metric_kind_t kind,
+    uint32_t identity) {
+    size_t i = 0;
+
+    for (i = 0; i < candidate_count; i++) {
+        if (candidates[i].kind == kind && candidates[i].identity == identity) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Evaluates bounded derived alternates on the owner loop. Time complexity is
+ * O(D*(P+R+C^2)); D <= 64, C <= 7. Space is O(C).
+ */
+static void mesh_path_observer_evaluate(mesh_network_t *mesh) {
+    uint64_t now_ms = 0;
+    size_t entry_index = 0;
+
+    if (!mesh) {
+        return;
+    }
+
+    now_ms = mesh_now_ms();
+    (void)mesh_path_observer_expire(&mesh->path_observer, now_ms);
+    for (entry_index = 0; entry_index < MESH_PATH_OBSERVER_LIMIT;
+         entry_index++) {
+        mesh_path_observer_entry_t *entry =
+            &mesh->path_observer.entries[entry_index];
+        mesh_path_metric_candidate_t
+            metric_candidates[MESH_PATH_METRIC_CANDIDATE_LIMIT];
+        mesh_path_metric_observation_t observation;
+        mesh_path_hysteresis_result_t hysteresis;
+        mesh_path_snapshot_t snapshot;
+        mesh_next_hop_result_t current;
+        char dest_ip[16] = {0};
+        size_t metric_count = 0;
+        size_t i = 0;
+
+        if (!entry->in_use) {
+            continue;
+        }
+
+        uint32_to_ip_str(entry->dest_ip, dest_ip);
+        snapshot = mesh_path_snapshot_build(mesh, dest_ip, 1);
+        current = mesh_path_snapshot_select(&snapshot);
+        memset(metric_candidates, 0, sizeof(metric_candidates));
+
+        for (i = 0; i < snapshot.candidate_count &&
+                    metric_count < MESH_PATH_METRIC_CANDIDATE_LIMIT; i++) {
+            const mesh_path_candidate_t *source = &snapshot.candidates[i];
+            mesh_next_hop_result_t source_path = {
+                source->kind, source->peer, source->route, source->rule
+            };
+            uint32_t identity = mesh_path_identity(&source_path);
+            uint32_t hop_count = source->route ? source->route->hop_count : 0;
+
+            mesh_path_metric_candidate_set(
+                &metric_candidates[metric_count++],
+                mesh_path_metric_kind_from_next_hop(source->kind),
+                source->peer, identity, hop_count);
+        }
+
+        for (i = 0; i < MESH_PATH_OBSERVER_NEXT_HOP_LIMIT &&
+                    metric_count < MESH_PATH_METRIC_CANDIDATE_LIMIT; i++) {
+            const mesh_path_observer_candidate_t *alternate =
+                &entry->candidates[i];
+            mesh_peer_t *peer = NULL;
+            char next_hop_ip[16] = {0};
+
+            if (!alternate->in_use ||
+                mesh_path_metric_candidate_contains(
+                    metric_candidates, metric_count,
+                    MESH_PATH_METRIC_KIND_LEARNED,
+                    alternate->next_hop_ip)) {
+                continue;
+            }
+            uint32_to_ip_str(alternate->next_hop_ip, next_hop_ip);
+            peer = mesh_find_peer_internal(mesh, next_hop_ip);
+            mesh_path_metric_candidate_set(
+                &metric_candidates[metric_count++],
+                MESH_PATH_METRIC_KIND_LEARNED, peer,
+                alternate->next_hop_ip, alternate->hop_count);
+        }
+
+    observation = mesh_path_metric_observe(
+            metric_candidates, metric_count,
+            mesh_path_metric_kind_from_next_hop(current.kind),
+            mesh_path_identity(&current));
+        hysteresis = mesh_path_hysteresis_observe(
+            &entry->hysteresis, &observation, now_ms);
+
+        if (mesh->path_metric_observations < UINT64_MAX) {
+            mesh->path_metric_observations++;
+        }
+        if (observation.differs &&
+            mesh->path_metric_recommendation_mismatches < UINT64_MAX) {
+            mesh->path_metric_recommendation_mismatches++;
+        }
+        mesh->last_current_path_kind = observation.current_kind;
+        mesh->last_recommended_path_kind = observation.recommended_kind;
+        mesh->last_current_path_cost = observation.current_cost;
+        mesh->last_recommended_path_cost = observation.recommended_cost;
+        mesh->last_recommended_path_available = observation.recommended_available;
+        mesh->last_path_policy_forced = observation.policy_forced;
+        mesh_path_observer_record_diagnostic(
+            entry, &observation, &hysteresis, metric_count, now_ms);
+        (void)mesh_path_trace_append_if_changed(
+            &mesh->path_trace, entry->dest_ip,
+            &entry->diagnostic, &entry->trace_baseline);
+    }
+}
+
+static mesh_next_hop_result_t mesh_next_hop_resolve(mesh_network_t *mesh,
+                                                    const char *dest_ip,
+                                                    int include_policy) {
+    mesh_path_snapshot_t snapshot =
+        mesh_path_snapshot_build(mesh, dest_ip, include_policy);
+    mesh_next_hop_result_t result = mesh_path_snapshot_select(&snapshot);
 
     return result;
 }
@@ -2622,6 +2963,13 @@ static int mesh_route_add_or_update(mesh_network_t *mesh, const char *dest_ip,
         return 0;
     }
     now_ms = mesh_now_ms();
+    if (next_hop) {
+        (void)mesh_path_observer_upsert(
+            &mesh->path_observer,
+            ip_str_to_uint32(dest_ip),
+            ip_str_to_uint32(next_hop->virtual_ip),
+            hop_count, now_ms, MESH_LEARNED_ROUTE_TTL_MS);
+    }
     direct_peer = mesh_find_peer_internal(mesh, dest_ip);
     if (direct_peer && direct_peer->is_connected) {
         mesh_route_delete(mesh, dest_ip);
@@ -3058,6 +3406,8 @@ static void mesh_on_p2p_peer_disconnected(p2p_peer_t *p2p_peer, void *user_data)
         mesh_peer_t *next = peer->next;
 
         if (peer->p2p_peer == p2p_peer) {
+            peer->transport_authenticated = 0;
+            peer->negotiated_capabilities &= ~MESH_CAP_STREAM_V1;
             if (peer->announced && mesh->on_peer_disconnected) {
                 mesh->on_peer_disconnected(peer, mesh->user_data);
             }
@@ -3389,6 +3739,7 @@ static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
         unsigned int protocol_minor = 0;
         uint32_t capabilities = 0;
         mesh_peer_t *duplicate = NULL;
+        int notify_connected = 0;
 
         if (!mesh_parse_hello_message(msg + 11,
                                       virtual_ip, sizeof(virtual_ip),
@@ -3489,7 +3840,6 @@ static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
         peer->protocol_major = (uint16_t)protocol_major;
         peer->protocol_minor = (uint16_t)protocol_minor;
         peer->capabilities = capabilities;
-        peer->negotiated_capabilities = mesh_local_capabilities(mesh) & capabilities;
         if (advertised_ip[0] != '\0' && advertised_port > 0 &&
             !mesh_ip_is_unspecified(advertised_ip)) {
             fmt(peer->advertised_real_ip, sizeof(peer->advertised_real_ip),
@@ -3499,9 +3849,11 @@ static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
         TLOG_INFO("Updated peer virtual IP to: {}", peer->virtual_ip);
         if (!peer->announced) {
             peer->announced = 1;
-            if (mesh->on_peer_connected) {
-                mesh->on_peer_connected(peer, mesh->user_data);
-            }
+            notify_connected = 1;
+        }
+        mesh_peer_refresh_negotiated_capabilities(peer);
+        if (notify_connected && mesh->on_peer_connected) {
+            mesh->on_peer_connected(peer, mesh->user_data);
         }
         if (mesh_peer_has_capability(peer, MESH_CAP_SELECTED_PAIR_IP)) {
             mesh_ice_init_peer(mesh, peer);
@@ -3694,8 +4046,7 @@ int mesh_ice_enable(mesh_network_t *mesh) {
 
     peer = mesh->peers;
     while (peer) {
-        peer->negotiated_capabilities =
-            mesh_local_capabilities(mesh) & peer->capabilities;
+        mesh_peer_refresh_negotiated_capabilities(peer);
         if (peer->p2p_peer) {
             mesh_send_hello(mesh, peer->p2p_peer);
         }
@@ -3722,8 +4073,7 @@ int mesh_ice_disable(mesh_network_t *mesh) {
     mesh->ice_enabled = 0;
     peer = mesh->peers;
     while (peer) {
-        peer->negotiated_capabilities =
-            mesh_local_capabilities(mesh) & peer->capabilities;
+        mesh_peer_refresh_negotiated_capabilities(peer);
         if (peer->p2p_peer) {
             mesh_send_hello(mesh, peer->p2p_peer);
         }
@@ -3758,6 +4108,56 @@ int mesh_ice_disable(mesh_network_t *mesh) {
     return MESH_OK;
 }
 
+int mesh_stream_admission_enable(mesh_network_t *mesh) {
+    mesh_peer_t *peer = NULL;
+
+    if (!mesh) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    if (mesh->stream_enabled) {
+        return MESH_OK;
+    }
+
+    mesh->stream_enabled = 1;
+    peer = mesh->peers;
+    while (peer) {
+        mesh_peer_refresh_negotiated_capabilities(peer);
+        if (peer->p2p_peer) {
+            mesh_send_hello(mesh, peer->p2p_peer);
+        }
+        peer = peer->next;
+    }
+
+    return MESH_OK;
+}
+
+int mesh_stream_admission_disable(mesh_network_t *mesh) {
+    mesh_peer_t *peer = NULL;
+
+    if (!mesh) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    if (!mesh->stream_enabled) {
+        return MESH_OK;
+    }
+
+    mesh->stream_enabled = 0;
+    peer = mesh->peers;
+    while (peer) {
+        mesh_peer_refresh_negotiated_capabilities(peer);
+        if (peer->p2p_peer) {
+            mesh_send_hello(mesh, peer->p2p_peer);
+        }
+        peer = peer->next;
+    }
+
+    return MESH_OK;
+}
+
+static int mesh_config_array_is_valid(const void *items, int count) {
+    return count >= 0 && (count == 0 || items != NULL);
+}
+
 void mesh_config_init(mesh_config_t *config) {
     if (!config) return;
 
@@ -3769,7 +4169,21 @@ void mesh_config_init(mesh_config_t *config) {
 mesh_network_t *mesh_create(const mesh_config_t *config) {
     mesh_ice_config_t ice_config;
 
-    if (!config || !config->virtual_ip) return NULL;
+    if (!config || !config->virtual_ip ||
+        !mesh_config_array_is_valid(config->bootstrap_peers, config->bootstrap_count) ||
+        !mesh_config_array_is_valid(config->ice_stun_servers, config->ice_stun_count) ||
+        !mesh_config_array_is_valid(config->route_rules, config->route_rule_count) ||
+        !mesh_config_array_is_valid(config->local_egress_cidrs, config->local_egress_count) ||
+        !mesh_config_array_is_valid(config->local_egress_allow_cidrs,
+                                    config->local_egress_allow_count) ||
+        !mesh_config_array_is_valid(config->magic_dns_records, config->magic_dns_record_count) ||
+        !mesh_config_array_is_valid(config->peer_allow_cidrs, config->peer_allow_count) ||
+        !mesh_config_array_is_valid(config->peer_allow_node_ids,
+                                    config->peer_allow_node_id_count) ||
+        !mesh_config_array_is_valid(config->packet_policy_rules,
+                                    config->packet_policy_rule_count)) {
+        return NULL;
+    }
 
     mesh_network_t *mesh = (mesh_network_t *)calloc(1, sizeof(mesh_network_t));
     if (!mesh) return NULL;
@@ -3830,11 +4244,24 @@ mesh_network_t *mesh_create(const mesh_config_t *config) {
 
     /* Copy bootstrap peers */
     if (config->bootstrap_peers && config->bootstrap_count > 0) {
-        mesh->bootstrap_peers = (char **)calloc(config->bootstrap_count, sizeof(char *));
-        if (mesh->bootstrap_peers) {
-            mesh->bootstrap_count = config->bootstrap_count;
-            for (int i = 0; i < config->bootstrap_count; i++) {
-                mesh->bootstrap_peers[i] = strdup(config->bootstrap_peers[i]);
+        mesh->bootstrap_peers =
+            (char **)calloc((size_t)config->bootstrap_count, sizeof(char *));
+        if (!mesh->bootstrap_peers) {
+            mesh_destroy(mesh);
+            return NULL;
+        }
+        mesh->bootstrap_count = config->bootstrap_count;
+        for (int i = 0; i < config->bootstrap_count; i++) {
+            const char *src = config->bootstrap_peers[i];
+
+            if (!src || src[0] == '\0') {
+                mesh_destroy(mesh);
+                return NULL;
+            }
+            mesh->bootstrap_peers[i] = strdup(src);
+            if (!mesh->bootstrap_peers[i]) {
+                mesh_destroy(mesh);
+                return NULL;
             }
         }
     }
@@ -4307,6 +4734,9 @@ int mesh_poll(mesh_network_t *mesh, int timeout_ms) {
         coro_context_run(mesh->ice_ctx, TURBO_RUN_NOWAIT);
     }
     mesh_cleanup_retired_peers(mesh);
+    if (mesh_refresh_stream_metrics(mesh)) {
+        mesh_path_observer_evaluate(mesh);
+    }
     mesh_route_expire_stale(mesh);
 
     /* Periodic route discovery every 100 poll cycles (~10 seconds if polled every 100ms) */
@@ -4709,6 +5139,11 @@ int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *info) {
     return MESH_OK;
 }
 
+int mesh_peer_stream_ready(const mesh_peer_t *peer) {
+    return mesh_peer_stream_binding_is_valid(peer) &&
+           mesh_peer_has_capability(peer, MESH_CAP_STREAM_V1);
+}
+
 mesh_peer_t *mesh_find_peer(mesh_network_t *mesh, const char *virtual_ip) {
     if (!mesh || !virtual_ip) return NULL;
     return mesh_find_peer_internal(mesh, virtual_ip);
@@ -4877,6 +5312,147 @@ int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info) {
         route = route->next;
     }
 
+    return MESH_OK;
+}
+
+static mesh_path_trace_kind_t mesh_path_trace_kind_to_v1(
+    mesh_path_metric_kind_t kind) {
+    switch (kind) {
+        case MESH_PATH_METRIC_KIND_POLICY:
+            return MESH_PATH_TRACE_KIND_POLICY;
+        case MESH_PATH_METRIC_KIND_DIRECT:
+            return MESH_PATH_TRACE_KIND_DIRECT;
+        case MESH_PATH_METRIC_KIND_LEARNED:
+            return MESH_PATH_TRACE_KIND_LEARNED;
+        case MESH_PATH_METRIC_KIND_NONE:
+        default:
+            return MESH_PATH_TRACE_KIND_NONE;
+    }
+}
+
+static mesh_path_trace_hysteresis_t mesh_path_trace_hysteresis_to_v1(
+    mesh_path_hysteresis_reason_t reason) {
+    switch (reason) {
+        case MESH_PATH_HYSTERESIS_POLICY:
+            return MESH_PATH_TRACE_HYSTERESIS_POLICY;
+        case MESH_PATH_HYSTERESIS_UNAVAILABLE:
+            return MESH_PATH_TRACE_HYSTERESIS_UNAVAILABLE;
+        case MESH_PATH_HYSTERESIS_INSUFFICIENT_GAIN:
+            return MESH_PATH_TRACE_HYSTERESIS_INSUFFICIENT_GAIN;
+        case MESH_PATH_HYSTERESIS_WINDOW:
+            return MESH_PATH_TRACE_HYSTERESIS_WINDOW;
+        case MESH_PATH_HYSTERESIS_READY:
+            return MESH_PATH_TRACE_HYSTERESIS_READY;
+        case MESH_PATH_HYSTERESIS_HARD_FAIL:
+            return MESH_PATH_TRACE_HYSTERESIS_HARD_FAIL;
+        case MESH_PATH_HYSTERESIS_STABLE:
+        default:
+            return MESH_PATH_TRACE_HYSTERESIS_STABLE;
+    }
+}
+
+static uint32_t mesh_path_trace_provenance_to_v1(uint32_t provenance) {
+    uint32_t result = 0;
+
+    if ((provenance &
+         MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM) != 0u) {
+        result |= MESH_PATH_TRACE_METRIC_AUTHENTICATED_STREAM;
+    }
+    return result;
+}
+
+static void mesh_path_trace_record_to_v1(
+    const mesh_path_trace_record_t *source,
+    mesh_path_trace_record_v1_t *target) {
+    const mesh_path_observer_diagnostic_t *diagnostic = NULL;
+
+    if (!source || !target) {
+        return;
+    }
+
+    memset(target, 0, sizeof(*target));
+    diagnostic = &source->diagnostic;
+    target->version = MESH_PATH_TRACE_API_VERSION_V1;
+    target->sequence = source->sequence;
+    target->observed_at_ms = diagnostic->observed_at_ms;
+    uint32_to_ip_str(source->dest_ip, target->dest_ip);
+    if (diagnostic->current_identity != 0u) {
+        uint32_to_ip_str(diagnostic->current_identity,
+                         target->current_next_hop_ip);
+    }
+    if (diagnostic->recommended_identity != 0u) {
+        uint32_to_ip_str(diagnostic->recommended_identity,
+                         target->recommended_next_hop_ip);
+    }
+    target->current_kind =
+        mesh_path_trace_kind_to_v1(diagnostic->current_kind);
+    target->recommended_kind =
+        mesh_path_trace_kind_to_v1(diagnostic->recommended_kind);
+    target->current_cost = diagnostic->current_cost;
+    target->recommended_cost = diagnostic->recommended_cost;
+    target->current_metric_provenance =
+        mesh_path_trace_provenance_to_v1(
+            diagnostic->current_metric_provenance);
+    target->recommended_metric_provenance =
+        mesh_path_trace_provenance_to_v1(
+            diagnostic->recommended_metric_provenance);
+    target->candidate_count = diagnostic->candidate_count;
+    target->hysteresis =
+        mesh_path_trace_hysteresis_to_v1(diagnostic->hysteresis_reason);
+    if (diagnostic->recommended_available) {
+        target->flags |= MESH_PATH_TRACE_RECOMMENDED_AVAILABLE;
+    }
+    if (diagnostic->policy_forced) {
+        target->flags |= MESH_PATH_TRACE_POLICY_FORCED;
+    }
+    if (diagnostic->differs) {
+        target->flags |= MESH_PATH_TRACE_DIFFERS;
+    }
+    if (diagnostic->switch_ready) {
+        target->flags |= MESH_PATH_TRACE_SWITCH_READY;
+    }
+    if (diagnostic->hard_fail) {
+        target->flags |= MESH_PATH_TRACE_HARD_FAIL;
+    }
+}
+
+int mesh_get_path_trace_v1(mesh_network_t *mesh,
+                           uint64_t after_sequence,
+                           mesh_path_trace_record_v1_t *records,
+                           size_t record_capacity,
+                           mesh_path_trace_page_v1_t *page) {
+    mesh_path_trace_record_t snapshot[MESH_PATH_TRACE_PAGE_MAX];
+    mesh_path_trace_page_t snapshot_page;
+    size_t returned = 0;
+    size_t i = 0;
+
+    if (!mesh || !page || record_capacity > MESH_PATH_TRACE_PAGE_MAX ||
+        (!records && record_capacity != 0u)) {
+        return MESH_ERR_INVALID_ARG;
+    }
+
+    memset(snapshot, 0, sizeof(snapshot));
+    memset(&snapshot_page, 0, sizeof(snapshot_page));
+    memset(page, 0, sizeof(*page));
+    if (records && record_capacity > 0u) {
+        memset(records, 0, record_capacity * sizeof(*records));
+    }
+
+    returned = mesh_path_trace_snapshot_after(
+        &mesh->path_trace, after_sequence, snapshot,
+        record_capacity, &snapshot_page);
+    for (i = 0; i < returned; i++) {
+        mesh_path_trace_record_to_v1(&snapshot[i], &records[i]);
+    }
+
+    page->version = MESH_PATH_TRACE_API_VERSION_V1;
+    page->returned_count = (uint32_t)returned;
+    page->oldest_sequence = snapshot_page.oldest_sequence;
+    page->latest_sequence = snapshot_page.latest_sequence;
+    page->next_after_sequence = snapshot_page.next_after_sequence;
+    page->overwrites = snapshot_page.overwrites;
+    page->has_more = snapshot_page.has_more;
+    page->gap_detected = snapshot_page.gap_detected;
     return MESH_OK;
 }
 

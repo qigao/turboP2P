@@ -19,13 +19,6 @@ void kad_id_from_data(const void *data, size_t len, kad_id_t *out) {
     SHA1((const unsigned char *)data, len, out->bytes);
 }
 
-void kad_id_random(kad_id_t *out) {
-    if (!out) return;
-    for (int i = 0; i < KADEMLIA_ID_BYTES; i++) {
-        out->bytes[i] = (uint8_t)(rand() & 0xFF);
-    }
-}
-
 /* XOR distance between two IDs */
 static void kad_id_xor(const kad_id_t *a, const kad_id_t *b, kad_id_t *result) {
     for (int i = 0; i < KADEMLIA_ID_BYTES; i++) {

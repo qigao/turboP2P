@@ -830,6 +830,48 @@ int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info) {
     return P2P_OK;
 }
 
+int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
+                                p2p_peer_stream_metrics_t *metrics) {
+    p2p_node_t *node = NULL;
+    uint64_t now_ms = 0;
+    uint64_t age_ms = 0;
+
+    if (!peer || !metrics) {
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    memset(metrics, 0, sizeof(*metrics));
+    metrics->sample_age_ms = UINT32_MAX;
+    node = peer->node;
+    if (node) {
+        turbo_mutex_lock(&node->mutex);
+    }
+    now_ms = turbo_hrtime() / 1000000U;
+
+    metrics->srtt_ms = peer->avg_rtt_ms > UINT32_MAX
+        ? UINT32_MAX
+        : (uint32_t)peer->avg_rtt_ms;
+    metrics->rttvar_ms = peer->rttvar_ms > UINT32_MAX
+        ? UINT32_MAX
+        : (uint32_t)peer->rttvar_ms;
+    metrics->sample_count = peer->rtt_sample_count;
+    if (peer->rtt_sample_count > 0 && peer->last_rtt_sample_ms > 0 &&
+        now_ms >= peer->last_rtt_sample_ms) {
+        age_ms = now_ms - peer->last_rtt_sample_ms;
+        metrics->sample_age_ms = age_ms > UINT32_MAX
+            ? UINT32_MAX
+            : (uint32_t)age_ms;
+        metrics->is_fresh = peer->is_connected &&
+                            peer->state == P2P_PEER_STATE_CONNECTED &&
+                            age_ms <= P2P_RTT_METRIC_FRESH_MS;
+    }
+
+    if (node) {
+        turbo_mutex_unlock(&node->mutex);
+    }
+    return P2P_OK;
+}
+
 int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info) {
     p2p_peer_info_ex_t info_ex = {0};
 

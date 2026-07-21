@@ -135,6 +135,7 @@ static int meshctl_write_init_config(FILE *fp,
     fprintf(fp, "identity_secret_hex: %s\n", cfg->identity_secret_hex);
     fprintf(fp, "listen_port: %d\n", cfg->listen_port);
     fprintf(fp, "ice_enabled: %s\n", cfg->ice_enabled ? "true" : "false");
+    fprintf(fp, "stream_enabled: %s\n", cfg->stream_enabled ? "true" : "false");
     if (cfg->ice_allow_loopback) {
         fprintf(fp, "ice_allow_loopback: true\n");
     }
@@ -1910,6 +1911,14 @@ static int meshctl_run_up(const char *config_path) {
     g_mesh = mesh_create(&mesh_cfg);
     if (!g_mesh) {
         fprintf(stderr, "Failed to create mesh\n");
+        meshctl_command_queue_destroy(&g_command_queue);
+        return 1;
+    }
+    if (g_config.stream_enabled &&
+        mesh_stream_admission_enable(g_mesh) != MESH_OK) {
+        fprintf(stderr, "Failed to enable stream admission\n");
+        mesh_destroy(g_mesh);
+        g_mesh = NULL;
         meshctl_command_queue_destroy(&g_command_queue);
         return 1;
     }

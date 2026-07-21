@@ -263,6 +263,8 @@ config.max_hops = 3;             /* Max relay hops */
 - [ ] Bandwidth limiting
 - [ ] QoS prioritization
 - [ ] Web UI for node management
+- [ ] Optional TurboWASM compute executor on explicitly enrolled compute nodes
+      (deferred; not a Mesh RPC, core-library, or ordinary-node dependency)
 
 ## 🤝 Contributing
 

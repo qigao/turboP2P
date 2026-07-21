@@ -223,31 +223,77 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     return p2p_send_owned_message(peer, reply);
 }
 
+int p2p_peer_record_rtt_sample_locked(p2p_peer_t *peer,
+                                      uint64_t sent_ms,
+                                      uint64_t received_ms) {
+    uint64_t rtt_ms = 0;
+    uint64_t delta_ms = 0;
+
+    if (!peer || sent_ms == 0 || peer->outstanding_ping_ms != sent_ms) {
+        return 0;
+    }
+
+    /* A matching response consumes the outstanding probe even when its clock
+     * value is invalid, so one malformed response cannot pin the probe state. */
+    peer->outstanding_ping_ms = 0;
+    if (received_ms < sent_ms) {
+        return 0;
+    }
+
+    rtt_ms = received_ms - sent_ms;
+    if (rtt_ms > P2P_RTT_SAMPLE_MAX_MS) {
+        return 0;
+    }
+
+    if (peer->rtt_sample_count == 0) {
+        peer->avg_rtt_ms = rtt_ms;
+        peer->rttvar_ms = rtt_ms / 2U;
+    } else {
+        delta_ms = peer->avg_rtt_ms > rtt_ms
+            ? peer->avg_rtt_ms - rtt_ms
+            : rtt_ms - peer->avg_rtt_ms;
+        peer->rttvar_ms = (3U * peer->rttvar_ms + delta_ms) / 4U;
+        peer->avg_rtt_ms = (7U * peer->avg_rtt_ms + rtt_ms) / 8U;
+    }
+
+    if (peer->rtt_sample_count < UINT32_MAX) {
+        peer->rtt_sample_count++;
+    }
+    peer->last_rtt_sample_ms = received_ms;
+    return 1;
+}
+
 int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg) {
     p2p_peer_info_ex_t peer_info = {0};
+    uint64_t now_ms = 0;
+    uint64_t rtt_ms = 0;
+    int sample_accepted = 0;
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
-    /* Update RTT and Vivaldi */
-    uint64_t now = turbo_hrtime() / 1000000;
-    uint64_t rtt = now - msg->payload.ping.timestamp;
-
+    now_ms = turbo_hrtime() / 1000000U;
     turbo_mutex_lock(&node->mutex);
     memcpy(peer->id, msg->payload.ping.node_id, P2P_DHT_KEY_SIZE);
     p2p_publish_peer_route(node, &msg->payload.ping);
-    
-    peer->avg_rtt_ms = (peer->avg_rtt_ms == 0) ? rtt : (uint64_t)(peer->avg_rtt_ms * 0.8 + rtt * 0.2);
-    
-    vivaldi_coord_t remote_coord;
-    memcpy(remote_coord.coords, msg->payload.ping.coords, sizeof(double)*4);
-    remote_coord.height = msg->payload.ping.height;
-    remote_coord.error = msg->payload.ping.error;
-    
-    vivaldi_update(&node->coord, &remote_coord, (double)rtt);
-    p2p_peer_fill_info_ex_locked(peer, &peer_info);
+
+    sample_accepted = p2p_peer_record_rtt_sample_locked(
+        peer, msg->payload.ping.timestamp, now_ms);
+    if (sample_accepted) {
+        vivaldi_coord_t remote_coord;
+
+        rtt_ms = now_ms - msg->payload.ping.timestamp;
+        memcpy(remote_coord.coords, msg->payload.ping.coords, sizeof(double) * 4);
+        remote_coord.height = msg->payload.ping.height;
+        remote_coord.error = msg->payload.ping.error;
+        vivaldi_update(&node->coord, &remote_coord, (double)rtt_ms);
+        p2p_peer_fill_info_ex_locked(peer, &peer_info);
+    }
     turbo_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)", peer_info.ip, peer_info.port, rtt);
+    if (sample_accepted) {
+        TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)",
+                   peer_info.ip, peer_info.port, rtt_ms);
+    }
     return P2P_OK;
 }
 

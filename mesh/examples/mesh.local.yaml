@@ -7,6 +7,7 @@ listen_port: 9994
 bootstrap_peers:
   - 161.97.65.129:9993
 ice_enabled: true
+stream_enabled: false
 stun_servers:
   - stun:161.97.65.129:3479
 # route_rules:

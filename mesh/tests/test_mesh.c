@@ -1144,6 +1144,173 @@ static int mesh_test_wait_for_min_peers(mesh_network_t **nodes, int node_count,
     return 0;
 }
 
+typedef struct {
+    int disconnect_count;
+    int ready_during_disconnect;
+} mesh_stream_admission_observer_t;
+
+static void mesh_test_stream_peer_disconnected(mesh_peer_t *peer, void *user_data) {
+    mesh_stream_admission_observer_t *observer =
+        (mesh_stream_admission_observer_t *)user_data;
+
+    if (!observer) {
+        return;
+    }
+
+    observer->disconnect_count++;
+    if (mesh_peer_stream_ready(peer)) {
+        observer->ready_during_disconnect = 1;
+    }
+}
+
+static void test_stream_capability_requires_authenticated_bilateral_admission(void) {
+    const char *enabled_bootstrap[] = {"127.0.0.1:20931"};
+    const char *disabled_bootstrap[] = {"127.0.0.1:20931"};
+    mesh_stream_admission_observer_t observer = {0};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *enabled = NULL;
+    mesh_network_t *disabled = NULL;
+    mesh_network_t *nodes[3] = {NULL};
+    mesh_peer_t *leader_enabled_peer = NULL;
+    mesh_peer_t *leader_disabled_peer = NULL;
+    mesh_peer_t *enabled_leader_peer = NULL;
+    mesh_peer_t *disabled_leader_peer = NULL;
+    mesh_peer_info_t leader_enabled_info;
+    mesh_peer_info_t leader_disabled_info;
+    mesh_peer_info_t enabled_leader_info;
+    mesh_peer_info_t disabled_leader_info;
+    int leader_started = 0;
+    int enabled_started = 0;
+    int disabled_started = 0;
+    int peers_ready = 0;
+
+    printf("\n[TEST] test_stream_capability_requires_authenticated_bilateral_admission\n");
+
+    check_int_eq(MESH_ERR_INVALID_ARG, mesh_stream_admission_enable(NULL));
+    check_int_eq(MESH_ERR_INVALID_ARG, mesh_stream_admission_disable(NULL));
+    check_int_eq(0, mesh_peer_stream_ready(NULL));
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.19.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 20931;
+    leader_cfg.on_peer_disconnected = mesh_test_stream_peer_disconnected;
+    leader_cfg.user_data = &observer;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    if (leader) {
+        check_int_eq(MESH_OK, mesh_stream_admission_enable(leader));
+        check_int_eq(MESH_OK, mesh_stream_admission_enable(leader));
+        leader_started = (mesh_start(leader) == MESH_OK);
+    }
+
+    mesh_config_t enabled_cfg;
+    mesh_config_init(&enabled_cfg);
+    enabled_cfg.virtual_ip = "10.42.19.2";
+    enabled_cfg.virtual_prefix = 16;
+    enabled_cfg.listen_port = 20932;
+    enabled_cfg.bootstrap_peers = enabled_bootstrap;
+    enabled_cfg.bootstrap_count = 1;
+    enabled = mesh_create(&enabled_cfg);
+    check_not_null(enabled);
+    if (enabled) {
+        check_int_eq(MESH_OK, mesh_stream_admission_enable(enabled));
+        check_int_eq(MESH_OK, mesh_stream_admission_disable(enabled));
+        check_int_eq(MESH_OK, mesh_stream_admission_disable(enabled));
+        check_int_eq(MESH_OK, mesh_stream_admission_enable(enabled));
+        enabled_started = (mesh_start(enabled) == MESH_OK);
+    }
+
+    mesh_config_t disabled_cfg;
+    mesh_config_init(&disabled_cfg);
+    disabled_cfg.virtual_ip = "10.42.19.3";
+    disabled_cfg.virtual_prefix = 16;
+    disabled_cfg.listen_port = 20933;
+    disabled_cfg.bootstrap_peers = disabled_bootstrap;
+    disabled_cfg.bootstrap_count = 1;
+    disabled = mesh_create(&disabled_cfg);
+    check_not_null(disabled);
+    if (disabled) {
+        disabled_started = (mesh_start(disabled) == MESH_OK);
+    }
+
+    nodes[0] = leader;
+    nodes[1] = enabled;
+    nodes[2] = disabled;
+
+    if (leader_started && enabled_started && disabled_started) {
+        peers_ready = mesh_test_wait_for_min_peers(nodes, 3, 1, 80);
+    }
+
+    for (int i = 0; peers_ready && i < 80; i++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        leader_enabled_peer = mesh_find_peer(leader, "10.42.19.2");
+        leader_disabled_peer = mesh_find_peer(leader, "10.42.19.3");
+        enabled_leader_peer = mesh_find_peer(enabled, "10.42.19.1");
+        disabled_leader_peer = mesh_find_peer(disabled, "10.42.19.1");
+        if (leader_enabled_peer && leader_disabled_peer &&
+            enabled_leader_peer && disabled_leader_peer) {
+            break;
+        }
+    }
+
+    memset(&leader_enabled_info, 0, sizeof(leader_enabled_info));
+    memset(&leader_disabled_info, 0, sizeof(leader_disabled_info));
+    memset(&enabled_leader_info, 0, sizeof(enabled_leader_info));
+    memset(&disabled_leader_info, 0, sizeof(disabled_leader_info));
+    if (leader_enabled_peer) {
+        mesh_get_peer_handle_info(leader_enabled_peer, &leader_enabled_info);
+    }
+    if (leader_disabled_peer) {
+        mesh_get_peer_handle_info(leader_disabled_peer, &leader_disabled_info);
+    }
+    if (enabled_leader_peer) {
+        mesh_get_peer_handle_info(enabled_leader_peer, &enabled_leader_info);
+    }
+    if (disabled_leader_peer) {
+        mesh_get_peer_handle_info(disabled_leader_peer, &disabled_leader_info);
+    }
+
+    check(leader_started);
+    check(enabled_started);
+    check(disabled_started);
+    check(peers_ready);
+    check_not_null(leader_enabled_peer);
+    check_not_null(leader_disabled_peer);
+    check_not_null(enabled_leader_peer);
+    check_not_null(disabled_leader_peer);
+    check(mesh_peer_stream_ready(leader_enabled_peer));
+    check(mesh_peer_stream_ready(enabled_leader_peer));
+    check_int_eq(0, mesh_peer_stream_ready(leader_disabled_peer));
+    check_int_eq(0, mesh_peer_stream_ready(disabled_leader_peer));
+    check((leader_enabled_info.capabilities & MESH_CAP_STREAM_V1) != 0u);
+    check((enabled_leader_info.capabilities & MESH_CAP_STREAM_V1) != 0u);
+    check((leader_enabled_info.negotiated_capabilities & MESH_CAP_STREAM_V1) != 0u);
+    check((enabled_leader_info.negotiated_capabilities & MESH_CAP_STREAM_V1) != 0u);
+    check_uint_eq(0u, leader_disabled_info.capabilities & MESH_CAP_STREAM_V1);
+    check((disabled_leader_info.capabilities & MESH_CAP_STREAM_V1) != 0u);
+    check_uint_eq(0u, leader_disabled_info.negotiated_capabilities & MESH_CAP_STREAM_V1);
+    check_uint_eq(0u, disabled_leader_info.negotiated_capabilities & MESH_CAP_STREAM_V1);
+
+    mesh_test_stop_destroy(&disabled);
+    nodes[2] = NULL;
+    mesh_test_stop_destroy(&enabled);
+    nodes[1] = NULL;
+    for (int i = 0; leader && observer.disconnect_count < 2 && i < 40; i++) {
+        mesh_test_poll_many(nodes, 1, 1, 100, 50);
+    }
+
+    check(observer.disconnect_count >= 2);
+    check_int_eq(0, observer.ready_during_disconnect);
+
+    mesh_test_stop_destroy(&disabled);
+    mesh_test_stop_destroy(&enabled);
+    mesh_test_stop_destroy(&leader);
+
+    printf("[TEST] ✓ stream admission capability test completed\n");
+}
+
 void test_connect_peer_uses_advertise_ip(void) {
     const char *bootstrap_peers[] = {"127.0.0.1:20401"};
     mesh_network_t *leader = NULL;
@@ -2274,6 +2441,9 @@ spec("mesh vpn") {
         it("routes packets after hello") { test_packet_routing_with_hello(); }
         it("learns relay routes") { test_route_learning(); }
         it("connects directly using advertise ip") { test_connect_peer_uses_advertise_ip(); }
+        it("admits streams only after authenticated bilateral capability negotiation") {
+            test_stream_capability_requires_authenticated_bilateral_admission();
+        }
     }
 
     describe("policy") {

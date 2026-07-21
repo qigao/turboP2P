@@ -72,7 +72,6 @@ void kademlia_destroy(kademlia_dht_t *dht);
 
 /* ID operations */
 void kad_id_from_data(const void *data, size_t len, kad_id_t *out);
-void kad_id_random(kad_id_t *out);
 int kad_id_distance_cmp(const kad_id_t *target, const kad_id_t *a, const kad_id_t *b);
 int kad_id_prefix_len(const kad_id_t *a, const kad_id_t *b);
 

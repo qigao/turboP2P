@@ -654,6 +654,7 @@ void mesh_node_config_init(mesh_node_config_t *cfg) {
     cfg->virtual_prefix = 16;
     cfg->listen_port = MESH_DEFAULT_PORT;
     cfg->ice_enabled = 0;
+    cfg->stream_enabled = 0;
     cfg->ice_allow_loopback = 0;
     cfg->status_interval_ms = 1000;
 }
@@ -940,6 +941,8 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
                 cfg->listen_port = (int)strtol(value, NULL, 10);
             } else if (strcmp(key, "ice_enabled") == 0) {
                 cfg->ice_enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) ? 1 : 0;
+            } else if (strcmp(key, "stream_enabled") == 0) {
+                cfg->stream_enabled = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) ? 1 : 0;
             } else if (strcmp(key, "ice_allow_loopback") == 0) {
                 cfg->ice_allow_loopback = (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) ? 1 : 0;
             } else if (strcmp(key, "status_file") == 0) {
@@ -1106,6 +1109,7 @@ void mesh_node_config_print(const mesh_node_config_t *cfg) {
     printf("identity       : %s\n", cfg->identity_secret_hex[0] ? "configured" : "(ephemeral)");
     printf("listen_port    : %d\n", cfg->listen_port);
     printf("ice_enabled    : %s\n", cfg->ice_enabled ? "true" : "false");
+    printf("stream_enabled : %s\n", cfg->stream_enabled ? "true" : "false");
     printf("ice_loopback   : %s\n", cfg->ice_allow_loopback ? "true" : "false");
     printf("status_file    : %s\n", cfg->status_file[0] ? cfg->status_file : "(unset)");
     printf("pid_file       : %s\n", cfg->pid_file[0] ? cfg->pid_file : "(unset)");

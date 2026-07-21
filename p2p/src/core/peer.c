@@ -785,6 +785,12 @@ void p2p_peer_stream_connect(void *handle, int status, void *arg) {
     peer->state = P2P_PEER_STATE_HANDSHAKING;
     peer->connect_time = turbo_hrtime();
     peer->last_seen = peer->connect_time;
+    peer->avg_rtt_ms = 0;
+    peer->rttvar_ms = 0;
+    peer->last_rtt_sample_ms = 0;
+    peer->last_ping_sent_ms = 0;
+    peer->outstanding_ping_ms = 0;
+    peer->rtt_sample_count = 0;
     turbo_mutex_unlock(&node->mutex);
     p2p_node_on_peer_connected(node, peer);
     p2p_peer_release(peer);

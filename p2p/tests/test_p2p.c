@@ -247,6 +247,31 @@ void test_p2p_generate_private_key(void) {
     check_int_eq(P2P_ERR_INVALID_ARG, p2p_generate_private_key(NULL));
 }
 
+void test_p2p_crypto_random_uses_checked_csprng(void) {
+    uint8_t random_bytes[P2P_KEY_SIZE] = {0};
+    uint8_t zero[P2P_KEY_SIZE] = {0};
+
+    check_int_eq(P2P_OK, p2p_crypto_random(random_bytes, sizeof(random_bytes)));
+    check(memcmp(random_bytes, zero, sizeof(random_bytes)) != 0);
+    check_int_eq(P2P_OK, p2p_crypto_random(NULL, 0));
+    check_int_eq(P2P_ERR_INVALID_ARG, p2p_crypto_random(NULL, 1));
+}
+
+void test_p2p_endpoint_ids_are_deterministic(void) {
+    const int first_port = 24001;
+    const int second_port = 24002;
+    kad_id_t first = {0};
+    kad_id_t same = {0};
+    kad_id_t different = {0};
+
+    p2p_endpoint_to_id("127.0.0.1", first_port, &first);
+    p2p_endpoint_to_id("127.0.0.1", first_port, &same);
+    p2p_endpoint_to_id("127.0.0.1", second_port, &different);
+
+    check_mem_eq(first.bytes, same.bytes, sizeof(first.bytes));
+    check_mem_ne(first.bytes, different.bytes, sizeof(first.bytes));
+}
+
 void test_p2p_public_key_from_private_key(void) {
     uint8_t secret[P2P_KEY_SIZE] = {0};
     uint8_t derived_public_key[P2P_KEY_SIZE] = {0};
@@ -505,6 +530,78 @@ void test_p2p_peer_create_valid(void) {
     check_int_eq(9999, info.port);
     check_ptr_eq(test_node, peer->node);
     check_int_eq(0, info.is_connected);
+    p2p_peer_destroy(peer);
+}
+
+void test_p2p_peer_stream_metrics_are_bounded_and_read_only(void) {
+    p2p_peer_t *peer = p2p_peer_create(test_node, "127.0.0.1", 9999);
+    p2p_peer_stream_metrics_t metrics = {0};
+    uint64_t now_ms = turbo_hrtime() / 1000000U;
+    uint64_t sent_ms = now_ms > 10U ? now_ms - 10U : now_ms;
+
+    check_not_null(peer);
+    check_int_eq(P2P_ERR_INVALID_ARG,
+                 p2p_peer_get_stream_metrics(NULL, &metrics));
+    check_int_eq(P2P_ERR_INVALID_ARG,
+                 p2p_peer_get_stream_metrics(peer, NULL));
+    check_int_eq(P2P_OK, p2p_peer_get_stream_metrics(peer, &metrics));
+    check_uint_eq(0, metrics.sample_count);
+    check_uint_eq(UINT32_MAX, metrics.sample_age_ms);
+    check_false(metrics.is_fresh);
+
+    if (sent_ms > 0) {
+        turbo_mutex_lock(&test_node->mutex);
+        peer->is_connected = 1;
+        peer->state = P2P_PEER_STATE_CONNECTED;
+        peer->outstanding_ping_ms = sent_ms;
+        check(p2p_peer_record_rtt_sample_locked(peer, sent_ms, now_ms));
+        turbo_mutex_unlock(&test_node->mutex);
+
+        check_int_eq(P2P_OK, p2p_peer_get_stream_metrics(peer, &metrics));
+        check_uint_eq((uint32_t)(now_ms - sent_ms), metrics.srtt_ms);
+        check_uint_eq((uint32_t)(now_ms - sent_ms) / 2U, metrics.rttvar_ms);
+        check_uint_eq(1, metrics.sample_count);
+        check(metrics.sample_age_ms <= P2P_RTT_METRIC_FRESH_MS);
+        check(metrics.is_fresh);
+
+        turbo_mutex_lock(&test_node->mutex);
+        peer->is_connected = 0;
+        peer->state = P2P_PEER_STATE_DISCONNECTED;
+        turbo_mutex_unlock(&test_node->mutex);
+        check_int_eq(P2P_OK, p2p_peer_get_stream_metrics(peer, &metrics));
+        check_false(metrics.is_fresh);
+    }
+
+    p2p_peer_destroy(peer);
+}
+
+void test_p2p_rtt_estimator_rejects_unmatched_and_unbounded_samples(void) {
+    p2p_peer_t *peer = p2p_peer_create(test_node, "127.0.0.1", 9999);
+
+    check_not_null(peer);
+    peer->outstanding_ping_ms = 1000;
+    check_false(p2p_peer_record_rtt_sample_locked(peer, 999, 1099));
+    check_uint_eq(0, peer->rtt_sample_count);
+    check_uint_eq(1000, peer->outstanding_ping_ms);
+
+    check(p2p_peer_record_rtt_sample_locked(peer, 1000, 1100));
+    check_uint_eq(100, peer->avg_rtt_ms);
+    check_uint_eq(50, peer->rttvar_ms);
+    check_uint_eq(1, peer->rtt_sample_count);
+    check_uint_eq(0, peer->outstanding_ping_ms);
+
+    peer->outstanding_ping_ms = 2000;
+    check(p2p_peer_record_rtt_sample_locked(peer, 2000, 2040));
+    check_uint_eq(92, peer->avg_rtt_ms);
+    check_uint_eq(52, peer->rttvar_ms);
+    check_uint_eq(2, peer->rtt_sample_count);
+
+    peer->outstanding_ping_ms = 3000;
+    check_false(p2p_peer_record_rtt_sample_locked(
+        peer, 3000, 3000 + (uint64_t)P2P_RTT_SAMPLE_MAX_MS + 1U));
+    check_uint_eq(2, peer->rtt_sample_count);
+    check_uint_eq(0, peer->outstanding_ping_ms);
+
     p2p_peer_destroy(peer);
 }
 
@@ -1084,11 +1181,151 @@ void test_p2p_two_nodes_real_connection(void) {
         printf("[TEST] ⚠ Message not delivered (event loop issue)\n");
     }
 
+    /* The authenticated identity ping provides the first stream sample. Force
+     * the low-frequency scheduler due and verify that maintenance adds another
+     * sample without introducing a new wire message type. */
+    p2p_peer_t *metrics_peer = p2p_peer_find(node2, "127.0.0.1", port1);
+    p2p_peer_stream_metrics_t stream_metrics = {0};
+    uint32_t first_sample_count = 0;
+
+    check_not_null(metrics_peer);
+    if (metrics_peer) {
+        for (int i = 0; i < 100; i++) {
+            coro_context_run(p2p_get_loop(node1), TURBO_RUN_NOWAIT);
+            coro_context_run(p2p_get_loop(node2), TURBO_RUN_NOWAIT);
+            check_int_eq(P2P_OK,
+                         p2p_peer_get_stream_metrics(metrics_peer, &stream_metrics));
+            if (stream_metrics.sample_count > 0) {
+                break;
+            }
+            turbo_sleep_ms(10);
+        }
+        check(stream_metrics.sample_count > 0);
+        check(stream_metrics.is_fresh);
+        first_sample_count = stream_metrics.sample_count;
+
+        turbo_mutex_lock(&node2->mutex);
+        uint64_t probe_now_ms = turbo_hrtime() / 1000000U;
+        metrics_peer->outstanding_ping_ms = 0;
+        metrics_peer->last_ping_sent_ms = probe_now_ms > P2P_RTT_PROBE_INTERVAL_MS
+            ? probe_now_ms - P2P_RTT_PROBE_INTERVAL_MS
+            : 0;
+        turbo_mutex_unlock(&node2->mutex);
+
+        check_not_null(node2->gossip_timer);
+        if (node2->gossip_timer) {
+            node_maintenance_cb(node2->gossip_timer);
+        }
+        for (int i = 0; i < 100; i++) {
+            coro_context_run(p2p_get_loop(node1), TURBO_RUN_NOWAIT);
+            coro_context_run(p2p_get_loop(node2), TURBO_RUN_NOWAIT);
+            check_int_eq(P2P_OK,
+                         p2p_peer_get_stream_metrics(metrics_peer, &stream_metrics));
+            if (stream_metrics.sample_count > first_sample_count) {
+                break;
+            }
+            turbo_sleep_ms(10);
+        }
+        check(stream_metrics.sample_count > first_sample_count);
+    }
+
     /* Clean up */
     p2p_test_shutdown_nodes(node1, node2, NULL);
     p2p_destroy(node2);
     p2p_destroy(node1);
     TLOG_INFO("[TEST] Both nodes destroyed");
+}
+
+static void test_p2p_owns_and_expires_accepted_peer_before_authentication(void) {
+    const int server_port = p2p_test_alloc_port_block(2);
+    const int client_port = server_port + 1;
+    p2p_node_t *server = p2p_create("127.0.0.1", server_port);
+    p2p_node_t *client = p2p_create("127.0.0.1", client_port);
+    int accepted_seen = 0;
+    int pending_aged = 0;
+
+    check_not_null(server);
+    check_not_null(client);
+    if (!server || !client) {
+        p2p_destroy(client);
+        p2p_destroy(server);
+        return;
+    }
+
+    check_int_eq(p2p_start_nonblocking(server), P2P_OK);
+    check_int_eq(p2p_start_nonblocking(client), P2P_OK);
+    check_int_eq(p2p_connect(client, "127.0.0.1", server_port), P2P_OK);
+
+    /* Poll only the server so it accepts the transport but cannot receive the
+     * initiator handshake. The accepted peer must still belong to the node. */
+    for (int i = 0; i < 100; i++) {
+        coro_context_run(p2p_get_loop(server), TURBO_RUN_NOWAIT);
+        if (p2p_test_peer_table_size(server) == 1) {
+            accepted_seen = 1;
+            break;
+        }
+        turbo_sleep_ms(1);
+    }
+
+    check(accepted_seen);
+    check_int_eq(0, p2p_get_peer_count(server));
+
+    turbo_mutex_lock(&server->mutex);
+    p2p_peer_entry_t *entry = server->peers_table;
+    if (entry && entry->peer) {
+        entry->peer->connect_time =
+            turbo_hrtime() - ((uint64_t)P2P_PEER_TIMEOUT_MS + 1U) * 1000000U;
+        pending_aged = 1;
+    }
+    turbo_mutex_unlock(&server->mutex);
+
+    check(pending_aged);
+    check_not_null(server->gossip_timer);
+    if (pending_aged && server->gossip_timer) {
+        node_maintenance_cb(server->gossip_timer);
+    }
+    check_int_eq(0, p2p_test_peer_table_size(server));
+
+    p2p_destroy(client);
+    p2p_destroy(server);
+}
+
+static void test_p2p_limits_pending_unauthenticated_peers(void) {
+    const int base_port = 30000;
+    const int node_port = p2p_test_alloc_port_block(1);
+    p2p_node_t *node = p2p_create("127.0.0.1", node_port);
+    int capacity_available = 0;
+
+    check_not_null(node);
+    if (!node) {
+        return;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    capacity_available = p2p_node_pending_peer_capacity_available_locked(node);
+    turbo_mutex_unlock(&node->mutex);
+    check(capacity_available);
+
+    for (int i = 0; i < P2P_PENDING_PEER_LIMIT; i++) {
+        p2p_peer_t *peer = p2p_peer_create(node, "127.0.0.1", base_port + i);
+        check_not_null(peer);
+        if (!peer) {
+            break;
+        }
+        peer->state = P2P_PEER_STATE_HANDSHAKING;
+        peer->connect_time = turbo_hrtime();
+        turbo_mutex_lock(&node->mutex);
+        p2p_node_add_peer_locked(node, peer);
+        turbo_mutex_unlock(&node->mutex);
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    capacity_available = p2p_node_pending_peer_capacity_available_locked(node);
+    turbo_mutex_unlock(&node->mutex);
+    check_false(capacity_available);
+    check_int_eq(P2P_PENDING_PEER_LIMIT, p2p_test_peer_table_size(node));
+
+    p2p_destroy(node);
 }
 
 void test_p2p_two_nodes_exchange_public_keys(void) {
@@ -1637,6 +1874,105 @@ void test_p2p_error_str_unknown(void) {
     check_str_eq("Unknown error", str);
 }
 
+enum {
+    P2P_TEST_NONCE_COUNTER_SIZE = 8,
+    P2P_TEST_AEAD_FRAME_OVERHEAD = P2P_TEST_NONCE_COUNTER_SIZE + P2P_TAG_SIZE,
+};
+
+static void p2p_test_crypto_sessions(p2p_crypto_session_t *sender,
+                                     p2p_crypto_session_t *receiver) {
+    memset(sender, 0, sizeof(*sender));
+    memset(receiver, 0, sizeof(*receiver));
+    for (size_t i = 0; i < P2P_KEY_SIZE; i++) {
+        sender->tx_key[i] = (uint8_t)(i + 1U);
+        receiver->rx_key[i] = sender->tx_key[i];
+    }
+    sender->ready = 1;
+    receiver->ready = 1;
+}
+
+void test_p2p_crypto_rejects_replayed_ciphertext(void) {
+    const uint8_t plaintext[] = "mesh-replay-test";
+    uint8_t ciphertext[sizeof(plaintext) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
+    uint8_t output[sizeof(plaintext)] = {0};
+    size_t ciphertext_len = 0;
+    size_t output_len = 0;
+    p2p_crypto_session_t sender;
+    p2p_crypto_session_t receiver;
+
+    p2p_test_crypto_sessions(&sender, &receiver);
+    check_int_eq(P2P_OK,
+                 p2p_crypto_encrypt(&sender, plaintext, sizeof(plaintext),
+                                    ciphertext, &ciphertext_len));
+    check_int_eq(P2P_OK,
+                 p2p_crypto_decrypt(&receiver, ciphertext, ciphertext_len,
+                                    output, &output_len));
+    check_int_eq((int)sizeof(plaintext), (int)output_len);
+    check(memcmp(plaintext, output, sizeof(plaintext)) == 0);
+    check_int_eq(P2P_ERR_CRYPTO,
+                 p2p_crypto_decrypt(&receiver, ciphertext, ciphertext_len,
+                                    output, &output_len));
+    check_int_eq(1, (int)receiver.rx_nonce);
+}
+
+void test_p2p_crypto_rejects_out_of_order_without_advancing(void) {
+    const uint8_t first[] = "first";
+    const uint8_t second[] = "second";
+    uint8_t first_ciphertext[sizeof(first) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
+    uint8_t second_ciphertext[sizeof(second) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
+    uint8_t output[sizeof(second)] = {0};
+    size_t first_ciphertext_len = 0;
+    size_t second_ciphertext_len = 0;
+    size_t output_len = 0;
+    p2p_crypto_session_t sender;
+    p2p_crypto_session_t receiver;
+
+    p2p_test_crypto_sessions(&sender, &receiver);
+    check_int_eq(P2P_OK,
+                 p2p_crypto_encrypt(&sender, first, sizeof(first),
+                                    first_ciphertext, &first_ciphertext_len));
+    check_int_eq(P2P_OK,
+                 p2p_crypto_encrypt(&sender, second, sizeof(second),
+                                    second_ciphertext, &second_ciphertext_len));
+
+    check_int_eq(P2P_ERR_CRYPTO,
+                 p2p_crypto_decrypt(&receiver, second_ciphertext,
+                                    second_ciphertext_len, output, &output_len));
+    check_int_eq(0, (int)receiver.rx_nonce);
+    check_int_eq(P2P_OK,
+                 p2p_crypto_decrypt(&receiver, first_ciphertext,
+                                    first_ciphertext_len, output, &output_len));
+    check_int_eq((int)sizeof(first), (int)output_len);
+    check(memcmp(first, output, sizeof(first)) == 0);
+    check_int_eq(P2P_OK,
+                 p2p_crypto_decrypt(&receiver, second_ciphertext,
+                                    second_ciphertext_len, output, &output_len));
+    check_int_eq((int)sizeof(second), (int)output_len);
+    check(memcmp(second, output, sizeof(second)) == 0);
+}
+
+void test_p2p_crypto_rejects_counter_exhaustion(void) {
+    const uint8_t plaintext[] = "counter";
+    uint8_t ciphertext[sizeof(plaintext) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
+    uint8_t output[sizeof(plaintext)] = {0};
+    size_t ciphertext_len = 0;
+    size_t output_len = 0;
+    p2p_crypto_session_t sender;
+    p2p_crypto_session_t receiver;
+
+    p2p_test_crypto_sessions(&sender, &receiver);
+    sender.tx_nonce = UINT64_MAX;
+    receiver.rx_nonce = UINT64_MAX;
+    check_int_eq(P2P_ERR_CRYPTO,
+                 p2p_crypto_encrypt(&sender, plaintext, sizeof(plaintext),
+                                    ciphertext, &ciphertext_len));
+    check_int_eq(P2P_ERR_CRYPTO,
+                 p2p_crypto_decrypt(&receiver, ciphertext, sizeof(ciphertext),
+                                    output, &output_len));
+    check(sender.tx_nonce == UINT64_MAX);
+    check(receiver.rx_nonce == UINT64_MAX);
+}
+
 spec("p2p module") {
     before_all() {
         p2p_test_logger_init();
@@ -1661,6 +1997,12 @@ spec("p2p module") {
         it("sets stable private-key identity") { test_p2p_node_set_private_key_makes_identity_stable(); }
         it("rejects identity changes after start") { test_p2p_node_set_private_key_rejects_started_node(); }
         it("generates a private key for stable identity") { test_p2p_generate_private_key(); }
+        it("uses a checked operating-system csprng") {
+            test_p2p_crypto_random_uses_checked_csprng();
+        }
+        it("derives deterministic provisional ids from endpoints") {
+            test_p2p_endpoint_ids_are_deterministic();
+        }
         it("derives a public key from a private key") { test_p2p_public_key_from_private_key(); }
         it("rejects a null ip") { test_p2p_create_null_ip(); }
         it("allows destroy on null") { test_p2p_destroy_null(); }
@@ -1696,6 +2038,12 @@ spec("p2p module") {
 
     describe("peer management") {
         it("creates a valid peer") { test_p2p_peer_create_valid(); }
+        it("exposes bounded read-only stream metrics") {
+            test_p2p_peer_stream_metrics_are_bounded_and_read_only();
+        }
+        it("rejects unmatched and unbounded rtt samples") {
+            test_p2p_rtt_estimator_rejects_unmatched_and_unbounded_samples();
+        }
         it("exposes a known peer id") { test_p2p_peer_get_id(); }
         it("exposes a known peer public key") { test_p2p_peer_get_public_key(); }
         it("preserves ipv6 in peer info ex") { test_p2p_peer_info_ex_preserves_ipv6(); }
@@ -1707,6 +2055,10 @@ spec("p2p module") {
         it("keeps empty dht lookups out of the active table") { test_p2p_dht_lookup_without_candidates_stays_idle(); }
         it("deduplicates authenticated peers by identity") { test_p2p_authenticated_duplicate_identity_keeps_single_peer(); }
         it("keeps inbound transport endpoints out of routing") { test_p2p_authenticated_inbound_peer_does_not_publish_ephemeral_route(); }
+        it("owns and expires accepted peers before authentication") {
+            test_p2p_owns_and_expires_accepted_peer_before_authentication();
+        }
+        it("limits pending unauthenticated peers") { test_p2p_limits_pending_unauthenticated_peers(); }
         it("connects two real nodes") { test_p2p_two_nodes_real_connection(); }
         it("exchanges public keys during handshake") { test_p2p_two_nodes_exchange_public_keys(); }
         it("fetches remote dht values") { test_p2p_dht_get_fetches_remote_value(); }
@@ -1720,5 +2072,17 @@ spec("p2p module") {
     describe("error handling") {
         it("returns known error strings") { test_p2p_error_str_valid(); }
         it("returns unknown error fallback") { test_p2p_error_str_unknown(); }
+    }
+
+    describe("crypto session") {
+        it("rejects replayed ciphertext") {
+            test_p2p_crypto_rejects_replayed_ciphertext();
+        }
+        it("rejects out-of-order ciphertext without advancing") {
+            test_p2p_crypto_rejects_out_of_order_without_advancing();
+        }
+        it("rejects exhausted counters") {
+            test_p2p_crypto_rejects_counter_exhaustion();
+        }
     }
 }

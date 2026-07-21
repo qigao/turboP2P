@@ -78,7 +78,7 @@ void p2p_crypto_session_destroy(p2p_crypto_session_t *sess);
  * @param pt_len Plaintext length
  * @param ct Ciphertext output (must be pt_len + 24 bytes for nonce + tag)
  * @param ct_len Output ciphertext length
- * @return P2P_OK on success
+ * @return P2P_OK on success, P2P_ERR_CRYPTO when the counter is exhausted
  */
 int p2p_crypto_encrypt(p2p_crypto_session_t *sess,
                        const uint8_t *pt, size_t pt_len,
@@ -91,7 +91,10 @@ int p2p_crypto_encrypt(p2p_crypto_session_t *sess,
  * @param ct_len Ciphertext length
  * @param pt Plaintext output
  * @param pt_len Output plaintext length
- * @return P2P_OK on success
+ * The session accepts only the next expected counter because its transport is
+ * reliable and ordered. Duplicate and out-of-order frames are rejected.
+ * @return P2P_OK on success, P2P_ERR_CRYPTO on authentication, replay,
+ *         ordering, or counter-exhaustion failure
  */
 int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
                        const uint8_t *ct, size_t ct_len,
@@ -145,9 +148,12 @@ int p2p_noise_is_complete(const p2p_noise_handshake_t *hs);
 int p2p_noise_split(const p2p_noise_handshake_t *hs, p2p_crypto_session_t *sess);
 
 /**
- * Generate random bytes
+ * Generate bytes with the operating-system CSPRNG.
+ * On failure, a non-empty output buffer is securely wiped.
+ * @return P2P_OK on success, P2P_ERR_INVALID_ARG for an invalid buffer,
+ *         or P2P_ERR_CRYPTO when the CSPRNG fails
  */
-void p2p_crypto_random(uint8_t *buf, size_t len);
+int p2p_crypto_random(uint8_t *buf, size_t len);
 
 /**
  * SHA-256 hash

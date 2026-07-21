@@ -291,6 +291,21 @@ typedef struct {
 } p2p_peer_info_ex_t;
 
 /**
+ * Read-only measurements for the authenticated ordered stream to a peer.
+ * sample_count == 0 means that no valid RTT sample is available.
+ * sample_age_ms is UINT32_MAX when no sample exists; is_fresh is true only
+ * while the latest sample is within the implementation's bounded freshness
+ * window. These values do not describe ICE or other datagram paths.
+ */
+typedef struct {
+    uint32_t srtt_ms;
+    uint32_t rttvar_ms;
+    uint32_t sample_age_ms;
+    uint32_t sample_count;
+    int is_fresh;
+} p2p_peer_stream_metrics_t;
+
+/**
  * Snapshot peer address and connection state
  * @param peer The peer
  * @param info Output peer info
@@ -305,6 +320,16 @@ CXX_C_API int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info);
  * @return P2P_OK on success
  */
 CXX_C_API int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
+
+/**
+ * Snapshot authenticated ordered-stream RTT measurements for a peer.
+ * @param peer The peer
+ * @param metrics Output metrics
+ * @return P2P_OK on success, P2P_ERR_INVALID_ARG for invalid arguments
+ */
+CXX_C_API int p2p_peer_get_stream_metrics(
+    p2p_peer_t *peer,
+    p2p_peer_stream_metrics_t *metrics);
 
 /**
  * Get peer count

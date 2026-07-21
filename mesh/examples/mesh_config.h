@@ -27,6 +27,7 @@ typedef struct {
     unsigned int virtual_prefix;
     int listen_port;
     int ice_enabled;
+    int stream_enabled;
     int ice_allow_loopback;
     char bootstrap_storage[MESH_NODE_MAX_BOOTSTRAP_PEERS][128];
     const char *bootstrap_peers[MESH_NODE_MAX_BOOTSTRAP_PEERS];

@@ -5,7 +5,13 @@
 本文件定义 Mesh 作为通用业务网络底座的目标架构、边界与迁移顺序。
 它不宣称目标能力已经实现；当前实现与验证状态仍以
 [`MESH_STATUS.md`](MESH_STATUS.md) 为准，现有协议细节以
-[`MESH_DESIGN.md`](MESH_DESIGN.md) 为准。
+[`MESH_DESIGN.md`](MESH_DESIGN.md) 为准。节点管理、Gossip 和命令协议见
+[`MESH_MANAGEMENT_PROTOCOL.md`](MESH_MANAGEMENT_PROTOCOL.md)；面向用户的身份、Grants、
+Controller API/CLI 与审计产品面见
+[`MESH_PRODUCT_CONTROL_PLANE.md`](MESH_PRODUCT_CONTROL_PLANE.md)。
+运行在 Mesh 之上的可选分布式对象存储 M3 见
+[`M3_DISTRIBUTED_STORAGE_DESIGN.md`](M3_DISTRIBUTED_STORAGE_DESIGN.md)；M3 是独立业务服务，
+不改变本文件定义的 Mesh networking-only core 边界。
 
 ## 决策摘要
 
@@ -14,7 +20,8 @@ Mesh 是业务连接的统一事实源，但不是业务协议实现。
 - 现有 IP 业务默认通过 TUN 接入，不要求业务链接 TurboP2P。
 - 需要明确 datagram、stream、截止时间或背压语义的嵌入式业务，使用后续增加的原生 flow 接口。
 - TurboMedia 继续拥有采集、编解码、RTP/RTCP、复用与媒体时钟；Mesh 只提供可验证的网络路径。
-- `meshd` 拥有 TUN、OS 路由、权限和服务生命周期；`mesh` 库拥有身份、策略、路径和转发状态。
+- `meshd` 拥有 TUN、OS 路由和 platform transaction；OS service manager 与独立
+  `mesh-agent` 拥有进程生命周期，`mesh` 库拥有身份、策略、路径和转发状态。
 - Exit node 是显式、可撤销的部署 profile；`0.0.0.0/0` 路由本身不授予出口权限。
 - 路径切换只有在传输语义兼容时才能自动发生。datagram 不得静默降级为可靠字节流。
 - 所有数据路径必须绑定已认证节点身份并提供机密性、完整性和重放保护。
@@ -55,6 +62,8 @@ MTU、QoS 和服务发现还不足以形成通用业务平台。
 - Mesh 不替代 TurboMedia 的 RTP/RTCP、WebRTC、codec 或拥塞算法。
 - Mesh 不为不同语义的 transport 提供隐式 fallback。
 - Mesh core 不安装 OS 路由、修改防火墙或管理系统服务。
+- Mesh RPC 不执行 shell、任意 native 代码或任意 Wasm export；可选 TurboWASM
+  计算执行器仅保留在 deferred TODO inventory，不属于 Mesh core 或普通节点依赖。
 - 第一阶段不把控制器、计费、用户目录或业务编排塞进 `mesh_network_t`。
 
 ## 候选方案
@@ -102,13 +111,18 @@ Mesh 可提供身份、发现和信令可达性，但不在 WebRTC ICE 外再套
 
 ## 分层职责
 
-### 1. 运行与平台层：`meshd` + `tunnel`
+### 1. 运行与平台层：`mesh-agent` + `meshd` + `tunnel`
 
-`meshd` 是每台主机的唯一 privileged owner：
+`mesh-agent` 是常驻、独立于数据面的管理入口。它复用 P2P/CoroNet 建立 management
+overlay，通过签名 Gossip 同步状态，并通过受限本地 supervisor adapter 管理 `meshd`。
+agent 不创建 TUN、不修改路由/NAT/firewall，远程协议也不能停止 agent 自身。MMP 的
+完整边界与 wire format 见 [`MESH_MANAGEMENT_PROTOCOL.md`](MESH_MANAGEMENT_PROTOCOL.md)。
+
+`meshd` 是每台主机 Mesh platform transaction 的唯一 privileged owner：
 
 - 创建和销毁 TUN。
 - 安装虚拟网段路由、DNS/search domain、必要的 NAT 和防火墙规则。
-- 读取配置、启动 Mesh、导出状态、处理系统信号。
+- 读取配置、启动 Mesh、导出状态、处理系统信号，并通过受限本地 IPC 接受 agent 请求。
 - 启动完成后按平台能力降低权限；私钥与配置文件保持最小权限。
 - OS 配置失败时回滚本次已应用的副作用，不能留下半配置路由。
 
@@ -162,6 +176,8 @@ TurboMedia P2P adapter -> TurboMedia components + TurboP2P::Mesh
 | 路径 | path manager | active path、RTT、MTU、capability |
 | 服务 | signed service registry | MagicDNS、resolve cache |
 | TUN/OS 副作用 | `meshd` platform runtime | status JSON |
+| 管理成员、期望状态与命令 journal | `mesh-agent` | management snapshot、审计锚点 |
+| `meshd` 实际进程状态 | OS service manager，由 `mesh-agent` 查询 | desired-state reconcile result |
 | 媒体 track/frame | TurboMedia | RTP packet、统计 |
 
 缓存只从上述事实源重建或失效，不允许 peer、route、daemon 各自推进同一状态。
@@ -364,6 +380,56 @@ route_metric = saturating_add(link_cost, neighbour_advertised_metric)
 loss、freshness 和 effective MTU；应用流量统计只补充观察，不作为唯一存活证据。probe
 在 secure envelope 内认证、限速、带 replay protection，攻击者不能通过伪造 ICMP 或
 回显 timestamp 降低自己的 cost。
+
+当前已完成 ordered stream 的第一项测量闭环：P2P 在认证会话内复用既有 PING/PONG，默认
+每 15 秒最多发出一个 probe，不新增 wire message；只有 timestamp 与本地唯一 outstanding
+probe 完全匹配、且 RTT 不超过 30 秒的 PONG 才进入 fixed-point SRTT/RTTVAR。未应答时不
+叠加 probe，连接继续按 30 秒 inactivity timeout 清理。`p2p_peer_get_stream_metrics()` 只返回
+有界只读 snapshot，并明确不代表 ICE/datagram。Mesh owner loop 最多每秒读取一次并缓存，
+packet path 只读缓存、不调用 P2P API、不分配也不加锁。
+
+指标可用性按位记录。本阶段只标记 stream RTT/RTTVAR available；loss、queue delay、MTU 和
+ICE selected-pair quality 仍保持 unknown，不用 0 冒充测量值。该指标当前只进入 observe-only
+evaluator，不改变 forwarding。fresh stream RTT 同时携带
+`authenticated ordered stream` 来源位：该位只用于 P2P peer 完成认证且 crypto session ready
+后发出的 probe，并要求 peer 状态仍为 connected、匹配 PONG 样本仍在 freshness 窗口内；它
+不为未知指标或远端 advertised metric 背书。
+
+迟滞门控已有独立纯状态机与测试：候选必须同时达到默认 200 cost 的绝对改善、10% 的相对
+改善，并连续保持 5 秒，才标记为 `switch-ready`。候选改变、指标不可用、当前路径恢复或
+单调时钟回退都会重置窗口；当前路径 hard-fail 可立即取得切换资格，pinned policy 不参与
+动态门控。三个阈值是命名的 build-time 配置默认值，尚未进入公开配置。
+
+迟滞状态机现已接入 owner-loop 的 observe-only evaluator。现有 route model 在 direct peer
+认证后仍删除同 destination 的正式 learned route；为保留真实比较样本，Mesh 从通过现有 peer
+admission 与 route policy 检查的 learned update 派生独立 alternate store。该 store 使用 IPv4
+数值 key，固定最多 64 个 destination bucket，每个 bucket 最多保存 4 个不同 learned next-hop
+identity、hop 和各自的 60 秒 TTL；迟滞和诊断状态只归 destination 一份。同一 identity 的更差
+hop 不刷新；bucket 满时只有严格更短的候选才能按确定性规则替换最差项，同 hop 输入不会产生
+顺序抖动。候选可独立过期，空 bucket 才被回收；容量耗尽只累计观察丢弃而不影响正式 route
+写入。
+
+alternate store 是单一 owner 的派生缓存，不进入 route count、broadcast、DHT、selector 或
+forwarding。每次 stream metric 最多一秒一次的 owner-loop refresh 后，evaluator 才组合当前
+pinned/direct snapshot 与观察到的 learned candidate 并推进迟滞；packet path 不再修改 evaluator
+状态。metric 与迟滞同时比较 `(path kind, next-hop identity)`，不会把一个 learned next-hop 的
+cost 归到另一个 learned next-hop。每个 bucket 保存最近一次 owner-loop 计算的内部诊断副本，
+包含 current/recommended identity、cost、候选数、迟滞原因和 switch-ready/hard-fail；候选更新
+会先使副本失效，直到下一次重新计算。`switch-ready` 仍只表示 shadow recommendation，现有
+forwarding、配置和 route wire behavior 均保持不变。
+
+owner loop 还维护固定 256 条的内部 path trace ring。只有 current/recommended path、identity、
+cost、metric provenance、候选数或迟滞结果发生语义变化时才追加；单纯下一秒重算或 timestamp
+变化不产生记录。ring 满后覆盖最旧记录并累计 overwrite count。additive
+`mesh_get_path_trace_v1()` C API 将它适配为固定 V1 DTO：调用方使用 exclusive sequence cursor
+按最旧到最新分页，每页最多 32 条；历史已被覆盖时返回 `gap_detected`，并从当前最旧记录继续，
+同时返回 retained range、next cursor、`has_more` 和 overwrite count。读取不分配堆内存、不写
+日志、不修改 owner-loop 状态；调用方必须在 `mesh_poll()` 的 owner thread 或 runtime 静止时读取。
+
+该本地 API 不含 payload、key 或 user identity，也不写日志或磁盘。sequence 只在当前进程实例内
+单调，重启后重置；所以它是有界诊断窗口，不是持久化或合规审计事实源。API 本身不提供认证，
+当前也未接入 `meshd` status JSON 或管理 wire protocol；任何远程导出必须由受权 status 边界完成
+身份认证、ACL、脱敏、rate limit 和审计。未来 DTO 演进使用 V2 API，不扩展 V1 结构体。
 
 当前 TurboNet::Ice public API 可读取 state 和 selected pair endpoint，但没有 RTT/loss
 snapshot。因此第一阶段可由 Mesh 测量 selected path；若要让 ICE 统一拥有 candidate-pair
@@ -895,6 +961,17 @@ Mesh TUN 承载浏览器 candidate；Mesh 可用于信令服务发现和受策�
 TUN 地址、virtual prefix 和 identity key 属于 restart-required；policy、QoS、
 service publication 和部分 path preference 可热更新。热更新失败不修改当前状态。
 
+`mesh-agent` 独立加载 management 配置：agent endpoint、trust roots、roles、Gossip
+limits、command journal 和 `observe-only | active` 模式。该配置不由 `meshd` 热更新，
+也不包含可经网络分发的 secret。
+
+产品模式下的策略来源按 profile 互斥：compat 继续由 `meshd` 本机静态配置提供；production
+只接受 Controller 发布的 signed compiled bundle，本机配置仅保留 trust root、不可放宽的
+guardrail 和 break-glass policy。agent 负责接收和 staging，`meshd` 仍须独立验证 signature、
+mesh ID、policy epoch、expiry 和 canonical hash 后才原子替换 snapshot。两种 policy source
+同时出现时 fail fast，不做隐式 merge。产品层契约见
+[`MESH_PRODUCT_CONTROL_PLANE.md`](MESH_PRODUCT_CONTROL_PLANE.md)。
+
 ## 兼容性与协议演进
 
 - 现有 `mesh_send_packet()`、callbacks、route rules 和 MagicDNS API 保持行为。
@@ -911,15 +988,43 @@ service publication 和部分 path preference 可热更新。热更新失败不�
 
 - 保持现有 public API 和 wire behavior。
 - 固化两节点/三节点 TUN、direct ICE、relay、policy 和 shutdown 回归。
+- 已固化 ordered-stream replay/out-of-order/counter-exhaustion、无 packet policy 时的
+  permissive compatibility，以及 compat policy 的 ordered first-match；datagram replay
+  window 仍属于阶段 2。
+- identity/ephemeral key 已统一使用 checked OS CSPRNG，失败时 identity 创建或握手
+  fail fast，不使用弱熵 fallback。
+- peer admission 与 local egress 的允许、拒绝和源地址防冒充路径已有真实节点回归；安全相关
+  array/count 配置不完整时 `mesh_create()` fail fast，不解释为空策略。
+- P2P 入站 transport 从 accept 起即由 peer 表拥有，认证完成前不进入公开 connected view；
+  未认证 peer 默认最多 128 个，并由现有 30 秒 peer timeout 定期关闭，避免半开握手无限占用
+  socket 与 peer 状态。该内部上限可在构建时调整，未来产品配置只能收紧或显式覆盖，不能取消
+  有界资源约束。
 - 为当前 stream fallback、MTU、queue 和 raw selected-pair path 增加明确诊断。
 
 ### 阶段 1：内部 path manager 与语义化选择
 
 - 把散落的 direct/route/fallback 判断收敛为内部 path snapshot 和 selector。
+- 首个内部闭环已将 pinned policy、direct peer 和 connected learned route 收集为最多 3 个
+  候选的无分配 snapshot，再由无副作用 selector 按现有优先级选择；data、forward 和 routed
+  control 继续共享同一入口。pinned next hop 不可用时仍 fail closed，direct 仍优先 learned，
+  不改变 public API、配置或 wire format。
+- observe-only evaluator 已使用有界 fixed-point cost、命名上限、饱和加乘、稳定 tie-break
+  和 unknown 保守 penalty 比较现选路径与建议路径。固定 64 个 destination、每 destination
+  最多 4 个 learned next-hop、单候选 TTL 60 秒的派生 alternate store 保留 direct 建立后被
+  正式 route model 删除的多条观察路径；metric、迟滞和内部诊断均携带稳定 next-hop identity。
+  迟滞按 destination 归属并只在最多每秒一次的 owner-loop metric refresh 后推进；容量耗尽
+  只影响观察，不参与 route count、broadcast、DHT、selector 或 forwarding。绝对改善、相对
+  改善、持续窗口与 hard-fail 门控已有单元与真实路径回归。P2P ordered stream 已提供持续、
+  只读且有 freshness 的 SRTT/RTTVAR snapshot；loss、queue、MTU 与 ICE 指标仍明确为 unknown，
+  不读取 Ice 私有状态，也不把缺失值冒充 0。fresh RTT 来源会标记为 authenticated ordered
+  stream；固定 256 条的内部 trace ring 只记录语义变化并覆盖最旧记录。本地
+  `mesh_get_path_trace_v1()` 以 exclusive cursor、每页最多 32 条、gap/overwrite 元数据导出有序
+  窗口；它不进入日志或磁盘，也不构成远程 status 或合规审计接口。
 - 默认结果与当前实现相同。
 - 增加 datagram-required policy 后，仅显式使用该策略的流量改变行为。
-- 增加有界 route candidate、metric probe 和 observe-only optimizer；保存 trace 并离线
-  比较现行路径与建议路径，不改变 forwarding。
+- 下一步由 `mesh-agent` 在已认证、授权、限流和审计的 status 边界消费本地 V1 snapshot；远程
+  schema 与本地 ABI 分开版本化。当前多 next-hop learned alternate 已可按 identity 在线 shadow
+  比较并生成诊断，但仍不改变 forwarding。
 - feasibility、迟滞、flow stickiness 和故障切换验证达标后，再通过显式 opt-in 启用
   dynamic selection；默认行为变更另行审批。
 
@@ -944,6 +1049,14 @@ service publication 和部分 path preference 可热更新。热更新失败不�
 - 发布 additive stream/datagram flow API。
 - 在独立 target 中实现 TurboMedia adapter，并以 profiling 决定是否启用。
 
+### Deferred inventory：可选 TurboWASM 计算执行器
+
+- 本项不进入当前阶段承诺，也不改变 MMP/1 禁止远程代码执行的契约。
+- 仅显式 compute 节点可在未来通过 additive `compute.wasm.v1` capability 启用独立、
+  低权限 TurboRuntime executor；普通 Mesh 节点不链接或部署 TurboWASM。
+- 启动条件是身份、typed command journal、policy、审计和独立进程资源限制均已完成，
+  且新的计算协议经过单独审批与端到端安全验证。
+
 ### Exit profile 独立迁移轨
 
 - E0：用现有 local-egress policy 和人工 namespace/NAT 完成 `lab-exit` 基线；不修改
@@ -958,6 +1071,18 @@ service publication 和部分 path preference 可热更新。热更新失败不�
 
 E1/E2 可以和安全数据面并行开发，但 E3 是生产发布硬依赖。每个阶段都能通过停用
 profile 和 platform rollback 恢复启动前 OS 状态，不改变 Mesh virtual IP 数据格式。
+
+### Management protocol 独立迁移轨
+
+- M0：ordered-stream transport replay 已修复；继续固化 canonical codec/signature vectors。
+- M1：部署 observer-only `mesh-agent`，只做 membership、status 和 anti-entropy。
+- M2：接收 desired state 但只输出 reconcile plan，不执行副作用。
+- M3：开放有 journal 和签名 result 的 bounded diagnostics/restart RPC。
+- M4：开放 service reconcile 与 prestaged config；agent crash 后从实际 service 状态恢复。
+- M5：route authentication、quorum、外部审计和安全数据面均达标后才允许 exit profile。
+
+该迁移轨不修改现有 Mesh packet wire format。任一阶段可通过停用 agent 回到当前部署；
+只有显式 `management_mode = active` 才接管既有 `meshd` service unit。
 
 每个阶段都通过独立 capability/config 开关启用。回滚只关闭新能力，TUN packet
 compatibility path 保持可用；不要求迁移用户数据格式。

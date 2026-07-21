@@ -1,17 +1,23 @@
 /**
- * p2p_minio_s3.c - IPFS-like storage with MinIO-like S3 API
+ * p2p_minio_s3.c - S3-shaped prototype over the P2P file API
  * 
- * Implements a simple object storage server over P2P network.
+ * This is not distributed mesh storage yet: p2p_put_file() registers a local
+ * path without copying its content, while this gateway removes the upload
+ * temporary file afterward. p2p_get_file() does not yet transfer bytes to the
+ * output path. There is no durable node-local store, replication, repair,
+ * persistence policy, or Byzantine consensus. The HTTP surface remains an
+ * integration prototype until those lower-layer guarantees exist.
+ *
  * API:
- *   PUT /:bucket/:object  -> Upload file (stores in P2P, indexes in DHT)
- *   GET /:bucket/:object  -> Download file (looks up hash in DHT, reterieves from P2P)
+ *   PUT /:bucket/:object  -> Exercise the incomplete local registry/DHT path
+ *   GET /:bucket/:object  -> Exercise the incomplete lookup/download path
  * 
  * Layering:
  *   [ REST API (Iris) ] -> [ Object Index (DHT) ] -> [ Block Storage (P2P File) ]
  */
 
 #include "p2p.h"
-#include <iris.h>
+#include <iris/iris.h>
 #include <turbo_fs.h>
 #include <turbo_mmap.h>
 #include <stdio.h>
@@ -94,7 +100,7 @@ static void send_s3_error(Res *res, int status, const char *code, const char *me
     turbo_json_object_set_string(j, "code", code);
     turbo_json_object_set_string(j, "message", message);
     render_s3_xml(res, status, TEMPLATE_S3_ERROR, j);
-    turbo_free_json(j);
+    turbo_free_json(&j);
 }
 
 /* Global state */
@@ -166,7 +172,7 @@ void handle_multipart_control(Req *req, Res *res) {
         turbo_json_object_set_string(j, "key", object);
         turbo_json_object_set_string(j, "upload_id", upl->upload_id);
         render_s3_xml(res, OK, TEMPLATE_INITIATE_MULTIPART, j);
-        turbo_free_json(j);
+        turbo_free_json(&j);
         return;
     }
 
@@ -214,8 +220,8 @@ void handle_multipart_control(Req *req, Res *res) {
         render_s3_xml(res, OK, TEMPLATE_COMPLETE_MULTIPART, j);
         
         turbo_json_serialize_free(manifest_str);
-        turbo_free_json(manifest_obj);
-        turbo_free_json(j);
+        turbo_free_json(&manifest_obj);
+        turbo_free_json(&j);
         return;
     }
 
@@ -242,7 +248,7 @@ void handle_list_buckets(Req *req, Res *res) {
     turbo_json_object_add(root, "buckets", buckets);
 
     render_s3_xml(res, OK, TEMPLATE_LIST_ALL_MY_BUCKETS, root);
-    turbo_free_json(root);
+    turbo_free_json(&root);
 }
 
 /*
@@ -548,7 +554,7 @@ void handle_get_object(Req *req, Res *res) {
                     fclose(fp);
                 }
             }
-            turbo_free_json(root);
+            turbo_free_json(&root);
         }
     } else {
         p2p_get_file(g_node, val, final_path);

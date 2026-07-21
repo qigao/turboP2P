@@ -6,32 +6,41 @@
 #include "p2p_crypto.h"
 #include "../internal.h"
 #include <monocypher.h>
+#include <platform.h>
+#include <limits.h>
 #include <string.h>
-#include <stdlib.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <bcrypt.h>
-#pragma comment(lib, "bcrypt.lib")
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#endif
+enum {
+    P2P_NONCE_COUNTER_SIZE = 8,
+    P2P_AEAD_NONCE_SIZE = 24,
+    P2P_AEAD_FRAME_OVERHEAD = P2P_NONCE_COUNTER_SIZE + P2P_TAG_SIZE,
+};
+
+static void p2p_crypto_build_nonce(uint64_t counter,
+                                   uint8_t nonce[P2P_AEAD_NONCE_SIZE]) {
+    memset(nonce, 0, P2P_AEAD_NONCE_SIZE);
+    for (int i = 0; i < P2P_NONCE_COUNTER_SIZE; i++) {
+        nonce[i] = (uint8_t)((counter >> (i * CHAR_BIT)) & UINT8_MAX);
+    }
+}
 
 /* =============================================================================
  * Random Number Generation
  * ============================================================================= */
 
-void p2p_crypto_random(uint8_t *buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(NULL, buf, (ULONG)len, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        read(fd, buf, len);
-        close(fd);
+int p2p_crypto_random(uint8_t *buf, size_t len) {
+    if (!buf && len > 0) {
+        return P2P_ERR_INVALID_ARG;
     }
-#endif
+
+    if (turbo_secure_random(buf, len) != 0) {
+        if (buf && len > 0) {
+            crypto_wipe(buf, len);
+        }
+        return P2P_ERR_CRYPTO;
+    }
+
+    return P2P_OK;
 }
 
 /* =============================================================================
@@ -39,13 +48,20 @@ void p2p_crypto_random(uint8_t *buf, size_t len) {
  * ============================================================================= */
 
 int p2p_crypto_generate_identity(p2p_identity_t *identity) {
+    p2p_identity_t generated = {0};
+    int ret = P2P_OK;
+
     if (!identity) return P2P_ERR_INVALID_ARG;
 
-    /* Generate random secret key */
-    p2p_crypto_random(identity->secret_key, P2P_KEY_SIZE);
+    ret = p2p_crypto_random(generated.secret_key, P2P_KEY_SIZE);
+    if (ret != P2P_OK) {
+        crypto_wipe(&generated, sizeof(generated));
+        return ret;
+    }
 
-    /* Derive public key */
-    crypto_x25519_public_key(identity->public_key, identity->secret_key);
+    crypto_x25519_public_key(generated.public_key, generated.secret_key);
+    memcpy(identity, &generated, sizeof(*identity));
+    crypto_wipe(&generated, sizeof(generated));
 
     return P2P_OK;
 }
@@ -94,21 +110,24 @@ int p2p_crypto_encrypt(p2p_crypto_session_t *sess,
         return P2P_ERR_INVALID_ARG;
     }
 
-    /* Build nonce from counter */
-    uint8_t nonce[24];
-    memset(nonce, 0, 24);
-    uint64_t counter = sess->tx_nonce++;
-    for (int i = 0; i < 8; i++) {
-        nonce[i] = (uint8_t)((counter >> (i * 8)) & 0xFF);
+    if (pt_len > SIZE_MAX - P2P_AEAD_FRAME_OVERHEAD) {
+        return P2P_ERR_INVALID_ARG;
     }
+
+    if (sess->tx_nonce == UINT64_MAX) {
+        return P2P_ERR_CRYPTO;
+    }
+
+    uint8_t nonce[P2P_AEAD_NONCE_SIZE];
+    p2p_crypto_build_nonce(sess->tx_nonce, nonce);
 
     /* Output format: [8 bytes nonce counter][16 bytes tag][ciphertext] */
     uint8_t *out_nonce = ct;
-    uint8_t *out_tag = ct + 8;
-    uint8_t *out_ct = ct + 8 + 16;
+    uint8_t *out_tag = ct + P2P_NONCE_COUNTER_SIZE;
+    uint8_t *out_ct = ct + P2P_AEAD_FRAME_OVERHEAD;
 
     /* Write nonce counter */
-    memcpy(out_nonce, nonce, 8);
+    memcpy(out_nonce, nonce, P2P_NONCE_COUNTER_SIZE);
 
     /* Encrypt with XChaCha20-Poly1305 */
     crypto_aead_lock(out_ct,            /* ciphertext */
@@ -118,7 +137,8 @@ int p2p_crypto_encrypt(p2p_crypto_session_t *sess,
                      NULL, 0,           /* no additional data */
                      pt, pt_len);       /* plaintext */
 
-    *ct_len = 8 + 16 + pt_len;
+    sess->tx_nonce++;
+    *ct_len = P2P_AEAD_FRAME_OVERHEAD + pt_len;
     return P2P_OK;
 }
 
@@ -129,22 +149,27 @@ int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
         return P2P_ERR_INVALID_ARG;
     }
 
-    /* Minimum: 8 (nonce) + 16 (tag) */
-    if (ct_len < 24) {
+    if (ct_len < P2P_AEAD_FRAME_OVERHEAD) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    size_t data_len = ct_len - 8 - 16;
+    if (sess->rx_nonce == UINT64_MAX) {
+        return P2P_ERR_CRYPTO;
+    }
+
+    size_t data_len = ct_len - P2P_AEAD_FRAME_OVERHEAD;
 
     /* Parse input */
     const uint8_t *in_nonce = ct;
-    const uint8_t *in_tag = ct + 8;
-    const uint8_t *in_ct = ct + 8 + 16;
+    const uint8_t *in_tag = ct + P2P_NONCE_COUNTER_SIZE;
+    const uint8_t *in_ct = ct + P2P_AEAD_FRAME_OVERHEAD;
 
-    /* Build full nonce */
-    uint8_t nonce[24];
-    memset(nonce, 0, 24);
-    memcpy(nonce, in_nonce, 8);
+    /* turbo_stream is ordered: reject duplicates and gaps before decryption. */
+    uint8_t nonce[P2P_AEAD_NONCE_SIZE];
+    p2p_crypto_build_nonce(sess->rx_nonce, nonce);
+    if (memcmp(in_nonce, nonce, P2P_NONCE_COUNTER_SIZE) != 0) {
+        return P2P_ERR_CRYPTO;
+    }
 
     /* Verify and decrypt */
     int ret = crypto_aead_unlock(pt,             /* plaintext */
@@ -158,7 +183,6 @@ int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
         return P2P_ERR_CRYPTO;
     }
 
-    /* Update expected nonce (could add replay protection here) */
     sess->rx_nonce++;
 
     *pt_len = data_len;
@@ -177,14 +201,18 @@ int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
 int p2p_noise_init_initiator(p2p_noise_handshake_t *hs,
                              const p2p_identity_t *identity,
                              const uint8_t *remote_public) {
+    int ret = P2P_OK;
+
     if (!hs || !identity) return P2P_ERR_INVALID_ARG;
 
     memset(hs, 0, sizeof(*hs));
     hs->is_initiator = 1;
     hs->step = 0;
 
-    /* Generate ephemeral keypair */
-    p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
+    ret = p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
+    if (ret != P2P_OK) {
+        return ret;
+    }
     crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
     memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
     memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);
@@ -199,14 +227,18 @@ int p2p_noise_init_initiator(p2p_noise_handshake_t *hs,
 
 int p2p_noise_init_responder(p2p_noise_handshake_t *hs,
                              const p2p_identity_t *identity) {
+    int ret = P2P_OK;
+
     if (!hs || !identity) return P2P_ERR_INVALID_ARG;
 
     memset(hs, 0, sizeof(*hs));
     hs->is_initiator = 0;
     hs->step = 0;
 
-    /* Generate ephemeral keypair */
-    p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
+    ret = p2p_crypto_random(hs->ephemeral_secret, P2P_KEY_SIZE);
+    if (ret != P2P_OK) {
+        return ret;
+    }
     crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
     memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
     memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);

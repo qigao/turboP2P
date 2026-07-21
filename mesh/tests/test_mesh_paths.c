@@ -1,6 +1,7 @@
 #include <tinytest.h>
 #include <turbo_mesh.h>
 #include <p2p.h>
+#include "mesh_path_optimizer.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -250,6 +251,29 @@ static int mesh_test_wait_for_min_peers(mesh_network_t **nodes, int node_count,
         }
 
         if (ready) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int mesh_test_wait_for_peer_pair(mesh_network_t **nodes,
+                                        const char *node0_peer_ip,
+                                        const char *node1_peer_ip,
+                                        int iterations) {
+    mesh_peer_info_t node0_peer = {0};
+    mesh_peer_info_t node1_peer = {0};
+
+    if (!nodes || !nodes[0] || !nodes[1] || !node0_peer_ip || !node1_peer_ip) {
+        return 0;
+    }
+
+    for (int i = 0; i < iterations; i++) {
+        mesh_test_poll_many(nodes, 2, 1, 100, 50);
+        if (mesh_test_find_peer_info(nodes[0], node0_peer_ip, &node0_peer) &&
+            mesh_test_find_peer_info(nodes[1], node1_peer_ip, &node1_peer) &&
+            node0_peer.is_connected && node1_peer.is_connected) {
             return 1;
         }
     }
@@ -684,6 +708,8 @@ static void test_direct_path_preferred_over_relay(void) {
     mesh_peer_info_t direct_peer_before = {0};
     mesh_peer_info_t leader_peer_after = {0};
     mesh_peer_info_t direct_peer_after = {0};
+    mesh_path_trace_record_v1_t trace_records[MESH_PATH_TRACE_PAGE_MAX] = {0};
+    mesh_path_trace_page_v1_t trace_page = {0};
     mesh_packet_counter_t node3_packets = {0};
     uint8_t packet[60];
     int leader_started = 0;
@@ -703,6 +729,9 @@ static void test_direct_path_preferred_over_relay(void) {
     int leader_peer_found_after_fallback = 0;
     int relay_bytes_after_fallback = 0;
     int direct_peer_gone = 0;
+    int trace_exported = 0;
+    int trace_destination_found = 0;
+    int trace_authenticated_metric_found = 0;
 
     printf("\n[TEST] test_direct_path_preferred_over_relay\n");
 
@@ -762,6 +791,32 @@ static void test_direct_path_preferred_over_relay(void) {
             strcmp(route_info.next_hop_virtual_ip, "10.42.7.1") == 0 &&
             route_info.hop_count == 1) {
             relay_ready = 1;
+            break;
+        }
+    }
+
+    for (int attempt = 0; relay_ready && attempt < 40; attempt++) {
+        mesh_test_poll_many(nodes, 3, 1, 100, 50);
+        trace_exported =
+            mesh_get_path_trace_v1(node2, 0, trace_records,
+                                   MESH_PATH_TRACE_PAGE_MAX,
+                                   &trace_page) == MESH_OK &&
+            trace_page.returned_count > 0;
+        for (uint32_t i = 0; i < trace_page.returned_count; i++) {
+            const mesh_path_trace_record_v1_t *record = &trace_records[i];
+            if (strcmp(record->dest_ip, "10.42.7.3") != 0) {
+                continue;
+            }
+            trace_destination_found =
+                record->version == MESH_PATH_TRACE_API_VERSION_V1;
+            if (((record->current_metric_provenance |
+                  record->recommended_metric_provenance) &
+                 MESH_PATH_TRACE_METRIC_AUTHENTICATED_STREAM) != 0u) {
+                trace_authenticated_metric_found = 1;
+            }
+        }
+        if (trace_exported && trace_destination_found &&
+            trace_authenticated_metric_found) {
             break;
         }
     }
@@ -855,6 +910,10 @@ static void test_direct_path_preferred_over_relay(void) {
     check(node3_packets.packet_received_count > 0);
     check(leader_peer_found_after_fallback);
     check(relay_bytes_after_fallback);
+    check(trace_exported);
+    check(trace_destination_found);
+    check(trace_authenticated_metric_found);
+    check_false(trace_page.gap_detected);
     check_str_eq("127.0.0.1:20703", direct_peer_before.real_ip);
     check(direct_peer_before.is_connected);
     check_str_eq("10.42.7.1", route_info.next_hop_virtual_ip);
@@ -1097,6 +1156,8 @@ static void test_non_mesh_pinned_route_uses_local_egress_role(void) {
     mesh_network_t *client = NULL;
     mesh_network_t *nodes[2] = {NULL};
     mesh_packet_counter_t router_packets = {0};
+    mesh_peer_info_t router_peer_info = {0};
+    mesh_peer_info_t client_peer_info = {0};
     mesh_local_egress_info_t egress_info = {0};
     mesh_local_egress_allow_info_t egress_allow_info = {0};
     uint8_t allowed_packet[60];
@@ -1166,8 +1227,14 @@ static void test_non_mesh_pinned_route_uses_local_egress_role(void) {
     nodes[0] = router;
     nodes[1] = client;
 
-    if (router_started && client_started) {
-        peers_ready = mesh_test_wait_for_min_peers(nodes, 2, 1, 60);
+    for (int i = 0; router_started && client_started && i < 60; i++) {
+        mesh_test_poll_many(nodes, 2, 1, 100, 50);
+        if (mesh_test_find_peer_info(router, "10.42.12.2", &router_peer_info) &&
+            mesh_test_find_peer_info(client, "10.42.12.1", &client_peer_info) &&
+            router_peer_info.is_connected && client_peer_info.is_connected) {
+            peers_ready = 1;
+            break;
+        }
     }
 
     if (router) {
@@ -1853,6 +1920,17 @@ static void test_packet_policy_filters_by_direction_and_port(void) {
             MESH_PACKET_POLICY_OUT,
             1,
         },
+        {
+            "10.42.21.2/32",
+            "10.42.21.1/32",
+            6,
+            0,
+            0,
+            0,
+            0,
+            MESH_PACKET_POLICY_OUT,
+            0,
+        },
     };
     uint8_t denied_out_packet[60];
     uint8_t denied_in_packet[60];
@@ -1924,14 +2002,14 @@ static void test_packet_policy_filters_by_direction_and_port(void) {
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.packet_policy_rules = node2_policy;
-    node2_cfg.packet_policy_rule_count = 2;
+    node2_cfg.packet_policy_rule_count = 3;
     node2 = mesh_create(&node2_cfg);
     check_not_null(node2);
     node2_started = (mesh_start(node2) == MESH_OK);
 
     nodes[0] = leader;
     nodes[1] = node2;
-    peers_ready = mesh_test_wait_for_min_peers(nodes, 2, 1, 40);
+    peers_ready = mesh_test_wait_for_peer_pair(nodes, "10.42.21.2", "10.42.21.1", 40);
 
     if (peers_ready) {
         denied_out_send_blocked =
@@ -1963,6 +2041,81 @@ static void test_packet_policy_filters_by_direction_and_port(void) {
     check(denied_in_not_delivered);
     check(allowed_send_ok);
     check(allowed_delivered);
+}
+
+static void test_packet_policy_empty_configuration_remains_permissive(void) {
+    const char *bootstrap_peers[] = {"127.0.0.1:21741"};
+    uint8_t packet[60];
+    mesh_packet_counter_t leader_counter = {0};
+    mesh_network_t *leader = NULL;
+    mesh_network_t *node2 = NULL;
+    mesh_network_t *nodes[2] = {NULL, NULL};
+    int leader_started = 0;
+    int node2_started = 0;
+    int peers_ready = 0;
+    int policy_empty = 0;
+    int send_ok = 0;
+    int delivered = 0;
+
+    printf("\n[TEST] test_packet_policy_empty_configuration_remains_permissive\n");
+
+    mesh_test_build_tcp_packet(packet, sizeof(packet),
+                               10, 42, 22, 2,
+                               10, 42, 22, 1,
+                               50000, 8443);
+
+    mesh_config_t leader_cfg;
+    mesh_config_init(&leader_cfg);
+    leader_cfg.virtual_ip = "10.42.22.1";
+    leader_cfg.virtual_prefix = 16;
+    leader_cfg.listen_port = 21741;
+    leader_cfg.on_packet_received = on_packet_received_counting;
+    leader_cfg.user_data = &leader_counter;
+    leader = mesh_create(&leader_cfg);
+    check_not_null(leader);
+    if (leader) {
+        leader_started = (mesh_start(leader) == MESH_OK);
+    }
+    if (leader_started) {
+        sleep_ms(500);
+    }
+
+    mesh_config_t node2_cfg;
+    mesh_config_init(&node2_cfg);
+    node2_cfg.virtual_ip = "10.42.22.2";
+    node2_cfg.virtual_prefix = 16;
+    node2_cfg.listen_port = 21742;
+    node2_cfg.bootstrap_peers = bootstrap_peers;
+    node2_cfg.bootstrap_count = 1;
+    node2 = mesh_create(&node2_cfg);
+    check_not_null(node2);
+    if (node2) {
+        node2_started = (mesh_start(node2) == MESH_OK);
+    }
+
+    nodes[0] = leader;
+    nodes[1] = node2;
+    policy_empty = (mesh_get_packet_policy_count(leader) == 0 &&
+                    mesh_get_packet_policy_count(node2) == 0);
+    peers_ready = mesh_test_wait_for_peer_pair(nodes, "10.42.22.2", "10.42.22.1", 40);
+
+    if (peers_ready) {
+        send_ok = (mesh_send_packet(node2, packet, sizeof(packet)) == MESH_OK);
+        for (int i = 0; send_ok && i < 30 && leader_counter.packet_received_count < 1; i++) {
+            mesh_test_poll_many(nodes, 2, 1, 20, 20);
+        }
+        delivered = (leader_counter.packet_received_count == 1);
+    }
+
+    mesh_test_stop_destroy(&node2);
+    mesh_test_stop_destroy(&leader);
+
+    check(leader_started);
+    check(node2_started);
+    check(peers_ready);
+    check(policy_empty);
+    check(send_ok);
+    check(delivered);
 }
 
 static void test_mesh_identity_secret_config_validation(void) {
@@ -2011,6 +2164,67 @@ static void test_mesh_identity_secret_config_validation(void) {
     cfg.peer_protocol_major = UINT16_MAX + 1u;
     mesh = mesh_create(&cfg);
     check_null(mesh);
+}
+
+static void test_mesh_config_rejects_incomplete_counted_arrays(void) {
+    const char *invalid_bootstrap[] = {NULL};
+    mesh_config_t cfg;
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.bootstrap_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.bootstrap_peers = invalid_bootstrap;
+    cfg.bootstrap_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.ice_stun_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.route_rule_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.local_egress_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.local_egress_allow_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.magic_dns_record_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.peer_allow_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.peer_allow_node_id_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.packet_policy_rule_count = 1;
+    check_null(mesh_create(&cfg));
+
+    mesh_config_init(&cfg);
+    cfg.virtual_ip = "10.42.23.1";
+    cfg.peer_allow_count = -1;
+    check_null(mesh_create(&cfg));
 }
 
 static void test_magic_dns_static_records(void) {
@@ -2073,7 +2287,789 @@ static void test_magic_dns_static_records(void) {
     check_null(mesh);
 }
 
+static void test_path_metric_recommends_lower_bounded_cost(void) {
+    mesh_path_metric_candidate_t candidates[] = {
+        {
+            MESH_PATH_METRIC_KIND_DIRECT,
+            1,
+            1,
+            120,
+            20,
+            0,
+            0,
+            0,
+            0,
+            0,
+        },
+        {
+            MESH_PATH_METRIC_KIND_LEARNED,
+            1,
+            1,
+            10,
+            2,
+            0,
+            0,
+            0,
+            1,
+            1,
+        },
+    };
+    mesh_path_metric_observation_t observation =
+        mesh_path_metric_observe(candidates, 2,
+                                 MESH_PATH_METRIC_KIND_DIRECT, 0);
+
+    check_true(observation.recommended_available);
+    check_int_eq(observation.recommended_kind, MESH_PATH_METRIC_KIND_LEARNED);
+    check_true(observation.differs);
+    check_uint_eq(observation.current_cost, 1140);
+    check_uint_eq(observation.recommended_cost, 688);
+}
+
+static void test_path_metric_penalizes_unknown_measurements(void) {
+    mesh_path_metric_candidate_t candidates[] = {
+        {
+            MESH_PATH_METRIC_KIND_DIRECT,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        },
+        {
+            MESH_PATH_METRIC_KIND_LEARNED,
+            1,
+            1,
+            1000,
+            100,
+            0,
+            0,
+            0,
+            1,
+            1,
+        },
+    };
+    mesh_path_metric_observation_t observation =
+        mesh_path_metric_observe(candidates, 2,
+                                 MESH_PATH_METRIC_KIND_DIRECT, 0);
+
+    check_int_eq(observation.recommended_kind, MESH_PATH_METRIC_KIND_LEARNED);
+    check_true(observation.recommended_cost < observation.current_cost);
+    check_true(observation.differs);
+}
+
+static void test_path_metric_distinguishes_learned_next_hop_identity(void) {
+    mesh_path_metric_candidate_t candidates[] = {
+        {
+            .kind = MESH_PATH_METRIC_KIND_LEARNED,
+            .eligible = 1,
+            .available_metrics = MESH_PATH_METRIC_AVAILABLE_RTT,
+            .srtt_ms = 100,
+            .rttvar_ms = 10,
+            .hop_count = 1,
+            .tie_break = 0x0A2A0102u,
+            .identity = 0x0A2A0102u,
+        },
+        {
+            .kind = MESH_PATH_METRIC_KIND_LEARNED,
+            .eligible = 1,
+            .available_metrics = MESH_PATH_METRIC_AVAILABLE_RTT,
+            .srtt_ms = 10,
+            .rttvar_ms = 2,
+            .hop_count = 1,
+            .tie_break = 0x0A2A0103u,
+            .identity = 0x0A2A0103u,
+        },
+    };
+    mesh_path_metric_observation_t observation = mesh_path_metric_observe(
+        candidates, 2, MESH_PATH_METRIC_KIND_LEARNED, 0x0A2A0102u);
+
+    check_int_eq(observation.current_kind, MESH_PATH_METRIC_KIND_LEARNED);
+    check_uint_eq(observation.current_identity, 0x0A2A0102u);
+    check_int_eq(observation.recommended_kind, MESH_PATH_METRIC_KIND_LEARNED);
+    check_uint_eq(observation.recommended_identity, 0x0A2A0103u);
+    check_uint_eq(observation.current_cost, 1440);
+    check_uint_eq(observation.recommended_cost, 688);
+    check_true(observation.differs);
+}
+
+static void test_path_metric_preserves_authenticated_stream_provenance(void) {
+    mesh_path_metric_candidate_t candidates[] = {
+        {
+            .kind = MESH_PATH_METRIC_KIND_DIRECT,
+            .eligible = 1,
+            .available_metrics = MESH_PATH_METRIC_AVAILABLE_RTT,
+            .srtt_ms = 100,
+            .rttvar_ms = 10,
+            .identity = 0x0A2A0110u,
+            .metric_provenance =
+                MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM,
+        },
+        {
+            .kind = MESH_PATH_METRIC_KIND_LEARNED,
+            .eligible = 1,
+            .available_metrics = MESH_PATH_METRIC_AVAILABLE_RTT,
+            .srtt_ms = 10,
+            .rttvar_ms = 2,
+            .hop_count = 1,
+            .identity = 0x0A2A0111u,
+            .metric_provenance =
+                MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM,
+        },
+    };
+    mesh_path_metric_observation_t observation = mesh_path_metric_observe(
+        candidates, 2, MESH_PATH_METRIC_KIND_DIRECT, 0x0A2A0110u);
+
+    check_uint_eq(observation.current_metric_provenance,
+                  MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM);
+    check_uint_eq(observation.recommended_metric_provenance,
+                  MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM);
+}
+
+static void test_path_metric_scores_only_available_measurements(void) {
+    mesh_path_metric_candidate_t candidate = {
+        MESH_PATH_METRIC_KIND_DIRECT,
+        1,
+        MESH_PATH_METRIC_AVAILABLE_RTT,
+        10,
+        2,
+        MESH_PATH_METRIC_MAX_LOSS_PPM,
+        MESH_PATH_METRIC_MAX_RTT_MS,
+        0,
+        0,
+        0,
+    };
+    uint32_t cost = 0;
+
+    check(mesh_path_metric_candidate_cost(&candidate, &cost));
+    check_uint_eq(188, cost);
+}
+
+static void test_path_metric_keeps_unavailable_policy_fail_closed(void) {
+    mesh_path_metric_candidate_t candidates[] = {
+        {
+            MESH_PATH_METRIC_KIND_POLICY,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        },
+        {
+            MESH_PATH_METRIC_KIND_DIRECT,
+            1,
+            1,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            1,
+        },
+    };
+    mesh_path_metric_observation_t observation =
+        mesh_path_metric_observe(candidates, 2,
+                                 MESH_PATH_METRIC_KIND_POLICY, 0);
+
+    check_true(observation.policy_forced);
+    check_false(observation.recommended_available);
+    check_int_eq(observation.recommended_kind, MESH_PATH_METRIC_KIND_POLICY);
+    check_uint_eq(observation.recommended_cost, MESH_PATH_METRIC_INFINITY);
+    check_false(observation.differs);
+}
+
+static void test_path_metric_cost_saturates_without_overflow(void) {
+    mesh_path_metric_candidate_t candidate = {
+        MESH_PATH_METRIC_KIND_DIRECT,
+        1,
+        MESH_PATH_METRIC_AVAILABLE_ALL,
+        MESH_PATH_METRIC_MAX_RTT_MS,
+        MESH_PATH_METRIC_MAX_RTT_MS,
+        MESH_PATH_METRIC_MAX_LOSS_PPM,
+        MESH_PATH_METRIC_MAX_RTT_MS,
+        UINT32_MAX,
+        MESH_PATH_METRIC_MAX_HOPS,
+        0,
+    };
+    uint32_t cost = 0;
+
+    check_true(mesh_path_metric_candidate_cost(&candidate, &cost));
+    check_uint_eq(cost, MESH_PATH_METRIC_MAX_FINITE);
+}
+
+static mesh_path_metric_observation_t mesh_test_metric_observation(
+    mesh_path_metric_kind_t current_kind,
+    mesh_path_metric_kind_t recommended_kind,
+    uint32_t current_cost,
+    uint32_t recommended_cost) {
+    mesh_path_metric_observation_t observation;
+
+    memset(&observation, 0, sizeof(observation));
+    observation.current_kind = current_kind;
+    observation.recommended_kind = recommended_kind;
+    observation.current_cost = current_cost;
+    observation.recommended_cost = recommended_cost;
+    observation.recommended_available = 1;
+    observation.differs = current_kind != recommended_kind;
+    return observation;
+}
+
+static void test_path_hysteresis_requires_sustained_improvement(void) {
+    mesh_path_hysteresis_state_t state = {0};
+    mesh_path_metric_observation_t observation = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_DIRECT,
+        MESH_PATH_METRIC_KIND_LEARNED,
+        2000,
+        1000);
+    mesh_path_hysteresis_result_t result;
+    const uint64_t started_ms = 1000;
+
+    result = mesh_path_hysteresis_observe(&state, &observation, started_ms);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_true(result.suppressed);
+    check_false(result.switch_ready);
+
+    result = mesh_path_hysteresis_observe(
+        &state, &observation,
+        started_ms + MESH_PATH_HYSTERESIS_WINDOW_MS - 1);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_true(result.suppressed);
+    check_false(result.switch_ready);
+
+    result = mesh_path_hysteresis_observe(
+        &state, &observation,
+        started_ms + MESH_PATH_HYSTERESIS_WINDOW_MS);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_READY);
+    check_false(result.suppressed);
+    check_true(result.switch_ready);
+}
+
+static void test_path_hysteresis_rejects_small_improvements(void) {
+    mesh_path_hysteresis_state_t state = {0};
+    mesh_path_metric_observation_t absolute_gain_too_small =
+        mesh_test_metric_observation(
+            MESH_PATH_METRIC_KIND_DIRECT,
+            MESH_PATH_METRIC_KIND_LEARNED,
+            1000,
+            850);
+    mesh_path_metric_observation_t relative_gain_too_small =
+        mesh_test_metric_observation(
+            MESH_PATH_METRIC_KIND_DIRECT,
+            MESH_PATH_METRIC_KIND_LEARNED,
+            4000,
+            3700);
+    mesh_path_hysteresis_result_t result;
+
+    result = mesh_path_hysteresis_observe(
+        &state, &absolute_gain_too_small, 1000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_INSUFFICIENT_GAIN);
+    check_true(result.suppressed);
+    check_false(state.pending);
+
+    result = mesh_path_hysteresis_observe(
+        &state, &relative_gain_too_small, 2000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_INSUFFICIENT_GAIN);
+    check_true(result.suppressed);
+    check_false(state.pending);
+}
+
+static void test_path_hysteresis_resets_when_recommendation_changes(void) {
+    mesh_path_hysteresis_state_t state = {0};
+    mesh_path_metric_observation_t learned = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_DIRECT,
+        MESH_PATH_METRIC_KIND_LEARNED,
+        2000,
+        1000);
+    mesh_path_metric_observation_t direct = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_LEARNED,
+        MESH_PATH_METRIC_KIND_DIRECT,
+        2000,
+        1000);
+    mesh_path_hysteresis_result_t result;
+
+    result = mesh_path_hysteresis_observe(&state, &learned, 1000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_int_eq(state.pending_kind, MESH_PATH_METRIC_KIND_LEARNED);
+
+    result = mesh_path_hysteresis_observe(
+        &state, &direct, 1000 + MESH_PATH_HYSTERESIS_WINDOW_MS);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_true(result.suppressed);
+    check_false(result.switch_ready);
+    check_int_eq(state.pending_kind, MESH_PATH_METRIC_KIND_DIRECT);
+    check_uint_eq(state.pending_since_ms,
+                  1000 + MESH_PATH_HYSTERESIS_WINDOW_MS);
+
+    result = mesh_path_hysteresis_observe(&state, &direct, 5000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_true(result.suppressed);
+    check_false(result.switch_ready);
+    check_uint_eq(state.pending_since_ms, 5000);
+}
+
+static void test_path_hysteresis_tracks_current_and_recommended_identity(void) {
+    mesh_path_hysteresis_state_t state = {0};
+    mesh_path_metric_observation_t observation = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_LEARNED,
+        MESH_PATH_METRIC_KIND_LEARNED,
+        2000,
+        1000);
+    mesh_path_hysteresis_result_t result;
+
+    observation.current_identity = 0x0A2A0101u;
+    observation.recommended_identity = 0x0A2A0102u;
+    observation.differs = 1;
+    result = mesh_path_hysteresis_observe(&state, &observation, 1000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_uint_eq(state.pending_identity, 0x0A2A0102u);
+
+    observation.recommended_identity = 0x0A2A0103u;
+    result = mesh_path_hysteresis_observe(
+        &state, &observation, 1000 + MESH_PATH_HYSTERESIS_WINDOW_MS);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_false(result.switch_ready);
+    check_uint_eq(state.pending_identity, 0x0A2A0103u);
+    check_uint_eq(state.pending_since_ms,
+                  1000 + MESH_PATH_HYSTERESIS_WINDOW_MS);
+
+    observation.current_identity = 0x0A2A0104u;
+    result = mesh_path_hysteresis_observe(
+        &state, &observation, 1000 + 2 * MESH_PATH_HYSTERESIS_WINDOW_MS);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_WINDOW);
+    check_false(result.switch_ready);
+    check_uint_eq(state.pending_current_identity, 0x0A2A0104u);
+    check_uint_eq(state.pending_since_ms,
+                  1000 + 2 * MESH_PATH_HYSTERESIS_WINDOW_MS);
+}
+
+static void test_path_hysteresis_bypasses_window_only_for_hard_failure(void) {
+    mesh_path_hysteresis_state_t state = {0};
+    mesh_path_metric_observation_t observation = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_DIRECT,
+        MESH_PATH_METRIC_KIND_LEARNED,
+        MESH_PATH_METRIC_INFINITY,
+        1000);
+    mesh_path_hysteresis_result_t result =
+        mesh_path_hysteresis_observe(&state, &observation, 1000);
+
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_HARD_FAIL);
+    check_true(result.switch_ready);
+    check_true(result.hard_fail);
+    check_false(result.suppressed);
+    check_false(state.pending);
+
+    observation.policy_forced = 1;
+    observation.recommended_available = 0;
+    result = mesh_path_hysteresis_observe(&state, &observation, 2000);
+    check_int_eq(result.reason, MESH_PATH_HYSTERESIS_POLICY);
+    check_false(result.switch_ready);
+    check_false(result.hard_fail);
+}
+
+static mesh_path_observer_candidate_t *mesh_test_observer_candidate_find(
+    mesh_path_observer_entry_t *entry,
+    uint32_t next_hop_ip) {
+    size_t candidate_index = 0;
+
+    if (!entry) {
+        return NULL;
+    }
+    for (candidate_index = 0;
+         candidate_index < MESH_PATH_OBSERVER_NEXT_HOP_LIMIT;
+         candidate_index++) {
+        if (entry->candidates[candidate_index].in_use &&
+            entry->candidates[candidate_index].next_hop_ip == next_hop_ip) {
+            return &entry->candidates[candidate_index];
+        }
+    }
+    return NULL;
+}
+
+static void test_path_observer_retains_multiple_next_hops_without_churn(void) {
+    mesh_path_observer_store_t store = {0};
+    mesh_path_observer_entry_t *entry = NULL;
+    mesh_path_observer_candidate_t *candidate = NULL;
+    mesh_path_observer_update_t update;
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0101u,
+                                       0x0A2A0102u, 3, 1000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    check_size_eq(store.count, 1);
+    check_size_eq(store.candidate_count, 1);
+    entry = &store.entries[0];
+    entry->hysteresis.pending = 1;
+    entry->hysteresis.pending_kind = MESH_PATH_METRIC_KIND_LEARNED;
+    entry->hysteresis.pending_identity = 0x0A2A0102u;
+    entry->hysteresis.pending_since_ms = 1000;
+    candidate = mesh_test_observer_candidate_find(entry, 0x0A2A0102u);
+    check_not_null(candidate);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0101u,
+                                       0x0A2A0102u, 3, 2000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_REFRESHED);
+    check_true(entry->hysteresis.pending);
+    check_hex64_eq(candidate->expires_at_ms, 62000);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0101u,
+                                       0x0A2A0102u, 4, 2500, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_IGNORED);
+    check_uint_eq(candidate->hop_count, 3);
+    check_true(entry->hysteresis.pending);
+    check_hex64_eq(candidate->expires_at_ms, 62000);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0101u,
+                                       0x0A2A0103u, 3, 3000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    check_size_eq(entry->candidate_count, 2);
+    check_size_eq(store.candidate_count, 2);
+    check_not_null(mesh_test_observer_candidate_find(entry, 0x0A2A0102u));
+    check_not_null(mesh_test_observer_candidate_find(entry, 0x0A2A0103u));
+    check_true(entry->hysteresis.pending);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0101u,
+                                       0x0A2A0104u, 2, 4000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    check_size_eq(entry->candidate_count, 3);
+    check_size_eq(store.candidate_count, 3);
+}
+
+static void test_path_observer_bounds_and_replaces_per_destination(void) {
+    mesh_path_observer_store_t store = {0};
+    mesh_path_observer_entry_t *entry = NULL;
+    mesh_path_observer_update_t update;
+    size_t i = 0;
+    const uint32_t hops[MESH_PATH_OBSERVER_NEXT_HOP_LIMIT] = {4, 4, 3, 2};
+
+    for (i = 0; i < MESH_PATH_OBSERVER_NEXT_HOP_LIMIT; i++) {
+        update = mesh_path_observer_upsert(
+            &store, 0x0A2A0301u, 0x0A2A0310u + (uint32_t)i,
+            hops[i], 1000 + (uint64_t)i, 60000);
+        check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    }
+    entry = mesh_path_observer_find(&store, 0x0A2A0301u);
+    check_not_null(entry);
+    check_size_eq(entry->candidate_count,
+                  MESH_PATH_OBSERVER_NEXT_HOP_LIMIT);
+    check_size_eq(store.candidate_count,
+                  MESH_PATH_OBSERVER_NEXT_HOP_LIMIT);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0301u,
+                                       0x0A2A0320u, 4, 2000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_FULL);
+    check_hex64_eq(store.capacity_drops, 1);
+    check_hex64_eq(store.per_destination_drops, 1);
+    check_null(mesh_test_observer_candidate_find(entry, 0x0A2A0320u));
+
+    entry->hysteresis.pending = 1;
+    entry->hysteresis.pending_kind = MESH_PATH_METRIC_KIND_LEARNED;
+    entry->hysteresis.pending_identity = 0x0A2A0310u;
+    update = mesh_path_observer_upsert(&store, 0x0A2A0301u,
+                                       0x0A2A0321u, 1, 3000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_REPLACED);
+    check_null(mesh_test_observer_candidate_find(entry, 0x0A2A0310u));
+    check_not_null(mesh_test_observer_candidate_find(entry, 0x0A2A0321u));
+    check_false(entry->hysteresis.pending);
+    check_size_eq(entry->candidate_count,
+                  MESH_PATH_OBSERVER_NEXT_HOP_LIMIT);
+}
+
+static void test_path_observer_enforces_destination_capacity(void) {
+    mesh_path_observer_store_t store = {0};
+    mesh_path_observer_update_t update = MESH_PATH_OBSERVER_INVALID;
+    size_t i = 0;
+
+    for (i = 0; i < MESH_PATH_OBSERVER_LIMIT; i++) {
+        update = mesh_path_observer_upsert(
+            &store, 0x0A2B0001u + (uint32_t)i,
+            0x0A2C0001u + (uint32_t)i, 1, 1000, 60000);
+        check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    }
+
+    check_size_eq(store.count, MESH_PATH_OBSERVER_LIMIT);
+    check_size_eq(store.candidate_count, MESH_PATH_OBSERVER_LIMIT);
+    update = mesh_path_observer_upsert(&store, 0x0A2D0001u,
+                                       0x0A2E0001u, 1, 1000, 60000);
+    check_int_eq(update, MESH_PATH_OBSERVER_FULL);
+    check_size_eq(store.count, MESH_PATH_OBSERVER_LIMIT);
+    check_size_eq(store.candidate_count, MESH_PATH_OBSERVER_LIMIT);
+    check_hex64_eq(store.capacity_drops, 1);
+}
+
+static void test_path_observer_expires_and_reuses_entries(void) {
+    mesh_path_observer_store_t store = {0};
+    mesh_path_observer_entry_t *entry = NULL;
+    mesh_path_observer_candidate_t *candidate = NULL;
+    mesh_path_observer_update_t update;
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0201u,
+                                       0x0A2A0202u, 1, 1000, 5000);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    update = mesh_path_observer_upsert(&store, 0x0A2A0201u,
+                                       0x0A2A0203u, 2, 1000, 10000);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    check_size_eq(mesh_path_observer_expire(&store, 5999), 0);
+    check_size_eq(store.count, 1);
+    check_size_eq(store.candidate_count, 2);
+    check_size_eq(mesh_path_observer_expire(&store, 6000), 1);
+    check_size_eq(store.count, 1);
+    check_size_eq(store.candidate_count, 1);
+    check_hex64_eq(store.expirations, 1);
+    entry = mesh_path_observer_find(&store, 0x0A2A0201u);
+    check_not_null(entry);
+    check_null(mesh_test_observer_candidate_find(entry, 0x0A2A0202u));
+    check_not_null(mesh_test_observer_candidate_find(entry, 0x0A2A0203u));
+    check_size_eq(mesh_path_observer_expire(&store, 11000), 1);
+    check_size_eq(store.count, 0);
+    check_size_eq(store.candidate_count, 0);
+    check_hex64_eq(store.expirations, 2);
+
+    update = mesh_path_observer_upsert(&store, 0x0A2A0204u,
+                                       0x0A2A0205u, 2, 12000, UINT64_MAX);
+    check_int_eq(update, MESH_PATH_OBSERVER_INSERTED);
+    check_size_eq(store.count, 1);
+    check_size_eq(store.candidate_count, 1);
+    entry = mesh_path_observer_find(&store, 0x0A2A0204u);
+    check_not_null(entry);
+    candidate = mesh_test_observer_candidate_find(entry, 0x0A2A0205u);
+    check_not_null(candidate);
+    check_hex64_eq(candidate->expires_at_ms, UINT64_MAX);
+}
+
+static void test_path_observer_snapshots_identity_aware_diagnostics(void) {
+    mesh_path_observer_store_t store = {0};
+    mesh_path_observer_entry_t *entry = NULL;
+    mesh_path_observer_diagnostic_t snapshot;
+    mesh_path_metric_observation_t observation = mesh_test_metric_observation(
+        MESH_PATH_METRIC_KIND_LEARNED,
+        MESH_PATH_METRIC_KIND_LEARNED,
+        2000,
+        1000);
+    mesh_path_hysteresis_result_t hysteresis = {
+        MESH_PATH_HYSTERESIS_READY, 0, 1, 0
+    };
+
+    check_int_eq(mesh_path_observer_upsert(
+                     &store, 0x0A2A0401u, 0x0A2A0402u,
+                     2, 1000, 60000),
+                 MESH_PATH_OBSERVER_INSERTED);
+    entry = mesh_path_observer_find(&store, 0x0A2A0401u);
+    check_not_null(entry);
+    observation.current_identity = 0x0A2A0402u;
+    observation.recommended_identity = 0x0A2A0403u;
+    observation.differs = 1;
+    mesh_path_observer_record_diagnostic(
+        entry, &observation, &hysteresis, 3, 5000);
+
+    check_true(mesh_path_observer_diagnostic_snapshot(
+        &store, 0x0A2A0401u, &snapshot));
+    check_true(snapshot.valid);
+    check_uint_eq(snapshot.current_identity, 0x0A2A0402u);
+    check_uint_eq(snapshot.recommended_identity, 0x0A2A0403u);
+    check_uint_eq(snapshot.candidate_count, 3);
+    check_hex64_eq(snapshot.observed_at_ms, 5000);
+    check_int_eq(snapshot.hysteresis_reason, MESH_PATH_HYSTERESIS_READY);
+    check_true(snapshot.switch_ready);
+
+    check_int_eq(mesh_path_observer_upsert(
+                     &store, 0x0A2A0401u, 0x0A2A0402u,
+                     2, 6000, 60000),
+                 MESH_PATH_OBSERVER_REFRESHED);
+    check_false(mesh_path_observer_diagnostic_snapshot(
+        &store, 0x0A2A0401u, &snapshot));
+    check_false(snapshot.valid);
+}
+
+static void test_path_trace_records_only_semantic_changes(void) {
+    mesh_path_trace_store_t store = {0};
+    mesh_path_trace_store_t saturated_store = {.next_sequence = UINT64_MAX};
+    mesh_path_observer_diagnostic_t baseline = {0};
+    mesh_path_observer_diagnostic_t saturated_baseline = {0};
+    mesh_path_observer_diagnostic_t diagnostic = {
+        .current_kind = MESH_PATH_METRIC_KIND_DIRECT,
+        .recommended_kind = MESH_PATH_METRIC_KIND_LEARNED,
+        .current_identity = 0x0A2A0501u,
+        .recommended_identity = 0x0A2A0502u,
+        .current_cost = 2000,
+        .recommended_cost = 1000,
+        .current_metric_provenance =
+            MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM,
+        .recommended_metric_provenance =
+            MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM,
+        .candidate_count = 2,
+        .observed_at_ms = 1000,
+        .hysteresis_reason = MESH_PATH_HYSTERESIS_WINDOW,
+        .recommended_available = 1,
+        .differs = 1,
+        .valid = 1,
+    };
+    mesh_path_trace_record_t records[2] = {0};
+
+    check_true(mesh_path_trace_append_if_changed(
+        &store, 0x0A2A0503u, &diagnostic, &baseline));
+    diagnostic.observed_at_ms = 2000;
+    check_false(mesh_path_trace_append_if_changed(
+        &store, 0x0A2A0503u, &diagnostic, &baseline));
+    check_size_eq(store.count, 1);
+
+    diagnostic.recommended_cost = 900;
+    diagnostic.hysteresis_reason = MESH_PATH_HYSTERESIS_READY;
+    diagnostic.switch_ready = 1;
+    check_true(mesh_path_trace_append_if_changed(
+        &store, 0x0A2A0503u, &diagnostic, &baseline));
+    check_size_eq(mesh_path_trace_snapshot(&store, records, 2), 2);
+    check_hex64_eq(records[0].sequence, 1);
+    check_hex64_eq(records[1].sequence, 2);
+    check_hex64_eq(records[1].diagnostic.observed_at_ms, 2000);
+    check_uint_eq(records[1].diagnostic.recommended_metric_provenance,
+                  MESH_PATH_METRIC_PROVENANCE_AUTHENTICATED_STREAM);
+    check_true(records[1].diagnostic.switch_ready);
+
+    check_true(mesh_path_trace_append_if_changed(
+        &saturated_store, 0x0A2A0503u, &diagnostic, &saturated_baseline));
+    diagnostic.recommended_cost = 800;
+    check_false(mesh_path_trace_append_if_changed(
+        &saturated_store, 0x0A2A0503u, &diagnostic, &saturated_baseline));
+    check_size_eq(saturated_store.count, 1);
+    check_hex64_eq(saturated_store.records[0].sequence, UINT64_MAX);
+}
+
+static void test_path_trace_bounds_and_snapshots_newest_window(void) {
+    mesh_path_trace_store_t store = {0};
+    mesh_path_observer_diagnostic_t baseline = {0};
+    mesh_path_observer_diagnostic_t diagnostic = {
+        .current_kind = MESH_PATH_METRIC_KIND_DIRECT,
+        .recommended_kind = MESH_PATH_METRIC_KIND_DIRECT,
+        .recommended_available = 1,
+        .valid = 1,
+    };
+    mesh_path_trace_record_t records[4] = {0};
+    mesh_path_trace_record_t page_records[4] = {0};
+    mesh_path_trace_page_t page = {0};
+    const size_t total = MESH_PATH_TRACE_LIMIT + 3u;
+    size_t i = 0;
+
+    for (i = 0; i < total; i++) {
+        diagnostic.current_cost = (uint32_t)i;
+        diagnostic.recommended_cost = (uint32_t)i;
+        diagnostic.observed_at_ms = 1000u + (uint64_t)i;
+        check_true(mesh_path_trace_append_if_changed(
+            &store, 0x0A2A0601u, &diagnostic, &baseline));
+    }
+
+    check_size_eq(store.count, MESH_PATH_TRACE_LIMIT);
+    check_hex64_eq(store.overwrites, 3);
+    check_size_eq(mesh_path_trace_snapshot(&store, records, 4), 4);
+    check_hex64_eq(records[0].sequence, (uint64_t)total - 3u);
+    check_hex64_eq(records[3].sequence, (uint64_t)total);
+    check_uint_eq(records[0].diagnostic.current_cost,
+                  (uint32_t)total - 4u);
+    check_uint_eq(records[3].diagnostic.current_cost,
+                  (uint32_t)total - 1u);
+
+    check_size_eq(mesh_path_trace_snapshot_after(
+                      &store, 0, page_records, 4, &page),
+                  4);
+    check_false(page.gap_detected);
+    check_true(page.has_more);
+    check_hex64_eq(page.oldest_sequence, 4);
+    check_hex64_eq(page.latest_sequence, (uint64_t)total);
+    check_hex64_eq(page_records[0].sequence, 4);
+    check_hex64_eq(page.next_after_sequence, 7);
+
+    check_size_eq(mesh_path_trace_snapshot_after(
+                      &store, 1, page_records, 4, &page),
+                  4);
+    check_true(page.gap_detected);
+    check_hex64_eq(page_records[0].sequence, 4);
+
+    check_size_eq(mesh_path_trace_snapshot_after(
+                      &store, (uint64_t)total - 2u,
+                      page_records, 4, &page),
+                  2);
+    check_false(page.gap_detected);
+    check_false(page.has_more);
+    check_hex64_eq(page_records[0].sequence, (uint64_t)total - 1u);
+    check_hex64_eq(page_records[1].sequence, (uint64_t)total);
+    check_hex64_eq(page.next_after_sequence, (uint64_t)total);
+}
+
+static void test_path_trace_public_v1_validates_and_returns_empty_page(void) {
+    mesh_config_t config;
+    mesh_network_t *mesh = NULL;
+    mesh_path_trace_record_v1_t record;
+    mesh_path_trace_page_v1_t page;
+
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.23.1";
+    config.virtual_prefix = 16;
+    config.listen_port = 21991;
+    mesh = mesh_create(&config);
+    check_not_null(mesh);
+
+    memset(&record, 0xFF, sizeof(record));
+    memset(&page, 0xFF, sizeof(page));
+    check_int_eq(mesh_get_path_trace_v1(NULL, 0, &record, 1, &page),
+                 MESH_ERR_INVALID_ARG);
+    check_int_eq(mesh_get_path_trace_v1(mesh, 0, NULL, 1, &page),
+                 MESH_ERR_INVALID_ARG);
+    check_int_eq(mesh_get_path_trace_v1(
+                     mesh, 0, &record, MESH_PATH_TRACE_PAGE_MAX + 1u, &page),
+                 MESH_ERR_INVALID_ARG);
+    check_int_eq(mesh_get_path_trace_v1(mesh, 0, &record, 1, NULL),
+                 MESH_ERR_INVALID_ARG);
+
+    check_int_eq(mesh_get_path_trace_v1(mesh, 0, &record, 1, &page),
+                 MESH_OK);
+    check_uint_eq(page.version, MESH_PATH_TRACE_API_VERSION_V1);
+    check_uint_eq(page.returned_count, 0);
+    check_false(page.has_more);
+    check_false(page.gap_detected);
+    check_hex64_eq(page.next_after_sequence, 0);
+    check_uint_eq(record.version, 0);
+
+    check_int_eq(mesh_get_path_trace_v1(mesh, 7, NULL, 0, &page),
+                 MESH_OK);
+    check_hex64_eq(page.next_after_sequence, 7);
+    mesh_destroy(mesh);
+}
+
+static void test_path_observer_rejects_invalid_observations(void) {
+    mesh_path_observer_store_t store = {0};
+
+    check_int_eq(mesh_path_observer_upsert(NULL, 1, 2, 1, 1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(&store, 0, 2, 1, 1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(&store, 1, 0, 1, 1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(&store, 1, 1, 1, 1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(&store, 1, 2, 0, 1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(
+                     &store, 1, 2, MESH_PATH_METRIC_MAX_HOPS + 1u,
+                     1000, 60000),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_int_eq(mesh_path_observer_upsert(&store, 1, 2, 1, 1000, 0),
+                 MESH_PATH_OBSERVER_INVALID);
+    check_size_eq(store.count, 0);
+}
+
 spec("mesh path regressions") {
+    describe("configuration") {
+        it("rejects incomplete counted arrays") {
+            test_mesh_config_rejects_incomplete_counted_arrays();
+        }
+    }
+
     describe("ice signaling") {
         it("supports runtime setup enable disable and re-enable") {
             test_ice_runtime_lifecycle();
@@ -2087,6 +3083,90 @@ spec("mesh path regressions") {
     }
 
     describe("path selection") {
+        it("recommends the lowest bounded metric without changing forwarding") {
+            test_path_metric_recommends_lower_bounded_cost();
+        }
+
+        it("treats unknown measurements as a conservative upper bound") {
+            test_path_metric_penalizes_unknown_measurements();
+        }
+
+        it("distinguishes learned candidates by next hop identity") {
+            test_path_metric_distinguishes_learned_next_hop_identity();
+        }
+
+        it("preserves authenticated stream metric provenance") {
+            test_path_metric_preserves_authenticated_stream_provenance();
+        }
+
+        it("scores only fields marked available") {
+            test_path_metric_scores_only_available_measurements();
+        }
+
+        it("keeps unavailable pinned policy fail closed") {
+            test_path_metric_keeps_unavailable_policy_fail_closed();
+        }
+
+        it("saturates metric arithmetic instead of overflowing") {
+            test_path_metric_cost_saturates_without_overflow();
+        }
+
+        it("requires a sustained material improvement before qualifying a switch") {
+            test_path_hysteresis_requires_sustained_improvement();
+        }
+
+        it("rejects absolute and relative gains below hysteresis thresholds") {
+            test_path_hysteresis_rejects_small_improvements();
+        }
+
+        it("restarts the observation window when the recommendation changes") {
+            test_path_hysteresis_resets_when_recommendation_changes();
+        }
+
+        it("restarts the observation window when path identity changes") {
+            test_path_hysteresis_tracks_current_and_recommended_identity();
+        }
+
+        it("bypasses the window only for a hard failure") {
+            test_path_hysteresis_bypasses_window_only_for_hard_failure();
+        }
+
+        it("retains multiple observed next hops without equal-cost churn") {
+            test_path_observer_retains_multiple_next_hops_without_churn();
+        }
+
+        it("bounds and replaces observed next hops per destination") {
+            test_path_observer_bounds_and_replaces_per_destination();
+        }
+
+        it("enforces the alternate destination capacity") {
+            test_path_observer_enforces_destination_capacity();
+        }
+
+        it("expires and reuses alternate observation entries") {
+            test_path_observer_expires_and_reuses_entries();
+        }
+
+        it("snapshots identity-aware path diagnostics") {
+            test_path_observer_snapshots_identity_aware_diagnostics();
+        }
+
+        it("records path trace only when diagnostic semantics change") {
+            test_path_trace_records_only_semantic_changes();
+        }
+
+        it("bounds path trace and snapshots the newest ordered window") {
+            test_path_trace_bounds_and_snapshots_newest_window();
+        }
+
+        it("validates the V1 path trace API and returns an empty page") {
+            test_path_trace_public_v1_validates_and_returns_empty_page();
+        }
+
+        it("rejects invalid alternate observations") {
+            test_path_observer_rejects_invalid_observations();
+        }
+
         it("prefers direct path over relay") { test_direct_path_preferred_over_relay(); }
 
         it("allows pinned route policy to override direct path") {
@@ -2125,7 +3205,11 @@ spec("mesh path regressions") {
     }
 
     describe("packet policy") {
-        it("filters packets by direction and port") {
+        it("keeps an empty policy configuration permissive") {
+            test_packet_policy_empty_configuration_remains_permissive();
+        }
+
+        it("uses first-match semantics for direction and port") {
             test_packet_policy_filters_by_direction_and_port();
         }
     }

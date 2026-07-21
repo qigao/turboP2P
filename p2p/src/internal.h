@@ -50,6 +50,18 @@ typedef struct turbo_stream_listener_s turbo_stream_listener_t;
 #define P2P_CONNECT_RETRY_MS 3000
 #define P2P_MANUAL_DISCONNECT_SUPPRESS_MS 5000
 #define P2P_DHT_GET_TIMEOUT_MS 1000
+#ifndef P2P_PENDING_PEER_LIMIT
+#define P2P_PENDING_PEER_LIMIT 128
+#endif
+#ifndef P2P_RTT_PROBE_INTERVAL_MS
+#define P2P_RTT_PROBE_INTERVAL_MS 15000U
+#endif
+#ifndef P2P_RTT_SAMPLE_MAX_MS
+#define P2P_RTT_SAMPLE_MAX_MS P2P_PEER_TIMEOUT_MS
+#endif
+#ifndef P2P_RTT_METRIC_FRESH_MS
+#define P2P_RTT_METRIC_FRESH_MS P2P_PEER_TIMEOUT_MS
+#endif
 #define P2P_DHT_KEY_SIZE 20              
 #define P2P_MAX_IP 64
 
@@ -236,6 +248,11 @@ struct p2p_peer_s {
   uint64_t connect_time;
   uint64_t reconnect_after_ms;
   uint64_t avg_rtt_ms;
+  uint64_t rttvar_ms;
+  uint64_t last_rtt_sample_ms;
+  uint64_t last_ping_sent_ms;
+  uint64_t outstanding_ping_ms;
+  uint32_t rtt_sample_count;
   vivaldi_coord_t coord;
 
   /* I/O & Crypto */
@@ -366,6 +383,9 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg);
 int p2p_peer_hold(p2p_peer_t *peer);
 int p2p_peer_hold_locked(p2p_peer_t *peer);
 void p2p_peer_release(p2p_peer_t *peer);
+int p2p_peer_record_rtt_sample_locked(p2p_peer_t *peer,
+                                      uint64_t sent_ms,
+                                      uint64_t received_ms);
 
 /* Messaging */
 int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type, const void *payload, size_t len);
@@ -384,6 +404,7 @@ p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node);
 CXX_C_API int p2p_node_start_server(p2p_node_t *node);
 void p2p_node_stop_server(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
+void node_maintenance_cb(turbo_timer_t *timer);
 
 /* Lifecycle and Events */
 void p2p_node_on_peer_connected(p2p_node_t *node, p2p_peer_t *peer);
@@ -413,6 +434,7 @@ p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *cou
 void p2p_peer_fill_info_ex_locked(const p2p_peer_t *peer, p2p_peer_info_ex_t *info);
 CXX_C_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer);
 CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
+CXX_C_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node);
 CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
 int p2p_id_is_zero(const uint8_t *id);
 void p2p_endpoint_to_key(char *buf, size_t buf_size, const char *ip, int port);

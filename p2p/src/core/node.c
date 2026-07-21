@@ -22,7 +22,7 @@ static int node_build_sockaddr(const char *ip, int port, struct sockaddr_storage
 static int node_sockaddr_to_peer(const struct sockaddr_storage *addr, char *ip,
                                  size_t ip_size, int *port);
 static void node_server_accept_cb(void *server_handle, void *client_handle, void *peer);
-static void node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer);
+static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer);
 static int node_ip_is_publishable(const char *ip);
 typedef void (*node_peer_event_cb_t)(struct p2p_peer_s *peer, void *user_data);
 static p2p_peer_t *node_find_connected_peer_by_id_locked(p2p_node_t *node,
@@ -39,6 +39,8 @@ static void node_handle_peer_disconnect_locked(p2p_node_t *node, p2p_peer_t *pee
 static int node_activate_authenticated_peer_locked(p2p_node_t *node, p2p_peer_t *peer,
                                                    p2p_peer_t **stale_peer,
                                                    p2p_peer_t **duplicate_peer);
+static p2p_peer_t *node_take_expired_pending_peer_locked(p2p_node_t *node,
+                                                         uint64_t now_ms);
 
 /* =============================================================================
  * Node Lifecycle
@@ -412,7 +414,9 @@ int p2p_dht_join_ring(p2p_node_t *node, const char *bootstrap_ip, int bootstrap_
         return ret;
     }
 
-    kad_id_random(&bootstrap_id); /* Identity logic will improve later */
+    /* Keep the provisional route ID consistent with other endpoint-derived
+     * Kademlia contacts until the authenticated peer ID is learned. */
+    p2p_endpoint_to_id(bootstrap_ip, bootstrap_port, &bootstrap_id);
     turbo_mutex_lock(&node->mutex);
     p2p_node_add_route_locked(node, bootstrap_id.bytes, bootstrap_ip, bootstrap_port);
     turbo_mutex_unlock(&node->mutex);
@@ -501,7 +505,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
     }
 
     p2p_dht_lookup_try_progress(node);
-    node_send_identity_ping(node, peer);
+    (void)node_send_identity_ping(node, peer);
 
     if (on_peer_connected) {
         on_peer_connected(peer, peer_user_data);
@@ -511,11 +515,20 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
     }
 }
 
-static void node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
+static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
     p2p_ping_payload_t ping = {0};
+    int ret = P2P_ERR_INVALID_STATE;
 
     if (!node || !peer) {
-        return;
+        return P2P_ERR_INVALID_ARG;
+    }
+
+    turbo_mutex_lock(&node->mutex);
+    if (!peer->is_connected || peer->state != P2P_PEER_STATE_CONNECTED ||
+        !p2p_crypto_session_is_ready(&peer->crypto) ||
+        peer->outstanding_ping_ms != 0) {
+        turbo_mutex_unlock(&node->mutex);
+        return P2P_ERR_INVALID_STATE;
     }
 
     memcpy(ping.node_id, node->id, P2P_DHT_KEY_SIZE);
@@ -527,7 +540,20 @@ static void node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
     memcpy(ping.coords, node->coord.coords, sizeof(ping.coords));
     ping.height = node->coord.height;
     ping.error = node->coord.error;
-    (void)p2p_send_message(node, peer, P2P_MSG_PING, &ping, sizeof(ping));
+    peer->last_ping_sent_ms = ping.timestamp;
+    peer->outstanding_ping_ms = ping.timestamp;
+    turbo_mutex_unlock(&node->mutex);
+
+    ret = p2p_send_message(node, peer, P2P_MSG_PING, &ping, sizeof(ping));
+    if (ret != P2P_OK) {
+        turbo_mutex_lock(&node->mutex);
+        if (peer->outstanding_ping_ms == ping.timestamp) {
+            peer->outstanding_ping_ms = 0;
+            peer->last_ping_sent_ms = 0;
+        }
+        turbo_mutex_unlock(&node->mutex);
+    }
+    return ret;
 }
 
 static int node_ip_is_publishable(const char *ip) {
@@ -698,6 +724,28 @@ CXX_C_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer) {
     peer_table_add(&node->peers_table, peer);
 }
 
+CXX_C_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node) {
+    p2p_peer_entry_t *curr = NULL;
+    p2p_peer_entry_t *tmp = NULL;
+    int pending_count = 0;
+
+    if (!node) {
+        return 0;
+    }
+
+    HASH_ITER(hh, node->peers_table, curr, tmp) {
+        if (curr->peer && !curr->peer->is_connected &&
+            curr->peer->state == P2P_PEER_STATE_HANDSHAKING) {
+            pending_count++;
+            if (pending_count >= P2P_PENDING_PEER_LIMIT) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
+}
+
 CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
                                                        const char *ip,
                                                        int port) {
@@ -844,6 +892,7 @@ static void node_server_accept_cb(void *server_handle, void *client_handle, void
     char ip[P2P_MAX_IP];
     int port = 0;
     p2p_peer_t *accepted_peer;
+    int peer_tracked = 0;
 
     if (!node || !client) return;
 
@@ -885,9 +934,26 @@ static void node_server_accept_cb(void *server_handle, void *client_handle, void
     }
 
     accepted_peer->state = P2P_PEER_STATE_HANDSHAKING;
-    accepted_peer->is_connected = 1;
+    accepted_peer->is_connected = 0;
     accepted_peer->connect_time = turbo_hrtime();
     accepted_peer->last_seen = accepted_peer->connect_time;
+
+    /* The peer table owns accepted transports from accept through teardown.
+     * Keep unauthenticated peers hidden from connected-peer snapshots until
+     * node_activate_authenticated_peer_locked() completes authentication. */
+    turbo_mutex_lock(&node->mutex);
+    if (p2p_node_pending_peer_capacity_available_locked(node) &&
+        !p2p_node_find_peer_by_endpoint_locked(node, ip, port)) {
+        p2p_node_add_peer_locked(node, accepted_peer);
+    }
+    peer_tracked = p2p_node_find_peer_by_endpoint_locked(node, ip, port) == accepted_peer;
+    turbo_mutex_unlock(&node->mutex);
+
+    if (!peer_tracked) {
+        turbo_stream_set_user_data(client, NULL);
+        p2p_peer_destroy(accepted_peer);
+        return;
+    }
 
     p2p_node_on_peer_connected(node, accepted_peer);
 }
@@ -949,6 +1015,10 @@ void p2p_gossip_start(p2p_node_t *node) {
 
 void node_maintenance_cb(turbo_timer_t *timer) {
     p2p_node_t *node = (p2p_node_t *)turbo_timer_get_data(timer);
+    p2p_peer_t *expired_peer = NULL;
+    p2p_peer_t **peers = NULL;
+    size_t peer_count = 0;
+    uint64_t now = 0;
     if (!node) return;
 
     turbo_mutex_lock(&node->mutex);
@@ -958,26 +1028,90 @@ void node_maintenance_cb(turbo_timer_t *timer) {
     /* 1. DHT Refresh */
     p2p_gossip_start(node);
 
-    turbo_mutex_lock(&node->mutex);
+    now = turbo_hrtime() / 1000000;
+    for (;;) {
+        turbo_mutex_lock(&node->mutex);
+        expired_peer = node_take_expired_pending_peer_locked(node, now);
+        turbo_mutex_unlock(&node->mutex);
 
-    /* 2. Peer Pruning (Remove inactive/dead peers) */
-    p2p_peer_entry_t *curr, *tmp;
-    uint64_t now = turbo_hrtime() / 1000000;
-    
-    HASH_ITER(hh, node->peers_table, curr, tmp) {
-        if (curr->peer && !curr->peer->is_connected) {
-            /* Peer was likely disconnected by async_server/client callback */
+        if (!expired_peer) {
+            break;
+        }
+
+        TLOG_DEBUG("[P2P] Expiring unauthenticated peer {}:{}",
+                   expired_peer->ip, expired_peer->port);
+        p2p_peer_destroy(expired_peer);
+    }
+
+    /* 2. Probe healthy authenticated streams and prune stale peers. The
+     * snapshot owns temporary holds so socket I/O never runs under node->mutex. */
+    peers = p2p_node_snapshot_connected_peers(node, &peer_count);
+    for (size_t i = 0; i < peer_count; i++) {
+        p2p_peer_t *peer = peers[i];
+        uint64_t last_seen_ms = 0;
+        int stale = 0;
+        int probe_due = 0;
+        p2p_peer_info_ex_t peer_info = {0};
+
+        if (!peer) {
             continue;
         }
 
-        /* If no activity for 30s, considering pinging or dropping */
-        if (curr->peer && (now - (curr->peer->last_seen / 1000000)) > P2P_PEER_TIMEOUT_MS) {
-            TLOG_INFO("[P2P] Pruning stale peer {}:{}", curr->peer->ip, curr->peer->port);
-            p2p_peer_disconnect(curr->peer);
-            /* Note: hash table removal handled by on_peer_disconnected callback */
+        turbo_mutex_lock(&node->mutex);
+        last_seen_ms = peer->last_seen / 1000000U;
+        stale = now >= last_seen_ms &&
+                now - last_seen_ms > P2P_PEER_TIMEOUT_MS;
+        probe_due = !stale && peer->state == P2P_PEER_STATE_CONNECTED &&
+                    p2p_crypto_session_is_ready(&peer->crypto) &&
+                    peer->outstanding_ping_ms == 0 &&
+                    (peer->last_ping_sent_ms == 0 ||
+                     (now >= peer->last_ping_sent_ms &&
+                      now - peer->last_ping_sent_ms >= P2P_RTT_PROBE_INTERVAL_MS));
+        if (stale) {
+            p2p_peer_fill_info_ex_locked(peer, &peer_info);
         }
+        turbo_mutex_unlock(&node->mutex);
+
+        if (stale) {
+            TLOG_INFO("[P2P] Pruning stale peer {}:{}", peer_info.ip, peer_info.port);
+            p2p_peer_disconnect(peer);
+        } else if (probe_due) {
+            (void)node_send_identity_ping(node, peer);
+        }
+        p2p_peer_release(peer);
     }
-    turbo_mutex_unlock(&node->mutex);
+    free(peers);
+}
+
+static p2p_peer_t *node_take_expired_pending_peer_locked(p2p_node_t *node,
+                                                         uint64_t now_ms) {
+    p2p_peer_entry_t *curr = NULL;
+    p2p_peer_entry_t *tmp = NULL;
+
+    if (!node) {
+        return NULL;
+    }
+
+    HASH_ITER(hh, node->peers_table, curr, tmp) {
+        p2p_peer_t *peer = curr->peer;
+        uint64_t connected_at_ms = 0;
+
+        if (!peer || peer->is_connected ||
+            peer->state != P2P_PEER_STATE_HANDSHAKING || peer->connect_time == 0) {
+            continue;
+        }
+
+        connected_at_ms = peer->connect_time / 1000000;
+        if (now_ms < connected_at_ms ||
+            now_ms - connected_at_ms <= P2P_PEER_TIMEOUT_MS) {
+            continue;
+        }
+
+        node_remove_peer_entry_locked(node, peer);
+        return peer;
+    }
+
+    return NULL;
 }
 
 /* =============================================================================

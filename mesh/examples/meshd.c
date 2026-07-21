@@ -1160,6 +1160,17 @@ static int meshd_run(const char *config_path, const mesh_node_config_t *override
         tunnel_shutdown();
         return 1;
     }
+    if (g_config.stream_enabled &&
+        mesh_stream_admission_enable(g_mesh) != MESH_OK) {
+        fprintf(stderr, "Failed to enable stream admission\n");
+        mesh_destroy(g_mesh);
+        g_mesh = NULL;
+        tunnel_destroy(g_tunnel);
+        g_tunnel = NULL;
+        meshd_free_tunnel_config(&tun_cfg);
+        tunnel_shutdown();
+        return 1;
+    }
 
     tunnel_set_traffic_callback(g_tunnel, meshd_on_tun_packet, g_mesh);
 
