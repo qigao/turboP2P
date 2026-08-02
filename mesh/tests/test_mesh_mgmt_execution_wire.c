@@ -155,6 +155,53 @@ static void test_signed_grant_and_request_round_trip(void) {
                MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA);
 }
 
+static void test_v2_request_round_trips_lease_fencing_proof(void) {
+  mesh_mgmt_execution_grant_v1_t grant;
+  mesh_mgmt_execution_grant_v1_t decoded_grant;
+  mesh_mgmt_execution_request_v1_t request;
+  mesh_mgmt_execution_request_v1_t decoded_request;
+  mesh_mgmt_execution_lease_proof_v2_t proof;
+  mesh_mgmt_execution_lease_proof_v2_t decoded_proof;
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V2];
+  uint16_t version = 0u;
+  size_t payload_size = 0u;
+
+  make_grant(&grant);
+  check_int_eq(mesh_mgmt_execution_grant_sign_v1(&grant, issuer_private_key),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  make_request(&grant, &request);
+  memset(&proof, 0, sizeof(proof));
+  proof.fencing_token = 41u;
+  proof.worker_generation = 7u;
+  proof.quorum_read_index = 43u;
+  proof.lease_expires_at_ms = request.deadline_ms - 1u;
+
+  check_int_eq(mesh_mgmt_execution_command_request_encode_v2(
+                   &grant, &request, &proof, payload, sizeof(payload),
+                   &payload_size),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  check_int_eq(mesh_mgmt_execution_command_request_decode_compatible_v2(
+                   payload, payload_size, &decoded_grant, &decoded_request,
+                   &version, &decoded_proof),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  check_uint_eq(version, MESH_MGMT_EXECUTION_COMMAND_VERSION_V2);
+  check_uint_eq(decoded_proof.fencing_token, proof.fencing_token);
+  check_uint_eq(decoded_proof.worker_generation, proof.worker_generation);
+  check_uint_eq(decoded_proof.quorum_read_index, proof.quorum_read_index);
+  check_uint_eq(decoded_proof.lease_expires_at_ms, proof.lease_expires_at_ms);
+  check_mem_eq(decoded_request.command_id, request.command_id,
+               sizeof(request.command_id));
+  check_int_eq(mesh_mgmt_execution_command_request_decode_v1(
+                   payload, payload_size, &decoded_grant, &decoded_request),
+               MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA);
+
+  proof.quorum_read_index = proof.fencing_token - 1u;
+  check_int_eq(mesh_mgmt_execution_command_request_encode_v2(
+                   &grant, &request, &proof, payload, sizeof(payload),
+                   &payload_size),
+               MESH_MGMT_EXECUTION_WIRE_INVALID_ARG);
+}
+
 static void test_signed_result_round_trip(void) {
   mesh_mgmt_execution_result_v1_t result;
   mesh_mgmt_execution_result_v1_t decoded;
@@ -330,7 +377,10 @@ spec("mesh management node execution wire E3") {
   }
   describe("execution command payloads") {
     it("round trips a signed grant and canonical request") {
-      test_signed_grant_and_request_round_trip();
+        test_signed_grant_and_request_round_trip();
+    }
+    it("round trips a V2 lease fencing proof and rejects it as V1") {
+        test_v2_request_round_trips_lease_fencing_proof();
     }
     it("round trips a signed terminal result") {
       test_signed_result_round_trip();

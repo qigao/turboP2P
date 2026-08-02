@@ -27,6 +27,8 @@ option(ENABLE_ZLIB "Use zlib" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(BUILD_EXAMPLES "Build example programs" ON)
 option(BUILD_TESTS "Build test suite" ON)
+option(TURBOP2P_BUILD_TURBORAFT_M3
+       "Build the TurboRaft-backed M3 namespace adapter" OFF)
 
   
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)

@@ -186,8 +186,8 @@ mesh_mgmt_dispatcher_validate_node_execution_shadow_v1(
          MESH_MGMT_ROLE_OPERATOR) == 0u)
         return MESH_MGMT_DISPATCH_AUTH_FAILED;
 
-    wire_result = mesh_mgmt_execution_command_request_decode_v1(
-        payload, payload_len, &grant, &request);
+    wire_result = mesh_mgmt_execution_command_request_decode_compatible_v2(
+        payload, payload_len, &grant, &request, NULL, NULL);
     if (wire_result != MESH_MGMT_EXECUTION_WIRE_OK)
         return map_execution_wire_result(wire_result);
     wire_result = mesh_mgmt_execution_grant_verify_v1(
@@ -266,8 +266,9 @@ mesh_mgmt_dispatcher_validate_node_execution_outbound_shadow_v1(
     if (verified.frame.kind != MESH_MGMT_KIND_COMMAND_REQUEST ||
         verified.header.forward_budget != 0u)
         return MESH_MGMT_DISPATCH_INVALID_FRAME;
-    wire_result = mesh_mgmt_execution_command_request_decode_v1(
-        verified.frame.payload, verified.frame.payload_len, &grant, &request);
+    wire_result = mesh_mgmt_execution_command_request_decode_compatible_v2(
+        verified.frame.payload, verified.frame.payload_len, &grant, &request,
+        NULL, NULL);
     if (wire_result != MESH_MGMT_EXECUTION_WIRE_OK)
         return map_execution_wire_result(wire_result);
     wire_result = mesh_mgmt_execution_grant_verify_v1(

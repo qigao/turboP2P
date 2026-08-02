@@ -62,6 +62,16 @@ m3_namespace_local_result_t m3_namespace_local_store_apply_put_v1(
     const uint8_t *object_key, size_t object_key_size,
     const uint8_t *manifest_bytes, size_t manifest_size);
 
+/**
+ * Apply one committed object tombstone. Missing objects are idempotent no-ops
+ * that still advance applied_index. Older or duplicate indexes are fenced.
+ */
+m3_namespace_local_result_t m3_namespace_local_store_apply_tombstone_v1(
+    m3_namespace_local_store_v1_t *store, uint64_t committed_index,
+    const uint8_t tenant_id[M3_CHUNK_CAPABILITY_TENANT_ID_SIZE],
+    const uint8_t *bucket, size_t bucket_size,
+    const uint8_t *object_key, size_t object_key_size);
+
 /** Return an inline, single-owner linearizable lookup adapter. */
 m3_namespace_lookup_adapter_v1_t
 m3_namespace_local_store_adapter_v1(m3_namespace_local_store_v1_t *store);

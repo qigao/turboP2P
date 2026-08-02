@@ -24,8 +24,10 @@ typedef enum {
 typedef struct {
   mesh_mgmt_execution_grant_v1_t grant;
   mesh_mgmt_execution_request_v1_t request;
+  mesh_mgmt_execution_lease_proof_v2_t lease_proof;
   uint8_t request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t reply_node_id[32];
+  uint16_t command_version;
 } mesh_mgmt_execution_shadow_command_v1_t;
 
 /**

@@ -85,9 +85,10 @@ mesh_mgmt_execution_shadow_command_from_event_v1(
       event->envelope.frame.payload_len, now_ms);
   if (dispatch_result != MESH_MGMT_DISPATCH_OK)
     return map_dispatch_result(dispatch_result);
-  wire_result = mesh_mgmt_execution_command_request_decode_v1(
+  wire_result = mesh_mgmt_execution_command_request_decode_compatible_v2(
       event->envelope.frame.payload, event->envelope.frame.payload_len,
-      &out_command->grant, &out_command->request);
+      &out_command->grant, &out_command->request,
+      &out_command->command_version, &out_command->lease_proof);
   if (wire_result != MESH_MGMT_EXECUTION_WIRE_OK) {
     memset(out_command, 0, sizeof(*out_command));
     return MESH_MGMT_EXECUTION_CONSUMER_INVALID_SCHEMA;

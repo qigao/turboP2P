@@ -4,10 +4,11 @@ install/
 bin/
 out/
 cmake-build-*/
+.vcpkg_installed/
+vcpkg_installed/
 conan-cache/
 coverage.xml
 .codegraph/
-.codex-*
 
 # IDE files
 .vs/
@@ -21,7 +22,6 @@ coverage.xml
 _ReSharper*
 *.log
 .cache/
-.agent
 
 # Compiled Object files
 *.slo
@@ -67,10 +67,12 @@ ehthumbs.db
 Thumbs.db
 
 # User specific settings
-compile_commands.json
 .env
-.env.config.cmake
-external/*
+ 
+# agents
+.codex-*
+.claude
+.agent
 
 # Security - Entire projects directory (contains generated keys, licenses, and project-specific configs)
 # NEVER commit this directory - it contains:

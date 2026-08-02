@@ -15,6 +15,13 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_replay.c
     test_mesh_mgmt_execution.c
     test_mesh_mgmt_execution_store.c
+    test_m3_namespace_local_store.c
+    test_mesh_flow_ruleset.c
+    test_mesh_flow_runtime.c
+    test_mesh_flow_ruleset_raft.c
+    test_mesh_task_lease.c
+    test_mesh_task_lease_raft.c
+    test_mesh_task_execution_guard.c
     test_mesh_mgmt_execution_result.c
     test_mesh_mgmt_execution_wire.c
     test_mesh_mgmt_session.c
@@ -52,6 +59,14 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
         test_mesh_mgmt_execution_orchestrator.c
         test_mesh_mgmt_execution_node.c
         test_meshd_execution_config.c)
+endif()
+
+if(TURBOP2P_BUILD_TURBORAFT_M3)
+  list(APPEND MESH_TEST_SOURCES test_m3_namespace_raft_adapter.c)
+  list(APPEND MESH_TEST_SOURCES test_mesh_task_lease_raft_adapter.c)
+  list(APPEND MESH_TEST_SOURCES test_mesh_flow_ruleset_raft_adapter.c)
+  list(APPEND MESH_TEST_SOURCES test_mesh_control_raft.c)
+  list(APPEND MESH_TEST_SOURCES test_mesh_control_raft_service.c)
 endif()
 
 foreach(test_source ${MESH_TEST_SOURCES})
@@ -104,6 +119,31 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_execution_store")
         list(APPEND extra_test_libs mesh_mgmt_execution_store)
+    endif()
+    if(test_name STREQUAL "test_m3_namespace_local_store")
+        list(APPEND extra_test_libs m3_namespace_local_store)
+    elseif(test_name STREQUAL "test_mesh_flow_ruleset")
+        list(APPEND extra_test_libs mesh_flow_ruleset)
+    elseif(test_name STREQUAL "test_mesh_flow_runtime")
+        list(APPEND extra_test_libs mesh_flow_ruleset)
+    elseif(test_name STREQUAL "test_mesh_flow_ruleset_raft")
+        list(APPEND extra_test_libs mesh_flow_ruleset_raft)
+    elseif(test_name STREQUAL "test_mesh_task_lease")
+        list(APPEND extra_test_libs mesh_task_lease)
+    elseif(test_name STREQUAL "test_mesh_task_lease_raft")
+        list(APPEND extra_test_libs mesh_task_lease_raft)
+    elseif(test_name STREQUAL "test_mesh_task_execution_guard")
+        list(APPEND extra_test_libs mesh_task_execution_guard)
+    elseif(test_name STREQUAL "test_m3_namespace_raft_adapter")
+        list(APPEND extra_test_libs m3_namespace_raft_adapter)
+    elseif(test_name STREQUAL "test_mesh_task_lease_raft_adapter")
+        list(APPEND extra_test_libs mesh_task_lease_raft_adapter)
+    elseif(test_name STREQUAL "test_mesh_flow_ruleset_raft_adapter")
+        list(APPEND extra_test_libs mesh_flow_ruleset_raft_adapter)
+    elseif(test_name STREQUAL "test_mesh_control_raft")
+        list(APPEND extra_test_libs mesh_control_raft)
+    elseif(test_name STREQUAL "test_mesh_control_raft_service")
+        list(APPEND extra_test_libs mesh_control_raft_service)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_execution_result")
         list(APPEND extra_test_libs mesh_mgmt_execution_result)

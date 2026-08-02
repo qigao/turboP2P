@@ -57,6 +57,29 @@ static void test_unknown_task_fails_closed(void) {
     check_true(task.requires_token);
 }
 
+static void test_rpc_ui_is_static_htmx_over_authoritative_virtual_rpc(void) {
+    meshd_task_model_t task = {0};
+    const char *page;
+    size_t page_size = 0u;
+
+    meshd_classify_mgmt_task("GET", "/", &task);
+    check_str_eq(task.type, "mesh.rpc-ui");
+    check_str_eq(task.layer, "mesh_data_plane");
+    check_false(task.requires_token);
+    check_true(task.safe_to_retry);
+    page = meshd_rpc_ui_page(&page_size);
+    check_not_null(page);
+    check(page_size > 0u);
+    check_str_contains(page, "htmx.org@2.0.10");
+    check_str_contains(page, "integrity=\"sha384-");
+    check_str_contains(page, "hx-get=\"/v1/status\"");
+    check_str_contains(page, "hx-post=\"/v1/shutdown\"");
+    check_str_contains(page, "X-Meshd-Token");
+    check_str_contains(page, "textContent=event.detail.xhr.responseText");
+    check_null(strstr(page, "127.0.0.1"));
+    check_null(strstr(page, "bind_host"));
+}
+
 static void test_task_response_preserves_the_control_contract(void) {
     meshd_task_model_t task = {
         "node.shutdown",
@@ -1291,6 +1314,10 @@ spec("meshd runtime") {
 
         it("fails closed for unknown tasks") {
             test_unknown_task_fails_closed();
+        }
+
+        it("serves an HTMX UI over authoritative virtual RPC only") {
+            test_rpc_ui_is_static_htmx_over_authoritative_virtual_rpc();
         }
 
         it("preserves the task response contract") {

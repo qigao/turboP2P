@@ -19,6 +19,16 @@ extern "C" {
   (MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V1 +                \
    MESH_MGMT_EXECUTION_GRANT_CANONICAL_MAX_SIZE_V1 +                     \
    MESH_MGMT_EXECUTION_REQUEST_CANONICAL_MAX_SIZE_V1)
+#define MESH_MGMT_EXECUTION_COMMAND_VERSION_V1 1u
+#define MESH_MGMT_EXECUTION_COMMAND_VERSION_V2 2u
+#define MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2 32u
+#define MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V2             \
+  (MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V1 + 4u +           \
+   MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2)
+#define MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V2                  \
+  (MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V2 +                \
+   MESH_MGMT_EXECUTION_GRANT_CANONICAL_MAX_SIZE_V1 +                     \
+   MESH_MGMT_EXECUTION_REQUEST_CANONICAL_MAX_SIZE_V1)
 #define MESH_MGMT_EXECUTION_COMMAND_RESULT_SIZE_V1 543u
 #define MESH_MGMT_EXECUTION_STATUS_CANONICAL_SIZE_V1 116u
 #define MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1 152u
@@ -53,6 +63,13 @@ typedef enum {
   MESH_MGMT_EXECUTION_WIRE_EXPIRED = -6,
 } mesh_mgmt_execution_wire_result_t;
 
+typedef struct {
+  uint64_t fencing_token;
+  uint64_t worker_generation;
+  uint64_t quorum_read_index;
+  uint64_t lease_expires_at_ms;
+} mesh_mgmt_execution_lease_proof_v2_t;
+
 mesh_mgmt_execution_wire_result_t
 mesh_mgmt_execution_grant_encode_canonical_v1(
     const mesh_mgmt_execution_grant_v1_t *grant, uint8_t *output,
@@ -83,6 +100,28 @@ mesh_mgmt_execution_command_request_decode_v1(
     const uint8_t *payload, size_t payload_size,
     mesh_mgmt_execution_grant_v1_t *out_grant,
     mesh_mgmt_execution_request_v1_t *out_request);
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_encode_v2(
+    const mesh_mgmt_execution_grant_v1_t *grant,
+    const mesh_mgmt_execution_request_v1_t *request,
+    const mesh_mgmt_execution_lease_proof_v2_t *proof, uint8_t *output,
+    size_t output_capacity, size_t *out_size);
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_decode_v2(
+    const uint8_t *payload, size_t payload_size,
+    mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request,
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof);
+
+/* Explicit version dispatch. V1 returns a zero proof; unknown versions fail. */
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_decode_compatible_v2(
+    const uint8_t *payload, size_t payload_size,
+    mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request, uint16_t *out_version,
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof);
 
 mesh_mgmt_execution_wire_result_t
 mesh_mgmt_execution_command_result_encode_v1(

@@ -4,6 +4,8 @@
  */
 
 #include "turbo_mesh.h"
+#include "mesh_flow_runtime.h"
+#include "mesh_internal_flow_policy.h"
 #include "mesh_mgmt_mesh_bridge.h"
 #include "mesh_path_optimizer.h"
 #include <fmt.h>
@@ -233,6 +235,7 @@ typedef struct mesh_network_s {
     int magic_dns_record_count;
     mesh_packet_policy_entry_t *packet_policy_rules;
     int packet_policy_rule_count;
+    mesh_flow_runtime_v1_t runtime_flow_policy;
 
     /* Statistics */
     mesh_stats_t stats;
@@ -1188,9 +1191,23 @@ static int mesh_packet_policy_allows(mesh_network_t *mesh,
                                      const uint8_t *ip_packet,
                                      size_t len) {
     int direction_has_rules = 0;
+    mesh_flow_decision_v1_t runtime_decision;
+    mesh_flow_runtime_result_t runtime_result;
 
     if (!mesh || !ip_packet || len < 20) {
         return 0;
+    }
+
+    if (mesh->runtime_flow_policy.open) {
+        runtime_result = mesh_flow_runtime_evaluate_ipv4_v1(
+            &mesh->runtime_flow_policy, direction, ip_packet, len, NULL,
+            &runtime_decision);
+        if (runtime_result == MESH_FLOW_RUNTIME_OK) {
+            return runtime_decision.action == MESH_FLOW_ACTION_ALLOW;
+        }
+        if (runtime_result != MESH_FLOW_RUNTIME_DISABLED) {
+            return 0;
+        }
     }
 
     if (!mesh->packet_policy_rules || mesh->packet_policy_rule_count <= 0) {
@@ -4588,6 +4605,7 @@ void mesh_destroy(mesh_network_t *mesh) {
     free(mesh->peer_allow_cidrs);
     free(mesh->peer_allow_node_ids);
     free(mesh->magic_dns_records);
+    mesh_flow_runtime_destroy_v1(&mesh->runtime_flow_policy);
     free(mesh->packet_policy_rules);
 
     free(mesh);
@@ -5215,6 +5233,60 @@ int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *info) {
     info->last_seen_ms = peer->last_seen_ms;
 
     return MESH_OK;
+}
+
+mesh_flow_runtime_result_t mesh_internal_flow_policy_publish_v1(
+    mesh_network_t *mesh, uint64_t committed_index, uint64_t policy_epoch,
+    mesh_flow_action_v1_t default_action, const mesh_flow_rule_v1_t *rules,
+    size_t rule_count) {
+    mesh_flow_runtime_result_t result;
+
+    if (!mesh) {
+        return MESH_FLOW_RUNTIME_INVALID_ARG;
+    }
+    if (!mesh->runtime_flow_policy.open) {
+        result = mesh_flow_runtime_init_v1(&mesh->runtime_flow_policy,
+                                           MESH_FLOW_RULESET_MAX_RULES,
+                                           default_action);
+        if (result != MESH_FLOW_RUNTIME_OK) {
+            return result;
+        }
+    }
+    return mesh_flow_runtime_publish_v1(&mesh->runtime_flow_policy,
+                                        committed_index, policy_epoch,
+                                        default_action, rules, rule_count);
+}
+
+mesh_flow_runtime_result_t mesh_internal_flow_policy_prepare_v1(
+    mesh_network_t *mesh) {
+    if (!mesh) {
+        return MESH_FLOW_RUNTIME_INVALID_ARG;
+    }
+    if (mesh->runtime_flow_policy.open) {
+        return MESH_FLOW_RUNTIME_OK;
+    }
+    return mesh_flow_runtime_init_v1(&mesh->runtime_flow_policy,
+                                     MESH_FLOW_RULESET_MAX_RULES,
+                                     MESH_FLOW_ACTION_DENY);
+}
+
+mesh_flow_runtime_result_t mesh_internal_flow_policy_require_v1(
+    mesh_network_t *mesh, uint64_t required_index) {
+    mesh_flow_runtime_result_t result;
+
+    if (!mesh || required_index == 0u) {
+        return MESH_FLOW_RUNTIME_INVALID_ARG;
+    }
+    if (!mesh->runtime_flow_policy.open) {
+        result = mesh_flow_runtime_init_v1(&mesh->runtime_flow_policy,
+                                           MESH_FLOW_RULESET_MAX_RULES,
+                                           MESH_FLOW_ACTION_DENY);
+        if (result != MESH_FLOW_RUNTIME_OK) {
+            return result;
+        }
+    }
+    return mesh_flow_runtime_require_index_v1(&mesh->runtime_flow_policy,
+                                              required_index);
 }
 
 int mesh_peer_stream_ready(const mesh_peer_t *peer) {

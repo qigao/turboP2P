@@ -15,6 +15,7 @@
 #define EXECUTION_COMMAND_FIELD_BODY 4u
 #define EXECUTION_COMMAND_FIELD_SIGNATURE 5u
 #define EXECUTION_COMMAND_FIELD_REQUEST 6u
+#define EXECUTION_COMMAND_FIELD_LEASE_PROOF 7u
 
 static const uint8_t grant_domain[32] = {
     'm', 'e', 's', 'h', '-', 'e', 'x', 'e', 'c', 'u', 't', 'i', 'o', 'n',
@@ -23,6 +24,9 @@ static const uint8_t grant_domain[32] = {
 static const uint8_t command_domain[16] = {
     'm', 'e', 's', 'h', '-', 'e', 'x', 'e',
     'c', '-', 'c', 'm', 'd', '-', 'v', '1'};
+static const uint8_t command_domain_v2[16] = {
+    'm', 'e', 's', 'h', '-', 'e', 'x', 'e',
+    'c', '-', 'c', 'm', 'd', '-', 'v', '2'};
 static const uint8_t status_domain[16] = {
     'm', 'e', 's', 'h', '-', 'e', 'x', 'e',
     'c', '-', 's', 't', '-', 'v', '1', 0};
@@ -368,20 +372,54 @@ static int read_command_u16_field(mesh_mgmt_tlv_reader_t *reader,
          read_u16(field.value) == expected;
 }
 
-mesh_mgmt_execution_wire_result_t
-mesh_mgmt_execution_command_request_encode_v1(
+static int lease_proof_is_valid(
+    const mesh_mgmt_execution_lease_proof_v2_t *proof) {
+  return proof && proof->fencing_token != 0u &&
+         proof->worker_generation != 0u && proof->quorum_read_index != 0u &&
+         proof->quorum_read_index >= proof->fencing_token &&
+         proof->lease_expires_at_ms != 0u;
+}
+
+static void encode_lease_proof(
+    const mesh_mgmt_execution_lease_proof_v2_t *proof,
+    uint8_t output[MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2]) {
+  write_u64(output, proof->fencing_token);
+  write_u64(output + 8u, proof->worker_generation);
+  write_u64(output + 16u, proof->quorum_read_index);
+  write_u64(output + 24u, proof->lease_expires_at_ms);
+}
+
+static int decode_lease_proof(
+    const uint8_t input[MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2],
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof) {
+  out_proof->fencing_token = read_u64(input);
+  out_proof->worker_generation = read_u64(input + 8u);
+  out_proof->quorum_read_index = read_u64(input + 16u);
+  out_proof->lease_expires_at_ms = read_u64(input + 24u);
+  return lease_proof_is_valid(out_proof);
+}
+
+static mesh_mgmt_execution_wire_result_t encode_command_request(
+    const uint8_t domain[16], uint16_t version,
     const mesh_mgmt_execution_grant_v1_t *grant,
-    const mesh_mgmt_execution_request_v1_t *request, uint8_t *output,
+    const mesh_mgmt_execution_request_v1_t *request,
+    const mesh_mgmt_execution_lease_proof_v2_t *proof, uint8_t *output,
     size_t output_capacity, size_t *out_size) {
   uint8_t grant_canonical[MESH_MGMT_EXECUTION_GRANT_CANONICAL_MAX_SIZE_V1];
   uint8_t request_canonical[MESH_MGMT_EXECUTION_REQUEST_CANONICAL_MAX_SIZE_V1];
+  uint8_t proof_canonical[MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2];
   size_t grant_size = 0u;
   size_t request_size = 0u;
   size_t required_size;
   mesh_mgmt_execution_wire_result_t grant_result;
   mesh_mgmt_execution_result_codec_result_t request_result;
 
-  if (!grant || !request || !out_size)
+  if (!grant || !request || !out_size ||
+      (version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2 &&
+       !lease_proof_is_valid(proof)))
+    return MESH_MGMT_EXECUTION_WIRE_INVALID_ARG;
+  if (version != MESH_MGMT_EXECUTION_COMMAND_VERSION_V1 &&
+      version != MESH_MGMT_EXECUTION_COMMAND_VERSION_V2)
     return MESH_MGMT_EXECUTION_WIRE_INVALID_ARG;
   if (mesh_mgmt_execution_grant_validate_v1(grant, grant->not_before_ms) !=
           MESH_MGMT_EXECUTION_OK ||
@@ -390,9 +428,8 @@ mesh_mgmt_execution_command_request_encode_v1(
           request->deadline_ms == 0u ? 0u : request->deadline_ms - 1u) !=
           MESH_MGMT_EXECUTION_OK ||
       mesh_mgmt_execution_request_bind_v1(grant, request) !=
-          MESH_MGMT_EXECUTION_OK) {
+          MESH_MGMT_EXECUTION_OK)
     return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
-  }
   grant_result = mesh_mgmt_execution_grant_encode_canonical_v1(
       grant, grant_canonical, sizeof(grant_canonical), &grant_size);
   if (grant_result != MESH_MGMT_EXECUTION_WIRE_OK)
@@ -401,18 +438,18 @@ mesh_mgmt_execution_command_request_encode_v1(
       request, request_canonical, sizeof(request_canonical), &request_size);
   if (request_result != MESH_MGMT_EXECUTION_RESULT_OK)
     return map_result_codec(request_result);
-  required_size = MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V1 +
+  required_size = (version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2
+                       ? MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V2
+                       : MESH_MGMT_EXECUTION_COMMAND_REQUEST_OVERHEAD_SIZE_V1) +
                   grant_size + request_size;
   *out_size = required_size;
   if (!output || output_capacity < required_size)
     return MESH_MGMT_EXECUTION_WIRE_RESOURCE_EXHAUSTED;
   required_size = 0u;
   required_size += mesh_mgmt_wire_write_tlv(
-      output + required_size, EXECUTION_COMMAND_FIELD_DOMAIN, command_domain,
-      sizeof(command_domain));
+      output + required_size, EXECUTION_COMMAND_FIELD_DOMAIN, domain, 16u);
   required_size += write_command_u16_field(
-      output + required_size, EXECUTION_COMMAND_FIELD_VERSION,
-      EXECUTION_COMMAND_VERSION_V1);
+      output + required_size, EXECUTION_COMMAND_FIELD_VERSION, version);
   required_size += write_command_u16_field(
       output + required_size, EXECUTION_COMMAND_FIELD_KIND,
       EXECUTION_COMMAND_REQUEST_V1);
@@ -425,6 +462,13 @@ mesh_mgmt_execution_command_request_encode_v1(
   required_size += mesh_mgmt_wire_write_tlv(
       output + required_size, EXECUTION_COMMAND_FIELD_REQUEST,
       request_canonical, request_size);
+  if (version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2) {
+    encode_lease_proof(proof, proof_canonical);
+    required_size += mesh_mgmt_wire_write_tlv(
+        output + required_size, EXECUTION_COMMAND_FIELD_LEASE_PROOF,
+        proof_canonical, sizeof(proof_canonical));
+    memset(proof_canonical, 0, sizeof(proof_canonical));
+  }
   if (required_size != *out_size) {
     memset(output, 0, output_capacity);
     return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
@@ -433,67 +477,173 @@ mesh_mgmt_execution_command_request_encode_v1(
 }
 
 mesh_mgmt_execution_wire_result_t
-mesh_mgmt_execution_command_request_decode_v1(
-    const uint8_t *payload, size_t payload_size,
-    mesh_mgmt_execution_grant_v1_t *out_grant,
-    mesh_mgmt_execution_request_v1_t *out_request) {
+mesh_mgmt_execution_command_request_encode_v1(
+    const mesh_mgmt_execution_grant_v1_t *grant,
+    const mesh_mgmt_execution_request_v1_t *request, uint8_t *output,
+    size_t output_capacity, size_t *out_size) {
+  return encode_command_request(
+      command_domain, MESH_MGMT_EXECUTION_COMMAND_VERSION_V1, grant, request,
+      NULL, output, output_capacity, out_size);
+}
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_encode_v2(
+    const mesh_mgmt_execution_grant_v1_t *grant,
+    const mesh_mgmt_execution_request_v1_t *request,
+    const mesh_mgmt_execution_lease_proof_v2_t *proof, uint8_t *output,
+    size_t output_capacity, size_t *out_size) {
+  return encode_command_request(
+      command_domain_v2, MESH_MGMT_EXECUTION_COMMAND_VERSION_V2, grant,
+      request, proof, output, output_capacity, out_size);
+}
+
+static mesh_mgmt_execution_wire_result_t decode_command_request(
+    const uint8_t domain[16], uint16_t version, const uint8_t *payload,
+    size_t payload_size, mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request,
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof) {
   mesh_mgmt_tlv_reader_t reader;
   mesh_mgmt_tlv_view_t field;
   mesh_mgmt_execution_wire_result_t grant_result;
   mesh_mgmt_execution_result_codec_result_t request_result;
 
-  if (!payload || !out_grant || !out_request)
+  if (!payload || !out_grant || !out_request ||
+      (version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2 && !out_proof))
     return MESH_MGMT_EXECUTION_WIRE_INVALID_ARG;
   memset(out_grant, 0, sizeof(*out_grant));
   memset(out_request, 0, sizeof(*out_request));
+  if (out_proof)
+    memset(out_proof, 0, sizeof(*out_proof));
   mesh_mgmt_tlv_reader_init(&reader, payload, payload_size);
-  if (!mesh_mgmt_wire_read_field(
-          &reader, EXECUTION_COMMAND_FIELD_DOMAIN, sizeof(command_domain),
-          &field) ||
-      memcmp(field.value, command_domain, sizeof(command_domain)) != 0 ||
+  if (!mesh_mgmt_wire_read_field(&reader, EXECUTION_COMMAND_FIELD_DOMAIN, 16u,
+                                 &field) ||
+      memcmp(field.value, domain, 16u) != 0 ||
       !read_command_u16_field(&reader, EXECUTION_COMMAND_FIELD_VERSION,
-                              EXECUTION_COMMAND_VERSION_V1) ||
+                              version) ||
       !read_command_u16_field(&reader, EXECUTION_COMMAND_FIELD_KIND,
                               EXECUTION_COMMAND_REQUEST_V1) ||
       mesh_mgmt_tlv_reader_next(&reader, &field) != 1 ||
       field.field_id != EXECUTION_COMMAND_FIELD_BODY ||
       field.value_len < MESH_MGMT_EXECUTION_GRANT_CANONICAL_BASE_SIZE_V1 ||
-      field.value_len > MESH_MGMT_EXECUTION_GRANT_CANONICAL_MAX_SIZE_V1) {
-    return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
-  }
+      field.value_len > MESH_MGMT_EXECUTION_GRANT_CANONICAL_MAX_SIZE_V1)
+    goto invalid_schema;
   grant_result = mesh_mgmt_execution_grant_decode_canonical_v1(
       field.value, field.value_len, out_grant);
   if (grant_result != MESH_MGMT_EXECUTION_WIRE_OK)
     return grant_result;
   if (!mesh_mgmt_wire_read_field(
           &reader, EXECUTION_COMMAND_FIELD_SIGNATURE,
-          MESH_MGMT_EXECUTION_SIGNATURE_SIZE, &field)) {
-    memset(out_grant, 0, sizeof(*out_grant));
-    return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
-  }
+          MESH_MGMT_EXECUTION_SIGNATURE_SIZE, &field))
+    goto invalid_schema;
   memcpy(out_grant->signature, field.value, MESH_MGMT_EXECUTION_SIGNATURE_SIZE);
   if (mesh_mgmt_tlv_reader_next(&reader, &field) != 1 ||
       field.field_id != EXECUTION_COMMAND_FIELD_REQUEST ||
-      field.value_len <
-          MESH_MGMT_EXECUTION_REQUEST_CANONICAL_BASE_SIZE_V1 ||
-      field.value_len >
-          MESH_MGMT_EXECUTION_REQUEST_CANONICAL_MAX_SIZE_V1) {
-    memset(out_grant, 0, sizeof(*out_grant));
-    return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
-  }
+      field.value_len < MESH_MGMT_EXECUTION_REQUEST_CANONICAL_BASE_SIZE_V1 ||
+      field.value_len > MESH_MGMT_EXECUTION_REQUEST_CANONICAL_MAX_SIZE_V1)
+    goto invalid_schema;
   request_result = mesh_mgmt_execution_request_decode_canonical_v1(
       field.value, field.value_len, out_request);
-  if (request_result != MESH_MGMT_EXECUTION_RESULT_OK ||
-      mesh_mgmt_tlv_reader_next(&reader, &field) != 0 ||
-      mesh_mgmt_execution_request_bind_v1(out_grant, out_request) !=
-          MESH_MGMT_EXECUTION_OK) {
+  if (request_result != MESH_MGMT_EXECUTION_RESULT_OK) {
     memset(out_grant, 0, sizeof(*out_grant));
     memset(out_request, 0, sizeof(*out_request));
-    return request_result == MESH_MGMT_EXECUTION_RESULT_OK
-               ? MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA
-               : map_result_codec(request_result);
+    return map_result_codec(request_result);
   }
+  if (version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2) {
+    if (mesh_mgmt_tlv_reader_next(&reader, &field) != 1 ||
+        field.field_id != EXECUTION_COMMAND_FIELD_LEASE_PROOF ||
+        field.value_len != MESH_MGMT_EXECUTION_LEASE_PROOF_SIZE_V2 ||
+        !decode_lease_proof(field.value, out_proof))
+      goto invalid_schema;
+  }
+  if (mesh_mgmt_tlv_reader_next(&reader, &field) != 0 ||
+      mesh_mgmt_execution_request_bind_v1(out_grant, out_request) !=
+          MESH_MGMT_EXECUTION_OK)
+    goto invalid_schema;
   return MESH_MGMT_EXECUTION_WIRE_OK;
+
+invalid_schema:
+  memset(out_grant, 0, sizeof(*out_grant));
+  memset(out_request, 0, sizeof(*out_request));
+  if (out_proof)
+    memset(out_proof, 0, sizeof(*out_proof));
+  return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
+}
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_decode_v1(
+    const uint8_t *payload, size_t payload_size,
+    mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request) {
+  return decode_command_request(
+      command_domain, MESH_MGMT_EXECUTION_COMMAND_VERSION_V1, payload,
+      payload_size, out_grant, out_request, NULL);
+}
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_decode_v2(
+    const uint8_t *payload, size_t payload_size,
+    mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request,
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof) {
+  return decode_command_request(
+      command_domain_v2, MESH_MGMT_EXECUTION_COMMAND_VERSION_V2, payload,
+      payload_size, out_grant, out_request, out_proof);
+}
+
+mesh_mgmt_execution_wire_result_t
+mesh_mgmt_execution_command_request_decode_compatible_v2(
+    const uint8_t *payload, size_t payload_size,
+    mesh_mgmt_execution_grant_v1_t *out_grant,
+    mesh_mgmt_execution_request_v1_t *out_request, uint16_t *out_version,
+    mesh_mgmt_execution_lease_proof_v2_t *out_proof) {
+  mesh_mgmt_tlv_reader_t reader;
+  mesh_mgmt_tlv_view_t domain;
+  mesh_mgmt_tlv_view_t version;
+  uint16_t decoded_version;
+
+  if (out_version)
+    *out_version = 0u;
+  if (out_proof)
+    memset(out_proof, 0, sizeof(*out_proof));
+  if (!payload || !out_grant || !out_request)
+    return MESH_MGMT_EXECUTION_WIRE_INVALID_ARG;
+  mesh_mgmt_tlv_reader_init(&reader, payload, payload_size);
+  if (!mesh_mgmt_wire_read_field(&reader, EXECUTION_COMMAND_FIELD_DOMAIN, 16u,
+                                 &domain) ||
+      !mesh_mgmt_wire_read_field(&reader, EXECUTION_COMMAND_FIELD_VERSION,
+                                 sizeof(uint16_t), &version))
+    return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
+  decoded_version = read_u16(version.value);
+  if (decoded_version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V1 &&
+      memcmp(domain.value, command_domain, 16u) == 0) {
+    mesh_mgmt_execution_wire_result_t result =
+        mesh_mgmt_execution_command_request_decode_v1(
+            payload, payload_size, out_grant, out_request);
+    if (result == MESH_MGMT_EXECUTION_WIRE_OK && out_version)
+      *out_version = decoded_version;
+    return result;
+  }
+  if (decoded_version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2 &&
+      memcmp(domain.value, command_domain_v2, 16u) == 0 && out_proof) {
+    mesh_mgmt_execution_wire_result_t result =
+        mesh_mgmt_execution_command_request_decode_v2(
+            payload, payload_size, out_grant, out_request, out_proof);
+    if (result == MESH_MGMT_EXECUTION_WIRE_OK && out_version)
+      *out_version = decoded_version;
+    return result;
+  }
+  if (decoded_version == MESH_MGMT_EXECUTION_COMMAND_VERSION_V2 &&
+      memcmp(domain.value, command_domain_v2, 16u) == 0) {
+    mesh_mgmt_execution_lease_proof_v2_t discarded_proof;
+    mesh_mgmt_execution_wire_result_t result =
+        mesh_mgmt_execution_command_request_decode_v2(
+            payload, payload_size, out_grant, out_request, &discarded_proof);
+    memset(&discarded_proof, 0, sizeof(discarded_proof));
+    if (result == MESH_MGMT_EXECUTION_WIRE_OK && out_version)
+      *out_version = decoded_version;
+    return result;
+  }
+  return MESH_MGMT_EXECUTION_WIRE_INVALID_SCHEMA;
 }
 
 mesh_mgmt_execution_wire_result_t

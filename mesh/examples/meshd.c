@@ -1392,6 +1392,15 @@ static void meshd_classify_mgmt_task(const char *method,
         return;
     }
 
+    if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
+        out_task->type = "mesh.rpc-ui";
+        out_task->layer = meshd_task_layer_name(MESHD_TASK_LAYER_MESH_DATA_PLANE);
+        out_task->impact = "read";
+        out_task->requires_token = 0;
+        out_task->safe_to_retry = 1;
+        return;
+    }
+
     if ((strcmp(method, "GET") == 0 && strcmp(path, "/health") == 0) ||
         (strcmp(method, "GET") == 0 && strcmp(path, "/v1/health") == 0)) {
         out_task->type = "mesh.health.query";
@@ -1607,26 +1616,52 @@ static int meshd_mgmt_configure_service_endpoint(meshd_mgmt_server_t *server,
     return 0;
 }
 
+static int meshd_send_http_response_typed(meshd_socket_t client_socket,
+                                          int status_code,
+                                          const char *status_text,
+                                          const char *content_type,
+                                          const char *body,
+                                          size_t body_len);
+
 static int meshd_send_http_response(meshd_socket_t client_socket,
                                    int status_code,
                                    const char *status_text,
                                    const char *body,
                                    size_t body_len) {
+    return meshd_send_http_response_typed(client_socket,
+                                          status_code,
+                                          status_text,
+                                          "application/json; charset=utf-8",
+                                          body,
+                                          body_len);
+}
+
+static int meshd_send_http_response_typed(meshd_socket_t client_socket,
+                                          int status_code,
+                                          const char *status_text,
+                                          const char *content_type,
+                                          const char *body,
+                                          size_t body_len) {
     char header[512];
     int ret = 0;
 
-    if (!meshd_socket_is_valid(client_socket) || !status_text || !body) {
+    if (!meshd_socket_is_valid(client_socket) || !status_text ||
+        !content_type || !body) {
         return -1;
     }
 
     snprintf(header, sizeof(header),
              "HTTP/1.1 %d %s\r\n"
-             "Content-Type: application/json; charset=utf-8\r\n"
+             "Content-Type: %s\r\n"
+             "Cache-Control: no-store\r\n"
+             "X-Content-Type-Options: nosniff\r\n"
+             "Referrer-Policy: no-referrer\r\n"
              "Content-Length: %zu\r\n"
              "Connection: close\r\n"
              "\r\n",
              status_code,
              status_text,
+             content_type,
              body_len);
 
     ret = meshd_socket_send_all(client_socket, header, strlen(header));
@@ -1635,6 +1670,71 @@ static int meshd_send_http_response(meshd_socket_t client_socket,
     }
 
     return meshd_socket_send_all(client_socket, body, body_len);
+}
+
+static const char *meshd_rpc_ui_page(size_t *out_size) {
+    static const char page[] =
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>Turbo Mesh Control</title>"
+        "<script src=\"https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js\" "
+        "integrity=\"sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V\" "
+        "crossorigin=\"anonymous\"></script>"
+        "<style>:root{--ink:#17221e;--paper:#eee9dc;--line:#8a9b91;"
+        "--signal:#e34d2f;--wash:#d8e1d8}*{box-sizing:border-box}body{margin:0;"
+        "color:var(--ink);background:radial-gradient(circle at 85% 10%,#f6b59d55,transparent 28%),"
+        "repeating-linear-gradient(90deg,transparent 0 47px,#17221e0b 48px),var(--paper);"
+        "font-family:'IBM Plex Mono','Cascadia Code',monospace}main{max-width:1180px;"
+        "margin:auto;padding:clamp(24px,6vw,72px)}header{display:grid;grid-template-columns:1fr auto;"
+        "gap:24px;align-items:end;border-bottom:3px solid var(--ink);padding-bottom:20px}"
+        "h1{font-size:clamp(38px,8vw,92px);line-height:.88;letter-spacing:-.07em;margin:0}"
+        ".kicker{color:var(--signal);font-weight:800;letter-spacing:.18em}.auth{display:flex;"
+        "gap:8px;align-items:end}.auth label{font-size:11px}.auth input{display:block;margin-top:6px;"
+        "padding:10px;border:2px solid var(--ink);background:#fff9;width:min(320px,60vw)}button{"
+        "border:2px solid var(--ink);background:var(--signal);color:white;padding:10px 14px;"
+        "font:inherit;font-weight:800;cursor:pointer}.grid{display:grid;grid-template-columns:"
+        "repeat(2,minmax(0,1fr));gap:16px;margin-top:24px}.panel{border:2px solid var(--ink);"
+        "background:#ffffff70;box-shadow:7px 7px 0 var(--line);padding:18px;min-height:220px}"
+        ".panel h2{margin:0 0 12px;font-size:14px;letter-spacing:.12em}.panel pre{margin:0;"
+        "white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.5}.danger{"
+        "margin-top:28px;border-top:2px solid var(--ink);padding-top:18px}.danger button{"
+        "background:var(--ink)}#rpc-result{margin-top:12px;background:var(--wash);padding:12px;"
+        "min-height:44px;white-space:pre-wrap}@media(max-width:760px){header{grid-template-columns:1fr}"
+        ".grid{grid-template-columns:1fr}.auth{align-items:stretch;flex-direction:column}.auth input{width:100%}}"
+        "</style></head><body><main><header><div><div class=\"kicker\">VIRTUAL RPC CONTROL SURFACE</div>"
+        "<h1>TURBO<br>MESH</h1></div><div class=\"auth\"><label>RPC TOKEN"
+        "<input id=\"rpc-token\" type=\"password\" autocomplete=\"off\" "
+        "placeholder=\"kept in this page only\"></label><button type=\"button\" "
+        "hx-on:click=\"htmx.trigger(document.body,'refresh')\">REFRESH</button></div></header>"
+        "<div class=\"grid\"><section class=\"panel\" hx-get=\"/v1/health\" "
+        "hx-trigger=\"load, refresh, every 5s\" hx-swap=\"none\" "
+        "hx-headers='js:{\"X-Meshd-Token\":document.getElementById(\"rpc-token\").value}' "
+        "hx-on::after-request=\"this.querySelector('pre').textContent=event.detail.xhr.responseText\">"
+        "<h2>HEALTH / DATA PLANE</h2><pre>WAITING FOR VIRTUAL NODE</pre></section>"
+        "<section class=\"panel\" hx-get=\"/v1/status\" "
+        "hx-trigger=\"load, refresh, every 2s\" hx-swap=\"none\" "
+        "hx-headers='js:{\"X-Meshd-Token\":document.getElementById(\"rpc-token\").value}' "
+        "hx-on::after-request=\"this.querySelector('pre').textContent=event.detail.xhr.responseText\">"
+        "<h2>STATUS / VIRTUAL SERVICE</h2><pre>WAITING FOR STATUS</pre></section>"
+        "<section class=\"panel\" hx-get=\"/v1/task-model\" "
+        "hx-trigger=\"load, refresh\" hx-swap=\"none\" "
+        "hx-headers='js:{\"X-Meshd-Token\":document.getElementById(\"rpc-token\").value}' "
+        "hx-on::after-request=\"this.querySelector('pre').textContent=event.detail.xhr.responseText\">"
+        "<h2>RPC TASK MODEL</h2><pre>WAITING FOR CONTRACT</pre></section>"
+        "<section class=\"panel\"><h2>ADDRESSING BOUNDARY</h2><pre>Clients use the signed virtual "
+        "host/IP from status or node.resolve. Internal bind addresses are never published by this page.</pre>"
+        "</section></div><form class=\"danger\" hx-post=\"/v1/shutdown\" hx-swap=\"none\" "
+        "hx-confirm=\"Stop this mesh node?\" "
+        "hx-headers='js:{\"X-Meshd-Token\":document.getElementById(\"rpc-token\").value}' "
+        "hx-on::after-request=\"document.getElementById('rpc-result').textContent=event.detail.xhr.responseText\">"
+        "<button type=\"submit\">SHUT DOWN NODE</button></form><pre id=\"rpc-result\">"
+        "UI actions call the authoritative RPC endpoint; this page owns no node state.</pre>"
+        "</main></body></html>";
+
+    if (out_size) {
+        *out_size = sizeof(page) - 1u;
+    }
+    return page;
 }
 
 static int meshd_ascii_equal_ci(const char *left,
@@ -2272,6 +2372,13 @@ static int meshd_mgmt_handle_request(meshd_mgmt_server_t *server,
 
     meshd_classify_mgmt_task(method, path, &task_model);
     meshd_task_generate_id(task_id, sizeof(task_id));
+
+    if (strcmp(method, "GET") == 0 && strcmp(path, "/") == 0) {
+        const char *page = meshd_rpc_ui_page(&body_len);
+        return meshd_send_http_response_typed(
+            client_socket, 200, "OK", "text/html; charset=utf-8", page,
+            body_len);
+    }
 
     if (task_model.requires_token && server->token[0] == '\0') {
         meshd_build_task_response_json(task_body,

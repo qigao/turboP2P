@@ -78,7 +78,8 @@ add_library(m3_chunk_store STATIC
 target_include_directories(m3_chunk_store PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(m3_chunk_store
-  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+  PUBLIC TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
 set_property(TARGET m3_chunk_store PROPERTY FOLDER "mesh/internal")
 
 # Owner-loop bridge from a content CID to the P2P swarm and immutable local
@@ -138,6 +139,102 @@ target_include_directories(m3_namespace_local_store PUBLIC
 target_link_libraries(m3_namespace_local_store
   PUBLIC m3_object_resolver m3_object_manifest)
 set_property(TARGET m3_namespace_local_store PROPERTY FOLDER "mesh/internal")
+
+# Deterministic, bounded L3/L4 policy fact source. Publication into the packet
+# plane is intentionally separate so static configuration behavior is stable.
+add_library(mesh_flow_ruleset STATIC
+  src/mesh_flow_ruleset.c
+  src/mesh_flow_ruleset.h
+  src/mesh_flow_runtime.c
+  src/mesh_flow_runtime.h)
+target_include_directories(mesh_flow_ruleset PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_property(TARGET mesh_flow_ruleset PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_flow_ruleset_raft STATIC
+  src/mesh_flow_ruleset_raft.c
+  src/mesh_flow_ruleset_raft.h)
+target_include_directories(mesh_flow_ruleset_raft PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_flow_ruleset_raft PUBLIC mesh_flow_ruleset)
+set_property(TARGET mesh_flow_ruleset_raft PROPERTY FOLDER "mesh/internal")
+
+# Cluster scheduling fact source for execution ownership. It is separate from
+# the target node's durable command journal and local RPC pending registry.
+add_library(mesh_task_lease STATIC
+  src/mesh_task_lease.c
+  src/mesh_task_lease.h)
+target_include_directories(mesh_task_lease PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_task_lease PUBLIC mesh_mgmt_execution)
+set_property(TARGET mesh_task_lease PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_task_lease_raft STATIC
+  src/mesh_task_lease_raft.c
+  src/mesh_task_lease_raft.h)
+target_include_directories(mesh_task_lease_raft PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+target_link_libraries(mesh_task_lease_raft PUBLIC mesh_task_lease)
+set_property(TARGET mesh_task_lease_raft PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_task_execution_guard STATIC
+  src/mesh_task_execution_guard.c
+  src/mesh_task_execution_guard.h)
+target_include_directories(mesh_task_execution_guard PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_task_execution_guard
+  PUBLIC mesh_task_lease
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_task_execution_guard PROPERTY FOLDER "mesh/internal")
+
+if(TURBOP2P_BUILD_TURBORAFT_M3)
+  # Dedicated metadata group: immutable chunks remain in the P2P data plane.
+  add_library(m3_namespace_raft_adapter STATIC
+    src/m3_namespace_raft_adapter.c
+    src/m3_namespace_raft_adapter.h)
+  target_include_directories(m3_namespace_raft_adapter PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(m3_namespace_raft_adapter PUBLIC
+    m3_namespace_local_store TurboRaft::Service)
+  set_property(TARGET m3_namespace_raft_adapter PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_task_lease_raft_adapter STATIC
+    src/mesh_task_lease_raft_adapter.c
+    src/mesh_task_lease_raft_adapter.h)
+  target_include_directories(mesh_task_lease_raft_adapter PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_task_lease_raft_adapter PUBLIC
+    mesh_task_lease_raft TurboRaft::Service)
+  set_property(TARGET mesh_task_lease_raft_adapter PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_flow_ruleset_raft_adapter STATIC
+    src/mesh_flow_ruleset_raft_adapter.c
+    src/mesh_flow_ruleset_raft_adapter.h)
+  target_include_directories(mesh_flow_ruleset_raft_adapter PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_flow_ruleset_raft_adapter PUBLIC
+    mesh_flow_ruleset_raft TurboRaft::Service)
+  set_property(TARGET mesh_flow_ruleset_raft_adapter PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_control_raft STATIC
+    src/mesh_control_raft.c
+    src/mesh_control_raft.h)
+  target_include_directories(mesh_control_raft PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_control_raft PUBLIC
+    mesh_flow_ruleset_raft_adapter mesh_task_lease_raft_adapter
+    TurboRaft::Service)
+  set_property(TARGET mesh_control_raft PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_control_raft_service STATIC
+    src/mesh_control_raft_service.c
+    src/mesh_control_raft_service.h)
+  target_include_directories(mesh_control_raft_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_control_raft_service PUBLIC
+    mesh_control_raft TurboRaft::SQLiteStorage)
+  set_property(TARGET mesh_control_raft_service PROPERTY FOLDER "mesh/internal")
+endif()
 
 # Pure evaluator for already-verified M3 chunk claims. Signature verification,
 # replay journals, transport and filesystem access remain outside this target.
@@ -574,7 +671,7 @@ target_include_directories(
 # Link libraries
 target_link_libraries(mesh
   PUBLIC TurboUtils::Core TurboP2P::P2P
-  PRIVATE mesh_mgmt_agent_router)
+  PRIVATE mesh_mgmt_agent_router mesh_flow_ruleset)
 
 if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "" OR
    NOT TARGET ${TURBOP2P_ICE_TARGET})
@@ -584,6 +681,18 @@ endif()
 target_link_libraries(mesh PRIVATE ${TURBOP2P_ICE_TARGET})
 target_compile_definitions(mesh PUBLIC MESH_HAS_TURBO_ICE=1)
 target_compile_definitions(mesh PRIVATE MESH_HAS_TURBO_ICE_CLOSE=1)
+
+if(TURBOP2P_BUILD_TURBORAFT_M3)
+  add_library(mesh_control_raft_mesh_bridge STATIC
+    src/mesh_control_raft_mesh_bridge.c
+    src/mesh_control_raft_mesh_bridge.h)
+  target_include_directories(mesh_control_raft_mesh_bridge PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_control_raft_mesh_bridge PUBLIC
+    mesh_control_raft mesh)
+  set_property(TARGET mesh_control_raft_mesh_bridge
+    PROPERTY FOLDER "mesh/internal")
+endif()
 
 # Shared-node management mode uses mesh's internal callback bridge while the
 # dedicated runtime mode remains available for compatibility.

@@ -43,7 +43,13 @@ include(Sanitizers)
 
 find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
 find_package(Threads REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
+
+if(TURBOP2P_BUILD_TURBORAFT_M3)
+  find_package(TurboRaft CONFIG REQUIRED COMPONENTS Service SQLiteStorage
+               PATHS ${TURBO_RAFT_ROOT})
+endif()
 
 if(BUILD_EXAMPLES)
   # TurboHttp releases from before the TurboUtils package split still refer to

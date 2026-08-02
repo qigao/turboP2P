@@ -5,6 +5,7 @@
 
 struct m3_namespace_local_entry_s {
   uint8_t occupied;
+  uint8_t tombstoned;
   uint8_t tenant_id[M3_CHUNK_CAPABILITY_TENANT_ID_SIZE];
   uint8_t *bucket;
   size_t bucket_size;
@@ -176,6 +177,7 @@ m3_namespace_local_result_t m3_namespace_local_store_apply_put_v1(
   entry->manifest_bytes = manifest_copy;
   entry->manifest_size = manifest_size;
   entry->committed_index = committed_index;
+  entry->tombstoned = 0u;
   store->applied_index = committed_index;
   return M3_NAMESPACE_LOCAL_OK;
 
@@ -184,6 +186,37 @@ exhausted:
   free(key_copy);
   free(manifest_copy);
   return M3_NAMESPACE_LOCAL_RESOURCE_EXHAUSTED;
+}
+
+m3_namespace_local_result_t m3_namespace_local_store_apply_tombstone_v1(
+    m3_namespace_local_store_v1_t *store, uint64_t committed_index,
+    const uint8_t tenant_id[M3_CHUNK_CAPABILITY_TENANT_ID_SIZE],
+    const uint8_t *bucket, size_t bucket_size,
+    const uint8_t *object_key, size_t object_key_size) {
+  m3_namespace_local_entry_t *entry;
+
+  if (!store || !store->open || !tenant_id ||
+      bytes_are_zero(tenant_id, M3_CHUNK_CAPABILITY_TENANT_ID_SIZE) ||
+      !key_is_valid(bucket, bucket_size, store->max_bucket_bytes) ||
+      !key_is_valid(object_key, object_key_size,
+                    store->max_object_key_bytes) ||
+      committed_index == 0u) {
+    return M3_NAMESPACE_LOCAL_INVALID_ARG;
+  }
+  if (committed_index <= store->applied_index)
+    return M3_NAMESPACE_LOCAL_OUT_OF_ORDER;
+
+  entry = find_entry(store, tenant_id, bucket, bucket_size, object_key,
+                     object_key_size);
+  if (entry) {
+    free(entry->manifest_bytes);
+    entry->manifest_bytes = NULL;
+    entry->manifest_size = 0u;
+    entry->committed_index = committed_index;
+    entry->tombstoned = 1u;
+  }
+  store->applied_index = committed_index;
+  return M3_NAMESPACE_LOCAL_OK;
 }
 
 static m3_namespace_lookup_result_t local_lookup_start(
@@ -207,7 +240,7 @@ static m3_namespace_lookup_result_t local_lookup_start(
   entry = find_entry(store, request->tenant_id, request->bucket,
                      request->bucket_size, request->object_key,
                      request->object_key_size);
-  if (!entry) {
+  if (!entry || entry->tombstoned) {
     complete_cb(M3_NAMESPACE_LOOKUP_NOT_FOUND, NULL, user_data);
     return M3_NAMESPACE_LOOKUP_OK;
   }
