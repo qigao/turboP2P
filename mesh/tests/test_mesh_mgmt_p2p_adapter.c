@@ -4,10 +4,13 @@
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_crypto.h"
 #include "mesh_mgmt_endpoint_pool.h"
+#include "mesh_mgmt_execution_wire.h"
+#include "mesh_mgmt_mesh_bridge.h"
 #include "mesh_mgmt_p2p_peer.h"
 
 #include <CoroNet.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -41,6 +44,7 @@ typedef struct {
   uint8_t next_message_byte;
   int random_result;
   size_t event_count;
+  int last_event_type;
 } runtime_callbacks_t;
 
 typedef struct {
@@ -48,6 +52,7 @@ typedef struct {
   uint8_t remote_transport_peer_id[P2P_KEY_SIZE];
   uint8_t next_namespace_byte;
   size_t event_count;
+  int last_event_type;
   size_t non_mmp_count;
   size_t failure_count;
   mesh_mgmt_agent_router_result_t last_router_failure;
@@ -272,7 +277,118 @@ static int runtime_event(void *context, const mesh_mgmt_dispatch_event_v1_t *eve
   if (!callbacks || !event)
     return -1;
   callbacks->event_count++;
+  callbacks->last_event_type = event->type;
   return 0;
+}
+
+static void fill_execution_bytes(uint8_t *bytes, size_t size, uint8_t first) {
+  size_t index;
+
+  for (index = 0u; index < size; ++index)
+    bytes[index] = (uint8_t)(first + index);
+}
+
+static size_t make_p2p_execution_request(
+    const mesh_mgmt_p2p_peer_config_v1_t *origin,
+    const mesh_mgmt_p2p_peer_config_v1_t *target,
+    const uint8_t issuer_private_key[32],
+    uint8_t output[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1]) {
+  mesh_mgmt_execution_grant_v1_t grant;
+  mesh_mgmt_execution_request_v1_t request;
+  uint8_t subject_public_key[32];
+  size_t output_size = 0u;
+
+  memset(&grant, 0, sizeof(grant));
+  memset(&request, 0, sizeof(request));
+  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+                   origin->signer.private_key, subject_public_key),
+               MESH_MGMT_CRYPTO_OK);
+  grant.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  fill_execution_bytes(grant.grant_id, sizeof(grant.grant_id), 0x11u);
+  memset(grant.mesh_id, 0x42, sizeof(grant.mesh_id));
+  grant.policy_epoch = 1u;
+  memcpy(grant.subject_principal, subject_public_key,
+         sizeof(grant.subject_principal));
+  memcpy(grant.target_node_id, target->signer.hello.managed_node_id,
+         sizeof(grant.target_node_id));
+  fill_execution_bytes(grant.deployment_id, sizeof(grant.deployment_id),
+                       0x21u);
+  grant.deployment_generation = 1u;
+  fill_execution_bytes(grant.package_digest, sizeof(grant.package_digest),
+                       0x31u);
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
+  grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+  grant.max_limits.module_bytes = 1024u;
+  grant.max_limits.stack_bytes = 1024u;
+  grant.max_limits.linear_memory_bytes = 4096u;
+  grant.max_limits.timeout_ms = 100u;
+  grant.max_limits.control_flow_steps = 1000u;
+  grant.max_limits.host_calls = 4u;
+  grant.max_limits.copied_guest_bytes = 1024u;
+  grant.max_limits.input_bytes = 64u;
+  grant.max_limits.stdout_bytes = 64u;
+  grant.max_limits.stderr_bytes = 64u;
+  grant.not_before_ms = TEST_NOW_MS - 1u;
+  grant.expires_at_ms = TEST_NOW_MS + 1000u;
+  check_int_eq(mesh_mgmt_execution_grant_sign_v1(
+                   &grant, issuer_private_key),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+
+  request.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  fill_execution_bytes(request.command_id, sizeof(request.command_id), 0x41u);
+  memcpy(request.grant_id, grant.grant_id, sizeof(request.grant_id));
+  memcpy(request.target_node_id, grant.target_node_id,
+         sizeof(request.target_node_id));
+  memcpy(request.deployment_id, grant.deployment_id,
+         sizeof(request.deployment_id));
+  request.deployment_generation = grant.deployment_generation;
+  memcpy(request.package_digest, grant.package_digest,
+         sizeof(request.package_digest));
+  request.input_kind = MESH_MGMT_EXECUTION_INPUT_NONE;
+  request.output_mode = MESH_MGMT_EXECUTION_OUTPUT_NONE;
+  request.deadline_ms = TEST_NOW_MS + 1000u;
+  fill_execution_bytes(request.request_nonce, sizeof(request.request_nonce),
+                       0x51u);
+  fill_execution_bytes(request.correlation_id,
+                       sizeof(request.correlation_id), 0x61u);
+  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+                   &grant, &request, output,
+                   MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1,
+                   &output_size),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  return output_size;
+}
+
+static int pump_until_execution_request(
+    p2p_adapter_test_state_t *state, const runtime_callbacks_t *callbacks) {
+  uint64_t deadline = turbo_monotonic_ms() + TEST_CONNECT_TIMEOUT_MS;
+
+  while (callbacks->last_event_type !=
+             MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW &&
+         turbo_monotonic_ms() < deadline) {
+    coro_context_run(p2p_get_loop(state->node1), TURBO_RUN_NOWAIT);
+    coro_context_run(p2p_get_loop(state->node2), TURBO_RUN_NOWAIT);
+    turbo_sleep_ms(1u);
+  }
+  return callbacks->last_event_type ==
+                 MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW
+             ? 0
+             : -1;
+}
+
+static int pump_until_router_event(
+    p2p_adapter_test_state_t *state,
+    const router_callbacks_t *callbacks,
+    int event_type) {
+  uint64_t deadline = turbo_monotonic_ms() + TEST_CONNECT_TIMEOUT_MS;
+
+  while (callbacks->last_event_type != event_type &&
+         turbo_monotonic_ms() < deadline) {
+    coro_context_run(p2p_get_loop(state->node1), TURBO_RUN_NOWAIT);
+    coro_context_run(p2p_get_loop(state->node2), TURBO_RUN_NOWAIT);
+    turbo_sleep_ms(1u);
+  }
+  return callbacks->last_event_type == event_type ? 0 : -1;
 }
 
 static int router_namespace_random(void *context, uint8_t *output, size_t output_len) {
@@ -304,6 +420,7 @@ static int router_event(void *context, p2p_peer_t *peer,
   memcpy(callbacks->remote_transport_peer_id, remote_transport_peer_id,
          sizeof(callbacks->remote_transport_peer_id));
   callbacks->event_count++;
+  callbacks->last_event_type = event->type;
   if (callbacks->endpoint_pool && event->type == MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED) {
     callbacks->last_endpoint_result = mesh_mgmt_endpoint_pool_mark_authenticated_v1(
         callbacks->endpoint_pool, remote_transport_peer_id, turbo_monotonic_ms());
@@ -651,6 +768,10 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
   mesh_mgmt_p2p_peer_v1_t rejected_runtime;
   uint8_t transport_key1[P2P_KEY_SIZE];
   uint8_t transport_key2[P2P_KEY_SIZE];
+  uint8_t execution_payload[
+      MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1];
+  size_t execution_payload_size;
+  mesh_mgmt_p2p_peer_result_t execution_send_result;
 
   memset(&state, 0, sizeof(state));
   memset(&callbacks1, 0, sizeof(callbacks1));
@@ -676,6 +797,29 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
   check_int_eq(prepare_runtime_config(&config2, state.node2, state.node2_peer, transport_key2,
                                       MANAGEMENT_KEY2, 0x32u, 0x42u, 0x52u, 2u, &callbacks2),
                0);
+  config1.signer.hello.features |=
+      MESH_MGMT_FEATURE_TARGETED_RPC | MESH_MGMT_FEATURE_NODE_EXECUTION;
+  config2.signer.hello.features |=
+      MESH_MGMT_FEATURE_TARGETED_RPC | MESH_MGMT_FEATURE_NODE_EXECUTION;
+  config1.dispatch.session.features |=
+      MESH_MGMT_FEATURE_TARGETED_RPC | MESH_MGMT_FEATURE_NODE_EXECUTION;
+  config2.dispatch.session.features |=
+      MESH_MGMT_FEATURE_TARGETED_RPC | MESH_MGMT_FEATURE_NODE_EXECUTION;
+  config1.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  config2.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  config1.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+  config2.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+  config1.dispatch.enable_node_execution_shadow = 1u;
+  config2.dispatch.enable_node_execution_shadow = 1u;
+  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+                   MANAGEMENT_KEY2,
+                   config2.dispatch.node_execution_grant_issuer_key),
+               MESH_MGMT_CRYPTO_OK);
+  memcpy(config1.dispatch.node_execution_grant_issuer_key,
+         config2.dispatch.node_execution_grant_issuer_key,
+         sizeof(config1.dispatch.node_execution_grant_issuer_key));
+  execution_payload_size = make_p2p_execution_request(
+      &config1, &config2, MANAGEMENT_KEY2, execution_payload);
 
   mismatched_config = config1;
   mismatched_config.signer.local_transport_peer_id[0] ^= 1u;
@@ -705,6 +849,19 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
   check_true(runtime1.signer.ack_built);
   check_true(runtime2.signer.hello_built);
   check_true(runtime2.signer.ack_built);
+  execution_send_result = mesh_mgmt_p2p_peer_send_execution_request_v1(
+      &runtime1, config2.signer.hello.managed_node_id,
+      execution_payload, execution_payload_size);
+  check_int_eq(
+      runtime1.protocol_peer.connection.last_dispatch_result,
+      MESH_MGMT_DISPATCH_OK);
+  check_int_eq(
+      runtime1.protocol_peer.connection.last_dispatch_stage,
+      MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_int_eq(execution_send_result, MESH_MGMT_P2P_PEER_OK);
+  check_int_eq(pump_until_execution_request(&state, &callbacks2), 0);
+  check_int_eq(callbacks2.last_event_type,
+               MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW);
 
   state.runtime1 = NULL;
   state.runtime2 = NULL;
@@ -746,10 +903,18 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
   mesh_mgmt_endpoint_snapshot_v1_t endpoint_snapshot2;
   mesh_mgmt_agent_router_peer_snapshot_v1_t first_snapshot;
   mesh_mgmt_agent_router_peer_snapshot_v1_t second_snapshot;
+  mesh_mgmt_execution_grant_v1_t decoded_grant;
+  mesh_mgmt_execution_request_v1_t decoded_request;
+  mesh_mgmt_execution_status_v1_t status;
   p2p_node_t *capacity_probe = NULL;
+  uint8_t execution_payload[
+      MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1];
+  uint8_t status_payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1];
   uint8_t transport_key1[P2P_KEY_SIZE];
   uint8_t transport_key2[P2P_KEY_SIZE];
   uint8_t zero_id[16];
+  size_t execution_payload_size = 0u;
+  size_t status_payload_size = 0u;
   unsigned short node1_port = 0u;
   int router1_installed = 0;
   int router2_installed = 0;
@@ -771,6 +936,11 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
   memset(&endpoint_snapshot2, 0, sizeof(endpoint_snapshot2));
   memset(&first_snapshot, 0, sizeof(first_snapshot));
   memset(&second_snapshot, 0, sizeof(second_snapshot));
+  memset(&decoded_grant, 0, sizeof(decoded_grant));
+  memset(&decoded_request, 0, sizeof(decoded_request));
+  memset(&status, 0, sizeof(status));
+  memset(execution_payload, 0, sizeof(execution_payload));
+  memset(status_payload, 0, sizeof(status_payload));
   memset(zero_id, 0, sizeof(zero_id));
   signer_callbacks1.next_message_byte = 0x20u;
   signer_callbacks2.next_message_byte = 0x80u;
@@ -788,6 +958,33 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
   check_int_eq(prepare_runtime_config(&peer_config2, state.node2, NULL, transport_key2,
                                       MANAGEMENT_KEY2, 0x32u, 0x42u, 0x52u, 2u, &signer_callbacks2),
                0);
+  peer_config1.signer.hello.features |=
+      MESH_MGMT_FEATURE_TARGETED_RPC | MESH_MGMT_FEATURE_NODE_EXECUTION;
+  peer_config2.signer.hello.features =
+      peer_config1.signer.hello.features;
+  peer_config1.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  peer_config2.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  peer_config1.dispatch.session.features =
+      peer_config1.signer.hello.features;
+  peer_config2.dispatch.session.features =
+      peer_config2.signer.hello.features;
+  peer_config1.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+  peer_config2.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+  peer_config1.dispatch.enable_node_execution_shadow = 1u;
+  peer_config2.dispatch.enable_node_execution_shadow = 1u;
+  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+                   MANAGEMENT_KEY2,
+                   peer_config2.dispatch.node_execution_grant_issuer_key),
+               MESH_MGMT_CRYPTO_OK);
+  memcpy(peer_config1.dispatch.node_execution_grant_issuer_key,
+         peer_config2.dispatch.node_execution_grant_issuer_key,
+         sizeof(peer_config1.dispatch.node_execution_grant_issuer_key));
+  execution_payload_size = make_p2p_execution_request(
+      &peer_config1, &peer_config2, MANAGEMENT_KEY2, execution_payload);
+  check_int_eq(mesh_mgmt_execution_command_request_decode_v1(
+                   execution_payload, execution_payload_size,
+                   &decoded_grant, &decoded_request),
+               MESH_MGMT_EXECUTION_WIRE_OK);
 
   router_config1.node = state.node1;
   router_config1.max_peers = 1u;
@@ -863,6 +1060,43 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
   check_int_eq(first_snapshot.session_state, MESH_MGMT_SESSION_ESTABLISHED);
   check_mem_eq(first_snapshot.remote_transport_peer_id, transport_key2, P2P_KEY_SIZE);
   check_false(memcmp(first_snapshot.connection_id, zero_id, sizeof(zero_id)) == 0);
+
+  router_callbacks2.last_event_type = 0;
+  check_int_eq(mesh_mgmt_agent_router_send_execution_request_v1(
+                   &router1, peer_config2.signer.hello.managed_node_id,
+                   execution_payload, execution_payload_size),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  check_int_eq(pump_until_router_event(
+                   &state, &router_callbacks2,
+                   MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW),
+               0);
+
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_DISABLED;
+  memcpy(status.command_id, decoded_request.command_id,
+         sizeof(status.command_id));
+  memcpy(status.correlation_id, decoded_request.correlation_id,
+         sizeof(status.correlation_id));
+  check_int_eq(mesh_mgmt_execution_request_digest_v1(
+                   &decoded_request, status.request_digest),
+               0);
+  memcpy(status.responder_node_id,
+         peer_config2.signer.hello.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_int_eq(mesh_mgmt_execution_command_status_encode_v1(
+                   &status, status_payload, sizeof(status_payload),
+                   &status_payload_size),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  router_callbacks1.last_event_type = 0;
+  check_int_eq(mesh_mgmt_agent_router_send_execution_response_v1(
+                   &router2, MESH_MGMT_KIND_COMMAND_STATUS,
+                   peer_config1.signer.hello.managed_node_id, status_payload,
+                   status_payload_size),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  check_int_eq(pump_until_router_event(
+                   &state, &router_callbacks1,
+                   MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW),
+               0);
 
   capacity_probe = p2p_create("127.0.0.1", 0);
   check_not_null(capacity_probe);
@@ -950,6 +1184,309 @@ cleanup:
   stop_nodes(&state);
 }
 
+static void test_mesh_bridge_shares_callbacks_and_detaches_without_disconnect(void) {
+  static const uint8_t MANAGEMENT_KEY1[32] = {
+      1u, 3u, 5u, 7u, 9u,  11u, 13u, 15u, 17u, 19u, 21u, 23u, 25u, 27u, 29u, 31u,
+      2u, 4u, 6u, 8u, 10u, 12u, 14u, 16u, 18u, 20u, 22u, 24u, 26u, 28u, 30u, 32u,
+  };
+  static const uint8_t MANAGEMENT_KEY2[32] = {
+      32u, 30u, 28u, 26u, 24u, 22u, 20u, 18u, 16u, 14u, 12u, 10u, 8u, 6u, 4u, 2u,
+      31u, 29u, 27u, 25u, 23u, 21u, 19u, 17u, 15u, 13u, 11u, 9u,  7u, 5u, 3u, 1u,
+  };
+  mesh_config_t mesh_config1;
+  mesh_config_t mesh_config2;
+  mesh_network_t *mesh1 = NULL;
+  mesh_network_t *mesh2 = NULL;
+  p2p_node_t *node1;
+  p2p_node_t *node2;
+  runtime_callbacks_t signer_callbacks1;
+  runtime_callbacks_t signer_callbacks2;
+  router_callbacks_t router_callbacks1;
+  router_callbacks_t router_callbacks2;
+  mesh_mgmt_p2p_peer_config_v1_t peer_config1;
+  mesh_mgmt_p2p_peer_config_v1_t peer_config2;
+  mesh_mgmt_agent_router_config_v1_t router_config1;
+  mesh_mgmt_agent_router_config_v1_t router_config2;
+  mesh_mgmt_agent_router_v1_t router1;
+  mesh_mgmt_agent_router_v1_t router2;
+  const char *node2_bootstraps[1];
+  char node1_endpoint[64];
+  uint8_t transport_key1[P2P_KEY_SIZE];
+  uint8_t transport_key2[P2P_KEY_SIZE];
+  uint64_t deadline;
+  unsigned short port1 = 0u;
+  unsigned short port2 = 0u;
+  int router1_initialized = 0;
+  int router2_initialized = 0;
+  int router1_attached = 0;
+  int router2_attached = 0;
+  int mesh1_started = 0;
+  int mesh2_started = 0;
+  int established = 0;
+
+  memset(&signer_callbacks1, 0, sizeof(signer_callbacks1));
+  memset(&signer_callbacks2, 0, sizeof(signer_callbacks2));
+  memset(&router_callbacks1, 0, sizeof(router_callbacks1));
+  memset(&router_callbacks2, 0, sizeof(router_callbacks2));
+  memset(&peer_config1, 0, sizeof(peer_config1));
+  memset(&peer_config2, 0, sizeof(peer_config2));
+  memset(&router_config1, 0, sizeof(router_config1));
+  memset(&router_config2, 0, sizeof(router_config2));
+  memset(&router1, 0, sizeof(router1));
+  memset(&router2, 0, sizeof(router2));
+  signer_callbacks1.next_message_byte = 0x20u;
+  signer_callbacks2.next_message_byte = 0x80u;
+  router_callbacks1.next_namespace_byte = 0x11u;
+  router_callbacks2.next_namespace_byte = 0x71u;
+
+  check_int_eq(pick_loopback_ports(&port1, &port2), 0);
+  if (port1 == 0u || port2 == 0u)
+    goto cleanup;
+  snprintf(node1_endpoint, sizeof(node1_endpoint), "127.0.0.1:%u", (unsigned int)port1);
+  node2_bootstraps[0] = node1_endpoint;
+
+  mesh_config_init(&mesh_config1);
+  mesh_config1.virtual_ip = "10.42.30.1";
+  mesh_config1.listen_port = (int)port1;
+  mesh_config1.advertise_ip = "127.0.0.1";
+  mesh_config1.network_id = "mgmt-shared-node-test";
+
+  mesh_config_init(&mesh_config2);
+  mesh_config2.virtual_ip = "10.42.30.2";
+  mesh_config2.listen_port = (int)port2;
+  mesh_config2.advertise_ip = "127.0.0.1";
+  mesh_config2.network_id = "mgmt-shared-node-test";
+  mesh_config2.bootstrap_peers = node2_bootstraps;
+  mesh_config2.bootstrap_count = 1;
+
+  mesh1 = mesh_create(&mesh_config1);
+  mesh2 = mesh_create(&mesh_config2);
+  check_not_null(mesh1);
+  check_not_null(mesh2);
+  if (!mesh1 || !mesh2)
+    goto cleanup;
+
+  node1 = mesh_mgmt_mesh_borrow_p2p_node_v1(mesh1);
+  node2 = mesh_mgmt_mesh_borrow_p2p_node_v1(mesh2);
+  check_not_null(node1);
+  check_not_null(node2);
+  if (!node1 || !node2)
+    goto cleanup;
+  check_int_eq(p2p_node_get_public_key(node1, transport_key1), P2P_OK);
+  check_int_eq(p2p_node_get_public_key(node2, transport_key2), P2P_OK);
+  check_int_eq(prepare_runtime_config(&peer_config1, node1, NULL, transport_key1,
+                                      MANAGEMENT_KEY1, 0x31u, 0x41u, 0x51u, 1u,
+                                      &signer_callbacks1),
+               0);
+  check_int_eq(prepare_runtime_config(&peer_config2, node2, NULL, transport_key2,
+                                      MANAGEMENT_KEY2, 0x32u, 0x42u, 0x52u, 2u,
+                                      &signer_callbacks2),
+               0);
+
+  router_config1.node = node1;
+  router_config1.max_peers = 2u;
+  router_config1.signer_template = &peer_config1.signer;
+  router_config1.dispatch_template = &peer_config1.dispatch;
+  router_config1.random_bytes = router_namespace_random;
+  router_config1.random_context = &router_callbacks1;
+  router_config1.on_event = router_event;
+  router_config1.on_non_mmp = router_non_mmp;
+  router_config1.on_failure = router_failure;
+  router_config1.on_peer_closed = router_peer_closed;
+  router_config1.callback_context = &router_callbacks1;
+  router_config2 = router_config1;
+  router_config2.node = node2;
+  router_config2.signer_template = &peer_config2.signer;
+  router_config2.dispatch_template = &peer_config2.dispatch;
+  router_config2.random_context = &router_callbacks2;
+  router_config2.callback_context = &router_callbacks2;
+
+  check_int_eq(mesh_mgmt_agent_router_init_v1(&router1, &router_config1),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router1_initialized = 1;
+  check_int_eq(mesh_mgmt_agent_router_init_v1(&router2, &router_config2),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router2_initialized = 1;
+  check_int_eq(mesh_mgmt_mesh_router_attach_v1(mesh1, &router1),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router1_attached = 1;
+  check_int_eq(mesh_mgmt_mesh_router_attach_v1(mesh2, &router2),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router2_attached = 1;
+  check_false(router1.owns_callbacks);
+  check_false(router2.owns_callbacks);
+
+  check_int_eq(mesh_start(mesh1), MESH_OK);
+  mesh1_started = 1;
+  check_int_eq(mesh_start(mesh2), MESH_OK);
+  mesh2_started = 1;
+
+  deadline = turbo_monotonic_ms() + TEST_CONNECT_TIMEOUT_MS;
+  while (turbo_monotonic_ms() < deadline) {
+    mesh_poll(mesh1, 10);
+    mesh_poll(mesh2, 10);
+    if (mesh_get_peer_count(mesh1) == 1 && mesh_get_peer_count(mesh2) == 1 &&
+        mesh_mgmt_agent_router_active_peers_v1(&router1) == 1u &&
+        mesh_mgmt_agent_router_active_peers_v1(&router2) == 1u &&
+        router_callbacks1.event_count >= 2u && router_callbacks2.event_count >= 2u) {
+      established = 1;
+      break;
+    }
+    turbo_sleep_ms(1u);
+  }
+
+  check_true(established);
+  check_size_eq(router_callbacks1.failure_count, 0u);
+  check_size_eq(router_callbacks2.failure_count, 0u);
+  check_size_eq(router_callbacks1.non_mmp_count, 0u);
+  check_size_eq(router_callbacks2.non_mmp_count, 0u);
+
+  check_int_eq(mesh_mgmt_mesh_router_detach_v1(mesh1, &router1),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router1_attached = 0;
+  check_int_eq(mesh_mgmt_mesh_router_detach_v1(mesh2, &router2),
+               MESH_MGMT_AGENT_ROUTER_OK);
+  router2_attached = 0;
+  check_size_eq(mesh_mgmt_agent_router_active_peers_v1(&router1), 0u);
+  check_size_eq(mesh_mgmt_agent_router_active_peers_v1(&router2), 0u);
+  check_size_eq(router_callbacks1.close_count, 1u);
+  check_size_eq(router_callbacks2.close_count, 1u);
+  check_int_eq(router_callbacks1.last_close_reason, MESH_MGMT_AGENT_ROUTER_CLOSE_LOCAL_STOP);
+  check_int_eq(router_callbacks2.last_close_reason, MESH_MGMT_AGENT_ROUTER_CLOSE_LOCAL_STOP);
+
+  for (int index = 0; index < 10; index++) {
+    mesh_poll(mesh1, 10);
+    mesh_poll(mesh2, 10);
+    turbo_sleep_ms(1u);
+  }
+  check_int_eq(mesh_get_peer_count(mesh1), 1);
+  check_int_eq(mesh_get_peer_count(mesh2), 1);
+
+cleanup:
+  if (router2_attached)
+    (void)mesh_mgmt_mesh_router_detach_v1(mesh2, &router2);
+  if (router1_attached)
+    (void)mesh_mgmt_mesh_router_detach_v1(mesh1, &router1);
+  if (router2_initialized)
+    mesh_mgmt_agent_router_destroy_v1(&router2);
+  if (router1_initialized)
+    mesh_mgmt_agent_router_destroy_v1(&router1);
+  if (mesh2_started)
+    mesh_stop(mesh2);
+  if (mesh1_started)
+    mesh_stop(mesh1);
+  mesh_destroy(mesh2);
+  mesh_destroy(mesh1);
+}
+
+static void test_agent_runtime_borrows_mesh_node_without_owning_event_loop(void) {
+  static const uint8_t MANAGEMENT_KEY[32] = {
+      1u, 3u, 5u, 7u, 9u,  11u, 13u, 15u, 17u, 19u, 21u, 23u, 25u, 27u, 29u, 31u,
+      2u, 4u, 6u, 8u, 10u, 12u, 14u, 16u, 18u, 20u, 22u, 24u, 26u, 28u, 30u, 32u,
+  };
+  mesh_config_t mesh_config;
+  mesh_network_t *mesh = NULL;
+  p2p_node_t *borrowed_node;
+  runtime_callbacks_t signer_callbacks;
+  router_callbacks_t router_callbacks;
+  mesh_mgmt_p2p_peer_config_v1_t peer_config;
+  mesh_mgmt_agent_runtime_config_v1_t runtime_config;
+  mesh_mgmt_agent_runtime_config_v1_t invalid_config;
+  mesh_mgmt_agent_runtime_v1_t runtime;
+  uint8_t transport_key[P2P_KEY_SIZE];
+  unsigned short port1 = 0u;
+  unsigned short port2 = 0u;
+  int runtime_initialized = 0;
+  int runtime_running = 0;
+  int mesh_started = 0;
+
+  memset(&signer_callbacks, 0, sizeof(signer_callbacks));
+  memset(&router_callbacks, 0, sizeof(router_callbacks));
+  memset(&peer_config, 0, sizeof(peer_config));
+  memset(&runtime_config, 0, sizeof(runtime_config));
+  memset(&invalid_config, 0, sizeof(invalid_config));
+  memset(&runtime, 0, sizeof(runtime));
+  signer_callbacks.next_message_byte = 0x20u;
+  router_callbacks.next_namespace_byte = 0x11u;
+
+  check_int_eq(pick_loopback_ports(&port1, &port2), 0);
+  if (port1 == 0u)
+    goto cleanup;
+  mesh_config_init(&mesh_config);
+  mesh_config.virtual_ip = "10.42.31.1";
+  mesh_config.listen_port = (int)port1;
+  mesh_config.advertise_ip = "127.0.0.1";
+  mesh_config.network_id = "mgmt-shared-runtime-test";
+  mesh = mesh_create(&mesh_config);
+  check_not_null(mesh);
+  if (!mesh)
+    goto cleanup;
+
+  borrowed_node = mesh_mgmt_mesh_borrow_p2p_node_v1(mesh);
+  check_not_null(borrowed_node);
+  if (!borrowed_node)
+    goto cleanup;
+  check_int_eq(p2p_node_get_public_key(borrowed_node, transport_key), P2P_OK);
+  check_int_eq(prepare_runtime_config(&peer_config, borrowed_node, NULL, transport_key,
+                                      MANAGEMENT_KEY, 0x31u, 0x41u, 0x51u, 1u,
+                                      &signer_callbacks),
+               0);
+
+  runtime_config.shared_mesh = mesh;
+  runtime_config.max_peers = 2u;
+  runtime_config.signer_template = &peer_config.signer;
+  runtime_config.dispatch_template = &peer_config.dispatch;
+  runtime_config.endpoint_capacity = 2u;
+  runtime_config.retry_base_ms = 10u;
+  runtime_config.retry_max_ms = 100u;
+  runtime_config.connect_timeout_ms = TEST_CONNECT_TIMEOUT_MS;
+  runtime_config.protocol_failure_limit = 2u;
+  runtime_config.first_endpoint_record_epoch = 1u;
+  runtime_config.first_service_record_epoch = 1u;
+  runtime_config.random_bytes = router_namespace_random;
+  runtime_config.random_context = &router_callbacks;
+  runtime_config.admit_peer = router_admit_peer;
+  runtime_config.on_event = router_event;
+  runtime_config.on_non_mmp = router_non_mmp;
+  runtime_config.on_failure = router_failure;
+  runtime_config.on_peer_closed = router_peer_closed;
+  runtime_config.callback_context = &router_callbacks;
+
+  invalid_config = runtime_config;
+  invalid_config.listen_host = "127.0.0.1";
+  invalid_config.listen_port = port2;
+  check_int_eq(mesh_mgmt_agent_runtime_init_v1(&runtime, &invalid_config),
+               MESH_MGMT_AGENT_RUNTIME_INVALID_ARG);
+  check_int_eq(mesh_mgmt_agent_runtime_init_v1(&runtime, &runtime_config),
+               MESH_MGMT_AGENT_RUNTIME_OK);
+  runtime_initialized = 1;
+  check_false(runtime.owns_node);
+  check_true(runtime.node == borrowed_node);
+  check_int_eq(mesh_mgmt_agent_runtime_start_v1(&runtime), MESH_MGMT_AGENT_RUNTIME_OK);
+  runtime_running = 1;
+  check_false(runtime.router.owns_callbacks);
+
+  check_int_eq(mesh_start(mesh), MESH_OK);
+  mesh_started = 1;
+  mesh_poll(mesh, 10);
+  check_int_eq(mesh_mgmt_agent_runtime_poll_v1(&runtime), MESH_MGMT_AGENT_RUNTIME_OK);
+  check_true(mesh_mgmt_mesh_borrow_p2p_node_v1(mesh) == borrowed_node);
+
+  check_int_eq(mesh_mgmt_agent_runtime_stop_v1(&runtime), MESH_MGMT_AGENT_RUNTIME_OK);
+  runtime_running = 0;
+  check_int_eq(runtime.state, MESH_MGMT_AGENT_RUNTIME_STOPPED);
+  check_true(mesh_mgmt_mesh_borrow_p2p_node_v1(mesh) == borrowed_node);
+
+cleanup:
+  if (runtime_running)
+    (void)mesh_mgmt_agent_runtime_stop_v1(&runtime);
+  if (runtime_initialized)
+    mesh_mgmt_agent_runtime_destroy_v1(&runtime);
+  if (mesh_started)
+    mesh_stop(mesh);
+  mesh_destroy(mesh);
+}
+
 static void prepare_agent_runtime_config(mesh_mgmt_agent_runtime_config_v1_t *config, uint16_t port,
                                          const uint8_t private_key[32],
                                          const mesh_mgmt_p2p_peer_config_v1_t *peer_config,
@@ -969,6 +1506,7 @@ static void prepare_agent_runtime_config(mesh_mgmt_agent_runtime_config_v1_t *co
   config->connect_timeout_ms = TEST_CONNECT_TIMEOUT_MS;
   config->protocol_failure_limit = 2u;
   config->first_endpoint_record_epoch = 1u;
+  config->first_service_record_epoch = 1u;
   config->bootstraps = bootstraps;
   config->bootstrap_count = bootstrap_count;
   config->random_bytes = router_namespace_random;
@@ -1068,6 +1606,8 @@ static void test_agent_runtime_pushes_verified_endpoint_discovery(void) {
   mesh_mgmt_p2p_peer_config_v1_t peer_config2;
   mesh_mgmt_agent_bootstrap_v1_t bootstrap2;
   mesh_mgmt_endpoint_publish_v1_t endpoint;
+  mesh_mgmt_service_publish_v1_t service;
+  mesh_mgmt_service_record_v1_t service_record;
   mesh_mgmt_agent_cached_endpoint_v1_t cached_input;
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
   runtime_callbacks_t signer_callbacks1;
@@ -1077,10 +1617,15 @@ static void test_agent_runtime_pushes_verified_endpoint_discovery(void) {
   uint8_t transport_id1[P2P_KEY_SIZE];
   uint8_t transport_id2[P2P_KEY_SIZE];
   uint8_t frame[MESH_MGMT_ENDPOINT_FRAME_V1_MAX];
+  uint8_t service_frame[MESH_MGMT_SERVICE_FRAME_V1_MAX];
   char key[MESH_MGMT_ENDPOINT_DHT_KEY_V1_SIZE];
+  char service_key[MESH_MGMT_SERVICE_DHT_KEY_V1_SIZE];
   size_t frame_len = sizeof(frame);
+  size_t service_frame_len = sizeof(service_frame);
   size_t key_len = 0u;
+  size_t service_key_len = 0u;
   uint64_t record_epoch = 0u;
+  uint64_t service_record_epoch = 0u;
   uint64_t next_epoch;
   uint64_t certificate_expires_at_ms;
   unsigned short port1 = 0u;
@@ -1094,6 +1639,8 @@ static void test_agent_runtime_pushes_verified_endpoint_discovery(void) {
   memset(&callbacks2, 0, sizeof(callbacks2));
   memset(&bootstrap2, 0, sizeof(bootstrap2));
   memset(&endpoint, 0, sizeof(endpoint));
+  memset(&service, 0, sizeof(service));
+  memset(&service_record, 0, sizeof(service_record));
   memset(&cached_input, 0, sizeof(cached_input));
   signer_callbacks1.next_message_byte = 0x21u;
   signer_callbacks2.next_message_byte = 0x81u;
@@ -1122,6 +1669,46 @@ static void test_agent_runtime_pushes_verified_endpoint_discovery(void) {
   check_int_eq(mesh_mgmt_agent_runtime_start_v1(&runtime2), MESH_MGMT_AGENT_RUNTIME_OK);
   check_int_eq(
       pump_agent_runtimes_until_established(&runtime1, &runtime2, &callbacks1, &callbacks2), 0);
+
+  service.address_family = MESH_MGMT_SERVICE_ADDRESS_IPV4;
+  service.virtual_address[0] = 100u;
+  service.virtual_address[1] = 64u;
+  service.virtual_address[3] = 2u;
+  service.dns_name = "node-b.mesh";
+  service.port = 7878u;
+  check_int_eq(mesh_mgmt_agent_runtime_publish_cached_service_v1(
+                   &runtime2, &service, &service_record_epoch),
+               MESH_MGMT_AGENT_RUNTIME_OK);
+  check_hex64_eq(service_record_epoch, 1u);
+  check_int_eq(mesh_mgmt_service_dht_key_build_v1(
+                   peer_config2.signer.expected_mesh_id_hash,
+                   peer_config2.signer.hello.managed_node_id, service_key,
+                   sizeof(service_key), &service_key_len),
+               MESH_MGMT_SERVICE_RECORD_OK);
+  check_int_eq(pump_agent_runtimes_until_dht_value(
+                   &runtime1, &runtime2, service_key, service_frame,
+                   &service_frame_len),
+               0);
+  check_int_eq(mesh_mgmt_agent_runtime_resolve_cached_service_v1(
+                   &runtime1, peer_config2.signer.hello.managed_node_id,
+                   TEST_NOW_MS, peer_config2.signer.frame_ttl_ms, &service_record),
+               MESH_MGMT_AGENT_RUNTIME_OK);
+  check_str_eq(service_record.virtual_host, "node-b.mesh");
+  check_str_eq(service_record.virtual_ip, "100.64.0.2");
+  check_int_eq(service_record.port, 7878u);
+
+  service_frame[service_frame_len - 1u] ^= 1u;
+  check_int_eq(p2p_dht_put_cached(
+                   runtime1.node, service_key, service_frame, service_frame_len),
+               P2P_OK);
+  check_int_eq(mesh_mgmt_agent_runtime_resolve_cached_service_v1(
+                   &runtime1, peer_config2.signer.hello.managed_node_id,
+                   TEST_NOW_MS, peer_config2.signer.frame_ttl_ms, &service_record),
+               MESH_MGMT_AGENT_RUNTIME_SERVICE_RECORD_FAILED);
+  check_int_eq(runtime1.last_service_record_result,
+               MESH_MGMT_SERVICE_RECORD_AUTH_FAILED);
+  check_mem_eq(&service_record, &(mesh_mgmt_service_record_v1_t){0},
+               sizeof(service_record));
 
   endpoint.address_family = MESH_MGMT_ENDPOINT_ADDRESS_IPV4;
   endpoint.address[0] = 224u;
@@ -1289,6 +1876,10 @@ static void test_agent_runtime_owns_listener_policy_and_reconnect(void) {
   invalid_config.first_endpoint_record_epoch = 0u;
   check_int_eq(mesh_mgmt_agent_runtime_init_v1(&invalid_runtime, &invalid_config),
                MESH_MGMT_AGENT_RUNTIME_INVALID_ARG);
+  invalid_config = config1;
+  invalid_config.first_service_record_epoch = 0u;
+  check_int_eq(mesh_mgmt_agent_runtime_init_v1(&invalid_runtime, &invalid_config),
+               MESH_MGMT_AGENT_RUNTIME_INVALID_ARG);
 
   config1.admit_peer = NULL;
   check_int_eq(mesh_mgmt_agent_runtime_init_v1(&runtime1, &config1), MESH_MGMT_AGENT_RUNTIME_OK);
@@ -1367,6 +1958,12 @@ spec("mesh management P2P adapter") {
     }
     it("routes bounded peer lifecycles and reconnects with a fresh connection id") {
       test_agent_router_owns_callbacks_and_reconnect_lifecycle();
+    }
+    it("shares mesh callbacks and detaches management without dropping data-plane peers") {
+      test_mesh_bridge_shares_callbacks_and_detaches_without_disconnect();
+    }
+    it("runs the management runtime on a borrowed mesh node and event loop") {
+      test_agent_runtime_borrows_mesh_node_without_owning_event_loop();
     }
     it("owns explicit listeners, admission policy, shutdown and reconnect") {
       test_agent_runtime_owns_listener_policy_and_reconnect();

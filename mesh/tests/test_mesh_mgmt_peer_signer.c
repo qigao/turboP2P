@@ -140,12 +140,14 @@ static void test_signer_builds_bound_hello_and_ack(void) {
   mesh_mgmt_peer_signer_v1_t signer;
   mesh_mgmt_verified_envelope_v1_t hello_envelope;
   mesh_mgmt_verified_envelope_v1_t ack_envelope;
+  mesh_mgmt_verified_envelope_v1_t targeted_envelope;
   mesh_mgmt_hello_v1_t decoded_hello;
   mesh_mgmt_hello_ack_v1_t expected_ack;
   mesh_mgmt_hello_ack_v1_t decoded_ack;
   const uint8_t *frame = NULL;
   size_t frame_len = 0u;
   uint8_t expected_message_id[16];
+  uint8_t target_node_id[32];
   uint8_t zero_key[32] = {0};
 
   memset(&signer, 0, sizeof(signer));
@@ -192,6 +194,25 @@ static void test_signer_builds_bound_hello_and_ack(void) {
   check_mem_eq(&decoded_ack, &expected_ack, sizeof(decoded_ack));
   check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE + 2u);
   check_size_eq(fixture.callbacks.random_calls, 2u);
+
+  fill_bytes(target_node_id, sizeof(target_node_id), 0x70u);
+  check_int_eq(mesh_mgmt_peer_signer_build_targeted_v1(
+                   &signer, MESH_MGMT_KIND_COMMAND_REQUEST, target_node_id,
+                   NULL, 0u, &frame, &frame_len),
+               MESH_MGMT_PEER_SIGNER_OK);
+  check_int_eq(signer.last_envelope_result, MESH_MGMT_ENVELOPE_OK);
+  check_int_eq(mesh_mgmt_envelope_verify_v1(
+                   frame, frame_len, &targeted_envelope),
+               MESH_MGMT_ENVELOPE_OK);
+  check_int_eq(targeted_envelope.frame.kind,
+               MESH_MGMT_KIND_COMMAND_REQUEST);
+  check_mem_eq(targeted_envelope.header.target_node_id, target_node_id,
+               sizeof(target_node_id));
+  check_size_eq(targeted_envelope.frame.payload_len, 0u);
+  check_hex64_eq(targeted_envelope.header.origin_sequence,
+                 TEST_FIRST_SEQUENCE + 2u);
+  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE + 3u);
+  check_size_eq(fixture.callbacks.random_calls, 3u);
 
   frame = (const uint8_t *)1;
   frame_len = 1u;

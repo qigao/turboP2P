@@ -145,17 +145,26 @@ p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id) 
     }
 
     turbo_mutex_lock(&node->mutex);
-    file = p2p_file_find_by_id(node->local_files, id);
+    file = p2p_node_find_local_file_by_id_locked(node, id);
     turbo_mutex_unlock(&node->mutex);
     return file;
 }
 
 p2p_file_t *p2p_node_find_local_file_by_id_locked(p2p_node_t *node, const p2p_id_t id) {
+    p2p_file_t *file = NULL;
+
     if (!node || !id) {
         return NULL;
     }
 
-    return p2p_file_find_by_id(node->local_files, id);
+    file = node->local_files;
+    while (file) {
+        if (memcmp(file->id, id, P2P_HASH_SIZE) == 0) {
+            return file;
+        }
+        file = file->next_file;
+    }
+    return NULL;
 }
 
 p2p_file_t *p2p_node_detach_local_files(p2p_node_t *node) {

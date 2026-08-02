@@ -108,6 +108,34 @@ p2p_transfer_t* p2p_transfer_find_by_id(p2p_transfer_manager_t *mgr, uint32_t id
     return NULL;
 }
 
+p2p_transfer_t* p2p_transfer_find_upload_by_remote_id(
+    p2p_transfer_manager_t *mgr, uint32_t remote_id, p2p_peer_t *peer) {
+    p2p_transfer_t *transfer = NULL;
+
+    if (!mgr || !peer || remote_id == 0) {
+        return NULL;
+    }
+
+    turbo_mutex_lock(&mgr->mutex);
+    transfer = mgr->active;
+    while (transfer) {
+        turbo_mutex_lock(&transfer->mutex);
+        if (!transfer->destroying &&
+            transfer->direction == P2P_TRANSFER_DIR_UPLOAD &&
+            transfer->remote_id == remote_id &&
+            transfer->peer == peer) {
+            transfer->ref_count++;
+            turbo_mutex_unlock(&transfer->mutex);
+            turbo_mutex_unlock(&mgr->mutex);
+            return transfer;
+        }
+        turbo_mutex_unlock(&transfer->mutex);
+        transfer = transfer->next;
+    }
+    turbo_mutex_unlock(&mgr->mutex);
+    return NULL;
+}
+
 void p2p_transfer_release(p2p_transfer_t *transfer) {
     p2p_transfer_manager_t *mgr = NULL;
     int should_free = 0;

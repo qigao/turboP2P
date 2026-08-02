@@ -2,6 +2,8 @@
 
 #include "mesh_mgmt_peer.h"
 #include "mesh_mgmt_peer_signer.h"
+#include "mesh_mgmt_execution_consumer.h"
+#include "mesh_mgmt_execution_response_consumer.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -551,6 +553,197 @@ static void test_dispatcher_rejects_side_effect_without_consuming_replay(void) {
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
+static void make_execution_command(
+    const test_context_t *context,
+    mesh_mgmt_execution_grant_v1_t *grant,
+    mesh_mgmt_execution_request_v1_t *request) {
+  memset(grant, 0, sizeof(*grant));
+  grant->version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  fill_bytes(grant->grant_id, sizeof(grant->grant_id), 0x21u);
+  memcpy(grant->mesh_id, context->mesh_id_hash, sizeof(grant->mesh_id));
+  grant->policy_epoch = 1u;
+  memcpy(grant->subject_principal, context->remote_public_key,
+         sizeof(grant->subject_principal));
+  fill_bytes(grant->target_node_id, sizeof(grant->target_node_id), 0xa0u);
+  fill_bytes(grant->deployment_id, sizeof(grant->deployment_id), 0x31u);
+  grant->deployment_generation = 1u;
+  fill_bytes(grant->package_digest, sizeof(grant->package_digest), 0x41u);
+  grant->operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
+  grant->capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+  grant->max_limits.module_bytes = 1024u;
+  grant->max_limits.stack_bytes = 1024u;
+  grant->max_limits.linear_memory_bytes = 4096u;
+  grant->max_limits.timeout_ms = 100u;
+  grant->max_limits.control_flow_steps = 1000u;
+  grant->max_limits.host_calls = 4u;
+  grant->max_limits.copied_guest_bytes = 1024u;
+  grant->max_limits.input_bytes = 64u;
+  grant->max_limits.stdout_bytes = 64u;
+  grant->max_limits.stderr_bytes = 64u;
+  grant->not_before_ms = 1400u;
+  grant->expires_at_ms = 1600u;
+  check_int_eq(mesh_mgmt_execution_grant_sign_v1(grant, ROOT_PRIVATE_KEY),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+
+  memset(request, 0, sizeof(*request));
+  request->version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  fill_bytes(request->command_id, sizeof(request->command_id), 0x51u);
+  memcpy(request->grant_id, grant->grant_id, sizeof(request->grant_id));
+  memcpy(request->target_node_id, grant->target_node_id,
+         sizeof(request->target_node_id));
+  memcpy(request->deployment_id, grant->deployment_id,
+         sizeof(request->deployment_id));
+  request->deployment_generation = grant->deployment_generation;
+  memcpy(request->package_digest, grant->package_digest,
+         sizeof(request->package_digest));
+  request->input_kind = MESH_MGMT_EXECUTION_INPUT_NONE;
+  request->output_mode = MESH_MGMT_EXECUTION_OUTPUT_DIGEST;
+  request->deadline_ms = 1590u;
+  fill_bytes(request->request_nonce, sizeof(request->request_nonce), 0x61u);
+  fill_bytes(request->correlation_id, sizeof(request->correlation_id), 0x71u);
+}
+
+static void test_dispatcher_emits_typed_execution_shadow_without_side_effect(void) {
+  test_context_t context;
+  mesh_mgmt_dispatcher_v1_t dispatcher;
+  mesh_mgmt_dispatch_event_v1_t event;
+  mesh_mgmt_execution_grant_v1_t grant;
+  mesh_mgmt_execution_request_v1_t request;
+  mesh_mgmt_execution_shadow_command_v1_t command;
+  mesh_mgmt_dispatch_stage_t stage;
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1];
+  uint8_t frame[MESH_MGMT_FRAME_MAX];
+  size_t payload_len = 0u;
+  size_t frame_len = 0u;
+
+  establish_dispatcher(&context, &dispatcher);
+  dispatcher.session.negotiated.features |=
+      MESH_MGMT_FEATURE_NODE_EXECUTION;
+  dispatcher.enable_node_execution_shadow = 1u;
+  memcpy(dispatcher.node_execution_grant_issuer_key,
+         context.root_public_key,
+         sizeof(dispatcher.node_execution_grant_issuer_key));
+  make_execution_command(&context, &grant, &request);
+  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+                   &grant, &request, payload, sizeof(payload), &payload_len),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  frame_len = sign_remote_frame_values(
+      &context, MESH_MGMT_KIND_COMMAND_REQUEST, payload, payload_len,
+      TEST_CERT_SERIAL, 3u, 0x10u, 20u, 0x61u, frame);
+
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_OK);
+  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_int_eq(
+      event.type,
+      MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW);
+  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  check_int_eq(mesh_mgmt_execution_shadow_command_from_event_v1(
+                   &dispatcher, &event, TEST_NOW_MS, &command),
+               MESH_MGMT_EXECUTION_CONSUMER_OK);
+  check_mem_eq(command.request.command_id, request.command_id,
+               sizeof(request.command_id));
+  check_mem_eq(command.grant.grant_id, grant.grant_id,
+               sizeof(grant.grant_id));
+  check_mem_eq(command.reply_node_id,
+               event.envelope.header.origin_node_id,
+               sizeof(command.reply_node_id));
+
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_REPLAYED);
+  grant.signature[0] ^= 1u;
+  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+                   &grant, &request, payload, sizeof(payload), &payload_len),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  frame_len = sign_remote_frame_values(
+      &context, MESH_MGMT_KIND_COMMAND_REQUEST, payload, payload_len,
+      TEST_CERT_SERIAL, 3u, 0x10u, 21u, 0x62u, frame);
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_AUTH_FAILED);
+  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+
+  frame_len = sign_remote_frame_values(
+      &context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL, 3u,
+      0x10u, 21u, 0x62u, frame);
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_OK);
+  check_hex64_eq(dispatcher.replay.last_sequence, 21u);
+  mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
+}
+
+static void test_dispatcher_emits_owned_execution_status_response(void) {
+  test_context_t context;
+  mesh_mgmt_dispatcher_v1_t dispatcher;
+  mesh_mgmt_dispatch_event_v1_t event;
+  mesh_mgmt_execution_status_v1_t status;
+  mesh_mgmt_execution_response_v1_t response;
+  mesh_mgmt_dispatch_stage_t stage;
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1];
+  uint8_t frame[MESH_MGMT_FRAME_MAX];
+  size_t payload_len = 0u;
+  size_t frame_len;
+
+  establish_dispatcher(&context, &dispatcher);
+  dispatcher.session.negotiated.features |=
+      MESH_MGMT_FEATURE_NODE_EXECUTION;
+  dispatcher.enable_node_execution_shadow = 1u;
+  memset(&status, 0, sizeof(status));
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_BUSY;
+  fill_bytes(status.command_id, sizeof(status.command_id), 0x31u);
+  fill_bytes(status.correlation_id, sizeof(status.correlation_id), 0x41u);
+  fill_bytes(status.request_digest, sizeof(status.request_digest), 0x51u);
+  memcpy(status.responder_node_id, context.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_int_eq(mesh_mgmt_execution_command_status_encode_v1(
+                   &status, payload, sizeof(payload), &payload_len),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  frame_len = sign_remote_frame_values(
+      &context, MESH_MGMT_KIND_COMMAND_STATUS, payload, payload_len,
+      TEST_CERT_SERIAL, 3u, 0x10u, 20u, 0x71u, frame);
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_OK);
+  check_int_eq(event.type,
+               MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW);
+  check_int_eq(mesh_mgmt_execution_response_from_event_v1(
+                   &dispatcher, &event, &response),
+               MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK);
+  check_int_eq(response.kind, MESH_MGMT_KIND_COMMAND_STATUS);
+  check_int_eq(response.status.code, MESH_MGMT_EXECUTION_STATUS_BUSY);
+  check_true(mesh_mgmt_execution_status_is_retryable_v1(
+      response.status.code));
+  check_mem_eq(response.status.command_id, status.command_id,
+               sizeof(status.command_id));
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_REPLAYED);
+
+  status.responder_node_id[0] ^= 1u;
+  check_int_eq(mesh_mgmt_execution_command_status_encode_v1(
+                   &status, payload, sizeof(payload), &payload_len),
+               MESH_MGMT_EXECUTION_WIRE_OK);
+  frame_len = sign_remote_frame_values(
+      &context, MESH_MGMT_KIND_COMMAND_STATUS, payload, payload_len,
+      TEST_CERT_SERIAL, 3u, 0x10u, 21u, 0x72u, frame);
+  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+                   &dispatcher, frame, frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &event, &stage),
+               MESH_MGMT_DISPATCH_AUTH_FAILED);
+  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
+}
+
 #define CONNECTION_TEST_FRAME_CAPACITY 4u
 
 typedef struct {
@@ -570,6 +763,11 @@ typedef struct {
   size_t event_count;
   int reject_result;
   mesh_mgmt_hello_ack_v1_t hello_ack;
+  mesh_mgmt_connection_v1_t *connection;
+  const uint8_t *response_frame;
+  size_t response_frame_len;
+  mesh_mgmt_connection_result_t regular_send_result;
+  mesh_mgmt_connection_result_t event_response_result;
 } connection_event_capture_t;
 
 static int connection_fake_recv(void *context, uint8_t **out_bytes, size_t *out_len) {
@@ -614,6 +812,15 @@ static int connection_capture_event(void *context, const mesh_mgmt_dispatch_even
   capture->events[capture->event_count++] = event->type;
   if (event->type == MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED)
     capture->hello_ack = event->hello_ack;
+  if (capture->connection && capture->response_frame) {
+    capture->regular_send_result = mesh_mgmt_connection_send_v1(
+        capture->connection, capture->response_frame,
+        capture->response_frame_len);
+    capture->event_response_result =
+        mesh_mgmt_connection_send_event_response_v1(
+            capture->connection, capture->response_frame,
+            capture->response_frame_len);
+  }
   return capture->reject_result;
 }
 
@@ -720,9 +927,15 @@ static void test_connection_owns_handshake_dispatch_and_receipt_commit(void) {
   check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_OK);
   check_int_eq(capture.events[1], MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
+  capture.connection = &connection;
+  capture.response_frame = probe_frame;
+  capture.response_frame_len = probe_frame_len;
   check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_OK);
   check_int_eq(capture.events[2], MESH_MGMT_DISPATCH_EVENT_MEMBERSHIP);
+  check_int_eq(capture.regular_send_result,
+               MESH_MGMT_CONNECTION_INVALID_STATE);
+  check_int_eq(capture.event_response_result, MESH_MGMT_CONNECTION_OK);
   check_int_eq(connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
   check_hex64_eq(connection.dispatcher.replay.last_sequence, 16u);
   check_hex64_eq(connection.transport.generation, 4u);
@@ -731,10 +944,13 @@ static void test_connection_owns_handshake_dispatch_and_receipt_commit(void) {
   check_int_eq(mesh_mgmt_connection_send_v1(&connection, command_frame, command_frame_len),
                MESH_MGMT_CONNECTION_INVALID_FRAME);
   check_int_eq(connection.last_dispatch_result, MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED);
-  check_size_eq(fake.send_count, 2u);
+  check_size_eq(fake.send_count, 3u);
   check_int_eq(mesh_mgmt_connection_send_v1(&connection, probe_frame, probe_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_size_eq(fake.send_count, 3u);
+  check_size_eq(fake.send_count, 4u);
+  check_int_eq(mesh_mgmt_connection_send_event_response_v1(
+                   &connection, probe_frame, probe_frame_len),
+               MESH_MGMT_CONNECTION_INVALID_STATE);
   mesh_mgmt_connection_destroy_v1(&connection);
 }
 
@@ -825,11 +1041,11 @@ typedef struct {
 
 typedef struct {
   uint8_t next_message_first;
+  uint64_t now_ms;
 } peer_signer_callbacks_t;
 
 static uint64_t peer_signer_now_ms(void *context) {
-  (void)context;
-  return TEST_NOW_MS;
+  return ((peer_signer_callbacks_t *)context)->now_ms;
 }
 
 static int peer_signer_random_bytes(void *context, uint8_t *output, size_t output_len) {
@@ -969,6 +1185,7 @@ static void test_peer_uses_live_signer_builder_contract(void) {
   memset(&config, 0, sizeof(config));
   memset(&peer, 0, sizeof(peer));
   callbacks.next_message_first = 0x60u;
+  callbacks.now_ms = TEST_NOW_MS + 1u;
   prepare_connection_config(&context, &fake, &capture, &config.connection);
   prepare_local_peer_signer(&context, &callbacks, &signer_config);
   check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &signer_config), MESH_MGMT_PEER_SIGNER_OK);
@@ -1218,9 +1435,15 @@ spec("mesh management identity and HELLO session") {
     it("rejects an unnegotiated stream ticket without consuming replay") {
       test_dispatcher_rejects_unnegotiated_stream_ticket_without_replay();
     }
+    it("emits an owned typed execution shadow without executing it") {
+      test_dispatcher_emits_typed_execution_shadow_without_side_effect();
+    }
+    it("emits an owned typed execution status response") {
+      test_dispatcher_emits_owned_execution_status_response();
+    }
   }
   describe("single-owner management connection") {
-    it("serializes handshake, dispatch and receipt commit") {
+    it("serializes handshake, event responses, and receipt commit") {
       test_connection_owns_handshake_dispatch_and_receipt_commit();
     }
     it("commits a delivered frame before callback rejection is terminal") {
@@ -1243,7 +1466,7 @@ spec("mesh management identity and HELLO session") {
     it("does not build or send ACK after consumer rejection") {
       test_peer_consumer_rejection_never_builds_or_sends_ack();
     }
-    it("uses the live local signer callback contract") {
+    it("accepts a local signer timestamp sampled after the peer clock") {
       test_peer_uses_live_signer_builder_contract();
     }
   }

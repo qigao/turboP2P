@@ -30,7 +30,8 @@ typedef enum {
 /**
  * Synchronous observer/consumer boundary. Borrowed envelope views are valid
  * only for this call. Return zero only after the event has been accepted.
- * Re-entering any connection API from this callback is invalid.
+ * Only mesh_mgmt_connection_send_event_response_v1() may re-enter the
+ * connection from this callback.
  */
 typedef int (*mesh_mgmt_connection_event_fn)(void *context,
                                              const mesh_mgmt_dispatch_event_v1_t *event);
@@ -93,6 +94,18 @@ mesh_mgmt_connection_send_hello_ack_v1(mesh_mgmt_connection_v1_t *connection, co
 /** Send a non-handshake frame after the session is established. */
 mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_v1_t *connection,
                                                            const uint8_t *frame, size_t frame_len);
+
+/**
+ * Send one immediate non-handshake response while handling an accepted event.
+ * This is the only connection operation permitted from on_event. The frame
+ * passes the same outbound schema, feature, identity, and transport checks as
+ * mesh_mgmt_connection_send_v1().
+ */
+mesh_mgmt_connection_result_t
+mesh_mgmt_connection_send_event_response_v1(
+    mesh_mgmt_connection_v1_t *connection,
+    const uint8_t *frame,
+    size_t frame_len);
 
 #ifdef __cplusplus
 }

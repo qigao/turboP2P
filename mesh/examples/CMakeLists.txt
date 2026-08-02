@@ -26,6 +26,10 @@ target_link_libraries(meshctl
     PRIVATE mesh
     TurboP2P::P2P)
 
+if(WIN32)
+    target_link_libraries(meshctl PRIVATE ws2_32)
+endif()
+
 target_compile_definitions(meshctl PRIVATE USING_EXAMPLES)
 
 set_target_properties(meshctl PROPERTIES
@@ -53,10 +57,18 @@ add_executable(meshd
     mesh_runtime_health.c)
 
 target_link_libraries(meshd
-    PRIVATE mesh tunnel
+    PRIVATE mesh tunnel mesh_mgmt_agent_runtime
+    mesh_mgmt_execution_rpc_control
     TurboP2P::P2P)
 
 target_compile_definitions(meshd PRIVATE USING_EXAMPLES)
+
+if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+    target_sources(meshd PRIVATE meshd_execution_config.c)
+    target_link_libraries(meshd PRIVATE mesh_mgmt_execution_node)
+    target_compile_definitions(meshd PRIVATE
+        TURBO_P2P_ENABLE_NODE_EXECUTION=1)
+endif()
 
 set_target_properties(meshd PROPERTIES
     FOLDER "mesh/examples"

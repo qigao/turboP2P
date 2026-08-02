@@ -24,9 +24,10 @@ typedef enum {
     MESH_MGMT_FEATURE_TARGETED_RPC = 1u << 2,
     MESH_MGMT_FEATURE_AUDIT_ANCHOR = 1u << 3,
     MESH_MGMT_FEATURE_STREAM_TICKET = 1u << 4,
+    MESH_MGMT_FEATURE_NODE_EXECUTION = 1u << 5,
 } mesh_mgmt_feature_t;
 
-#define MESH_MGMT_FEATURE_KNOWN_MASK 0x1fu
+#define MESH_MGMT_FEATURE_KNOWN_MASK 0x3fu
 
 typedef enum {
     MESH_MGMT_PLATFORM_LINUX = 1,
@@ -110,6 +111,7 @@ typedef struct {
     mesh_mgmt_session_config_v1_t config;
     mesh_mgmt_negotiated_v1_t negotiated;
     mesh_mgmt_certificate_v1_t remote_certificate;
+    uint8_t remote_certificate_wire[MESH_MGMT_CERTIFICATE_V1_SIZE];
     uint8_t remote_connection_id[16];
     uint8_t remote_session_id[16];
     uint64_t remote_incarnation;
@@ -168,6 +170,10 @@ mesh_mgmt_session_result_t mesh_mgmt_session_accept_hello_ack_v1(
 mesh_mgmt_session_result_t mesh_mgmt_session_authorize_kind_v1(
     const mesh_mgmt_session_v1_t *session,
     uint8_t kind);
+
+mesh_mgmt_session_result_t mesh_mgmt_session_authorize_feature_v1(
+    const mesh_mgmt_session_v1_t *session,
+    uint64_t required_features);
 
 #ifdef __cplusplus
 }

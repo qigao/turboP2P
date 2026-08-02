@@ -1,6 +1,7 @@
 #ifndef TURBO_P2P_MESH_MGMT_ENDPOINT_PUBLISHER_H
 #define TURBO_P2P_MESH_MGMT_ENDPOINT_PUBLISHER_H
 
+#include "mesh_mgmt_record_epoch.h"
 #include "mesh_mgmt_endpoint_record.h"
 #include "mesh_mgmt_peer_signer.h"
 
@@ -22,6 +23,7 @@ typedef enum {
   MESH_MGMT_ENDPOINT_PUBLISHER_SIGN_FAILED = -6,
   MESH_MGMT_ENDPOINT_PUBLISHER_P2P_FAILED = -7,
   MESH_MGMT_ENDPOINT_PUBLISHER_RESOURCE_EXHAUSTED = -8,
+  MESH_MGMT_ENDPOINT_PUBLISHER_EPOCH_FAILED = -9,
 } mesh_mgmt_endpoint_publisher_result_t;
 
 typedef enum {
@@ -45,6 +47,8 @@ typedef struct {
   uint8_t local_transport_peer_id[P2P_KEY_SIZE];
   uint64_t certificate_expires_at_ms;
   uint64_t next_record_epoch;
+  mesh_mgmt_record_epoch_allocate_fn allocate_record_epoch;
+  void *record_epoch_context;
   mesh_mgmt_endpoint_publisher_state_t state;
   mesh_mgmt_endpoint_publisher_result_t last_error;
   mesh_mgmt_endpoint_record_result_t last_record_result;
@@ -59,6 +63,11 @@ mesh_mgmt_endpoint_publisher_result_t
 mesh_mgmt_endpoint_publisher_init_v1(mesh_mgmt_endpoint_publisher_v1_t *publisher, p2p_node_t *node,
                                      const mesh_mgmt_peer_signer_config_v1_t *signer_config,
                                      uint64_t first_record_epoch);
+
+mesh_mgmt_endpoint_publisher_result_t mesh_mgmt_endpoint_publisher_set_epoch_allocator_v1(
+    mesh_mgmt_endpoint_publisher_v1_t *publisher,
+    mesh_mgmt_record_epoch_allocate_fn allocate_record_epoch,
+    void *record_epoch_context);
 
 /**
  * Sign and store the next local endpoint record, then push it to currently

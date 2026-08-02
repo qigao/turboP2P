@@ -13,12 +13,17 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_crypto.c
     test_mesh_mgmt_envelope.c
     test_mesh_mgmt_replay.c
+    test_mesh_mgmt_execution.c
+    test_mesh_mgmt_execution_store.c
+    test_mesh_mgmt_execution_result.c
+    test_mesh_mgmt_execution_wire.c
     test_mesh_mgmt_session.c
     test_mesh_mgmt_peer_signer.c
     test_mesh_mgmt_transport.c
     test_mesh_mgmt_p2p_adapter.c
     test_mesh_mgmt_endpoint_pool.c
     test_mesh_mgmt_endpoint_record.c
+    test_mesh_mgmt_service_record.c
     test_mesh_mgmt_coronet_transport.c
     test_mesh_stream_codec.c
     test_mesh_stream_bind.c
@@ -28,7 +33,26 @@ set(MESH_TEST_SOURCES
     test_mesh_stream_channel.c
     test_mesh_stream_registry.c
     test_mesh_stream_coronet.c
+    test_meshctl_rpc.c
+    test_mesh_mgmt_execution_rpc_registry.c
+    test_mesh_mgmt_execution_rpc_control.c
+    test_mesh_mgmt_execution_disabled_responder.c
     test_meshd_runtime.c)
+
+if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+    set(MESH_MGMT_EXECUTION_TEST_WASM
+        "${CMAKE_CURRENT_BINARY_DIR}/mesh_mgmt_execution_test_guest.wasm")
+    turbo_add_wasm_application(mesh_mgmt_execution_test_guest
+        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/data/execution_guest.c
+        MAX_MEMORY 262144
+        OUTPUT ${MESH_MGMT_EXECUTION_TEST_WASM}
+        NO_CHECK)
+    list(APPEND MESH_TEST_SOURCES
+        test_mesh_mgmt_execution_runner.c
+        test_mesh_mgmt_execution_orchestrator.c
+        test_mesh_mgmt_execution_node.c
+        test_meshd_execution_config.c)
+endif()
 
 foreach(test_source ${MESH_TEST_SOURCES})
     get_filename_component(test_name ${test_source} NAME_WE)
@@ -42,7 +66,26 @@ foreach(test_source ${MESH_TEST_SOURCES})
 
     set(extra_test_libs)
     if(test_name STREQUAL "test_meshd_runtime")
-        list(APPEND extra_test_libs tunnel TurboP2P::P2P)
+        target_sources(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_runtime_health.c)
+        list(APPEND extra_test_libs tunnel mesh_mgmt_agent_runtime TurboP2P::P2P)
+        if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+            target_sources(${test_name} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/../examples/meshd_execution_config.c)
+            list(APPEND extra_test_libs mesh_mgmt_execution_node)
+            target_compile_definitions(${test_name} PRIVATE
+                TURBO_P2P_ENABLE_NODE_EXECUTION=1)
+        endif()
+    endif()
+    if(test_name STREQUAL "test_meshctl_rpc")
+        target_sources(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_runtime_health.c)
+        list(APPEND extra_test_libs TurboP2P::P2P)
+        if(WIN32)
+            list(APPEND extra_test_libs ws2_32)
+        endif()
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_codec")
         list(APPEND extra_test_libs mesh_mgmt_codec)
@@ -56,8 +99,53 @@ foreach(test_source ${MESH_TEST_SOURCES})
     if(test_name STREQUAL "test_mesh_mgmt_replay")
         list(APPEND extra_test_libs mesh_mgmt_replay)
     endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution")
+        list(APPEND extra_test_libs mesh_mgmt_execution)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_store")
+        list(APPEND extra_test_libs mesh_mgmt_execution_store)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_result")
+        list(APPEND extra_test_libs mesh_mgmt_execution_result)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_wire")
+        list(APPEND extra_test_libs
+            mesh_mgmt_execution_wire
+            mesh_mgmt_dispatch
+            mesh_mgmt_crypto
+            mesh_mgmt_session)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_runner")
+        add_dependencies(${test_name} mesh_mgmt_execution_test_guest)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}")
+        list(APPEND extra_test_libs mesh_mgmt_execution_runner)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_orchestrator")
+        add_dependencies(${test_name} mesh_mgmt_execution_test_guest)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}")
+      list(APPEND extra_test_libs mesh_mgmt_execution_orchestrator
+        mesh_mgmt_execution_service mesh_mgmt_execution_worker
+        mesh_mgmt_execution_egress mesh_mgmt_execution_sender)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_node")
+        add_dependencies(${test_name} mesh_mgmt_execution_test_guest)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}")
+        list(APPEND extra_test_libs mesh_mgmt_execution_node)
+    endif()
+    if(test_name STREQUAL "test_meshd_execution_config")
+        target_sources(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/meshd_execution_config.c)
+        list(APPEND extra_test_libs mesh_mgmt_execution_node)
+    endif()
     if(test_name STREQUAL "test_mesh_mgmt_session")
-        list(APPEND extra_test_libs mesh_mgmt_peer mesh_mgmt_peer_signer)
+        list(APPEND extra_test_libs
+            mesh_mgmt_peer
+            mesh_mgmt_peer_signer
+            mesh_mgmt_execution_consumer
+            mesh_mgmt_execution_response_consumer)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_peer_signer")
         list(APPEND extra_test_libs mesh_mgmt_peer_signer)
@@ -76,6 +164,9 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_endpoint_record")
         list(APPEND extra_test_libs mesh_mgmt_agent_runtime)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_service_record")
+        list(APPEND extra_test_libs mesh_mgmt_service_record)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_coronet_transport")
         list(APPEND extra_test_libs mesh_mgmt_coronet_adapter)
@@ -118,9 +209,31 @@ foreach(test_source ${MESH_TEST_SOURCES})
                 TurboUtils::TinyTest
                 ${extra_test_libs})
 
+    set(test_runtime_output_directory "${CMAKE_BINARY_DIR}/bin")
+    if(test_name STREQUAL "test_mesh_mgmt_execution_runner" OR
+       test_name STREQUAL "test_mesh_mgmt_execution_orchestrator")
+        set(test_runtime_output_directory
+            "${CMAKE_BINARY_DIR}/node-execution-test-bin")
+    endif()
     set_target_properties(${test_name} PROPERTIES
         FOLDER "mesh/tests"
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+        RUNTIME_OUTPUT_DIRECTORY ${test_runtime_output_directory})
 
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()
+
+target_link_libraries(test_mesh_mgmt_execution_rpc_registry PRIVATE
+    mesh_mgmt_execution_rpc_registry
+)
+
+target_link_libraries(test_mesh_mgmt_execution_rpc_control PRIVATE
+    mesh_mgmt_execution_rpc_control
+)
+
+target_link_libraries(test_mesh_mgmt_execution_disabled_responder PRIVATE
+    mesh_mgmt_execution_disabled_responder
+)
+
+target_link_libraries(test_meshd_runtime PRIVATE
+    mesh_mgmt_execution_rpc_control
+)

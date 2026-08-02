@@ -148,3 +148,67 @@ mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_handle_message_v1(mesh_mgmt_p2p_p
   runtime->last_error = MESH_MGMT_P2P_PEER_OK;
   return MESH_MGMT_P2P_PEER_OK;
 }
+static mesh_mgmt_p2p_peer_result_t send_execution_frame(
+    mesh_mgmt_p2p_peer_v1_t *runtime,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len) {
+  const mesh_mgmt_session_v1_t *session;
+  const uint8_t *frame = NULL;
+  size_t frame_len = 0u;
+  mesh_mgmt_peer_signer_result_t signer_result;
+  mesh_mgmt_connection_result_t connection_result;
+
+  if (!runtime || !target_node_id || !payload || payload_len == 0u)
+    return MESH_MGMT_P2P_PEER_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_P2P_PEER_READY || runtime->in_api)
+    return MESH_MGMT_P2P_PEER_INVALID_STATE;
+  session = &runtime->protocol_peer.connection.dispatcher.session;
+  if (session->state != MESH_MGMT_SESSION_ESTABLISHED ||
+      !session->remote_hello_verified ||
+      !mesh_mgmt_crypto_equal_32(
+          session->remote_certificate.managed_node_id, target_node_id))
+    return MESH_MGMT_P2P_PEER_IDENTITY_MISMATCH;
+
+  runtime->in_api = 1u;
+  signer_result = mesh_mgmt_peer_signer_build_targeted_v1(
+      &runtime->signer, kind, target_node_id, payload, payload_len, &frame,
+      &frame_len);
+  runtime->last_signer_result = signer_result;
+  if (signer_result != MESH_MGMT_PEER_SIGNER_OK) {
+    runtime->in_api = 0u;
+    runtime->last_error = MESH_MGMT_P2P_PEER_SIGNER_FAILED;
+    return runtime->last_error;
+  }
+  connection_result = mesh_mgmt_connection_send_v1(
+      &runtime->protocol_peer.connection, frame, frame_len);
+  runtime->protocol_peer.last_connection_result = connection_result;
+  runtime->in_api = 0u;
+  if (connection_result != MESH_MGMT_CONNECTION_OK)
+    return runtime_fail(runtime, MESH_MGMT_P2P_PEER_PROTOCOL_FAILED);
+  runtime->last_error = MESH_MGMT_P2P_PEER_OK;
+  return MESH_MGMT_P2P_PEER_OK;
+}
+
+mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_send_execution_request_v1(
+    mesh_mgmt_p2p_peer_v1_t *runtime,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len) {
+  return send_execution_frame(runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+                              target_node_id, payload, payload_len);
+}
+
+mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_send_execution_response_v1(
+    mesh_mgmt_p2p_peer_v1_t *runtime,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len) {
+  if (kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+      kind != MESH_MGMT_KIND_COMMAND_STATUS)
+    return MESH_MGMT_P2P_PEER_INVALID_ARG;
+  return send_execution_frame(runtime, kind, target_node_id, payload,
+                              payload_len);
+}

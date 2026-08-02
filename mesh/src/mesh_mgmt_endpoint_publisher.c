@@ -93,6 +93,19 @@ mesh_mgmt_endpoint_publisher_init_v1(mesh_mgmt_endpoint_publisher_v1_t *publishe
   return MESH_MGMT_ENDPOINT_PUBLISHER_OK;
 }
 
+mesh_mgmt_endpoint_publisher_result_t mesh_mgmt_endpoint_publisher_set_epoch_allocator_v1(
+    mesh_mgmt_endpoint_publisher_v1_t *publisher,
+    mesh_mgmt_record_epoch_allocate_fn allocate_record_epoch,
+    void *record_epoch_context) {
+  if (!publisher || !allocate_record_epoch)
+    return MESH_MGMT_ENDPOINT_PUBLISHER_INVALID_ARG;
+  if (publisher->state != MESH_MGMT_ENDPOINT_PUBLISHER_READY || publisher->in_api)
+    return MESH_MGMT_ENDPOINT_PUBLISHER_INVALID_STATE;
+  publisher->allocate_record_epoch = allocate_record_epoch;
+  publisher->record_epoch_context = record_epoch_context;
+  return MESH_MGMT_ENDPOINT_PUBLISHER_OK;
+}
+
 mesh_mgmt_endpoint_publisher_result_t
 mesh_mgmt_endpoint_publisher_publish_cached_v1(mesh_mgmt_endpoint_publisher_v1_t *publisher,
                                                const mesh_mgmt_endpoint_publish_v1_t *endpoint,
@@ -126,6 +139,16 @@ mesh_mgmt_endpoint_publisher_publish_cached_v1(mesh_mgmt_endpoint_publisher_v1_t
     return publisher_finish(publisher, MESH_MGMT_ENDPOINT_PUBLISHER_IDENTITY_FAILED);
 
   record_epoch = publisher->next_record_epoch;
+  if (publisher->allocate_record_epoch) {
+    if (publisher->allocate_record_epoch(publisher->record_epoch_context, &record_epoch) != 0 ||
+        record_epoch < publisher->next_record_epoch) {
+      return publisher_finish(publisher, MESH_MGMT_ENDPOINT_PUBLISHER_EPOCH_FAILED);
+    }
+    if (record_epoch == UINT64_MAX)
+      publisher->sequence_exhausted = 1u;
+    else
+      publisher->next_record_epoch = record_epoch + 1u;
+  }
   memset(&announcement, 0, sizeof(announcement));
   memcpy(announcement.owner_node_id, publisher->signer.origin_node_id,
          sizeof(announcement.owner_node_id));
@@ -195,10 +218,12 @@ mesh_mgmt_endpoint_publisher_publish_cached_v1(mesh_mgmt_endpoint_publisher_v1_t
     return publisher_finish(publisher, MESH_MGMT_ENDPOINT_PUBLISHER_P2P_FAILED);
 
   *out_record_epoch = record_epoch;
-  if (record_epoch == UINT64_MAX)
-    publisher->sequence_exhausted = 1u;
-  else
-    publisher->next_record_epoch = record_epoch + 1u;
+  if (!publisher->allocate_record_epoch) {
+    if (record_epoch == UINT64_MAX)
+      publisher->sequence_exhausted = 1u;
+    else
+      publisher->next_record_epoch = record_epoch + 1u;
+  }
   return publisher_finish(publisher, MESH_MGMT_ENDPOINT_PUBLISHER_OK);
 }
 

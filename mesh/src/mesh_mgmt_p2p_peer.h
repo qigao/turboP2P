@@ -62,6 +62,24 @@ void mesh_mgmt_p2p_peer_destroy_v1(mesh_mgmt_p2p_peer_v1_t *runtime);
 mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_start_v1(mesh_mgmt_p2p_peer_v1_t *runtime,
                                                         uint64_t now_ms);
 
+mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_send_execution_request_v1(
+    mesh_mgmt_p2p_peer_v1_t *runtime,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len);
+
+/**
+ * Send one canonical COMMAND_RESULT or COMMAND_STATUS outside the inbound
+ * callback. The authenticated remote managed-node identity must equal
+ * target_node_id.
+ */
+mesh_mgmt_p2p_peer_result_t mesh_mgmt_p2p_peer_send_execution_response_v1(
+    mesh_mgmt_p2p_peer_v1_t *runtime,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len);
+
 /**
  * Synchronously consume one P2P custom-message callback. Non-MMP payloads are
  * reported without changing protocol state so an outer legacy mux can handle

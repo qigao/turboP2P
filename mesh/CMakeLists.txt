@@ -61,14 +61,284 @@ target_link_libraries(mesh_mgmt_replay PUBLIC
   mesh_mgmt_envelope)
 set_property(TARGET mesh_mgmt_replay PROPERTY FOLDER "mesh/internal")
 
+# Pure E0 node-execution schema, authorization intersection and bounded journal
+# simulator. It has no transport, filesystem, TurboRuntime or Wasm dependency.
+add_library(mesh_mgmt_execution STATIC
+  src/mesh_mgmt_execution.c
+  src/mesh_mgmt_execution.h)
+target_include_directories(mesh_mgmt_execution PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_property(TARGET mesh_mgmt_execution PROPERTY FOLDER "mesh/internal")
+
+# Internal single-store M3 immutable CAS. Namespace, Raft, gateway, transport
+# capability and execution authority remain separate layers.
+add_library(m3_chunk_store STATIC
+  src/m3_chunk_store.c
+  src/m3_chunk_store.h)
+target_include_directories(m3_chunk_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_store
+  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET m3_chunk_store PROPERTY FOLDER "mesh/internal")
+
+# Owner-loop bridge from a content CID to the P2P swarm and immutable local
+# M3 CAS. Stable seed files remain outside the CAS filesystem boundary.
+add_library(m3_chunk_fetch_service STATIC
+  src/m3_chunk_fetch_service.c
+  src/m3_chunk_fetch_service.h)
+target_include_directories(m3_chunk_fetch_service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_fetch_service
+  PUBLIC m3_chunk_store TurboP2P::P2P
+  PRIVATE TurboUtils::Core)
+set_property(TARGET m3_chunk_fetch_service PROPERTY FOLDER "mesh/internal")
+
+# Canonical immutable object manifest contract for Raft metadata pages,
+# snapshots and download planning. It owns no namespace or transport state.
+add_library(m3_object_manifest STATIC
+  src/m3_object_manifest.c
+  src/m3_object_manifest.h)
+target_include_directories(m3_object_manifest PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_object_manifest
+  PUBLIC m3_chunk_store
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET m3_object_manifest PROPERTY FOLDER "mesh/internal")
+
+# Ordered manifest downloader over the M3 chunk swarm. It assembles into a
+# private temporary file and publishes only after whole-object verification.
+add_library(m3_object_download_service STATIC
+  src/m3_object_download_service.c
+  src/m3_object_download_service.h)
+target_include_directories(m3_object_download_service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_object_download_service
+  PUBLIC m3_chunk_fetch_service m3_object_manifest
+  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET m3_object_download_service PROPERTY FOLDER "mesh/internal")
+
+# Linearizable namespace-to-data-plane composition. The metadata implementation
+# is injected and remains the sole owner of bucket/key and committed versions.
+add_library(m3_object_resolver STATIC
+  src/m3_object_resolver.c
+  src/m3_object_resolver.h)
+target_include_directories(m3_object_resolver PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_object_resolver
+  PUBLIC m3_object_download_service m3_chunk_capability)
+set_property(TARGET m3_object_resolver PROPERTY FOLDER "mesh/internal")
+
+# Explicit single-owner local profile for stage/demo runs. Distributed M3 must
+# replace this with a Raft state machine plus quorum ReadIndex adapter.
+add_library(m3_namespace_local_store STATIC
+  src/m3_namespace_local_store.c
+  src/m3_namespace_local_store.h)
+target_include_directories(m3_namespace_local_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_namespace_local_store
+  PUBLIC m3_object_resolver m3_object_manifest)
+set_property(TARGET m3_namespace_local_store PROPERTY FOLDER "mesh/internal")
+
+# Pure evaluator for already-verified M3 chunk claims. Signature verification,
+# replay journals, transport and filesystem access remain outside this target.
+add_library(m3_chunk_capability STATIC
+  src/m3_chunk_capability.c
+  src/m3_chunk_capability.h)
+target_include_directories(m3_chunk_capability PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_capability
+  PUBLIC m3_chunk_store
+  PRIVATE TurboUtils::Core)
+set_property(TARGET m3_chunk_capability PROPERTY FOLDER "mesh/internal")
+
+# The only M3 storage adapter intended for gateway/bulk-stream consumers. It
+# accepts authorized access rather than raw network claims or host paths.
+add_library(m3_chunk_access_store STATIC
+  src/m3_chunk_access_store.c
+  src/m3_chunk_access_store.h)
+target_include_directories(m3_chunk_access_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_access_store
+  PUBLIC m3_chunk_capability
+  PRIVATE m3_chunk_store)
+set_property(TARGET m3_chunk_access_store PROPERTY FOLDER "mesh/internal")
+
+# Bounded owner-loop request journal. UUID reuse is idempotent only when the
+# canonical authorized-access digest and terminal result remain identical.
+add_library(m3_chunk_replay STATIC
+  src/m3_chunk_replay.c
+  src/m3_chunk_replay.h)
+target_include_directories(m3_chunk_replay PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_replay
+  PUBLIC m3_chunk_capability
+  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET m3_chunk_replay PROPERTY FOLDER "mesh/internal")
+
+# Versioned durable snapshot owner for mutation replay bindings. It persists a
+# new IN_PROGRESS binding before side effects and terminal results afterward.
+add_library(m3_chunk_replay_store STATIC
+  src/m3_chunk_replay_store.c
+  src/m3_chunk_replay_store.h)
+target_include_directories(m3_chunk_replay_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_replay_store
+  PUBLIC m3_chunk_replay
+  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET m3_chunk_replay_store PROPERTY FOLDER "mesh/internal")
+
+# Read-only M3 composition root. Mutation remains fail-closed until replay
+# bindings and terminal results have a durable on-disk format.
+add_library(m3_chunk_read_service STATIC
+  src/m3_chunk_read_service.c
+  src/m3_chunk_read_service.h)
+target_include_directories(m3_chunk_read_service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_read_service
+  PUBLIC m3_chunk_access_store m3_chunk_replay)
+set_property(TARGET m3_chunk_read_service PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_execution_store STATIC
+  src/mesh_mgmt_execution_store.c
+  src/mesh_mgmt_execution_store.h)
+target_include_directories(mesh_mgmt_execution_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_execution_store
+  PUBLIC mesh_mgmt_execution mesh_mgmt_execution_result TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_mgmt_execution_store PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_execution_result STATIC
+  src/mesh_mgmt_execution_result.c
+  src/mesh_mgmt_execution_result.h)
+target_include_directories(mesh_mgmt_execution_result PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_execution_result
+  PUBLIC mesh_mgmt_execution
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_mgmt_execution_result PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_execution_wire STATIC
+  src/mesh_mgmt_execution_wire.c
+  src/mesh_mgmt_execution_wire.h)
+target_include_directories(mesh_mgmt_execution_wire PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_execution_wire
+  PUBLIC mesh_mgmt_execution_result
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_mgmt_execution_wire PROPERTY FOLDER "mesh/internal")
+
+option(TURBO_P2P_ENABLE_NODE_EXECUTION
+  "Build the local prestaged TurboRuntime node-execution runner" OFF)
+if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+  find_package(TurboRuntime CONFIG REQUIRED)
+  add_library(mesh_mgmt_execution_runner STATIC
+    src/mesh_mgmt_execution_runner.c
+    src/mesh_mgmt_execution_runner.h)
+  target_include_directories(mesh_mgmt_execution_runner PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_runner
+    PUBLIC mesh_mgmt_execution
+    PRIVATE OpenSSL::Crypto TurboRuntime::Core TurboUtils::Core)
+  set_property(TARGET mesh_mgmt_execution_runner PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_orchestrator STATIC
+    src/mesh_mgmt_execution_orchestrator.c
+    src/mesh_mgmt_execution_orchestrator.h)
+  target_include_directories(mesh_mgmt_execution_orchestrator PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_orchestrator
+    PUBLIC mesh_mgmt_execution_runner mesh_mgmt_execution_store
+           mesh_mgmt_execution_result
+    PRIVATE mesh_mgmt_crypto OpenSSL::Crypto)
+  set_property(TARGET mesh_mgmt_execution_orchestrator
+    PROPERTY FOLDER "mesh/internal")
+endif()
+
 add_library(mesh_mgmt_dispatch STATIC
   src/mesh_mgmt_dispatch.c
   src/mesh_mgmt_dispatch.h)
 target_include_directories(mesh_mgmt_dispatch PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_dispatch PUBLIC
-  mesh_mgmt_session mesh_mgmt_replay)
+  mesh_mgmt_session mesh_mgmt_replay
+  PRIVATE mesh_mgmt_execution_wire mesh_mgmt_crypto)
 set_property(TARGET mesh_mgmt_dispatch PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_execution_consumer STATIC
+  src/mesh_mgmt_execution_consumer.c
+  src/mesh_mgmt_execution_consumer.h)
+target_include_directories(mesh_mgmt_execution_consumer PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_execution_consumer
+  PUBLIC mesh_mgmt_dispatch mesh_mgmt_execution_wire
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_mgmt_execution_consumer PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_execution_response_consumer STATIC
+  src/mesh_mgmt_execution_response_consumer.c
+  src/mesh_mgmt_execution_response_consumer.h)
+target_include_directories(mesh_mgmt_execution_response_consumer PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_execution_response_consumer
+  PUBLIC mesh_mgmt_dispatch mesh_mgmt_execution_wire
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_mgmt_execution_response_consumer
+  PROPERTY FOLDER "mesh/internal")
+
+if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+  add_library(mesh_mgmt_execution_service STATIC
+    src/mesh_mgmt_execution_service.c
+    src/mesh_mgmt_execution_service.h)
+  target_include_directories(mesh_mgmt_execution_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_service
+    PUBLIC mesh_mgmt_execution_consumer mesh_mgmt_execution_orchestrator
+           mesh_mgmt_execution_wire)
+  set_property(TARGET mesh_mgmt_execution_service PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_worker STATIC
+    src/mesh_mgmt_execution_worker.c
+    src/mesh_mgmt_execution_worker.h)
+  target_include_directories(mesh_mgmt_execution_worker PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_worker
+    PUBLIC mesh_mgmt_execution_service TurboUtils::Core)
+  set_property(TARGET mesh_mgmt_execution_worker PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_egress STATIC
+    src/mesh_mgmt_execution_egress.c
+    src/mesh_mgmt_execution_egress.h)
+  target_include_directories(mesh_mgmt_execution_egress PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_egress
+    PUBLIC mesh_mgmt_execution_worker TurboUtils::Core)
+  set_property(TARGET mesh_mgmt_execution_egress PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_sender STATIC
+    src/mesh_mgmt_execution_sender.c
+    src/mesh_mgmt_execution_sender.h)
+  target_include_directories(mesh_mgmt_execution_sender PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_sender
+    PUBLIC mesh_mgmt_execution_egress mesh_mgmt_peer_signer
+           mesh_mgmt_connection mesh_mgmt_agent_runtime
+    PRIVATE mesh_mgmt_crypto)
+  set_property(TARGET mesh_mgmt_execution_sender PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_node STATIC
+    src/mesh_mgmt_execution_node.c
+    src/mesh_mgmt_execution_node.h)
+  target_include_directories(mesh_mgmt_execution_node PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_node
+    PUBLIC mesh_mgmt_execution_runner mesh_mgmt_execution_store
+           mesh_mgmt_execution_orchestrator mesh_mgmt_execution_service
+           mesh_mgmt_execution_worker mesh_mgmt_execution_egress
+           mesh_mgmt_execution_sender mesh_mgmt_agent_runtime
+    PRIVATE mesh_mgmt_crypto)
+  set_property(TARGET mesh_mgmt_execution_node PROPERTY FOLDER "mesh/internal")
+endif()
 
 # Bounded MMP framing over a reliable byte stream. The core preserves
 # coalesced recv chunks and uses an explicit borrowed-frame commit lifecycle.
@@ -145,15 +415,19 @@ target_link_libraries(mesh_mgmt_p2p_peer PUBLIC
   mesh_mgmt_p2p_adapter mesh_mgmt_peer_signer)
 set_property(TARGET mesh_mgmt_p2p_peer PROPERTY FOLDER "mesh/internal")
 
-# Bounded agent edge for one P2P node. It owns global callback routing and one
-# short-lived MMP runtime per authenticated transport peer, but not the node.
+# Bounded agent edge for one P2P node. It supports exclusive callback ownership
+# and externally dispatched shared-node mode, and owns one short-lived MMP
+# runtime per authenticated transport peer, but not the node.
 add_library(mesh_mgmt_agent_router STATIC
   src/mesh_mgmt_agent_router.c
   src/mesh_mgmt_agent_router.h)
 target_include_directories(mesh_mgmt_agent_router PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_agent_router PUBLIC
-  mesh_mgmt_p2p_peer TurboUtils::Core)
+  mesh_mgmt_p2p_peer
+  mesh_mgmt_execution_disabled_responder
+  mesh_mgmt_execution_response_consumer
+  TurboUtils::Core)
 set_property(TARGET mesh_mgmt_agent_router PROPERTY FOLDER "mesh/internal")
 
 # Bounded, identity-keyed management endpoint state. Verified discovery input,
@@ -178,6 +452,17 @@ target_link_libraries(mesh_mgmt_endpoint_record PUBLIC
   mesh_mgmt_endpoint_pool mesh_mgmt_envelope mesh_mgmt_identity OpenSSL::Crypto)
 set_property(TARGET mesh_mgmt_endpoint_record PROPERTY FOLDER "mesh/internal")
 
+# Signed virtual-service discovery is deliberately separate from physical
+# endpoint records so RPC addresses can never enter transport dial state.
+add_library(mesh_mgmt_service_record STATIC
+  src/mesh_mgmt_service_record.c
+  src/mesh_mgmt_service_record.h)
+target_include_directories(mesh_mgmt_service_record PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_service_record PUBLIC
+  mesh_mgmt_envelope mesh_mgmt_identity OpenSSL::Crypto)
+set_property(TARGET mesh_mgmt_service_record PROPERTY FOLDER "mesh/internal")
+
 # Validated local endpoint signer and connected-peer DHT push boundary. It
 # borrows the P2P node and owns a wiped copy of the management signing seed.
 add_library(mesh_mgmt_endpoint_publisher STATIC
@@ -189,6 +474,17 @@ target_link_libraries(mesh_mgmt_endpoint_publisher PUBLIC
   mesh_mgmt_endpoint_record mesh_mgmt_peer_signer TurboP2P::P2P TurboUtils::Core)
 set_property(TARGET mesh_mgmt_endpoint_publisher PROPERTY FOLDER "mesh/internal")
 
+# Validated signer and connected-peer DHT push boundary for RPC virtual service
+# records. It owns no transport endpoint state.
+add_library(mesh_mgmt_service_publisher STATIC
+  src/mesh_mgmt_service_publisher.c
+  src/mesh_mgmt_service_publisher.h)
+target_include_directories(mesh_mgmt_service_publisher PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_service_publisher PUBLIC
+  mesh_mgmt_service_record mesh_mgmt_peer_signer TurboP2P::P2P TurboUtils::Core)
+set_property(TARGET mesh_mgmt_service_publisher PROPERTY FOLDER "mesh/internal")
+
 # Dedicated mesh-agent composition root. It owns a private P2P listener, the
 # MMP callback router and bounded endpoint reconnect state on one event loop.
 add_library(mesh_mgmt_agent_runtime STATIC
@@ -197,7 +493,8 @@ add_library(mesh_mgmt_agent_runtime STATIC
 target_include_directories(mesh_mgmt_agent_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_agent_runtime PUBLIC
-  mesh_mgmt_agent_router mesh_mgmt_endpoint_publisher TurboNet::CoroNet)
+  mesh_mgmt_agent_router mesh_mgmt_endpoint_publisher mesh_mgmt_service_publisher
+  TurboNet::CoroNet)
 set_property(TARGET mesh_mgmt_agent_runtime PROPERTY FOLDER "mesh/internal")
 
 # Length-first framing for future reliable byte-stream transports. This codec
@@ -275,7 +572,9 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link libraries
-target_link_libraries(mesh PUBLIC TurboUtils::Core TurboP2P::P2P)
+target_link_libraries(mesh
+  PUBLIC TurboUtils::Core TurboP2P::P2P
+  PRIVATE mesh_mgmt_agent_router)
 
 if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "" OR
    NOT TARGET ${TURBOP2P_ICE_TARGET})
@@ -285,6 +584,10 @@ endif()
 target_link_libraries(mesh PRIVATE ${TURBOP2P_ICE_TARGET})
 target_compile_definitions(mesh PUBLIC MESH_HAS_TURBO_ICE=1)
 target_compile_definitions(mesh PRIVATE MESH_HAS_TURBO_ICE_CLOSE=1)
+
+# Shared-node management mode uses mesh's internal callback bridge while the
+# dedicated runtime mode remains available for compatibility.
+target_link_libraries(mesh_mgmt_agent_runtime PUBLIC mesh)
 
 set_property(TARGET mesh PROPERTY FOLDER "mesh")
 set_target_properties(
@@ -317,3 +620,38 @@ endif()
 if(BUILD_TESTS)
   add_subdirectory(tests)
 endif()
+add_library(mesh_mgmt_execution_rpc_registry STATIC
+    src/mesh_mgmt_execution_rpc_registry.c
+)
+target_include_directories(mesh_mgmt_execution_rpc_registry PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mesh_mgmt_execution_rpc_registry PUBLIC
+    mesh_mgmt_execution_response_consumer
+)
+
+add_library(mesh_mgmt_execution_rpc_control STATIC
+    src/mesh_mgmt_execution_rpc_control.c
+)
+target_include_directories(mesh_mgmt_execution_rpc_control PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mesh_mgmt_execution_rpc_control PUBLIC
+    mesh_mgmt_execution_rpc_registry
+    mesh_mgmt_execution_wire
+)
+
+add_library(mesh_mgmt_execution_disabled_responder STATIC
+    src/mesh_mgmt_execution_disabled_responder.c
+)
+target_include_directories(mesh_mgmt_execution_disabled_responder PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(mesh_mgmt_execution_disabled_responder
+    PUBLIC
+        mesh_mgmt_execution_consumer
+        mesh_mgmt_peer_signer
+        mesh_mgmt_connection
+    PRIVATE
+        mesh_mgmt_crypto
+)

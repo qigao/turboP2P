@@ -20,4 +20,10 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
                                      uint32_t transfer_id, uint32_t chunk_index,
                                      uint32_t request_id);
 
+/**
+ * Handle FILE_ACK - finish and release the peer-scoped upload
+ */
+int p2p_sender_handle_file_ack(p2p_node_t *node, p2p_peer_t *peer,
+                               uint32_t transfer_id, int success);
+
 #endif /* P2P_SENDER_H */

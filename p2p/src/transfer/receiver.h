@@ -19,8 +19,7 @@ int p2p_receiver_request_chunk(p2p_node_t *node, p2p_transfer_t *transfer, uint3
  */
 int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
                                        uint32_t request_id, uint64_t file_size,
-                                       uint32_t total_chunks, const uint8_t *file_hash,
-                                       uint32_t transfer_id);
+                                       uint32_t total_chunks, const uint8_t *file_hash);
 
 /**
  * Handle CHUNK_DATA - received chunk data

@@ -17,9 +17,11 @@
 #include <string.h>
 #include <stdlib.h>
 #include <tlog.h>
+#include <turbo_fs.h>
 #include <turbo_thread.h>
 
 #define MAX_MESSAGE_LEN 1024
+#define DOWNLOAD_PATH_SIZE 512
 
 #ifdef _WIN32
 #define p2p_strdup _strdup
@@ -32,10 +34,75 @@ typedef struct {
     int should_exit;
 } stdin_context_t;
 
+typedef struct download_request_s {
+    char output_path[DOWNLOAD_PATH_SIZE];
+    struct download_request_s *next;
+} download_request_t;
+
+static download_request_t *g_download_requests = NULL;
+
 /* Forward declarations */
 void handle_command(p2p_node_t *node, const char *cmd);
 void show_help(void);
 static void process_stdin_command(void *arg1, void *arg2);
+
+static download_request_t *find_download_request(const char *output_path) {
+    download_request_t *request = g_download_requests;
+
+    while (request) {
+        if (strcmp(request->output_path, output_path) == 0) {
+            return request;
+        }
+        request = request->next;
+    }
+    return NULL;
+}
+
+static void remove_download_request(download_request_t *request) {
+    download_request_t **current = &g_download_requests;
+
+    while (*current) {
+        if (*current == request) {
+            *current = request->next;
+            request->next = NULL;
+            return;
+        }
+        current = &(*current)->next;
+    }
+}
+
+static void on_download_complete(p2p_transfer_t *transfer, int success,
+                                 const char *error, void *user_data) {
+    download_request_t *request = (download_request_t *)user_data;
+
+    (void)transfer;
+    if (!request) {
+        return;
+    }
+    remove_download_request(request);
+    if (success) {
+        printf("\nFile downloaded and verified: %s\n", request->output_path);
+    } else {
+        (void)turbo_fs_unlink(request->output_path);
+        printf("\nDownload failed for %s: %s\n", request->output_path,
+               error ? error : "unknown transfer error");
+    }
+    free(request);
+    printf("p2p> ");
+    fflush(stdout);
+}
+
+static void cleanup_download_requests(void) {
+    download_request_t *request = g_download_requests;
+
+    g_download_requests = NULL;
+    while (request) {
+        download_request_t *next = request->next;
+        (void)turbo_fs_unlink(request->output_path);
+        free(request);
+        request = next;
+    }
+}
 
 /* Message callback */
 void on_message(p2p_node_t *node, p2p_peer_t *peer, const void *data, size_t len, void *user_data) {
@@ -152,17 +219,33 @@ void cmd_upload(p2p_node_t *node, const char *filepath) {
 /* Command: download file */
 void cmd_download(p2p_node_t *node, const char *args) {
     char hash[65];  /* 64 hex chars + null terminator */
-    char output[512];
+    char output[DOWNLOAD_PATH_SIZE];
+    download_request_t *request;
 
-    if (sscanf(args, "%s %s", hash, output) != 2) {
+    if (sscanf(args, "%64s %511s", hash, output) != 2) {
         printf("Usage: download <hash> <output_path>\n");
         return;
     }
+    if (find_download_request(output)) {
+        printf("A download is already writing to %s\n", output);
+        return;
+    }
+    request = (download_request_t *)calloc(1, sizeof(*request));
+    if (!request) {
+        printf("Failed to start download: out of memory\n");
+        return;
+    }
+    memcpy(request->output_path, output, strlen(output) + 1);
+    request->next = g_download_requests;
+    g_download_requests = request;
 
-    int ret = p2p_get_file(node, hash, output);
+    int ret = p2p_get_file_async(node, hash, output, on_download_complete,
+                                 request);
     if (ret == P2P_OK) {
-        printf("File downloaded to %s\n", output);
+        printf("Download started: %s\n", output);
     } else {
+        remove_download_request(request);
+        free(request);
         printf("Failed to download: %s\n", p2p_error_str(ret));
     }
 }
@@ -442,12 +525,14 @@ int main(int argc, char *argv[]) {
         stdin_ctx.should_exit = 1;
         turbo_thread_join(&stdin_tid);
         p2p_destroy(node);
+        cleanup_download_requests();
         return 1;
     }
 
     /* Cleanup */
     turbo_thread_join(&stdin_tid);
     p2p_destroy(node);
+    cleanup_download_requests();
     tlog_destroy(tlog_get_default());
 
     printf("\nGoodbye!\n");

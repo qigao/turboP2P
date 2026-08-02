@@ -4,6 +4,7 @@
  */
 
 #include "turbo_mesh.h"
+#include "mesh_mgmt_mesh_bridge.h"
 #include "mesh_path_optimizer.h"
 #include <fmt.h>
 #include <p2p.h>
@@ -200,6 +201,7 @@ typedef struct mesh_network_s {
 
     /* P2P layer */
     p2p_node_t *p2p_node;
+    mesh_mgmt_agent_router_v1_t *mgmt_router;
     coro_context_t *ice_ctx;
 
 
@@ -3368,6 +3370,7 @@ static void mesh_send_hello(mesh_network_t *mesh, p2p_peer_t *p2p_peer) {
 static void mesh_on_p2p_peer_connected(p2p_peer_t *p2p_peer, void *user_data) {
     mesh_network_t *mesh = (mesh_network_t *)user_data;
     mesh_peer_t *mesh_peer = NULL;
+    mesh_mgmt_agent_router_result_t mgmt_result;
     if (!mesh) return;
 
     /* Get peer address for logging */
@@ -3385,6 +3388,16 @@ static void mesh_on_p2p_peer_connected(p2p_peer_t *p2p_peer, void *user_data) {
         return;
     }
 
+    if (mesh->mgmt_router) {
+        mgmt_result =
+            mesh_mgmt_agent_router_offer_peer_connected_v1(mesh->mgmt_router, p2p_peer);
+        if (mgmt_result != MESH_MGMT_AGENT_ROUTER_OK &&
+            mgmt_result != MESH_MGMT_AGENT_ROUTER_DUPLICATE_PEER) {
+            TLOG_WARN("Management peer attach failed: {}", (int)mgmt_result);
+            return;
+        }
+    }
+
     mesh_send_hello(mesh, p2p_peer);
 
 }
@@ -3392,6 +3405,11 @@ static void mesh_on_p2p_peer_connected(p2p_peer_t *p2p_peer, void *user_data) {
 static void mesh_on_p2p_peer_disconnected(p2p_peer_t *p2p_peer, void *user_data) {
     mesh_network_t *mesh = (mesh_network_t *)user_data;
     if (!mesh) return;
+
+    if (mesh->mgmt_router) {
+        (void)mesh_mgmt_agent_router_offer_peer_disconnected_v1(mesh->mgmt_router,
+                                                                p2p_peer);
+    }
 
     /* Get peer address for logging */
     char peer_ip[64];  /* Match INET_ADDRSTRLEN (22) + safety margin */
@@ -3721,11 +3739,21 @@ static int mesh_handle_control_payload(mesh_network_t *mesh, p2p_peer_t *p2p_pee
 
 static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
                                   const void *data, size_t len, void *user_data) {
-    (void)node;
-
     mesh_network_t *mesh = (mesh_network_t *)user_data;
     mesh_peer_t *peer = NULL;
     if (!mesh || len == 0) return;
+
+    if (mesh->mgmt_router) {
+        mesh_mgmt_agent_router_result_t mgmt_result =
+            mesh_mgmt_agent_router_offer_message_v1(mesh->mgmt_router, node, p2p_peer,
+                                                     data, len);
+        if (mgmt_result != MESH_MGMT_AGENT_ROUTER_NOT_MMP) {
+            if (mgmt_result != MESH_MGMT_AGENT_ROUTER_OK) {
+                TLOG_WARN("Management message rejected: {}", (int)mgmt_result);
+            }
+            return;
+        }
+    }
 
     const char *msg = (const char *)data;
 
@@ -4504,6 +4532,16 @@ void mesh_destroy(mesh_network_t *mesh) {
 
     (void)mesh_ice_disable(mesh);
 
+    if (mesh->mgmt_router) {
+        mesh_mgmt_agent_router_v1_t *router = mesh->mgmt_router;
+        mesh_mgmt_agent_router_result_t result =
+            mesh_mgmt_mesh_router_detach_v1(mesh, router);
+        if (result != MESH_MGMT_AGENT_ROUTER_OK) {
+            TLOG_ERROR("Failed to detach management router during mesh destroy: {}",
+                       (int)result);
+        }
+    }
+
     /* Destroy P2P node first so no more peer callbacks race with teardown. */
     if (mesh->p2p_node) {
         mesh_disconnect_all_p2p_peers(mesh);
@@ -4553,6 +4591,46 @@ void mesh_destroy(mesh_network_t *mesh) {
     free(mesh->packet_policy_rules);
 
     free(mesh);
+}
+
+p2p_node_t *mesh_mgmt_mesh_borrow_p2p_node_v1(mesh_network_t *mesh) {
+    return mesh ? mesh->p2p_node : NULL;
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_mesh_router_attach_v1(mesh_network_t *mesh,
+                               mesh_mgmt_agent_router_v1_t *router) {
+    mesh_mgmt_agent_router_result_t result;
+
+    if (!mesh || !router)
+        return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+    if (mesh->p2p_running || mesh->mgmt_router ||
+        router->node != mesh->p2p_node ||
+        router->state != MESH_MGMT_AGENT_ROUTER_READY)
+        return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+
+    result = mesh_mgmt_agent_router_start_embedded_v1(router);
+    if (result != MESH_MGMT_AGENT_ROUTER_OK)
+        return result;
+    mesh->mgmt_router = router;
+    return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_mesh_router_detach_v1(mesh_network_t *mesh,
+                               mesh_mgmt_agent_router_v1_t *router) {
+    mesh_mgmt_agent_router_result_t result;
+
+    if (!mesh || !router)
+        return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+    if (mesh->mgmt_router != router)
+        return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+
+    mesh->mgmt_router = NULL;
+    result = mesh_mgmt_agent_router_stop_v1(router);
+    if (result != MESH_MGMT_AGENT_ROUTER_OK)
+        mesh->mgmt_router = router;
+    return result;
 }
 
 /* =============================================================================

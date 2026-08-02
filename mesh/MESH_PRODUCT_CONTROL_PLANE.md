@@ -10,6 +10,10 @@
 本文不修改当前 `mesh_config_t`、packet wire format 或 MMP/1 wire format。所有新接口和
 格式在实现前仍需独立 API/protocol review。
 
+受控节点 Wasm 执行是独立的可选产品扩展，见
+[`MESH_NODE_EXECUTION_DESIGN.md`](MESH_NODE_EXECUTION_DESIGN.md)。它不把通用
+`EXEC`/`SHELL` 加入 MMP，也不允许 execution policy 与 network/object policy 混用。
+
 ## 产品定义
 
 目标产品是身份驱动、策略控制、可审计的 Mesh overlay：
@@ -628,6 +632,9 @@ compile/apply 返回结构化 Result，snapshot 所有权与 owner-loop 约束�
    canary-secret 和 spool failure tests。
 8. **P7 route/exit product**：advertise/use/admin 三权分离、quorum、kill-switch 和多出口状态。
 9. **P8 UI/GitOps**：approval、policy diff/test、audit search、API tokens/workload identity。
+10. **P9 node execution**：prestaged immutable TurboRuntime application、ExecutionGrant、
+    persistent command journal、独立低权限 worker 和 signed result；默认关闭，不能阻塞
+    `meshd` 数据面。
 
 每阶段通过 feature/capability 和 profile 显式启用。不能从 production 自动回退到 compat；
 回滚通过新 epoch 发布已验证的旧语义 bundle。

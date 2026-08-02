@@ -716,6 +716,11 @@ MMP/1 仅允许以下类型化操作：
 没有 `EXEC`、`SHELL`、任意 argv 或任意 path operation。诊断 profile 在构建时注册，不能
 由网络 payload 注入命令行。
 
+未来受控 Wasm 执行也不放宽该约束。它必须使用 additive `node-execution-v1` feature，只引用
+本机预置且 digest 固定的 TurboRuntime deployment，并由独立 ExecutionGrant、持久化 command
+journal 和低权限 worker 强制执行；设计见
+[`MESH_NODE_EXECUTION_DESIGN.md`](MESH_NODE_EXECUTION_DESIGN.md)。
+
 COMMAND_REQUEST 包含 command ID、operation、target、policy epoch、generation、deadline、
 preconditions 和类型化参数。目标处理顺序固定为：
 

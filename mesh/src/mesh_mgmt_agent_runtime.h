@@ -3,6 +3,7 @@
 
 #include "mesh_mgmt_agent_router.h"
 #include "mesh_mgmt_endpoint_publisher.h"
+#include "mesh_mgmt_service_publisher.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,6 +20,8 @@ typedef enum {
   MESH_MGMT_AGENT_RUNTIME_ENDPOINT_RECORD_FAILED = -7,
   MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED = -8,
   MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED = -9,
+  MESH_MGMT_AGENT_RUNTIME_SERVICE_RECORD_FAILED = -10,
+  MESH_MGMT_AGENT_RUNTIME_SEND_FAILED = -11,
 } mesh_mgmt_agent_runtime_result_t;
 
 typedef enum {
@@ -44,6 +47,16 @@ typedef struct {
   uint64_t max_ttl_ms;
 } mesh_mgmt_agent_cached_endpoint_v1_t;
 
+typedef struct {
+  const uint8_t *mesh_id_hash;
+  const uint8_t *owner_node_id;
+  const uint8_t *certificate;
+  size_t certificate_len;
+  const uint8_t *trusted_issuer_key;
+  uint64_t now_ms;
+  uint64_t max_ttl_ms;
+} mesh_mgmt_agent_cached_service_v1_t;
+
 /**
  * Called only after a signed MMP session identifies a peer that is absent from
  * the endpoint pool. Return zero to admit it under an external membership
@@ -55,6 +68,7 @@ typedef int (*mesh_mgmt_agent_admit_peer_fn)(void *context, p2p_peer_t *peer,
                                              const mesh_mgmt_dispatch_event_v1_t *event);
 
 typedef struct {
+  struct mesh_network_s *shared_mesh;
   const char *listen_host;
   uint16_t listen_port;
   const uint8_t *p2p_private_key;
@@ -67,6 +81,9 @@ typedef struct {
   uint64_t connect_timeout_ms;
   uint32_t protocol_failure_limit;
   uint64_t first_endpoint_record_epoch;
+  uint64_t first_service_record_epoch;
+  mesh_mgmt_record_epoch_allocate_fn allocate_record_epoch;
+  void *record_epoch_context;
   const mesh_mgmt_agent_bootstrap_v1_t *bootstraps;
   size_t bootstrap_count;
   mesh_mgmt_agent_router_random_fn random_bytes;
@@ -80,15 +97,19 @@ typedef struct {
 } mesh_mgmt_agent_runtime_config_v1_t;
 
 /**
- * Dedicated single-event-loop composition root. It owns node, listener,
- * router and endpoint pool. signer_template and dispatch_template are
- * immutable borrows and must outlive the runtime. No method is thread-safe.
+ * Single-event-loop composition root. In dedicated mode it owns the node and
+ * listener. In shared_mesh mode it borrows the mesh node and attaches its
+ * router through the mesh callback bridge. signer_template and
+ * dispatch_template are immutable borrows and must outlive the runtime. No
+ * method is thread-safe.
  */
 typedef struct {
   p2p_node_t *node;
+  struct mesh_network_s *shared_mesh;
   mesh_mgmt_agent_router_v1_t router;
   mesh_mgmt_endpoint_pool_v1_t endpoint_pool;
   mesh_mgmt_endpoint_publisher_v1_t endpoint_publisher;
+  mesh_mgmt_service_publisher_v1_t service_publisher;
   mesh_mgmt_agent_admit_peer_fn admit_peer;
   mesh_mgmt_agent_router_event_fn on_event;
   mesh_mgmt_agent_router_non_mmp_fn on_non_mmp;
@@ -100,20 +121,29 @@ typedef struct {
   mesh_mgmt_agent_router_result_t last_router_result;
   mesh_mgmt_endpoint_pool_result_t last_endpoint_result;
   mesh_mgmt_endpoint_record_result_t last_endpoint_record_result;
+  mesh_mgmt_service_record_result_t last_service_record_result;
   mesh_mgmt_endpoint_publisher_result_t last_publisher_result;
+  mesh_mgmt_service_publisher_result_t last_service_publisher_result;
   int last_p2p_result;
   uint8_t in_api;
+  uint8_t owns_node;
 } mesh_mgmt_agent_runtime_v1_t;
 
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
                                 const mesh_mgmt_agent_runtime_config_v1_t *config);
 
-/** Install callbacks, arm the inert endpoint pool, then bind the listener. */
+/**
+ * Dedicated mode installs callbacks and binds its listener. Shared mode
+ * attaches to mesh before mesh_start(); the caller starts the mesh afterward.
+ */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
-/** Run due endpoint transitions and one nonblocking CoroNet loop iteration. */
+/**
+ * Dedicated mode advances endpoint dialing and CoroNet. Shared mode is a
+ * no-op because mesh_poll() owns connection policy and the event loop.
+ */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
@@ -132,6 +162,27 @@ mesh_mgmt_agent_runtime_apply_cached_endpoint_v1(mesh_mgmt_agent_runtime_v1_t *r
                                                  const mesh_mgmt_agent_cached_endpoint_v1_t *input);
 
 /**
+ * Read one signed RPC service frame from the local DHT cache and verify it
+ * against caller-owned direct trust. The output is zeroed on every failure.
+ * This function performs no network lookup and never updates endpoint state.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_read_cached_service_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
+                                               const mesh_mgmt_agent_cached_service_v1_t *input,
+                                               mesh_mgmt_service_record_v1_t *out_record);
+
+/**
+ * Resolve one cached RPC service using only an established managed node ID.
+ * Trust anchor, mesh identity and the remote certificate come from the
+ * runtime's authenticated session state.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_resolve_cached_service_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
+                                                  const uint8_t owner_node_id[32],
+                                                  uint64_t now_ms, uint64_t max_ttl_ms,
+                                                  mesh_mgmt_service_record_v1_t *out_record);
+
+/**
  * Sign the next local endpoint fact and push it to the local DHT cache plus
  * currently connected peers. No iterative DHT lookup is run or awaited.
  */
@@ -141,8 +192,81 @@ mesh_mgmt_agent_runtime_publish_cached_endpoint_v1(mesh_mgmt_agent_runtime_v1_t 
                                                    uint64_t *out_record_epoch);
 
 /**
- * Stop reconnects, disconnect managed peers and destroy the owned P2P node.
- * A stopped runtime cannot be restarted; destroy and initialize a new one.
+ * Sign the next local RPC virtual-service fact and push it to the local DHT
+ * cache plus connected peers. The record never enters endpoint dial state.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_publish_cached_service_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
+                                                  const mesh_mgmt_service_publish_v1_t *service,
+                                                  uint64_t *out_record_epoch);
+
+/**
+ * Sends one canonical execution request to the unique authenticated management
+ * session for target_node_id. The runtime resolves no physical address here.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_request_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len);
+
+/**
+ * Sends one canonical execution result/status to the unique authenticated
+ * management session for target_node_id.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_response_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len);
+
+/**
+ * Revalidates and copies a request supplied to the configured runtime event
+ * callback. The copy may be submitted to an out-of-loop worker.
+ */
+mesh_mgmt_execution_consumer_result_t
+mesh_mgmt_agent_runtime_execution_command_from_event_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    uint64_t now_ms,
+    mesh_mgmt_execution_shadow_command_v1_t *out_command);
+
+/**
+ * Sends a command-bound execution status from the active runtime callback.
+ */
+mesh_mgmt_execution_disabled_responder_result_t
+mesh_mgmt_agent_runtime_send_execution_status_from_command_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    p2p_peer_t *peer,
+    const mesh_mgmt_execution_shadow_command_v1_t *command,
+    uint16_t status_code);
+
+/**
+ * Consumes a result/status event through the authenticated dispatcher owned
+ * by peer. Intended for use from the configured runtime event callback.
+ */
+mesh_mgmt_execution_response_consumer_result_t
+mesh_mgmt_agent_runtime_execution_response_from_event_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    mesh_mgmt_execution_response_v1_t *out_response);
+
+mesh_mgmt_execution_disabled_responder_result_t
+mesh_mgmt_agent_runtime_send_execution_disabled_from_event_v1(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    uint64_t now_ms);
+
+/**
+ * Stop management work. Dedicated mode disconnects peers and destroys its P2P
+ * node. Shared mode detaches MMP without disconnecting mesh peers or destroying
+ * the borrowed node. A stopped runtime cannot be restarted.
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_stop_v1(mesh_mgmt_agent_runtime_v1_t *runtime);

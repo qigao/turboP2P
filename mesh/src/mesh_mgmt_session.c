@@ -353,6 +353,8 @@ static void session_fail(mesh_mgmt_session_v1_t *session) {
     memset(&session->negotiated, 0, sizeof(session->negotiated));
     memset(&session->remote_certificate, 0,
            sizeof(session->remote_certificate));
+    memset(session->remote_certificate_wire, 0,
+           sizeof(session->remote_certificate_wire));
     memset(session->remote_connection_id, 0,
            sizeof(session->remote_connection_id));
     memset(session->remote_session_id, 0,
@@ -521,6 +523,8 @@ mesh_mgmt_session_result_t mesh_mgmt_session_accept_hello_v1(
         return result;
     }
     session->remote_certificate = certificate;
+    memcpy(session->remote_certificate_wire, hello.certificate,
+           sizeof(session->remote_certificate_wire));
     memcpy(session->remote_connection_id, hello.connection_id, 16);
     memcpy(session->remote_session_id, envelope->header.session_id, 16);
     session->remote_incarnation = envelope->header.incarnation;
@@ -650,7 +654,21 @@ mesh_mgmt_session_result_t mesh_mgmt_session_authorize_kind_v1(
         default:
             return MESH_MGMT_SESSION_INVALID_STATE;
     }
-    return (session->negotiated.features & required_feature) != 0u
+    return mesh_mgmt_session_authorize_feature_v1(session, required_feature);
+}
+
+mesh_mgmt_session_result_t mesh_mgmt_session_authorize_feature_v1(
+    const mesh_mgmt_session_v1_t *session,
+    uint64_t required_features) {
+    if (!session) return MESH_MGMT_SESSION_INVALID_ARG;
+    if (session->state != MESH_MGMT_SESSION_ESTABLISHED)
+        return MESH_MGMT_SESSION_NOT_ESTABLISHED;
+    if (required_features == 0u ||
+        (required_features & ~MESH_MGMT_FEATURE_KNOWN_MASK) != 0u) {
+        return MESH_MGMT_SESSION_INVALID_SCHEMA;
+    }
+    return (session->negotiated.features & required_features) ==
+                   required_features
                ? MESH_MGMT_SESSION_OK
                : MESH_MGMT_SESSION_UNSUPPORTED_FEATURE;
 }

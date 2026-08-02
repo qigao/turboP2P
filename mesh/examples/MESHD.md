@@ -27,6 +27,13 @@ bootstrap_peers: []
 status_file: /var/run/meshd/status.json
 pid_file: /var/run/meshd/meshd.pid
 status_interval_ms: 1000
+mgmt_private_key_file: /etc/meshd/management.key
+mgmt_certificate_file: /etc/meshd/management.cert
+mgmt_trusted_issuer_key_file: /etc/meshd/management.issuer
+mgmt_execution_grant_issuer_key_file: /etc/meshd/execution-grant.issuer
+mgmt_mesh_id_hex: 4242424242424242424242424242424242424242424242424242424242424242
+mgmt_first_record_epoch: 1
+mgmt_record_epoch_file: /var/lib/meshd/management.epoch
 ice_enabled: true
 ice_allow_loopback: true
 stun_servers:
@@ -62,6 +69,38 @@ Stable identity notes:
 - or use `meshctl init -o mesh.yaml ...` to write a starter config with a fresh identity in one step
 - when configured, the node keeps the same mesh identity across restarts
 - status output reports `identity_configured`, but does not expose the secret value
+
+Shared management identity notes:
+
+- all six `mgmt_*` settings are optional as a group; partial configuration is rejected
+- management mode requires a stable `identity_secret_hex`
+- key and issuer files contain exactly 32 bytes encoded as 64 hexadecimal characters
+- `mgmt_execution_grant_issuer_key_file` is optional and must be distinct from the
+  management certificate issuer; when present it enables targeted node execution
+- node execution startup requires the local management certificate to include the
+  Operator role and advertises `TARGETED_RPC` plus `NODE_EXECUTION`
+- the certificate file contains exactly 354 bytes encoded as 708 hexadecimal characters
+- whitespace is allowed in those files; other characters and incorrect lengths are rejected
+- startup verifies certificate signature, mesh id, management key and the live P2P transport identity
+- `mgmt_first_record_epoch` initializes `mgmt_record_epoch_file` only when the state file does not
+  exist; once created, the state file is the sole source of the next signed record sequence
+- each endpoint or RPC service sequence is atomically reserved and fsynced before signing; an
+  invalid, exhausted or unwritable state file prevents management startup or publication
+- `meshd` holds a non-blocking exclusive lock on `<mgmt_record_epoch_file>.lock` for the complete
+  management runtime lifetime; a second process using the same state fails during startup
+- management and mesh traffic share the mesh listener, P2P identity and `mesh_poll()` event loop
+- when RPC is enabled, `meshd` republishes its signed virtual RPC service every 10 seconds
+
+Node execution RPC:
+
+- `POST /v1/executions` accepts one canonical binary `COMMAND_REQUEST` body
+- `GET /v1/executions/{correlation_id}` accepts an exact 64-character hexadecimal id
+- both endpoints require `X-Meshd-Token` and never expose a physical peer address
+- duplicate immutable bindings are idempotent and are not sent twice
+- definitive pre-send failures are removed; ambiguous sends remain pending until a
+  verified response or deadline timeout
+- nodes without a configured execution worker return an authenticated
+  `COMMAND_STATUS` with `STATUS_DISABLED`; they never silently discard a request
 
 ICE-related config notes:
 

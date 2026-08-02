@@ -45,11 +45,16 @@ typedef enum {
     MESH_MGMT_DISPATCH_EVENT_ERROR = 7,
     MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_REQUEST = 8,
     MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_ISSUED = 9,
+    MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW = 10,
+    MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW = 11,
+    MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW = 12,
 } mesh_mgmt_dispatch_event_type_t;
 
 typedef struct {
     mesh_mgmt_session_config_v1_t session;
     mesh_mgmt_replay_config_v1_t replay;
+    uint8_t enable_node_execution_shadow;
+    uint8_t node_execution_grant_issuer_key[32];
 } mesh_mgmt_dispatch_config_v1_t;
 
 /**
@@ -67,10 +72,52 @@ typedef struct {
 typedef struct {
     mesh_mgmt_session_v1_t session;
     mesh_mgmt_replay_gate_v1_t replay;
+    uint8_t enable_node_execution_shadow;
+    uint8_t node_execution_grant_issuer_key[32];
 } mesh_mgmt_dispatcher_v1_t;
 
 /** Shared fail-closed baseline for incoming and outgoing observer traffic. */
 int mesh_mgmt_dispatch_kind_is_observer_safe_v1(uint8_t kind);
+
+/**
+ * Validate an execution command without causing any state transition or
+ * external side effect. The payload is accepted only for an established
+ * session that negotiated node-execution-v1 and for the configured Grant
+ * authority.
+ */
+mesh_mgmt_dispatch_result_t
+mesh_mgmt_dispatcher_validate_node_execution_shadow_v1(
+    const mesh_mgmt_dispatcher_v1_t *dispatcher,
+    const uint8_t *payload,
+    size_t payload_len,
+    uint64_t now_ms);
+
+/**
+ * Verify and authorize one signed outbound node-execution-v1 request. This
+ * validates only transport eligibility and performs no send or execution.
+ */
+mesh_mgmt_dispatch_result_t
+mesh_mgmt_dispatcher_validate_node_execution_outbound_shadow_v1(
+    const mesh_mgmt_dispatcher_v1_t *dispatcher,
+    const uint8_t *frame,
+    size_t frame_len);
+
+/**
+ * Verify one signed outbound node-execution-v1 result. The result executor
+ * must match the MMP origin node and the frame target must be the established
+ * remote managed node.
+ */
+mesh_mgmt_dispatch_result_t
+mesh_mgmt_dispatcher_validate_node_execution_result_outbound_shadow_v1(
+    const mesh_mgmt_dispatcher_v1_t *dispatcher,
+    const uint8_t *frame,
+    size_t frame_len);
+
+mesh_mgmt_dispatch_result_t
+mesh_mgmt_dispatcher_validate_node_execution_status_outbound_shadow_v1(
+    const mesh_mgmt_dispatcher_v1_t *dispatcher,
+    const uint8_t *frame,
+    size_t frame_len);
 
 mesh_mgmt_dispatch_result_t mesh_mgmt_dispatcher_init_v1(
     mesh_mgmt_dispatcher_v1_t *dispatcher,

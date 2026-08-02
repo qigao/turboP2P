@@ -24,6 +24,21 @@ This file is the operational truth. Older design docs in this folder still conta
 
 ## What Works
 
+### Management control plane
+
+Current management infrastructure includes canonical signed MMP envelopes,
+direct-trust node certificates, authenticated HELLO/ACK sessions, bounded replay
+state, a shared-node MMP router/runtime, signed endpoint and RPC virtual-service
+records, verified virtual-address resolution, and persistent monotonic record
+epochs with a process-lifetime lock.
+
+This is management transport and identity infrastructure, not a complete product
+control plane. Membership gossip/anti-entropy, persistent command journals,
+typed command execution, policy compiler/signed rollout, revocation, Controller,
+supervisor integration and audit closure remain incomplete. Older incremental
+notes later in this document describe the state when individual MMP layers were
+introduced and must not be read as the current aggregate status.
+
 ### Core mesh
 
 - Virtual IP based overlay networking works

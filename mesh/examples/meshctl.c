@@ -11,13 +11,36 @@
 #include <signal.h>
 #include <stdint.h>
 #include <time.h>
+#include <errno.h>
 
 #define MESH_SNAPSHOT_VERSION 1
 
 #ifdef _WIN32
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #else
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#endif
+
+#define MESHD_CTL_RPC_ADDR_DEFAULT "127.0.0.1:7878"
+#define MESHD_CTL_RPC_PORT_DEFAULT 7878
+#define MESHD_CTL_RPC_INITIAL_BUF_SIZE 8192
+
+#ifdef _WIN32
+typedef SOCKET meshctl_socket_t;
+#else
+typedef int meshctl_socket_t;
+#endif
+
+#ifdef _WIN32
+#define MESHD_CTL_INVALID_SOCKET INVALID_SOCKET
+#else
+#define MESHD_CTL_INVALID_SOCKET (-1)
 #endif
 
 #define MESHCTL_MAX_COMMAND 256
@@ -82,6 +105,433 @@ static int meshctl_parse_bool_arg(const char *value, int *out) {
     }
 
     return -1;
+}
+
+static meshctl_socket_t meshctl_invalid_socket(void) {
+    return (meshctl_socket_t)MESHD_CTL_INVALID_SOCKET;
+}
+
+static int meshctl_socket_is_valid(meshctl_socket_t socket_fd) {
+    return socket_fd != meshctl_invalid_socket();
+}
+
+static void meshctl_close_socket(meshctl_socket_t socket_fd) {
+    if (!meshctl_socket_is_valid(socket_fd)) {
+        return;
+    }
+
+#ifdef _WIN32
+    closesocket(socket_fd);
+#else
+    close(socket_fd);
+#endif
+}
+
+static int meshctl_socket_send_all(meshctl_socket_t socket_fd, const char *data, size_t len) {
+    size_t offset = 0;
+
+    while (offset < len) {
+        int sent = send(socket_fd, data + offset, (int)(len - offset), 0);
+        if (sent > 0) {
+            offset += (size_t)sent;
+            continue;
+        }
+
+#ifdef _WIN32
+        if (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINPROGRESS) {
+            continue;
+        }
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            continue;
+        }
+#endif
+        return -1;
+    }
+
+    return 0;
+}
+
+static int meshctl_parse_host_port(const char *value, char *host, size_t host_size, uint16_t *port) {
+    char copy[160] = {0};
+    char *colon = NULL;
+    char *port_end = NULL;
+    const char *normalized_host = NULL;
+    size_t host_len = 0;
+    size_t value_len = 0;
+    unsigned long parsed_port = 0;
+
+    if (!value || !host || !port || host_size == 0) {
+        return -1;
+    }
+    host[0] = '\0';
+    *port = 0;
+
+    value_len = strlen(value);
+    if (value_len == 0 || value_len >= sizeof(copy)) {
+        return -1;
+    }
+    memcpy(copy, value, value_len + 1);
+    colon = strrchr(copy, ':');
+    if (!colon) {
+        return -1;
+    }
+
+    *colon = '\0';
+    if (copy[0] == '\0') {
+        normalized_host = "127.0.0.1";
+    } else {
+        normalized_host = copy;
+    }
+    host_len = strlen(normalized_host);
+    if (host_len >= host_size) {
+        return -1;
+    }
+
+    parsed_port = strtoul(colon + 1, &port_end, 10);
+    if (port_end == colon + 1 || *port_end != '\0' ||
+        parsed_port == 0 || parsed_port > 65535) {
+        return -1;
+    }
+
+    memcpy(host, normalized_host, host_len + 1);
+    *port = (uint16_t)parsed_port;
+    return 0;
+}
+
+static int meshctl_build_rpc_node_addr(const char *node,
+                                       char *out,
+                                       size_t out_size) {
+    char normalized_host[128] = {0};
+    char candidate[160] = {0};
+    uint16_t port = 0;
+    int written = 0;
+
+    if (!node || node[0] == '\0' || node[0] == ':' || !out || out_size == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+
+    if (strchr(node, ':')) {
+        written = snprintf(candidate, sizeof(candidate), "%s", node);
+    } else {
+        written = snprintf(candidate,
+                           sizeof(candidate),
+                           "%s:%u",
+                           node,
+                           MESHD_CTL_RPC_PORT_DEFAULT);
+    }
+    if (written < 0 || (size_t)written >= sizeof(candidate) ||
+        meshctl_parse_host_port(candidate,
+                                normalized_host,
+                                sizeof(normalized_host),
+                                &port) != 0 ||
+        normalized_host[0] == '\0') {
+        return -1;
+    }
+
+    written = snprintf(out, out_size, "%s:%u", normalized_host, port);
+    if (written < 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static int meshctl_build_rpc_resolve_path(const char *node_id,
+                                          char *out,
+                                          size_t out_size) {
+    static const char PREFIX[] = "/v1/node/resolve/";
+    size_t index = 0;
+    int written = 0;
+
+    if (!node_id || !out || out_size == 0 ||
+        strlen(node_id) != 64u) {
+        if (out && out_size > 0) {
+            out[0] = '\0';
+        }
+        return -1;
+    }
+    out[0] = '\0';
+    for (index = 0; index < 64u; index++) {
+        if (!((node_id[index] >= '0' && node_id[index] <= '9') ||
+              (node_id[index] >= 'a' && node_id[index] <= 'f'))) {
+            return -1;
+        }
+    }
+    written = snprintf(out, out_size, "%s%s", PREFIX, node_id);
+    if (written < 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
+static int meshctl_rpc_is_task_model_response(const char *body) {
+    return body && strstr(body, "\"task\":") && strstr(body, "\"ok\":") && strstr(body, "\"task\":{\"id\":");
+}
+
+static void meshctl_rpc_extract_json_field(const char *json, const char *prefix, char *out, size_t out_size) {
+    const char *start = NULL;
+    const char *value_start = NULL;
+    const char *value_end = NULL;
+    size_t value_len = 0;
+
+    if (!json || !prefix || !out || out_size == 0) {
+        if (out && out_size > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
+
+    out[0] = '\0';
+    start = strstr(json, prefix);
+    if (!start) {
+        return;
+    }
+
+    value_start = start + strlen(prefix);
+    if (*value_start == '"') {
+        value_start++;
+        value_end = strchr(value_start, '"');
+    } else {
+        value_end = value_start;
+        while (*value_end != '\0' && *value_end != ',' && *value_end != '}') {
+            value_end++;
+        }
+    }
+
+    if (!value_start || !value_end || value_end <= value_start) {
+        return;
+    }
+
+    value_len = (size_t)(value_end - value_start);
+    if (value_len >= out_size) {
+        value_len = out_size - 1;
+    }
+
+    memcpy(out, value_start, value_len);
+    out[value_len] = '\0';
+}
+
+static void meshctl_rpc_print_task_response(const char *body) {
+    char task_id[64] = {0};
+    char task_type[128] = {0};
+    char task_layer[64] = {0};
+    char task_impact[32] = {0};
+    char task_safe_to_retry[8] = {0};
+    char ok_flag[8] = {0};
+    const char *control_scope = "unknown";
+
+    meshctl_rpc_extract_json_field(body, "\"ok\":", ok_flag, sizeof(ok_flag));
+    meshctl_rpc_extract_json_field(body, "\"id\":\"", task_id, sizeof(task_id));
+    meshctl_rpc_extract_json_field(body, "\"type\":\"", task_type, sizeof(task_type));
+    meshctl_rpc_extract_json_field(body, "\"target_layer\":\"", task_layer, sizeof(task_layer));
+    meshctl_rpc_extract_json_field(body, "\"impact\":\"", task_impact, sizeof(task_impact));
+    meshctl_rpc_extract_json_field(body, "\"safe_to_retry\":", task_safe_to_retry, sizeof(task_safe_to_retry));
+
+    if (strcmp(task_layer, "mesh_data_plane") == 0) {
+        control_scope = "mesh_data_plane (read/report only, safer)";
+    } else if (strcmp(task_layer, "node_control") == 0) {
+        control_scope = "node_control (mutating control, privileged)";
+    }
+
+    if (ok_flag[0] != '\0') {
+        printf("ok=%s task=%s layer=%s impact=%s retry=%s id=%s\n",
+               ok_flag[0] == 't' ? "true" : ok_flag,
+               task_type[0] ? task_type : "unknown",
+               task_layer[0] ? task_layer : "unknown",
+               task_impact[0] ? task_impact : "unknown",
+               task_safe_to_retry[0] ? task_safe_to_retry : "unknown",
+               task_id[0] ? task_id : "unknown");
+        printf("scope=%s\n", control_scope);
+        if (strncmp(ok_flag, "true", 4) == 0) {
+            const char *result = strstr(body, "\"result\":");
+            if (result) {
+                printf("result=%s\n", result + strlen("\"result\":"));
+            }
+        } else {
+            const char *error = strstr(body, "\"error\":");
+            if (error) {
+                printf("error=%s\n", error + strlen("\"error\":"));
+            }
+        }
+        return;
+    }
+
+    printf("%s\n", body);
+}
+
+static int meshctl_rpc_send(const char *addr, const char *path, const char *method, const char *token, int print_raw) {
+    meshctl_socket_t socket_fd = meshctl_invalid_socket();
+    char host[128] = {0};
+    uint16_t port = 0;
+    char req[1024] = {0};
+    char *response = NULL;
+    size_t response_capacity = MESHD_CTL_RPC_INITIAL_BUF_SIZE;
+    size_t total_read = 0;
+    int body_len = 0;
+    char *body = NULL;
+    int read_bytes = 0;
+    char token_header[256] = {0};
+
+    if (!addr || !path || !method) {
+        fprintf(stderr, "RPC call missing arguments\n");
+        return 1;
+    }
+
+    if (meshctl_parse_host_port(addr, host, sizeof(host), &port) != 0) {
+        fprintf(stderr, "Invalid --rpc-address format: %s\n", addr);
+        return 1;
+    }
+
+    if (!meshctl_socket_is_valid(socket_fd)) {
+        struct addrinfo hints;
+        struct addrinfo *addresses = NULL;
+        struct addrinfo *address = NULL;
+        char service[6] = {0};
+
+#ifdef _WIN32
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            fprintf(stderr, "Failed to initialize Winsock\n");
+            return 1;
+        }
+#endif
+
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        snprintf(service, sizeof(service), "%u", (unsigned)port);
+        if (getaddrinfo(host, service, &hints, &addresses) != 0) {
+            fprintf(stderr, "Failed to resolve RPC node: %s\n", host);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return 1;
+        }
+
+        for (address = addresses; address; address = address->ai_next) {
+            socket_fd = (meshctl_socket_t)socket(address->ai_family,
+                                                 address->ai_socktype,
+                                                 address->ai_protocol);
+            if (!meshctl_socket_is_valid(socket_fd)) {
+                continue;
+            }
+            if (connect(socket_fd,
+                        address->ai_addr,
+                        (int)address->ai_addrlen) == 0) {
+                break;
+            }
+            meshctl_close_socket(socket_fd);
+            socket_fd = meshctl_invalid_socket();
+        }
+        freeaddrinfo(addresses);
+
+        if (!meshctl_socket_is_valid(socket_fd)) {
+            fprintf(stderr,
+                    "Failed to connect to RPC node %s:%u through the mesh route\n",
+                    host,
+                    (unsigned)port);
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return 1;
+        }
+    }
+
+    response = (char *)malloc(response_capacity);
+    if (!response) {
+        fprintf(stderr, "Failed to allocate RPC response buffer\n");
+        meshctl_close_socket(socket_fd);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 1;
+    }
+
+    if (token && token[0] != '\0') {
+        snprintf(token_header, sizeof(token_header), "X-Meshd-Token: %s\r\n", token);
+    }
+
+    snprintf(req, sizeof(req),
+             "%s %s HTTP/1.1\r\n"
+             "Host: %s:%u\r\n"
+             "Connection: close\r\n"
+             "%s"
+             "\r\n",
+             method,
+             path,
+             host,
+             (unsigned)port,
+             token_header);
+
+    if (meshctl_socket_send_all(socket_fd, req, strlen(req)) != 0) {
+        fprintf(stderr, "Failed to send RPC request\n");
+        free(response);
+        response = NULL;
+        meshctl_close_socket(socket_fd);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 1;
+    }
+
+    do {
+        if (total_read + 1 >= response_capacity) {
+            size_t new_capacity = response_capacity * 2;
+            char *grown = (char *)realloc(response, new_capacity);
+            if (!grown) {
+                fprintf(stderr, "Failed to grow RPC response buffer\n");
+                free(response);
+                response = NULL;
+                meshctl_close_socket(socket_fd);
+#ifdef _WIN32
+                WSACleanup();
+#endif
+                return 1;
+            }
+            response = grown;
+            response_capacity = new_capacity;
+        }
+
+        read_bytes = recv(socket_fd, response + total_read, (int)(response_capacity - total_read - 1), 0);
+        if (read_bytes <= 0) {
+            break;
+        }
+        total_read += read_bytes;
+    } while (1);
+
+    response[total_read] = '\0';
+    meshctl_close_socket(socket_fd);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+
+    body = strstr(response, "\r\n\r\n");
+    if (body) {
+        body += 4;
+        body_len = (int)strlen(body);
+    } else {
+        body = response;
+        body_len = (int)strlen(response);
+    }
+
+    if (body_len > 0) {
+        if (print_raw) {
+            printf("%s\n", body);
+        } else if (meshctl_rpc_is_task_model_response(body)) {
+            meshctl_rpc_print_task_response(body);
+        } else {
+            printf("%s\n", body);
+        }
+    } else {
+        printf("%s\n", response);
+    }
+
+    free(response);
+    return 0;
 }
 
 static int meshctl_config_add_bootstrap(meshctl_config_t *cfg, const char *value) {
@@ -1722,6 +2172,119 @@ static int meshctl_run_doctor(const char *config_path) {
     return 0;
 }
 
+static int meshctl_run_rpc(int argc, char **argv) {
+    const char *addr = MESHD_CTL_RPC_ADDR_DEFAULT;
+    const char *token = NULL;
+    const char *action = NULL;
+    const char *method = "GET";
+    const char *path = NULL;
+    const char *action_arg = NULL;
+    char node_addr[160] = {0};
+    char resolve_path[128] = {0};
+    int raw_output = 0;
+    int i = 0;
+    int action_found = 0;
+    int address_set = 0;
+
+    for (i = 0; i < argc; i++) {
+        if ((strcmp(argv[i], "--addr") == 0 || strcmp(argv[i], "-a") == 0) && i + 1 < argc) {
+            if (address_set) {
+                fprintf(stderr, "Use only one of --node or --addr\n");
+                return 1;
+            }
+            addr = argv[i + 1];
+            address_set = 1;
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--node") == 0 && i + 1 < argc) {
+            if (address_set) {
+                fprintf(stderr, "Use only one of --node or --addr\n");
+                return 1;
+            }
+            if (meshctl_build_rpc_node_addr(argv[i + 1],
+                                            node_addr,
+                                            sizeof(node_addr)) != 0) {
+                fprintf(stderr, "Invalid virtual RPC node: %s\n", argv[i + 1]);
+                return 1;
+            }
+            addr = node_addr;
+            address_set = 1;
+            i++;
+            continue;
+        }
+
+        if ((strcmp(argv[i], "--token") == 0 || strcmp(argv[i], "-t") == 0) && i + 1 < argc) {
+            token = argv[i + 1];
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--raw") == 0) {
+            raw_output = 1;
+            continue;
+        }
+
+        if (!action_found && action == NULL && argv[i][0] != '-') {
+            action = argv[i];
+            action_found = 1;
+            continue;
+        }
+
+        if (action_found) {
+            if (!action_arg && argv[i][0] != '-') {
+                action_arg = argv[i];
+                continue;
+            }
+            fprintf(stderr, "Unexpected extra argument: %s\n", argv[i]);
+            return 1;
+        }
+    }
+
+    if (!action) {
+        fprintf(stderr, "meshctl rpc requires an action\n");
+        fprintf(stderr, "example: meshctl rpc --node <magic-dns|virtual-ip> [--raw] status\n");
+        return 1;
+    }
+
+    if (strcmp(action, "resolve") == 0) {
+        if (!action_arg ||
+            meshctl_build_rpc_resolve_path(action_arg,
+                                           resolve_path,
+                                           sizeof(resolve_path)) != 0) {
+            fprintf(stderr,
+                    "resolve requires one 64-character lowercase node id\n");
+            return 1;
+        }
+        path = resolve_path;
+    } else if (action_arg) {
+        fprintf(stderr, "Unexpected extra argument: %s\n", action_arg);
+        return 1;
+    } else if (strcmp(action, "status") == 0) {
+        path = "/status";
+    } else if (strcmp(action, "v1-status") == 0) {
+        path = "/v1/status";
+    } else if (strcmp(action, "health") == 0) {
+        path = "/health";
+    } else if (strcmp(action, "ping") == 0) {
+        path = "/ping";
+    } else if (strcmp(action, "task-model") == 0 || strcmp(action, "v1-task-model") == 0) {
+        path = "/v1/task-model";
+    } else if (strcmp(action, "shutdown") == 0) {
+        path = "/v1/shutdown";
+        method = "POST";
+    } else if (action[0] == '/') {
+        path = action;
+    } else {
+        fprintf(stderr, "unsupported rpc action: %s\n", action);
+        fprintf(stderr, "example: meshctl rpc --node <magic-dns|virtual-ip> [--raw] status\n");
+        return 1;
+    }
+
+    return meshctl_rpc_send(addr, path, method, token, raw_output);
+}
+
 static int meshctl_run_genkey(void) {
     uint8_t secret_key[P2P_KEY_SIZE] = {0};
     uint8_t public_key[P2P_KEY_SIZE] = {0};
@@ -1977,8 +2540,13 @@ static void meshctl_print_usage(const char *argv0) {
     printf("         [--ice-enabled <true|false>] [--ice-allow-loopback <true|false>]\n");
     printf("  %s doctor -c <mesh.yaml>\n", argv0);
     printf("  %s up -c <mesh.yaml>\n", argv0);
+    printf("  %s rpc [--node <magic-dns|virtual-ip>[:port]] [--token <token>] [--raw]\n", argv0);
+    printf("         <status|v1-status|health|ping|task-model|v1-task-model|resolve <node-id>|shutdown>\n");
+    printf("         compatibility: --addr <host:port>\n");
+    printf("  rpc scope: status/health/ping/task-model/resolve => mesh_data_plane; shutdown => node_control\n");
 }
 
+#ifndef MESHCTL_NO_MAIN
 int main(int argc, char **argv) {
     const char *command = NULL;
     const char *config_path = NULL;
@@ -1996,6 +2564,10 @@ int main(int argc, char **argv) {
 
     if (strcmp(command, "init") == 0) {
         return meshctl_run_init(argc - 2, argv + 2);
+    }
+
+    if (strcmp(command, "rpc") == 0) {
+        return meshctl_run_rpc(argc - 2, argv + 2);
     }
 
     for (i = 2; i < argc; i++) {
@@ -2021,3 +2593,4 @@ int main(int argc, char **argv) {
     meshctl_print_usage(argv[0]);
     return 1;
 }
+#endif

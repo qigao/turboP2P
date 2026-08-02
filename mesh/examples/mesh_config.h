@@ -3,6 +3,7 @@
 
 #include <turbo_mesh.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,13 @@ typedef struct {
     char virtual_ip[16];
     char advertise_ip[64];
     char identity_secret_hex[65];
+    char mgmt_private_key_file[260];
+    char mgmt_certificate_file[260];
+    char mgmt_trusted_issuer_key_file[260];
+    char mgmt_execution_grant_issuer_key_file[260];
+    char mgmt_mesh_id_hex[65];
+    uint64_t mgmt_first_record_epoch;
+    char mgmt_record_epoch_file[260];
     unsigned int virtual_prefix;
     int listen_port;
     int ice_enabled;
@@ -69,6 +77,7 @@ typedef struct {
 void mesh_node_config_init(mesh_node_config_t *cfg);
 int mesh_node_config_load(mesh_node_config_t *cfg, const char *path);
 int mesh_node_config_validate(const mesh_node_config_t *cfg);
+int mesh_node_config_management_enabled(const mesh_node_config_t *cfg);
 void mesh_node_config_print(const mesh_node_config_t *cfg);
 int mesh_node_parse_bootstrap_endpoint(const char *value,
                                        char *ip,

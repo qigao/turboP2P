@@ -205,11 +205,30 @@ CXX_C_API int p2p_broadcast(p2p_node_t *node, const void *data, size_t len);
 CXX_C_API int p2p_put_file(p2p_node_t *node, const char *filepath, char key_out[65]);
 
 /**
- * Get file by hash key
+ * Start downloading a file by hash key and report verified completion.
  * @param node Node
  * @param key 65-byte hash key (64 hex chars + null terminator)
  * @param output_path Where to save
- * @return P2P_OK on success
+ * @param complete_cb Called after whole-file digest verification; may be NULL
+ * @param user_data Opaque value passed to complete_cb
+ * @return P2P_OK when the asynchronous request was started
+ *
+ * @note A P2P_OK return does not mean the file is complete. output_path may
+ *       contain partial data until complete_cb reports success.
+ * @note complete_cb runs on the node event loop. It must not block.
+ */
+CXX_C_API int p2p_get_file_async(
+    p2p_node_t *node, const char key[65], const char *output_path,
+    p2p_transfer_complete_cb complete_cb, void *user_data);
+
+/**
+ * Start downloading a file without a completion callback.
+ * @param node Node
+ * @param key 65-byte hash key (64 hex chars + null terminator)
+ * @param output_path Where to save
+ * @return P2P_OK when the asynchronous request was started
+ *
+ * @note Prefer p2p_get_file_async() when the caller needs to consume the file.
  */
 CXX_C_API int p2p_get_file(p2p_node_t *node, const char key[65], const char *output_path);
 

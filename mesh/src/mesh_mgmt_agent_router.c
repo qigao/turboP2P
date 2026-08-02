@@ -37,6 +37,36 @@ static mesh_mgmt_agent_router_slot_v1_t *find_slot(mesh_mgmt_agent_router_v1_t *
   return NULL;
 }
 
+static mesh_mgmt_agent_router_result_t find_execution_target(
+    mesh_mgmt_agent_router_v1_t *router,
+    const uint8_t target_node_id[32],
+    mesh_mgmt_agent_router_slot_v1_t **out_slot) {
+  mesh_mgmt_agent_router_slot_v1_t *matched_slot = NULL;
+  size_t index;
+
+  *out_slot = NULL;
+  for (index = 0u; index < router->max_peers; ++index) {
+    mesh_mgmt_agent_router_slot_v1_t *slot = slot_at(router, index);
+    const mesh_mgmt_session_v1_t *session;
+
+    if (!slot || !slot->active)
+      continue;
+    session = &slot->runtime.protocol_peer.connection.dispatcher.session;
+    if (session->state != MESH_MGMT_SESSION_ESTABLISHED ||
+        !session->remote_hello_verified ||
+        !mesh_mgmt_crypto_equal_32(
+            session->remote_certificate.managed_node_id, target_node_id))
+      continue;
+    if (matched_slot)
+      return MESH_MGMT_AGENT_ROUTER_DUPLICATE_PEER;
+    matched_slot = slot;
+  }
+  if (!matched_slot)
+    return MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
+  *out_slot = matched_slot;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
 static mesh_mgmt_agent_router_slot_v1_t *find_free_slot(mesh_mgmt_agent_router_v1_t *router) {
   size_t index;
 
@@ -187,12 +217,14 @@ static mesh_mgmt_agent_router_result_t attach_peer(mesh_mgmt_agent_router_v1_t *
   return MESH_MGMT_AGENT_ROUTER_OK;
 }
 
-static void router_peer_connected(p2p_peer_t *peer, void *context) {
-  mesh_mgmt_agent_router_v1_t *router = (mesh_mgmt_agent_router_v1_t *)context;
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_offer_peer_connected_v1(
+    mesh_mgmt_agent_router_v1_t *router, p2p_peer_t *peer) {
   mesh_mgmt_agent_router_result_t result;
 
-  if (!router || !peer || router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
-    return;
+  if (!router || !peer)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
   router->callback_depth++;
   result = attach_peer(router, peer);
   if (result != MESH_MGMT_AGENT_ROUTER_OK) {
@@ -201,17 +233,27 @@ static void router_peer_connected(p2p_peer_t *peer, void *context) {
     report_failure(router, NULL, peer, result, router->last_peer_result);
   }
   router->callback_depth--;
+  return result;
 }
 
-static void router_peer_disconnected(p2p_peer_t *peer, void *context) {
-  mesh_mgmt_agent_router_v1_t *router = (mesh_mgmt_agent_router_v1_t *)context;
-  mesh_mgmt_agent_router_slot_v1_t *slot;
+static void router_peer_connected(p2p_peer_t *peer, void *context) {
+  (void)mesh_mgmt_agent_router_offer_peer_connected_v1(
+      (mesh_mgmt_agent_router_v1_t *)context, peer);
+}
 
-  if (!router || !peer || router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
-    return;
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_offer_peer_disconnected_v1(
+    mesh_mgmt_agent_router_v1_t *router, p2p_peer_t *peer) {
+  mesh_mgmt_agent_router_slot_v1_t *slot;
+  mesh_mgmt_agent_router_result_t result = MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
+
+  if (!router || !peer)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
   router->callback_depth++;
   slot = find_slot(router, peer);
   if (slot) {
+    result = MESH_MGMT_AGENT_ROUTER_OK;
     report_closed(router, slot);
     if (router->callback_depth > 1u || slot->runtime.in_api)
       slot->disconnect_pending = 1u;
@@ -219,6 +261,12 @@ static void router_peer_disconnected(p2p_peer_t *peer, void *context) {
       retire_slot(router, slot);
   }
   router->callback_depth--;
+  return result;
+}
+
+static void router_peer_disconnected(p2p_peer_t *peer, void *context) {
+  (void)mesh_mgmt_agent_router_offer_peer_disconnected_v1(
+      (mesh_mgmt_agent_router_v1_t *)context, peer);
 }
 
 static void fail_and_disconnect(mesh_mgmt_agent_router_v1_t *router,
@@ -236,41 +284,51 @@ static void fail_and_disconnect(mesh_mgmt_agent_router_v1_t *router,
   }
 }
 
-static void router_message(p2p_node_t *node, p2p_peer_t *peer, const void *bytes, size_t length,
-                           void *context) {
-  mesh_mgmt_agent_router_v1_t *router = (mesh_mgmt_agent_router_v1_t *)context;
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_offer_message_v1(
+    mesh_mgmt_agent_router_v1_t *router, p2p_node_t *node, p2p_peer_t *peer,
+    const void *bytes, size_t length) {
   mesh_mgmt_agent_router_slot_v1_t *slot;
 
-  if (!router || !node || !peer || !bytes || router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
-    return;
+  if (!router || !node || !peer || !bytes || length == 0u || node != router->node)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  if (!mesh_mgmt_p2p_message_is_mmp_v1(bytes, length))
+    return MESH_MGMT_AGENT_ROUTER_NOT_MMP;
+
   router->callback_depth++;
   slot = find_slot(router, peer);
-  if (!mesh_mgmt_p2p_message_is_mmp_v1(bytes, length)) {
-    if (router->on_non_mmp)
-      router->on_non_mmp(router->callback_context, node, peer, bytes, length);
-    if (slot && slot->disconnect_pending)
-      retire_slot(router, slot);
-    router->callback_depth--;
-    return;
-  }
   if (!slot) {
     report_failure(router, NULL, peer, MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND,
                    MESH_MGMT_P2P_PEER_INVALID_STATE);
     p2p_disconnect_peer(peer);
     router->callback_depth--;
-    return;
+    return MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
   }
 
   router->last_peer_result =
       mesh_mgmt_p2p_peer_handle_message_v1(&slot->runtime, bytes, length, router_now_ms(router));
   if (router->last_peer_result != MESH_MGMT_P2P_PEER_OK) {
     fail_and_disconnect(router, slot, MESH_MGMT_AGENT_ROUTER_PEER_FAILED);
+    router->callback_depth--;
+    return MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
   } else if (slot->disconnect_pending) {
     retire_slot(router, slot);
   } else {
     router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
   }
   router->callback_depth--;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+static void router_message(p2p_node_t *node, p2p_peer_t *peer, const void *bytes, size_t length,
+                           void *context) {
+  mesh_mgmt_agent_router_v1_t *router = (mesh_mgmt_agent_router_v1_t *)context;
+  mesh_mgmt_agent_router_result_t result =
+      mesh_mgmt_agent_router_offer_message_v1(router, node, peer, bytes, length);
+
+  if (result == MESH_MGMT_AGENT_ROUTER_NOT_MMP && router && router->on_non_mmp)
+    router->on_non_mmp(router->callback_context, node, peer, bytes, length);
 }
 
 static mesh_mgmt_agent_router_result_t validate_template(mesh_mgmt_agent_router_v1_t *router) {
@@ -372,6 +430,19 @@ mesh_mgmt_agent_router_install_v1(mesh_mgmt_agent_router_v1_t *router) {
     return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
   p2p_set_peer_callbacks(router->node, router_peer_connected, router_peer_disconnected, router);
   p2p_set_message_handler(router->node, router_message, router);
+  router->owns_callbacks = 1u;
+  router->state = MESH_MGMT_AGENT_ROUTER_INSTALLED;
+  router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_start_embedded_v1(mesh_mgmt_agent_router_v1_t *router) {
+  if (!router)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_READY || router->callback_depth != 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  router->owns_callbacks = 0u;
   router->state = MESH_MGMT_AGENT_ROUTER_INSTALLED;
   router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
   return MESH_MGMT_AGENT_ROUTER_OK;
@@ -390,15 +461,19 @@ mesh_mgmt_agent_router_stop_v1(mesh_mgmt_agent_router_v1_t *router) {
     mesh_mgmt_agent_router_slot_v1_t *slot = slot_at(router, index);
     if (slot && slot->active) {
       slot->close_reason = MESH_MGMT_AGENT_ROUTER_CLOSE_LOCAL_STOP;
-      p2p_disconnect_peer(slot->peer);
+      if (router->owns_callbacks)
+        p2p_disconnect_peer(slot->peer);
       if (slot->active) {
         report_closed(router, slot);
         retire_slot(router, slot);
       }
     }
   }
-  p2p_set_message_handler(router->node, NULL, NULL);
-  p2p_set_peer_callbacks(router->node, NULL, NULL, NULL);
+  if (router->owns_callbacks) {
+    p2p_set_message_handler(router->node, NULL, NULL);
+    p2p_set_peer_callbacks(router->node, NULL, NULL, NULL);
+  }
+  router->owns_callbacks = 0u;
   router->state = MESH_MGMT_AGENT_ROUTER_READY;
   router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
   return MESH_MGMT_AGENT_ROUTER_OK;
@@ -449,4 +524,187 @@ mesh_mgmt_agent_router_peer_snapshot_v1(const mesh_mgmt_agent_router_v1_t *route
     }
   }
   return MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
+}
+
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_identity_snapshot_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const uint8_t managed_node_id[32],
+    mesh_mgmt_agent_router_identity_snapshot_v1_t *out_snapshot) {
+  const mesh_mgmt_session_v1_t *matched_session = NULL;
+  size_t index;
+
+  if (out_snapshot)
+    memset(out_snapshot, 0, sizeof(*out_snapshot));
+  if (!router || !managed_node_id || !out_snapshot)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state == MESH_MGMT_AGENT_ROUTER_UNINITIALIZED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+
+  for (index = 0u; index < router->max_peers; index++) {
+    const mesh_mgmt_agent_router_slot_v1_t *slot = slot_at_const(router, index);
+    const mesh_mgmt_session_v1_t *session;
+
+    if (!slot || !slot->active)
+      continue;
+    session = &slot->runtime.protocol_peer.connection.dispatcher.session;
+    if (session->state != MESH_MGMT_SESSION_ESTABLISHED ||
+        !session->remote_hello_verified ||
+        !mesh_mgmt_crypto_equal_32(session->remote_certificate.managed_node_id,
+                                   managed_node_id))
+      continue;
+    if (matched_session)
+      return MESH_MGMT_AGENT_ROUTER_DUPLICATE_PEER;
+    matched_session = session;
+  }
+  if (!matched_session)
+    return MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
+
+  memcpy(out_snapshot->managed_node_id, matched_session->remote_certificate.managed_node_id,
+         sizeof(out_snapshot->managed_node_id));
+  memcpy(out_snapshot->certificate, matched_session->remote_certificate_wire,
+         sizeof(out_snapshot->certificate));
+  out_snapshot->certificate_len = sizeof(out_snapshot->certificate);
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_execution_consumer_result_t
+mesh_mgmt_agent_router_execution_command_from_event_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    uint64_t now_ms,
+    mesh_mgmt_execution_shadow_command_v1_t *out_command) {
+  mesh_mgmt_agent_router_slot_v1_t *slot;
+
+  if (!router || !peer || !event || !out_command || now_ms == 0u)
+    return MESH_MGMT_EXECUTION_CONSUMER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth == 0u)
+    return MESH_MGMT_EXECUTION_CONSUMER_INVALID_STATE;
+  slot = find_slot(router, peer);
+  if (!slot)
+    return MESH_MGMT_EXECUTION_CONSUMER_INVALID_STATE;
+  return mesh_mgmt_execution_shadow_command_from_event_v1(
+      &slot->runtime.protocol_peer.connection.dispatcher, event, now_ms,
+      out_command);
+}
+
+mesh_mgmt_execution_disabled_responder_result_t
+mesh_mgmt_agent_router_send_execution_status_from_command_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    p2p_peer_t *peer,
+    const mesh_mgmt_execution_shadow_command_v1_t *command,
+    uint16_t status_code) {
+  mesh_mgmt_agent_router_slot_v1_t *slot;
+
+  if (!router || !peer || !command)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth == 0u)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_STATE;
+  slot = find_slot(router, peer);
+  if (!slot)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_STATE;
+  return mesh_mgmt_execution_status_response_from_command_v1(
+      command, status_code, &slot->runtime.signer,
+      &slot->runtime.protocol_peer.connection);
+}
+
+mesh_mgmt_execution_response_consumer_result_t
+mesh_mgmt_agent_router_execution_response_from_event_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    mesh_mgmt_execution_response_v1_t *out_response) {
+  mesh_mgmt_agent_router_slot_v1_t *slot;
+
+  if (!router || !peer || !event || !out_response)
+    return MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_INVALID_STATE;
+  slot = find_slot(router, peer);
+  if (!slot)
+    return MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_INVALID_STATE;
+  return mesh_mgmt_execution_response_from_event_v1(
+      &slot->runtime.protocol_peer.connection.dispatcher, event,
+      out_response);
+}
+
+mesh_mgmt_execution_disabled_responder_result_t
+mesh_mgmt_agent_router_send_execution_disabled_from_event_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    p2p_peer_t *peer,
+    const mesh_mgmt_dispatch_event_v1_t *event,
+    uint64_t now_ms) {
+  mesh_mgmt_agent_router_slot_v1_t *slot;
+
+  if (!router || !peer || !event || now_ms == 0u)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_STATE;
+  slot = find_slot(router, peer);
+  if (!slot)
+    return MESH_MGMT_EXECUTION_DISABLED_RESPONDER_INVALID_STATE;
+  return mesh_mgmt_execution_disabled_response_from_event_v1(
+      &slot->runtime.protocol_peer.connection.dispatcher, event, now_ms,
+      &slot->runtime.signer, &slot->runtime.protocol_peer.connection);
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_send_execution_request_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len) {
+  mesh_mgmt_agent_router_slot_v1_t *matched_slot = NULL;
+  mesh_mgmt_agent_router_result_t find_result;
+
+  if (!router || !target_node_id || !payload || payload_len == 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth != 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+
+  find_result = find_execution_target(router, target_node_id, &matched_slot);
+  if (find_result != MESH_MGMT_AGENT_ROUTER_OK)
+    return find_result;
+
+  router->last_peer_result = mesh_mgmt_p2p_peer_send_execution_request_v1(
+      &matched_slot->runtime, target_node_id, payload, payload_len);
+  if (router->last_peer_result != MESH_MGMT_P2P_PEER_OK) {
+    router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
+  router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_send_execution_response_v1(
+    mesh_mgmt_agent_router_v1_t *router,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len) {
+  mesh_mgmt_agent_router_slot_v1_t *matched_slot = NULL;
+  mesh_mgmt_agent_router_result_t find_result;
+
+  if (!router || !target_node_id || !payload || payload_len == 0u ||
+      (kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+       kind != MESH_MGMT_KIND_COMMAND_STATUS))
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth != 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+
+  find_result = find_execution_target(router, target_node_id, &matched_slot);
+  if (find_result != MESH_MGMT_AGENT_ROUTER_OK)
+    return find_result;
+  router->last_peer_result = mesh_mgmt_p2p_peer_send_execution_response_v1(
+      &matched_slot->runtime, kind, target_node_id, payload, payload_len);
+  if (router->last_peer_result != MESH_MGMT_P2P_PEER_OK) {
+    router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
+  router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
+  return MESH_MGMT_AGENT_ROUTER_OK;
 }

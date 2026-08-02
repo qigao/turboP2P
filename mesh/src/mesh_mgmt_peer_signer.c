@@ -147,8 +147,10 @@ void mesh_mgmt_peer_signer_destroy_v1(mesh_mgmt_peer_signer_v1_t *signer) {
 }
 
 static mesh_mgmt_peer_signer_result_t
-signer_build_frame(mesh_mgmt_peer_signer_v1_t *signer, uint8_t kind, const uint8_t *payload,
-                   size_t payload_len, const uint8_t **out_frame, size_t *out_frame_len) {
+signer_build_frame(mesh_mgmt_peer_signer_v1_t *signer, uint8_t kind,
+                   const uint8_t target_node_id[32],
+                   const uint8_t *payload, size_t payload_len,
+                   const uint8_t **out_frame, size_t *out_frame_len) {
   mesh_mgmt_sign_input_v1_t input;
   mesh_mgmt_envelope_result_t envelope_result;
   uint64_t now_ms;
@@ -178,6 +180,9 @@ signer_build_frame(mesh_mgmt_peer_signer_v1_t *signer, uint8_t kind, const uint8
   input.payload_len = payload_len;
   memcpy(input.header.mesh_id_hash, signer->mesh_id_hash, sizeof(input.header.mesh_id_hash));
   memcpy(input.header.origin_node_id, signer->origin_node_id, sizeof(input.header.origin_node_id));
+  if (target_node_id)
+    memcpy(input.header.target_node_id, target_node_id,
+           sizeof(input.header.target_node_id));
   input.header.principal_epoch = signer->principal_epoch;
   input.header.incarnation = signer->incarnation;
   memcpy(input.header.session_id, signer->session_id, sizeof(input.header.session_id));
@@ -221,8 +226,8 @@ int mesh_mgmt_peer_signer_build_hello_v1(void *context, const uint8_t **out_fram
     signer->last_error = MESH_MGMT_PEER_SIGNER_ENCODE_FAILED;
     return signer->last_error;
   }
-  result = signer_build_frame(signer, MESH_MGMT_KIND_HELLO, payload, payload_len, out_frame,
-                              out_frame_len);
+  result = signer_build_frame(signer, MESH_MGMT_KIND_HELLO, NULL, payload,
+                              payload_len, out_frame, out_frame_len);
   mesh_mgmt_crypto_wipe(payload, sizeof(payload));
   if (result == MESH_MGMT_PEER_SIGNER_OK)
     signer->hello_built = 1u;
@@ -250,10 +255,42 @@ int mesh_mgmt_peer_signer_build_ack_v1(void *context, const mesh_mgmt_hello_ack_
     signer->last_error = MESH_MGMT_PEER_SIGNER_ENCODE_FAILED;
     return signer->last_error;
   }
-  result = signer_build_frame(signer, MESH_MGMT_KIND_HELLO_ACK, payload, payload_len, out_frame,
-                              out_frame_len);
+  result = signer_build_frame(signer, MESH_MGMT_KIND_HELLO_ACK, NULL, payload,
+                              payload_len, out_frame, out_frame_len);
   mesh_mgmt_crypto_wipe(payload, sizeof(payload));
   if (result == MESH_MGMT_PEER_SIGNER_OK)
     signer->ack_built = 1u;
   return result;
+}
+
+mesh_mgmt_peer_signer_result_t mesh_mgmt_peer_signer_build_targeted_v1(
+    mesh_mgmt_peer_signer_v1_t *signer,
+    uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload,
+    size_t payload_len,
+    const uint8_t **out_frame,
+    size_t *out_frame_len) {
+  mesh_mgmt_peer_signer_result_t result =
+      signer_require_ready(signer, out_frame, out_frame_len);
+
+  if (result != MESH_MGMT_PEER_SIGNER_OK)
+    return result;
+  if (!target_node_id || bytes_are_zero(target_node_id, 32u) ||
+      (!payload && payload_len != 0u))
+    return MESH_MGMT_PEER_SIGNER_INVALID_ARG;
+  if (!signer->hello_built || !signer->ack_built)
+    return MESH_MGMT_PEER_SIGNER_INVALID_STATE;
+  switch (kind) {
+    case MESH_MGMT_KIND_FORWARD:
+    case MESH_MGMT_KIND_COMMAND_REQUEST:
+    case MESH_MGMT_KIND_COMMAND_ACCEPTED:
+    case MESH_MGMT_KIND_COMMAND_RESULT:
+    case MESH_MGMT_KIND_COMMAND_STATUS:
+      break;
+    default:
+      return MESH_MGMT_PEER_SIGNER_INVALID_ARG;
+  }
+  return signer_build_frame(signer, kind, target_node_id, payload,
+                            payload_len, out_frame, out_frame_len);
 }

@@ -82,6 +82,12 @@ typedef struct p2p_transfer_s {
 
     p2p_peer_t *peer;                         /* Primary peer (single-source) */
 
+    /* Bounded FILE_GET response arbitration */
+    p2p_peer_t *request_peers[P2P_MAX_SOURCES];
+    uint8_t request_peer_done[P2P_MAX_SOURCES];
+    uint8_t request_peer_count;
+    uint8_t response_count;
+
     /* Multi-source download support */
     p2p_transfer_source_t sources[P2P_MAX_SOURCES];
     uint8_t source_count;                     /* Number of active sources */
@@ -119,6 +125,8 @@ void p2p_transfer_manager_destroy(p2p_transfer_manager_t *mgr);
 p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_dir_t dir);
 void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer);
 p2p_transfer_t* p2p_transfer_find_by_id(p2p_transfer_manager_t *mgr, uint32_t id);
+p2p_transfer_t* p2p_transfer_find_upload_by_remote_id(
+    p2p_transfer_manager_t *mgr, uint32_t remote_id, p2p_peer_t *peer);
 void p2p_transfer_release(p2p_transfer_t *transfer);
 
 int p2p_transfer_open_file(p2p_transfer_t *transfer, const char *mode);

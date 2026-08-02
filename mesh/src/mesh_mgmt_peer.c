@@ -61,9 +61,11 @@ static int sequence_is_newer(uint64_t candidate, uint64_t current) {
   return distance != 0u && distance < (UINT64_C(1) << 63);
 }
 
-static int envelope_time_is_valid(const mesh_mgmt_verified_envelope_v1_t *envelope,
-                                  uint64_t now_ms) {
-  return envelope->header.issued_at_ms <= now_ms && envelope->header.expires_at_ms > now_ms;
+static int envelope_time_is_locally_sendable(
+    const mesh_mgmt_verified_envelope_v1_t *envelope,
+    uint64_t sampled_before_build_ms) {
+  return envelope->header.issued_at_ms < envelope->header.expires_at_ms &&
+         envelope->header.expires_at_ms > sampled_before_build_ms;
 }
 
 static int hello_matches_local_config(const mesh_mgmt_peer_v1_t *peer,
@@ -92,7 +94,7 @@ static int validate_local_hello(mesh_mgmt_peer_v1_t *peer, const uint8_t *frame,
       mesh_mgmt_certificate_verify_v1(hello.certificate, sizeof(hello.certificate),
                                       config->trusted_issuer_key, config->expected_mesh_id_hash,
                                       now_ms, &certificate) != MESH_MGMT_IDENTITY_OK ||
-      !envelope_time_is_valid(&envelope, now_ms) ||
+      !envelope_time_is_locally_sendable(&envelope, now_ms) ||
       mesh_mgmt_blake2b_256(config->trusted_issuer_key, 32, issuer_hash) != MESH_MGMT_CRYPTO_OK ||
       !hello_matches_local_config(peer, &hello) ||
       !mesh_mgmt_crypto_equal_32(issuer_hash, hello.issuer_chain_hash) ||
@@ -151,7 +153,7 @@ static int validate_local_ack(mesh_mgmt_peer_v1_t *peer, const uint8_t *frame, s
          envelope.frame.kind == MESH_MGMT_KIND_HELLO_ACK &&
          mesh_mgmt_hello_ack_decode_v1(envelope.frame.payload, envelope.frame.payload_len, &ack) ==
              MESH_MGMT_SESSION_OK &&
-         envelope_time_is_valid(&envelope, now_ms) &&
+         envelope_time_is_locally_sendable(&envelope, now_ms) &&
          header_matches_local_session(&envelope.header, &peer->local_header) &&
          bytes_are_zero(envelope.header.target_node_id, sizeof(envelope.header.target_node_id)) &&
          envelope.header.forward_budget == 0u && ack_values_equal(&ack, &peer->pending_ack);

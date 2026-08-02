@@ -1,5 +1,6 @@
 #include "mesh_config.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,6 +77,22 @@ static int mesh_node_parse_identity_secret_hex(const char *hex) {
         }
     }
 
+    return 1;
+}
+
+static int mesh_node_parse_u64(const char *value, uint64_t *out) {
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (!value || !out || value[0] == '\0' || value[0] == '-') {
+        return 0;
+    }
+    errno = 0;
+    parsed = strtoull(value, &end, 10);
+    if (errno != 0 || !end || *end != '\0') {
+        return 0;
+    }
+    *out = (uint64_t)parsed;
     return 1;
 }
 
@@ -935,6 +952,29 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
                 strncpy(cfg->advertise_ip, value, sizeof(cfg->advertise_ip) - 1);
             } else if (strcmp(key, "identity_secret_hex") == 0) {
                 strncpy(cfg->identity_secret_hex, value, sizeof(cfg->identity_secret_hex) - 1);
+            } else if (strcmp(key, "mgmt_private_key_file") == 0) {
+                strncpy(cfg->mgmt_private_key_file, value,
+                        sizeof(cfg->mgmt_private_key_file) - 1);
+            } else if (strcmp(key, "mgmt_certificate_file") == 0) {
+                strncpy(cfg->mgmt_certificate_file, value,
+                        sizeof(cfg->mgmt_certificate_file) - 1);
+            } else if (strcmp(key, "mgmt_trusted_issuer_key_file") == 0) {
+                strncpy(cfg->mgmt_trusted_issuer_key_file, value,
+                        sizeof(cfg->mgmt_trusted_issuer_key_file) - 1);
+            } else if (strcmp(key, "mgmt_execution_grant_issuer_key_file") == 0) {
+                strncpy(cfg->mgmt_execution_grant_issuer_key_file, value,
+                        sizeof(cfg->mgmt_execution_grant_issuer_key_file) - 1);
+            } else if (strcmp(key, "mgmt_mesh_id_hex") == 0) {
+                strncpy(cfg->mgmt_mesh_id_hex, value, sizeof(cfg->mgmt_mesh_id_hex) - 1);
+            } else if (strcmp(key, "mgmt_first_record_epoch") == 0) {
+                if (!mesh_node_parse_u64(value, &cfg->mgmt_first_record_epoch)) {
+                    fprintf(stderr, "Invalid mgmt_first_record_epoch: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "mgmt_record_epoch_file") == 0) {
+                strncpy(cfg->mgmt_record_epoch_file, value,
+                        sizeof(cfg->mgmt_record_epoch_file) - 1);
             } else if (strcmp(key, "virtual_prefix") == 0) {
                 cfg->virtual_prefix = (unsigned int)strtoul(value, NULL, 10);
             } else if (strcmp(key, "listen_port") == 0) {
@@ -961,7 +1001,17 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
     return 0;
 }
 
+int mesh_node_config_management_enabled(const mesh_node_config_t *cfg) {
+    return cfg && cfg->mgmt_private_key_file[0] != '\0' &&
+           cfg->mgmt_certificate_file[0] != '\0' &&
+           cfg->mgmt_trusted_issuer_key_file[0] != '\0' &&
+           cfg->mgmt_mesh_id_hex[0] != '\0' &&
+           cfg->mgmt_first_record_epoch != 0u &&
+           cfg->mgmt_record_epoch_file[0] != '\0';
+}
+
 int mesh_node_config_validate(const mesh_node_config_t *cfg) {
+    int mgmt_field_count = 0;
     int i = 0;
 
     if (!mesh_node_parse_ipv4(cfg->virtual_ip)) {
@@ -977,6 +1027,31 @@ int mesh_node_config_validate(const mesh_node_config_t *cfg) {
     if (cfg->identity_secret_hex[0] != '\0' &&
         !mesh_node_parse_identity_secret_hex(cfg->identity_secret_hex)) {
         fprintf(stderr, "Invalid identity_secret_hex: expected 64 hex characters\n");
+        return -1;
+    }
+
+    mgmt_field_count += cfg->mgmt_private_key_file[0] != '\0';
+    mgmt_field_count += cfg->mgmt_certificate_file[0] != '\0';
+    mgmt_field_count += cfg->mgmt_trusted_issuer_key_file[0] != '\0';
+    mgmt_field_count += cfg->mgmt_mesh_id_hex[0] != '\0';
+    mgmt_field_count += cfg->mgmt_first_record_epoch != 0u;
+    mgmt_field_count += cfg->mgmt_record_epoch_file[0] != '\0';
+    if (mgmt_field_count != 0 && mgmt_field_count != 6) {
+        fprintf(stderr, "Management configuration must provide all mgmt_* fields\n");
+        return -1;
+    }
+    if (mesh_node_config_management_enabled(cfg)) {
+        if (cfg->identity_secret_hex[0] == '\0') {
+            fprintf(stderr, "Management mode requires stable identity_secret_hex\n");
+            return -1;
+        }
+        if (!mesh_node_parse_identity_secret_hex(cfg->mgmt_mesh_id_hex)) {
+            fprintf(stderr, "Invalid mgmt_mesh_id_hex: expected 64 hex characters\n");
+            return -1;
+        }
+    } else if (cfg->mgmt_execution_grant_issuer_key_file[0] != '\0') {
+        fprintf(stderr,
+                "Execution Grant issuer requires complete management configuration\n");
         return -1;
     }
 
@@ -1107,6 +1182,16 @@ void mesh_node_config_print(const mesh_node_config_t *cfg) {
     printf("virtual_ip     : %s/%u\n", cfg->virtual_ip, cfg->virtual_prefix);
     printf("advertise_ip   : %s\n", cfg->advertise_ip[0] ? cfg->advertise_ip : "(unset)");
     printf("identity       : %s\n", cfg->identity_secret_hex[0] ? "configured" : "(ephemeral)");
+    printf("management     : %s\n",
+           mesh_node_config_management_enabled(cfg) ? "shared-node" : "disabled");
+    printf("node_execution : %s\n",
+           cfg->mgmt_execution_grant_issuer_key_file[0] != '\0'
+               ? "enabled"
+               : "disabled");
+    if (mesh_node_config_management_enabled(cfg)) {
+        printf("mgmt_epoch     : %llu\n",
+               (unsigned long long)cfg->mgmt_first_record_epoch);
+    }
     printf("listen_port    : %d\n", cfg->listen_port);
     printf("ice_enabled    : %s\n", cfg->ice_enabled ? "true" : "false");
     printf("stream_enabled : %s\n", cfg->stream_enabled ? "true" : "false");

@@ -210,14 +210,15 @@ mesh_mgmt_connection_send_hello_ack_v1(mesh_mgmt_connection_v1_t *connection, co
                        mesh_mgmt_dispatcher_mark_ack_sent_v1);
 }
 
-mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_v1_t *connection,
-                                                           const uint8_t *frame, size_t frame_len) {
-  mesh_mgmt_connection_result_t result = require_ready(connection);
+static mesh_mgmt_connection_result_t
+send_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
+                         const uint8_t *frame,
+                         size_t frame_len) {
+  mesh_mgmt_connection_result_t result;
+  mesh_mgmt_dispatch_result_t dispatch_result;
   mesh_mgmt_transport_result_t transport_result;
   uint8_t kind = 0u;
 
-  if (result != MESH_MGMT_CONNECTION_OK)
-    return result;
   result = decode_outbound_kind(connection, frame, frame_len, &kind);
   if (result != MESH_MGMT_CONNECTION_OK)
     return result;
@@ -226,9 +227,34 @@ mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_
   if (kind == MESH_MGMT_KIND_HELLO || kind == MESH_MGMT_KIND_HELLO_ACK)
     return MESH_MGMT_CONNECTION_INVALID_FRAME;
   if (!mesh_mgmt_dispatch_kind_is_observer_safe_v1(kind)) {
-    connection->last_dispatch_result = MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED;
-    connection->last_dispatch_stage = MESH_MGMT_DISPATCH_STAGE_SESSION;
-    return MESH_MGMT_CONNECTION_INVALID_FRAME;
+    if (!connection->dispatcher.enable_node_execution_shadow ||
+        (kind != MESH_MGMT_KIND_COMMAND_REQUEST &&
+         kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+         kind != MESH_MGMT_KIND_COMMAND_STATUS)) {
+      connection->last_dispatch_result = MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED;
+      connection->last_dispatch_stage = MESH_MGMT_DISPATCH_STAGE_SESSION;
+      return MESH_MGMT_CONNECTION_INVALID_FRAME;
+    }
+    connection->last_dispatch_stage = MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH;
+    if (kind == MESH_MGMT_KIND_COMMAND_REQUEST)
+      dispatch_result =
+          mesh_mgmt_dispatcher_validate_node_execution_outbound_shadow_v1(
+              &connection->dispatcher, frame, frame_len);
+    else if (kind == MESH_MGMT_KIND_COMMAND_RESULT)
+      dispatch_result =
+          mesh_mgmt_dispatcher_validate_node_execution_result_outbound_shadow_v1(
+              &connection->dispatcher, frame, frame_len);
+    else
+      dispatch_result =
+          mesh_mgmt_dispatcher_validate_node_execution_status_outbound_shadow_v1(
+              &connection->dispatcher, frame, frame_len);
+    connection->last_dispatch_result = dispatch_result;
+    if (dispatch_result != MESH_MGMT_DISPATCH_OK) {
+      return dispatch_result == MESH_MGMT_DISPATCH_UNSUPPORTED_FEATURE ||
+                     dispatch_result == MESH_MGMT_DISPATCH_NOT_ESTABLISHED
+                 ? MESH_MGMT_CONNECTION_INVALID_STATE
+                 : MESH_MGMT_CONNECTION_INVALID_FRAME;
+    }
   }
   if (mesh_mgmt_session_authorize_kind_v1(&connection->dispatcher.session, kind) !=
       MESH_MGMT_SESSION_OK) {
@@ -241,6 +267,33 @@ mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_
   connection->last_transport_result = transport_result;
   if (transport_result != MESH_MGMT_TRANSPORT_OK)
     return connection_fail(connection, MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
+  connection->last_dispatch_result = MESH_MGMT_DISPATCH_OK;
   connection->last_error = MESH_MGMT_CONNECTION_OK;
   return MESH_MGMT_CONNECTION_OK;
+}
+
+mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(
+    mesh_mgmt_connection_v1_t *connection,
+    const uint8_t *frame,
+    size_t frame_len) {
+  mesh_mgmt_connection_result_t result = require_ready(connection);
+
+  if (result != MESH_MGMT_CONNECTION_OK)
+    return result;
+  return send_non_handshake_frame(connection, frame, frame_len);
+}
+
+mesh_mgmt_connection_result_t
+mesh_mgmt_connection_send_event_response_v1(
+    mesh_mgmt_connection_v1_t *connection,
+    const uint8_t *frame,
+    size_t frame_len) {
+  if (!connection || !frame)
+    return MESH_MGMT_CONNECTION_INVALID_ARG;
+  if (connection->state == MESH_MGMT_CONNECTION_TERMINAL)
+    return connection->last_error;
+  if (connection->state != MESH_MGMT_CONNECTION_READY ||
+      !connection->in_event_callback)
+    return MESH_MGMT_CONNECTION_INVALID_STATE;
+  return send_non_handshake_frame(connection, frame, frame_len);
 }
