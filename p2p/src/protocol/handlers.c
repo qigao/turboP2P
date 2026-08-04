@@ -341,6 +341,12 @@ int p2p_handle_dht_find_node(p2p_node_t *node, p2p_peer_t *peer, const p2p_messa
     p2p_message_t *response = NULL;
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    if (msg->header.payload_len < sizeof(p2p_dht_find_node_payload_t)) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
 
     kad_id_t target;
     memcpy(target.bytes, msg->payload.dht_find_node.target_id, KADEMLIA_ID_BYTES);
@@ -361,6 +367,22 @@ int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t
     p2p_peer_info_ex_t peer_info = {0};
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    if (msg->header.payload_len < offsetof(p2p_dht_store_payload_t, data)) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
+    if (msg->payload.dht_store.data_len > sizeof(msg->payload.dht_store.data) ||
+
+        msg->header.payload_len != offsetof(p2p_dht_store_payload_t, data) +
+
+                                      msg->payload.dht_store.data_len) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
     p2p_peer_get_info_ex(peer, &peer_info);
 
     kad_id_t key;
@@ -385,6 +407,12 @@ int p2p_handle_dht_get(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *
     p2p_message_t *response = NULL;
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    if (msg->header.payload_len < sizeof(p2p_dht_find_node_payload_t)) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
 
     kad_id_t key;
     memcpy(key.bytes, msg->payload.dht_find_node.target_id, KADEMLIA_ID_BYTES);
@@ -404,9 +432,23 @@ int p2p_handle_dht_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_messag
     p2p_peer_info_ex_t peer_info = {0};
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
+    if (msg->header.payload_len < offsetof(p2p_dht_response_payload_t, data)) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
     p2p_peer_get_info_ex(peer, &peer_info);
 
     const p2p_dht_response_payload_t *res = &msg->payload.dht_response;
+    if (res->node_count > KADEMLIA_K ||
+
+        res->data_len > sizeof(res->data)) {
+
+        return P2P_ERR_INVALID_ARG;
+
+    }
+
     turbo_mutex_lock(&node->mutex);
     TLOG_DEBUG("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
               peer_info.ip, peer_info.port, res->node_count);

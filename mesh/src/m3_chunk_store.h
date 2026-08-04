@@ -23,6 +23,7 @@ typedef enum {
   M3_CHUNK_STORE_RESOURCE_EXHAUSTED = -6,
   M3_CHUNK_STORE_LOCKED = -7,
   M3_CHUNK_STORE_CSPRNG_FAILED = -8,
+  M3_CHUNK_STORE_ABORTED = -9,
 } m3_chunk_store_result_t;
 
 typedef struct {
@@ -83,6 +84,26 @@ m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
 m3_chunk_store_result_t m3_chunk_store_read_range_v1(
     const m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *cid,
     uint64_t offset, size_t length, uint8_t *buffer, size_t *out_read);
+
+/** Enumeration callback; return nonzero to abort. cid carries digest and
+ *  size; modified_us is the chunk file mtime in microseconds since epoch. */
+typedef int (*m3_chunk_store_enumerate_cb)(const m3_chunk_cid_v1_t *cid,
+                                           uint64_t modified_us,
+                                           void *user_data);
+
+/**
+ * Enumerate every published chunk in the CAS. The callback runs on the
+ * caller's thread; do not call other store functions from it. Returns OK when
+ * the walk finished, or the callback's nonzero value mapped as
+ * M3_CHUNK_STORE_ABORTED.
+ */
+m3_chunk_store_result_t m3_chunk_store_enumerate_v1(
+    const m3_chunk_store_v1_t *store, m3_chunk_store_enumerate_cb callback,
+    void *user_data);
+
+/** Delete one published chunk (and its empty shard directory). */
+m3_chunk_store_result_t m3_chunk_store_delete_v1(
+    m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *cid);
 
 #ifdef __cplusplus
 }

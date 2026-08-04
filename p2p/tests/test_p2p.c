@@ -5,6 +5,7 @@
  */
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -1805,12 +1806,18 @@ void test_p2p_dht_response_matches_request_id(void) {
     msg1.header.request_id = 1002;
     msg1.payload.dht_response.found = 1;
     msg1.payload.dht_response.data_len = (uint16_t)(strlen(value2) + 1);
+    msg1.header.payload_len =
+        (uint16_t)(offsetof(p2p_dht_response_payload_t, data) +
+                   msg1.payload.dht_response.data_len);
     memcpy(msg1.payload.dht_response.data, value2, strlen(value2) + 1);
 
     p2p_message_init(&msg2, P2P_MSG_DHT_RESPONSE);
     msg2.header.request_id = 1001;
     msg2.payload.dht_response.found = 1;
     msg2.payload.dht_response.data_len = (uint16_t)(strlen(value1) + 1);
+    msg2.header.payload_len =
+        (uint16_t)(offsetof(p2p_dht_response_payload_t, data) +
+                   msg2.payload.dht_response.data_len);
     memcpy(msg2.payload.dht_response.data, value1, strlen(value1) + 1);
 
     check_int_eq(P2P_OK, p2p_handle_dht_response(node, peer, &msg1));

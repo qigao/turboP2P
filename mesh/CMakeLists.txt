@@ -1,5 +1,5 @@
 project(mesh C)
-
+find_package(OpenSSL REQUIRED)
 # =============================================================================
 # Mesh Library
 # =============================================================================
@@ -21,7 +21,7 @@ add_library(mesh_mgmt_crypto STATIC
   src/mesh_mgmt_crypto.h)
 target_include_directories(mesh_mgmt_crypto PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto monocypher)
+target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto TurboNet::Crypto)
 set_property(TARGET mesh_mgmt_crypto PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_mgmt_envelope STATIC
@@ -81,6 +81,63 @@ target_link_libraries(m3_chunk_store
   PUBLIC TurboUtils::Core
   PRIVATE OpenSSL::Crypto)
 set_property(TARGET m3_chunk_store PROPERTY FOLDER "mesh/internal")
+
+# Server-side AWS Signature V4 verification for the M3 gateway.
+add_library(m3_gateway_sigv4 STATIC
+  src/m3_gateway_sigv4.c
+  src/m3_gateway_sigv4.h)
+target_include_directories(m3_gateway_sigv4 PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_gateway_sigv4 PUBLIC TurboNet::Crypto)
+set_property(TARGET m3_gateway_sigv4 PROPERTY FOLDER "mesh/internal")
+
+# Authenticated chunk transport over a p2p node: wire codec, capability
+# sign/verify, store-side service and gateway-side request/response client.
+add_library(m3_chunk_mesh STATIC
+  src/m3_chunk_mesh.c
+  src/m3_chunk_mesh.h)
+target_include_directories(m3_chunk_mesh PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_mesh
+  PUBLIC m3_store_node mesh_mgmt_crypto TurboP2P::P2P
+  PRIVATE TurboUtils::Core)
+set_property(TARGET m3_chunk_mesh PROPERTY FOLDER "mesh/internal")
+
+# Data-plane client used by the metadata leader: issues authorized chunk
+# capabilities to registered store nodes, verifies durable receipts and
+# encodes the placement into a V2 manifest.
+add_library(m3_gateway_datapane STATIC
+  src/m3_gateway_datapane.c
+  src/m3_gateway_datapane.h)
+target_include_directories(m3_gateway_datapane PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_gateway_datapane
+  PUBLIC m3_store_node m3_object_manifest m3_chunk_mesh TurboP2P::P2P
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET m3_gateway_datapane PROPERTY FOLDER "mesh/internal")
+
+# Placement repair: computes per-chunk replica debt, backfills missing
+# replicas from healthy sources and produces an updated manifest for
+# UPDATE_PLACEMENT commit.
+add_library(m3_repair STATIC
+  src/m3_repair.c
+  src/m3_repair.h)
+target_include_directories(m3_repair PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_repair PUBLIC m3_gateway_datapane)
+set_property(TARGET m3_repair PROPERTY FOLDER "mesh/internal")
+
+# Phase 1 single-node M3 S3 gateway (Iris routes + chunk/namespace wiring).
+add_library(m3_gateway STATIC
+  src/m3_gateway.c
+  src/m3_gateway.h)
+target_include_directories(m3_gateway PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_gateway PUBLIC
+  m3_gateway_sigv4 m3_namespace_local_store m3_object_manifest
+  m3_gateway_datapane m3_repair mesh_media_playlist mesh_release
+  TurboNet::Crypto TurboHttp::Iris)
+set_property(TARGET m3_gateway PROPERTY FOLDER "mesh/internal")
 
 # Owner-loop bridge from a content CID to the P2P swarm and immutable local
 # M3 CAS. Stable seed files remain outside the CAS filesystem boundary.
@@ -234,6 +291,32 @@ if(TURBOP2P_BUILD_TURBORAFT_M3)
   target_link_libraries(mesh_control_raft_service PUBLIC
     mesh_control_raft TurboRaft::SQLiteStorage)
   set_property(TARGET mesh_control_raft_service PROPERTY FOLDER "mesh/internal")
+
+  # Phase 2a: single-voter raft metadata backend for the M3 gateway.
+  add_library(m3_gateway_raft STATIC
+    src/m3_gateway_raft.c
+    src/m3_gateway_raft.h)
+  target_include_directories(m3_gateway_raft PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(m3_gateway_raft PUBLIC
+    m3_namespace_raft_adapter TurboRaft::Service TurboRaft::SQLiteStorage)
+  target_compile_definitions(m3_gateway_raft PUBLIC TURBO_P2P_M3_RAFT_ENABLED=1)
+  set_property(TARGET m3_gateway_raft PROPERTY FOLDER "mesh/internal")
+  target_link_libraries(m3_gateway PUBLIC m3_gateway_raft)
+  target_compile_definitions(m3_gateway PUBLIC TURBO_P2P_M3_RAFT_ENABLED=1)
+
+  # Phase 2b-ii: multi-process CoroNet TLS transport node runtime.
+  add_library(m3_raft_node STATIC
+    src/m3_raft_node.c
+    src/m3_raft_node.h)
+  target_include_directories(m3_raft_node PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(m3_raft_node PUBLIC
+    m3_gateway_raft TurboRaft::CoroNet TurboNet::CoroNet)
+  set_property(TARGET m3_raft_node PROPERTY FOLDER "mesh/internal")
+
+  # Multi-node metadata backend: the gateway embeds an m3_raft_node voter.
+  target_link_libraries(m3_gateway PUBLIC m3_raft_node)
 endif()
 
 # Pure evaluator for already-verified M3 chunk claims. Signature verification,
@@ -248,6 +331,30 @@ target_link_libraries(m3_chunk_capability
   PRIVATE TurboUtils::Core)
 set_property(TARGET m3_chunk_capability PROPERTY FOLDER "mesh/internal")
 
+# Verifiable durable-evidence issued by one store node. Signs the canonical
+# receipt body with RFC 8032 Ed25519 and fingerprints the signed receipt for
+# manifest placement references.
+add_library(m3_chunk_receipt STATIC
+  src/m3_chunk_receipt.c
+  src/m3_chunk_receipt.h)
+target_include_directories(m3_chunk_receipt PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_chunk_receipt
+  PUBLIC mesh_mgmt_crypto m3_chunk_capability
+  PRIVATE OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET m3_chunk_receipt PROPERTY FOLDER "mesh/internal")
+
+# Data-plane service over one immutable local CAS: authorized PUT/READ, quota
+# accounting and signed durable receipts consumed by the metadata plane.
+add_library(m3_store_node STATIC
+  src/m3_store_node.c
+  src/m3_store_node.h)
+target_include_directories(m3_store_node PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(m3_store_node
+  PUBLIC m3_chunk_read_service m3_chunk_receipt
+  PRIVATE TurboUtils::Core)
+set_property(TARGET m3_store_node PROPERTY FOLDER "mesh/internal")
 # The only M3 storage adapter intended for gateway/bulk-stream consumers. It
 # accepts authorized access rather than raw network claims or host paths.
 add_library(m3_chunk_access_store STATIC
@@ -558,6 +665,10 @@ target_include_directories(mesh_mgmt_service_record PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_service_record PUBLIC
   mesh_mgmt_envelope mesh_mgmt_identity OpenSSL::Crypto)
+if(WIN32)
+  target_link_libraries(mesh_mgmt_endpoint_record PUBLIC ws2_32)
+  target_link_libraries(mesh_mgmt_service_record PUBLIC ws2_32)
+endif()
 set_property(TARGET mesh_mgmt_service_record PROPERTY FOLDER "mesh/internal")
 
 # Validated local endpoint signer and connected-peer DHT push boundary. It
@@ -654,6 +765,163 @@ target_link_libraries(mesh_stream_transport PUBLIC
   mesh_stream_bind mesh_stream_session TurboNet::CoroNet)
 set_property(TARGET mesh_stream_transport PROPERTY FOLDER "mesh/internal")
 
+# Reliable ordered block-stream session (P1): frame protocol, sliding
+# window, selective retransmit, backpressure and resume, over a pluggable
+# byte transport (mesh_stream_transport / CoroNet TLS adapter later).
+add_library(mesh_stream_data STATIC
+  src/mesh_stream_data.c
+  src/mesh_stream_data.h)
+target_include_directories(mesh_stream_data PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_data
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET mesh_stream_data PROPERTY FOLDER "mesh/internal")
+
+# Per-source health scoring and bad-source elimination for multi-source pulls.
+add_library(mesh_stream_source_selector STATIC
+  src/mesh_stream_source_selector.c
+  src/mesh_stream_source_selector.h)
+target_include_directories(mesh_stream_source_selector PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_source_selector PUBLIC mesh_stream_data)
+set_property(TARGET mesh_stream_source_selector PROPERTY FOLDER "mesh/internal")
+
+# Parallel multi-source block puller: schedules block fetches across the best
+# sources, verifies each block, retries failures/timeouts and delivers in order.
+add_library(mesh_stream_multisource STATIC
+  src/mesh_stream_multisource.c
+  src/mesh_stream_multisource.h)
+target_include_directories(mesh_stream_multisource PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_multisource
+  PUBLIC mesh_stream_source_selector
+  PRIVATE TurboNet::Crypto)
+set_property(TARGET mesh_stream_multisource PROPERTY FOLDER "mesh/internal")
+
+# Stream service discovery: mesh-stream/mesh-sync dns-name convention and a
+# bounded registry over the mgmt service record (epoch fenced, TTL expired).
+add_library(mesh_stream_discovery STATIC
+  src/mesh_stream_discovery.c
+  src/mesh_stream_discovery.h)
+target_include_directories(mesh_stream_discovery PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_discovery PUBLIC mesh_mgmt_service_record)
+set_property(TARGET mesh_stream_discovery PROPERTY FOLDER "mesh/internal")
+
+# Multi-source backing for the media range pull: the multisource block puller
+# (P2) serves as the fetch io of mesh_stream_media_pull (P8).
+add_library(mesh_stream_media_pull_multisource STATIC
+  src/mesh_stream_media_pull_multisource.c
+  src/mesh_stream_media_pull_multisource.h)
+target_include_directories(mesh_stream_media_pull_multisource PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_media_pull_multisource
+  PUBLIC mesh_stream_media_pull mesh_stream_multisource)
+set_property(TARGET mesh_stream_media_pull_multisource PROPERTY FOLDER "mesh/internal")
+
+# Live-over-HTTP core: sliding-window HLS live playlist over the live session.
+add_library(mesh_stream_live_hls STATIC
+  src/mesh_stream_live_hls.c
+  src/mesh_stream_live_hls.h)
+target_include_directories(mesh_stream_live_hls PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_live_hls PRIVATE TurboUtils::Core)
+set_property(TARGET mesh_stream_live_hls PROPERTY FOLDER "mesh/internal")
+
+# Multi-file software release manifest: versioned path -> gateway object key +
+# object digest, canonical encode/decode + reproducible digest.
+add_library(mesh_release STATIC
+  src/mesh_release.c
+  src/mesh_release.h)
+target_include_directories(mesh_release PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_release
+  PUBLIC m3_object_manifest
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET mesh_release PROPERTY FOLDER "mesh/internal")
+
+# HLS-style playlist generation over the media index: media playlist with
+# per-segment EXTINF + EXT-X-BYTERANGE (feeding mesh_stream_media_pull) and a
+# master playlist over the ABR ladder.
+add_library(mesh_media_playlist STATIC
+  src/mesh_media_playlist.c
+  src/mesh_media_playlist.h)
+target_include_directories(mesh_media_playlist PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_media_playlist PUBLIC mesh_media_index)
+set_property(TARGET mesh_media_playlist PROPERTY FOLDER "mesh/internal")
+
+# On-demand media range pull: resolve a byte range to its chunk span via the
+# media index and fetch/verify/assemble exactly those chunks (Range/206).
+add_library(mesh_stream_media_pull STATIC
+  src/mesh_stream_media_pull.c
+  src/mesh_stream_media_pull.h)
+target_include_directories(mesh_stream_media_pull PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_media_pull
+  PUBLIC mesh_media_index
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET mesh_stream_media_pull PROPERTY FOLDER "mesh/internal")
+
+# KCP transport binding for mesh_stream_live: live FEC -> turbo_kcp
+# Reed-Solomon FEC config and a coro_socket-backed datagram io bridge.
+add_library(mesh_stream_kcp_adapter STATIC
+  src/mesh_stream_kcp_adapter.c
+  src/mesh_stream_kcp_adapter.h)
+target_include_directories(mesh_stream_kcp_adapter PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_kcp_adapter
+  PUBLIC mesh_stream_live TurboNet::CoroNet)
+set_property(TARGET mesh_stream_kcp_adapter PROPERTY FOLDER "mesh/internal")
+
+# Per-peer stream QoS: flow-ruleset admission + sliding-window bandwidth and
+# chunk statistics.
+add_library(mesh_stream_qos STATIC
+  src/mesh_stream_qos.c
+  src/mesh_stream_qos.h)
+target_include_directories(mesh_stream_qos PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_qos PUBLIC mesh_flow_ruleset)
+set_property(TARGET mesh_stream_qos PROPERTY FOLDER "mesh/internal")
+
+# Live edge streaming session: seq-numbered blocks with a bounded reorder
+# window, LIVE_SKIP for blocks that are no longer recoverable, and an XOR
+# erasure codec (the testable stand-in for the turbo_kcp Reed-Solomon FEC
+# backend that a KCP-bound io adapter would enable).
+add_library(mesh_stream_live STATIC
+  src/mesh_stream_live.c
+  src/mesh_stream_live.h)
+target_include_directories(mesh_stream_live PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_live PRIVATE TurboUtils::Core)
+set_property(TARGET mesh_stream_live PROPERTY FOLDER "mesh/internal")
+
+# Media segment index + ABR ladder: chunk-aligned segments over an M3
+# manifest, byte-range -> chunk-span resolution (HTTP Range/206) and
+# bandwidth-driven rendition selection.
+add_library(mesh_media_index STATIC
+  src/mesh_media_index.c
+  src/mesh_media_index.h)
+target_include_directories(mesh_media_index PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_media_index
+  PUBLIC m3_object_manifest
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET mesh_media_index PROPERTY FOLDER "mesh/internal")
+
+# File sync engine: manifest diff (fetch only missing chunks), progressive
+# temp-file assembly with per-chunk verification, resume from a committed
+# offset, and explicit conflict policies (last-writer-wins / keep-both).
+add_library(mesh_sync_engine STATIC
+  src/mesh_sync_engine.c
+  src/mesh_sync_engine.h)
+target_include_directories(mesh_sync_engine PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_sync_engine
+  PUBLIC m3_object_manifest
+  PRIVATE TurboNet::Crypto TurboUtils::Core)
+set_property(TARGET mesh_sync_engine PROPERTY FOLDER "mesh/internal")
+
 # Build as shared library (DLL on Windows)
 add_library(mesh SHARED ${MESH_LIB_SOURCES})
 add_library(TurboP2P::Mesh ALIAS mesh)
@@ -673,12 +941,8 @@ target_link_libraries(mesh
   PUBLIC TurboUtils::Core TurboP2P::P2P
   PRIVATE mesh_mgmt_agent_router mesh_flow_ruleset)
 
-if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "" OR
-   NOT TARGET ${TURBOP2P_ICE_TARGET})
-  message(FATAL_ERROR "mesh requires the TurboNet ICE target")
-endif()
 
-target_link_libraries(mesh PRIVATE ${TURBOP2P_ICE_TARGET})
+target_link_libraries(mesh PRIVATE  TurboNet::Ice)
 target_compile_definitions(mesh PUBLIC MESH_HAS_TURBO_ICE=1)
 target_compile_definitions(mesh PRIVATE MESH_HAS_TURBO_ICE_CLOSE=1)
 
@@ -764,3 +1028,4 @@ target_link_libraries(mesh_mgmt_execution_disabled_responder
     PRIVATE
         mesh_mgmt_crypto
 )
+

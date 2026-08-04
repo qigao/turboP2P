@@ -16,6 +16,25 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_execution.c
     test_mesh_mgmt_execution_store.c
     test_m3_namespace_local_store.c
+
+    test_m3_gateway_sigv4.c
+    test_m3_object_manifest_v2.c
+    test_m3_chunk_receipt.c
+    test_m3_store_node.c
+    test_m3_chunk_mesh.c
+    test_m3_gc.c
+    test_mesh_stream_data.c
+    test_mesh_stream_source_selector.c
+    test_mesh_sync_engine.c
+    test_mesh_media_index.c
+    test_mesh_stream_live.c
+    test_mesh_stream_cluster.c
+    test_mesh_stream_kcp.c
+    test_mesh_stream_media_pull.c
+    test_mesh_stream_media_pull_multisource.c
+    test_mesh_media_playlist.c
+    test_mesh_release.c
+    test_mesh_stream_live_hls.c
     test_mesh_flow_ruleset.c
     test_mesh_flow_runtime.c
     test_mesh_flow_ruleset_raft.c
@@ -63,6 +82,17 @@ endif()
 
 if(TURBOP2P_BUILD_TURBORAFT_M3)
   list(APPEND MESH_TEST_SOURCES test_m3_namespace_raft_adapter.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_gateway_raft.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_cluster.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_wirecodec.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_coronet_transport.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_tls_handshake.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_coronet_session.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_raft_coronet_node.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_gateway_raft_node.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_gateway_http.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_gateway_datapane.c)
+  list(APPEND MESH_TEST_SOURCES test_m3_repair.c)
   list(APPEND MESH_TEST_SOURCES test_mesh_task_lease_raft_adapter.c)
   list(APPEND MESH_TEST_SOURCES test_mesh_flow_ruleset_raft_adapter.c)
   list(APPEND MESH_TEST_SOURCES test_mesh_control_raft.c)
@@ -122,6 +152,66 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
     if(test_name STREQUAL "test_m3_namespace_local_store")
         list(APPEND extra_test_libs m3_namespace_local_store)
+    endif()
+    if(test_name STREQUAL "test_m3_object_manifest_v2")
+        list(APPEND extra_test_libs m3_object_manifest OpenSSL::Crypto)
+    endif()
+    if(test_name STREQUAL "test_m3_chunk_receipt")
+        list(APPEND extra_test_libs m3_chunk_receipt)
+    endif()
+    if(test_name STREQUAL "test_m3_store_node")
+        list(APPEND extra_test_libs m3_store_node)
+    endif()
+    if(test_name STREQUAL "test_m3_chunk_mesh")
+        list(APPEND extra_test_libs m3_chunk_mesh m3_store_node TurboP2P::P2P)
+    endif()
+    if(test_name STREQUAL "test_m3_gc")
+        list(APPEND extra_test_libs m3_store_node)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_data")
+        list(APPEND extra_test_libs mesh_stream_data)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_source_selector")
+        list(APPEND extra_test_libs mesh_stream_multisource mesh_stream_source_selector TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_sync_engine")
+        list(APPEND extra_test_libs mesh_sync_engine m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_media_index")
+        list(APPEND extra_test_libs mesh_media_index m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_live")
+        list(APPEND extra_test_libs mesh_stream_live)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_cluster")
+        list(APPEND extra_test_libs mesh_stream_discovery mesh_stream_qos mesh_mgmt_service_record mesh_flow_ruleset)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_kcp")
+        list(APPEND extra_test_libs mesh_stream_kcp_adapter mesh_stream_live TurboNet::CoroNet)
+        if(WIN32)
+            list(APPEND extra_test_libs ws2_32)
+        endif()
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_media_pull")
+        list(APPEND extra_test_libs mesh_stream_media_pull mesh_media_index m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_media_pull_multisource")
+        list(APPEND extra_test_libs mesh_stream_media_pull_multisource mesh_stream_media_pull mesh_stream_multisource mesh_media_index m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_media_playlist")
+        list(APPEND extra_test_libs mesh_media_playlist mesh_media_index m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_release")
+        list(APPEND extra_test_libs mesh_release m3_object_manifest TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_stream_live_hls")
+        list(APPEND extra_test_libs mesh_stream_live_hls mesh_stream_live)
+    endif()
+    if(test_name STREQUAL "test_m3_repair")
+        list(APPEND extra_test_libs m3_repair m3_namespace_raft_adapter m3_object_manifest m3_store_node)
+    endif()
+    if(test_name STREQUAL "test_m3_gateway_sigv4")
+        list(APPEND extra_test_libs m3_gateway_sigv4)
     elseif(test_name STREQUAL "test_mesh_flow_ruleset")
         list(APPEND extra_test_libs mesh_flow_ruleset)
     elseif(test_name STREQUAL "test_mesh_flow_runtime")
@@ -136,6 +226,36 @@ foreach(test_source ${MESH_TEST_SOURCES})
         list(APPEND extra_test_libs mesh_task_execution_guard)
     elseif(test_name STREQUAL "test_m3_namespace_raft_adapter")
         list(APPEND extra_test_libs m3_namespace_raft_adapter)
+    elseif(test_name STREQUAL "test_m3_gateway_raft")
+        list(APPEND extra_test_libs m3_gateway_raft m3_object_manifest)
+    elseif(test_name STREQUAL "test_m3_raft_cluster")
+        list(APPEND extra_test_libs m3_namespace_raft_adapter m3_object_manifest TurboRaft::SQLiteStorage)
+    elseif(test_name STREQUAL "test_m3_raft_wirecodec")
+        list(APPEND extra_test_libs m3_namespace_raft_adapter m3_object_manifest TurboRaft::SQLiteStorage TurboRaft::Core)
+    elseif(test_name STREQUAL "test_m3_raft_coronet_transport")
+        list(APPEND extra_test_libs TurboRaft::CoroNet TurboRaft::Core)
+    elseif(test_name STREQUAL "test_m3_raft_coronet_session")
+        list(APPEND extra_test_libs TurboRaft::CoroNet TurboRaft::Core)
+    elseif(test_name STREQUAL "test_m3_raft_coronet_node")
+        list(APPEND extra_test_libs m3_raft_node m3_object_manifest)
+        target_compile_definitions(${test_name} PRIVATE
+            M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
+    elseif(test_name STREQUAL "test_m3_gateway_raft_node")
+        list(APPEND extra_test_libs m3_gateway m3_raft_node m3_object_manifest)
+        target_compile_definitions(${test_name} PRIVATE
+            M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
+    elseif(test_name STREQUAL "test_m3_gateway_http")
+        list(APPEND extra_test_libs m3_gateway m3_raft_node m3_object_manifest TurboHttp::Iris TurboHttp::HttpClient)
+        target_compile_definitions(${test_name} PRIVATE
+            M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
+    elseif(test_name STREQUAL "test_m3_gateway_datapane")
+        list(APPEND extra_test_libs m3_gateway m3_raft_node m3_object_manifest m3_store_node)
+        target_compile_definitions(${test_name} PRIVATE
+            M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
+    elseif(test_name STREQUAL "test_m3_raft_tls_handshake")
+        list(APPEND extra_test_libs TurboRaft::CoroNet TurboRaft::Core TurboNet::CoroNet)
+        target_compile_definitions(${test_name} PRIVATE
+            M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
     elseif(test_name STREQUAL "test_mesh_task_lease_raft_adapter")
         list(APPEND extra_test_libs mesh_task_lease_raft_adapter)
     elseif(test_name STREQUAL "test_mesh_flow_ruleset_raft_adapter")
@@ -260,6 +380,9 @@ foreach(test_source ${MESH_TEST_SOURCES})
         RUNTIME_OUTPUT_DIRECTORY ${test_runtime_output_directory})
 
     add_test(NAME ${test_name} COMMAND ${test_name})
+    if(TARGET turbo_p2p_copy_runtime_dlls)
+        add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
+    endif()
 endforeach()
 
 target_link_libraries(test_mesh_mgmt_execution_rpc_registry PRIVATE

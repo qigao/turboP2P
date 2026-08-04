@@ -45,7 +45,7 @@ target_include_directories(
 target_link_libraries(
   p2p
   PUBLIC TurboUtils::Core TurboNet::CoroNet TurboUtils::Parser
-  PRIVATE OpenSSL::Crypto monocypher roaring uthash)
+  PRIVATE OpenSSL::Crypto TurboNet::Crypto roaring uthash)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)
 else()

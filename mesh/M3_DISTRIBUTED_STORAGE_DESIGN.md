@@ -53,13 +53,11 @@ replication、repair、object commit 或一致性保证，不能作为 M3 实现
 - `iris_app_route_stream()`、`req_read_body()` 和 `req_body_read_error()` 的 fail-fast request streaming。
 - HTTP Range client、multipart/S3 schema、credential provider 和 SigV4 client-side 兼容性测试能力。
 
-需要在 TurboHTTP 上游先补齐的能力：
+需要在 TurboHTTP 上游先补齐的能力（2026-08 复核）：
 
-- Iris 公共 chunked response API 当前不返回底层发送错误；M3 不能在发送失败后误报 GET 成功。
-- 当前 `s3_put_object_from_file()` 与 `s3_download_object_stream()` 实现仍把完整对象读入内存，不能
-  用作 M3 大对象路径。
-- TurboHTTP S3 target 是 client SDK；M3 gateway 需要独立的 server-side request canonicalization
-  和 SigV4 verification boundary，不能复制或穿透 client internal signer。
+- ~~Iris 公共 chunked response API 不返回底层发送错误~~ → **已补齐**：`reply_chunked_write()` 在底层发送失败时返回 -1（iris/router.c），M3 GET 可据此不误报成功。
+- ~~`s3_put_object_from_file()` / `s3_download_object_stream()` 整对象读内存~~ → **已补齐**：两者均走 `s3_execute_signed_stream()` + 回调式流式读写（s3_client.c）。
+- **server-side SigV4 verification 仍缺失**：TurboHTTP 只有 client 侧 canonical helper 与 JWT/Bearer，没有 Authorization 签名验证。turbo-p2p 在 `mesh/src/m3_gateway_sigv4.*` 提供 Phase 1 过渡实现（单凭证、AWS4-HMAC-SHA256、x-amz-date/x-amz-content-sha256 必填、时间窗 ±15min、常量时间比较），长期应下沉到 TurboHTTP 独立模块并接入 Iris 认证中间件。
 
 这些缺口应以 additive、可返回错误的 streaming API 修复；M3 不直接访问 Iris `Res` 内部 socket，
 也不在 gateway 里另写 HTTP parser。
@@ -435,6 +433,94 @@ M3 通过独立 feature/进程启停；关闭 M3 不改变 Mesh route、identity
 和 wire protocol 都带 version。升级失败时停止新写入、保留旧 reader 和 snapshot/WAL/chunk 数据，
 不得通过删除或隐式迁移回滚。
 
+
+## 20. Phase 1 gateway 落地状态（2026-08）
+
+turbo-p2p `mesh/` 内已落地一个单节点 M3 gateway 原型（`mesh/src/m3_gateway.*` +
+`mesh/examples/m3_gateway_main.c`），用于验证网关层接线与 SigV4 边界，不是分布式 M3：
+
+- 路由（Iris）：`PUT/GET/HEAD/DELETE /:bucket/:object`、`GET /`。
+- 认证：`m3_gateway_sigv4`（server-side SigV4，见 2.3 复核）；未签名/篡改/过期请求返回 403。
+- 存储：对象分块（≤ `max_chunk_bytes`）→ `m3_chunk_store`（不可变 CAS，落盘于
+  `m3store/v1/chunks/`）；对象 CID = SHA-256(concat(chunk digest))，size = sum(chunk size)。
+- 元数据：`m3_namespace_local_store`（单节点，`apply_put`/`apply_tombstone` + 线性化查询适配器）。
+- 校验：PUT 校验 `x-amz-content-sha256` 与 body 一致；GET 逐 chunk `read_range` 后 `reply_chunked_*`
+  流式返回，发送失败（-1）即终止，不误报成功。
+- 测试：`test_m3_gateway_sigv4`（6 用例，自签名 + 篡改/过期/密钥/格式）；端到端冒烟覆盖
+  小对象与 2MB 多块对象的 PUT/GET/HEAD/DELETE 闭环、403/404。
+
+Phase 1 明确边界（后续 Phase 处理）：
+- 单节点：元数据无 Raft（`m3_namespace_raft_adapter` 为 Phase 2 预留）；对象无副本/repair/GC。
+- Iris 路由为非 stream，请求体整缓冲（main 将 `max_request_body_size` 提到 64MB）；Phase 2 改
+  `iris_app_route_stream` + `req_read_body` 以支持无上限流式。
+- object key 不含 `/`（单段路由参数）；query 不参与签名（multipart/范围参数后续支持）。
+- 单凭证（AKID + 32 字节 secret），后续扩展多凭证/轮换。
+
+Phase 2 目标：固定三 voter 的 Raft 元数据（复用 `m3_namespace_raft_adapter`）+ 流式路由 +
+Range/206 与 multipart；Phase 3：chunk 副本/repair/GC 与容量配额。
+
+### 20.1 已完成 vs 未完成（对照 V1 目标，2026-08）
+
+已完成（单节点 S3 网关面）：
+- S3 HTTP：`PUT/GET/HEAD/DELETE /:bucket/:object`、`GET /`、`GET /:bucket`（ListObjects：prefix/marker/max-keys/IsTruncated/NextMarker）、Range/206/416、ETag（带引号，各接口一致）。
+- 认证：server-side SigV4（Authorization header、presigned URL、多凭证 resolver；x-amz-content-sha256 必填、时间窗 ±900s）。
+- 数据面：不可变 chunk CAS（`m3_chunk_store`）、对象 CID=SHA-256(concat(chunk digest))、manifest 编解码、逐 chunk hash 校验。
+- 元数据：单节点 `m3_namespace_local_store`（原子持久化 `namespace.bin` + 重启恢复 + 确定性枚举）。
+- 校验/错误：payload hash 一致性、S3 错误 XML、未签名 403、缺失 404。
+
+未完成（V1 目标内）：
+- 分布式元数据：三固定 voter 的线性一致 namespace（Raft）——**适配层已实现，未接线到网关**（见 20.2）。
+- PUT 原子提交：chunk 持久化 + Raft metadata commit 都成功才返回。
+- 数据面：跨 failure domain 副本、后台 repair、GC（chunk 回收）、健康 replica 选择。
+- 通过 Mesh 虚拟网络提供服务（当前为本地 HTTP）。
+- multipart upload、无上限流式请求体（当前整缓冲 64MiB）、CopyObject、版本/标签/条件请求。
+- 配置化容量配额、多租户 ACL、审计、监控指标。
+
+### 20.2 下一步计划与 Raft 元数据可行性评估（2026-08，实证）
+
+优先级：Raft 元数据（V1 核心）→ Mesh 接入 → 副本/repair/GC → multipart/流式/配额。
+
+Raft 可行性评估结论（`事实`：已实证）：
+- TurboRaft 已安装（`external/pkgs/turboraft`），含 `raft_service.h`、`raft_coronet_transport.h`（CoroNet transport）、`raft_sqlite_storage.h`、`raft_snapshot_*`、`raft_service_owner.h`。
+- `m3_namespace_raft_adapter`（`mesh/src/m3_namespace_raft_adapter.c`，449 行）已完整实现：command encode/decode、state machine、bind_service、raft lookup adapter、propose、poll；测试 `test_m3_namespace_raft_adapter`（2 用例/41 断言）全绿。
+- 仓库内参考实现 `mesh_control_raft_service`（TurboRaft 服务封装：sqlite + core config + transport + tick/step/poll）测试全绿（2 用例/33 断言）。
+- `TURBOP2P_BUILD_TURBORAFT_M3=ON` 配置/构建成功（TurboRaft 包已接入）。
+
+剩余工作（Phase 2a→2c）：
+1. **Phase 2a 网关接线**：`m3_gateway` 从 local store 切到 raft adapter——init 建 raft service（`tr_raft_core_config_t` + `raft_coronet_transport`）、PUT/DELETE 用 `m3_namespace_raft_propose_v1`、GET/HEAD/List 用 raft lookup adapter、事件循环 poll 驱动；local `persist/load` 保留为单节点 fallback/测试用。
+2. **Phase 2b 三 voter 部署**：固定三节点成员 + CoroNet transport + SQLite 持久化；gateway 只接受 leader 写、follower 提供 linearizable 读。
+3. **Phase 2c 故障验证**：crash/partition/recovery、leader 切换、线性一致性读测试；对照 M3_DESIGN 17（Verification gates）的确定性 simulator 与 Raft 测试。
+
+### 20.3 Phase 2a 落地状态（2026-08，已实现并验证）
+
+- `mesh/src/m3_gateway_raft.*`：单 voter raft 元数据后端——SQLite（log/snapshot）+ `m3_namespace_raft_adapter`（状态机/线性化读/propose）+ no-op transport + open 时 tick 驱动自选 leader；`put/tombstone` 同步等待应用到本地 store；`lookup` 走 read-index barrier（异步，由网关 poll 驱动）。
+- `m3_gateway`：元数据后端抽象（local/raft 二选一，`gateway_meta_*` helper），新增 `m3_gateway_init_raft_v1`；`m3_gateway_main` 支持 `--raft <sqlite>`。
+- 验证：`test_m3_gateway_raft`（提交 + 线性化读 + tombstone + 重启恢复，2 用例/22 断言）全绿；raft 模式网关 e2e（PUT/GET/LIST + 重启后元数据恢复）通过；全量 ctest 54/54。
+- 已知约束（Phase 2a）：单节点（无 transport/多副本）；TurboRaft `read_index` 要求当前 term 已提交条目——leader 就任后首次读前需先提交一次写（raft 标准行为，已注释于代码）；`TURBOP2P_BUILD_TURBORAFT_M3` 已置 ON 纳入常规构建。
+### 20.4 Phase 2b-i 落地状态（2026-08，单进程三 voter 集群已验证）
+
+- `mesh/tests/test_m3_raft_cluster.c`：单进程三 voter（`{1,2,3}`）raft 集群，内存 transport（`enqueue` 按目标投递 inbox + `step` 处理），每节点独立 namespace store + SQLite(`:memory:`) + `m3_namespace_raft_adapter`。
+- 验证：选举出 leader → leader `propose` PUT → 复制 + quorum 提交 → **三个 voter 的状态机全部收敛**（各节点 store 均含该 key）。1 用例 / 8 断言全绿；全量 ctest 55/55。
+- 结论：TurboRaft 三 voter 正确性（选举/复制/提交/多数派）与 m3 namespace adapter 多节点应用已验证，为 Phase 2b-ii（真实 CoroNet transport + 三进程部署 + follower 读）铺路。
+- **重要发现（约束）**：TurboRaft 	r_raft_core_read_index 仅 leader 支持（非 leader 直接返回 TURBO_EPROTO，core 层无 read-index 转发）。因此 M3 的 linearizable 读必须**路由到 leader**；「follower 提供读」需要 TurboRaft 上游增加 read-index 转发（或上层把读请求转发给 leader）。Phase 2b-ii 按「读走 leader」设计。
+
+### 20.5 Phase 2b-ii（wire codec 边界）落地状态（2026-08）
+
+- mesh/tests/test_m3_raft_wirecodec.c：三 voter 集群，所有 raft 消息经 	r_raft_wire_codec 编解码后投递（模拟进程/网络序列化边界），验证选举 + quorum 提交 + 三节点状态机收敛。1 用例 / 9 断言全绿；全量 ctest 56/56。
+- 依赖：wire codec 使用 DataBind（TBE），运行需 data_bind.dll（已纳入顶层 runtime DLL 复制 target）。
+- 说明：本步验证「跨序列化边界后 raft 正确性不变」，为真实 CoroNet transport 三进程部署（含 TLS 身份 + 事件循环）提供 wire-format 证据；CoroNet transport 集成仍为后续独立迭代。
+
+### 20.6 Phase 2b-ii（CoroNet transport 组件验证）落地状态（2026-08）
+
+- mesh/tests/test_m3_raft_coronet_transport.c：验证 CoroNet raft transport 组件 API 可用性——确定性拨号方向（小 ID 拨出/大 ID 接收）、peer manager 配置校验（重复/乱序/含自身 id 拒绝，空 peer 列表合法）、证书身份解析（sha256: 指纹 → node id；未注册指纹拒绝）。3 用例 / 18 断言全绿；全量 ctest 57/57。
+- 结论：transport 组件 API 可用且约束明确，真实三进程部署的剩余工作集中在 CoroNet 事件循环集成（session/inbound/dial）+ TLS 证书签发 + 网关 leader 读路由。
+
+
+
+风险与前置：
+- TurboRaft 需按 M3_DESIGN 4.4 完成独立准入复核（许可/ABI/事件循环约束；测试已覆盖单服务，三节点网络待验证）。
+- 网关切 raft 后，`applied_index` 同步与 propose 失败重试语义需明确（幂等 command_id 去重）。
+- 构建开关：`TURBOP2P_BUILD_TURBORAFT_M3` 默认 OFF；建议 Phase 2a 起默认 ON 以纳入常规构建/测试。
 ## 19. Primary references
 
 - Raft extended paper: <https://raft.github.io/raft.pdf>

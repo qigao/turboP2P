@@ -89,8 +89,10 @@ int m3_namespace_raft_command_encode_v1(
   *out_size = 0u;
   if (!command || !output || !command->bucket || !command->object_key ||
       (command->type != M3_NAMESPACE_RAFT_COMMAND_PUT &&
-       command->type != M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE) ||
-      (command->type == M3_NAMESPACE_RAFT_COMMAND_PUT &&
+       command->type != M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
+       command->type != M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT) ||
+      ((command->type == M3_NAMESPACE_RAFT_COMMAND_PUT ||
+        command->type == M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT) &&
        (!command->manifest_bytes || command->manifest_size == 0u)) ||
       (command->type == M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
        (command->manifest_bytes || command->manifest_size != 0u))) {
@@ -143,8 +145,10 @@ int m3_namespace_raft_command_decode_v1(
   decoded.object_key_size = read_u16(bytes + COMMAND_KEY_SIZE_OFFSET);
   decoded.manifest_size = read_u16(bytes + COMMAND_MANIFEST_SIZE_OFFSET);
   if ((decoded.type != M3_NAMESPACE_RAFT_COMMAND_PUT &&
-       decoded.type != M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE) ||
-      (decoded.type == M3_NAMESPACE_RAFT_COMMAND_PUT &&
+       decoded.type != M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
+       decoded.type != M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT) ||
+      ((decoded.type == M3_NAMESPACE_RAFT_COMMAND_PUT ||
+        decoded.type == M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT) &&
        decoded.manifest_size == 0u) ||
       (decoded.type == M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
        decoded.manifest_size != 0u) ||
@@ -201,6 +205,11 @@ static int apply_batch(void *context, const tr_raft_entry_t *entries,
     }
     if (command.type == M3_NAMESPACE_RAFT_COMMAND_PUT) {
       result = m3_namespace_local_store_apply_put_v1(
+          adapter->store, entries[i].index, command.tenant_id, command.bucket,
+          command.bucket_size, command.object_key, command.object_key_size,
+          command.manifest_bytes, command.manifest_size);
+    } else if (command.type == M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT) {
+      result = m3_namespace_local_store_apply_update_placement_v1(
           adapter->store, entries[i].index, command.tenant_id, command.bucket,
           command.bucket_size, command.object_key, command.object_key_size,
           command.manifest_bytes, command.manifest_size);

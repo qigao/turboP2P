@@ -43,4 +43,7 @@ foreach(test_source ${TUNNEL_TEST_SOURCES})
     # Add test
     add_test(NAME ${test_name}
         COMMAND ${test_name})
+    if(TARGET turbo_p2p_copy_runtime_dlls)
+        add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
+    endif()
 endforeach()

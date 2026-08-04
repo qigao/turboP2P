@@ -1,15 +1,15 @@
 #include "mesh_mgmt_crypto.h"
 
-#include <monocypher.h>
+#include <turbo_crypto.h>
 #include <openssl/evp.h>
 
 #include <string.h>
 
-static const uint8_t MESH_MGMT_EMPTY_MESSAGE[1] = {0};
-
-static const uint8_t *mesh_mgmt_message_bytes(const uint8_t *message, size_t message_len) {
-  return message_len == 0u ? MESH_MGMT_EMPTY_MESSAGE : message;
-}
+/* Ed25519 signatures must stay on the OpenSSL EVP provider: TurboNet::Crypto
+ * currently exposes Monocypher's BLAKE2b-based EdDSA, which is not RFC 8032
+ * (SHA-512) compatible and would change the wire format of every signed
+ * envelope and peer record.  The remaining primitives (BLAKE2b-256,
+ * constant-time compare, secure wipe) come from TurboNet::Crypto. */
 
 mesh_mgmt_crypto_result_t
 mesh_mgmt_ed25519_public_from_private(const uint8_t private_key[MESH_MGMT_ED25519_PRIVATE_KEY_SIZE],
@@ -65,8 +65,7 @@ mesh_mgmt_ed25519_sign(const uint8_t private_key[MESH_MGMT_ED25519_PRIVATE_KEY_S
     goto cleanup;
   }
   if (EVP_DigestSignInit(context, NULL, NULL, NULL, key) != 1 ||
-      EVP_DigestSign(context, signature, &signature_len,
-                     mesh_mgmt_message_bytes(message, message_len), message_len) != 1 ||
+      EVP_DigestSign(context, signature, &signature_len, message, message_len) != 1 ||
       signature_len != MESH_MGMT_ED25519_SIGNATURE_SIZE) {
     memset(signature, 0, MESH_MGMT_ED25519_SIGNATURE_SIZE);
     goto cleanup;
@@ -98,7 +97,7 @@ mesh_mgmt_ed25519_verify(const uint8_t public_key[MESH_MGMT_ED25519_PUBLIC_KEY_S
     goto cleanup;
   }
   verify_result = EVP_DigestVerify(context, signature, MESH_MGMT_ED25519_SIGNATURE_SIZE,
-                                   mesh_mgmt_message_bytes(message, message_len), message_len);
+                                   message, message_len);
   if (verify_result == 1) {
     result = MESH_MGMT_CRYPTO_OK;
   } else if (verify_result == 0) {
@@ -120,8 +119,10 @@ mesh_mgmt_crypto_result_t mesh_mgmt_blake2b_256(const uint8_t *message, size_t m
   if (!message && message_len != 0u) {
     return MESH_MGMT_CRYPTO_INVALID_ARG;
   }
-  crypto_blake2b(digest, MESH_MGMT_BLAKE2B_256_SIZE, mesh_mgmt_message_bytes(message, message_len),
-                 message_len);
+  if (turbo_crypto_blake2b(digest, MESH_MGMT_BLAKE2B_256_SIZE, message, message_len) !=
+      TURBO_CRYPTO_OK) {
+    return MESH_MGMT_CRYPTO_FAILURE;
+  }
   return MESH_MGMT_CRYPTO_OK;
 }
 
@@ -130,18 +131,16 @@ int mesh_mgmt_crypto_equal_32(const uint8_t lhs[MESH_MGMT_BLAKE2B_256_SIZE],
   if (!lhs || !rhs) {
     return 0;
   }
-  return crypto_verify32(lhs, rhs) == 0;
+  return turbo_crypto_verify(lhs, rhs, MESH_MGMT_BLAKE2B_256_SIZE) == TURBO_CRYPTO_OK ? 1 : 0;
 }
 
 int mesh_mgmt_crypto_equal_16(const uint8_t lhs[16], const uint8_t rhs[16]) {
   if (!lhs || !rhs) {
     return 0;
   }
-  return crypto_verify16(lhs, rhs) == 0;
+  return turbo_crypto_verify(lhs, rhs, 16u) == TURBO_CRYPTO_OK ? 1 : 0;
 }
 
 void mesh_mgmt_crypto_wipe(void *data, size_t length) {
-  if (data && length != 0u) {
-    crypto_wipe(data, length);
-  }
+  turbo_crypto_wipe(data, length);
 }

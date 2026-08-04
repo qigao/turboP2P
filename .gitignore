@@ -88,3 +88,6 @@ license_encryption.key
 **/license_encryption.key
 **/*_key.rsa
 **/*.lic
+
+# M3 gateway raft test leftover (local test db)
+m3_gateway_raft_test.db

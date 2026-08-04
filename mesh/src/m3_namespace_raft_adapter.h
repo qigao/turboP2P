@@ -18,6 +18,7 @@ extern "C" {
 typedef enum {
   M3_NAMESPACE_RAFT_COMMAND_PUT = 1,
   M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE = 2,
+  M3_NAMESPACE_RAFT_COMMAND_UPDATE_PLACEMENT = 3,
 } m3_namespace_raft_command_type_t;
 
 /** Borrowed command view. The canonical encoder copies all bytes. */

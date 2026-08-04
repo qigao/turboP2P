@@ -30,8 +30,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(MSVC)
   add_compile_options(/experimental:c11atomics)
 endif()
-# Enable folder organization in IDEs
-set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+ 
 set_property(GLOBAL PROPERTY PREDEFINED_TARGETS_FOLDER "cmake")
 
 # Enable testing
@@ -42,32 +41,48 @@ include(CMakeOptions.cmake)
 include(Sanitizers)
 
 find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
-find_package(Threads REQUIRED)
-find_package(OpenSSL REQUIRED)
 find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
+find_package(TurboHttp REQUIRED PATHS ${TURBO_HTTP_ROOT})
+find_package(OpenSSL REQUIRED)
 
 if(TURBOP2P_BUILD_TURBORAFT_M3)
   find_package(TurboRaft CONFIG REQUIRED COMPONENTS Service SQLiteStorage
                PATHS ${TURBO_RAFT_ROOT})
 endif()
 
-if(BUILD_EXAMPLES)
-  # TurboHttp releases from before the TurboUtils package split still refer to
-  # these build-tree target names. Keep the compatibility local to examples;
-  # the aliases are not exported by TurboP2P.
-  if(NOT TARGET TurboNet::Utils)
-    add_library(TurboNet::Utils ALIAS TurboUtils::Core)
+# Windows 测试进程需要从可执行文件目录解析依赖 DLL（turbo_utils.dll、CoroNet.dll、
+# turbo_ice.dll、ssl.dll）。把它们复制到运行时输出目录，避免同一 ctest 进程
+# 批量启动测试时出现 STATUS_DLL_NOT_FOUND (0xc0000135)。
+if(WIN32 AND (BUILD_TESTS OR BUILD_EXAMPLES))
+  set(_turbo_p2p_runtime_dlls
+      $<TARGET_FILE:TurboNet::CoroNet>
+      $<TARGET_FILE:TurboNet::Ice>
+      $<TARGET_FILE:TurboUtils::Core>)
+  if(TARGET TurboHttp::Iris)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboHttp::Iris>)
   endif()
-  if(NOT TARGET TurboNet::Parser)
-    add_library(TurboNet::Parser ALIAS TurboUtils::Parser)
+  if(TARGET TurboHttp::HttpClient)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboHttp::HttpClient>)
   endif()
-  find_package(TurboHttp REQUIRED PATHS ${TURBO_HTTP_ROOT})
-endif()
-
-if(NOT DEFINED TURBOP2P_ICE_TARGET OR "${TURBOP2P_ICE_TARGET}" STREQUAL "")
-  if(TARGET TurboNet::Ice)
-    set(TURBOP2P_ICE_TARGET TurboNet::Ice)
+  if(TARGET TurboUtils::Mustache)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::Mustache>)
   endif()
+  if(TARGET TurboUtils::Parser)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::Parser>)
+  endif()
+  if(TARGET TurboUtils::DataBind)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::DataBind>)
+  endif()
+  if(DEFINED VCPKG_INSTALLED_DIR AND EXISTS
+     "${VCPKG_INSTALLED_DIR}/x64-windows/bin/ssl.dll")
+    list(APPEND _turbo_p2p_runtime_dlls
+         "${VCPKG_INSTALLED_DIR}/x64-windows/bin/ssl.dll")
+  endif()
+  add_custom_target(turbo_p2p_copy_runtime_dlls
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_turbo_p2p_runtime_dlls}
+            ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}
+    COMMENT "Copying test runtime DLLs to ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+    VERBATIM)
 endif()
 
 # Additional components

@@ -481,7 +481,9 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
   }
 
   store->open = 1u;
-  if (turbo_fs_stat(store->path, &stat) == 0) {
+  /* First open has no journal yet; access() avoids ERROR logs for a missing file. */
+  if (turbo_fs_access(store->path, TURBO_FS_ACCESS_EXISTS) == 0 &&
+      turbo_fs_stat(store->path, &stat) == 0) {
     result = load_snapshot(store);
     if (result != MESH_MGMT_EXECUTION_STORE_OK)
       goto failed;

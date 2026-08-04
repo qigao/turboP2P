@@ -1,6 +1,7 @@
 #include <turbo_mesh.h>
 #include <p2p.h>
 #include <turbo_thread.h>
+#include <turbo_parser.h>
 #include <tlog.h>
 #include "mesh_config.h"
 #include "mesh_runtime_health.h"
@@ -2546,6 +2547,123 @@ static void meshctl_print_usage(const char *argv0) {
     printf("  rpc scope: status/health/ping/task-model/resolve => mesh_data_plane; shutdown => node_control\n");
 }
 
+/* ---- meshctl cluster (turbo_cmd) -----------------------------------------
+ * Multi-node management: query a set of node RPC endpoints and aggregate, or
+ * list the configured node inventory. Parsing is delegated to turbo_cmd from
+ * turbo_parser.h so flags/help/validation follow the shared TurboUtils CLI
+ * conventions. */
+
+#define MESHCTL_CLUSTER_MAX_NODES 16u
+#define MESHCTL_CLUSTER_VERSION "1.0"
+
+typedef struct {
+    int subcommand; /* 0 = status, 1 = list */
+    char *nodes[MESHCTL_CLUSTER_MAX_NODES];
+    uint32_t node_count;
+    char *nodes_csv; /* comma-separated --node value (turbo_cmd single string) */
+    char scratch[MESHCTL_CLUSTER_MAX_NODES][128]; /* split copies (input may be read-only) */
+    char *token;
+    bool raw;
+} meshctl_cluster_opts_t;
+
+static int meshctl_cluster_parse(int argc, char **argv, meshctl_cluster_opts_t *opts) {
+    turbo_cmd_parser_t *cmd = NULL;
+    turbo_cmd_subcommand_t *status = NULL;
+    turbo_cmd_subcommand_t *list = NULL;
+    int selected = -1;
+
+    if (!opts)
+        return -1;
+    memset(opts, 0, sizeof(*opts));
+    cmd = turbo_cmd_create("meshctl cluster", MESHCTL_CLUSTER_VERSION);
+    if (!cmd)
+        return -1;
+
+    status = turbo_cmd_add_subcommand(cmd, "status", "Query node status across the cluster");
+    turbo_cmd_sub_add_string(status, &opts->nodes_csv, "node", "n",
+                             "Comma-separated node addresses (host:port)");
+    turbo_cmd_sub_add_string(status, &opts->token, "token", "t", "RPC auth token");
+    turbo_cmd_sub_add_flag(status, &opts->raw, "raw", NULL, "Print raw response bodies");
+
+    list = turbo_cmd_add_subcommand(cmd, "list", "List the configured cluster nodes");
+    turbo_cmd_sub_add_string(list, &opts->nodes_csv, "node", "n",
+                             "Comma-separated node addresses (host:port)");
+
+    selected = turbo_cmd_parse_subcommand(cmd, argc, argv, false);
+    turbo_cmd_destroy(cmd);
+    if (selected < 0)
+        return -1; /* help or parse error already printed */
+    opts->subcommand = selected;
+    /* Split the comma-separated node list into the node array without mutating
+     * the input (command-line argv is writable, test literals are not). */
+    if (opts->nodes_csv && opts->nodes_csv[0] != '\0') {
+        const char *cursor = opts->nodes_csv;
+
+        while (*cursor != '\0' && opts->node_count < MESHCTL_CLUSTER_MAX_NODES) {
+            const char *start;
+            size_t len;
+
+            while (*cursor == ',' || *cursor == ' ')
+                cursor++;
+            start = cursor;
+            while (*cursor != '\0' && *cursor != ',')
+                cursor++;
+            len = (size_t)(cursor - start);
+            while (len > 0u && start[len - 1u] == ' ')
+                len--;
+            if (len > 0u && len < sizeof(opts->scratch[0])) {
+                uint32_t index = opts->node_count;
+
+                memcpy(opts->scratch[index], start, len);
+                opts->scratch[index][len] = '\0';
+                opts->nodes[index] = opts->scratch[index];
+                opts->node_count++;
+            }
+        }
+    }
+    return 0;
+}
+
+static int meshctl_run_cluster_status(meshctl_cluster_opts_t *opts) {
+    uint32_t up = 0u;
+    uint32_t down = 0u;
+
+    if (opts->node_count == 0u) {
+        fprintf(stderr, "cluster status requires at least one --node\n");
+        return 1;
+    }
+    for (uint32_t i = 0u; i < opts->node_count; i++) {
+        int ok = meshctl_rpc_send(opts->nodes[i], "/v1/status", "GET", opts->token,
+                                  opts->raw);
+
+        if (ok == 0) {
+            printf("NODE %s: UP\n", opts->nodes[i]);
+            up++;
+        } else {
+            printf("NODE %s: DOWN\n", opts->nodes[i]);
+            down++;
+        }
+    }
+    printf("CLUSTER STATUS nodes=%u up=%u down=%u\n", opts->node_count, up, down);
+    return down > 0u ? 1 : 0;
+}
+
+static int meshctl_run_cluster(int argc, char **argv) {
+    meshctl_cluster_opts_t opts;
+
+    if (meshctl_cluster_parse(argc, argv, &opts) != 0)
+        return 1;
+    if (opts.subcommand == 1) {
+        if (opts.node_count == 0u) {
+            printf("CLUSTER LIST no nodes configured\n");
+            return 0;
+        }
+        for (uint32_t i = 0u; i < opts.node_count; i++)
+            printf("%u %s\n", i, opts.nodes[i]);
+        return 0;
+    }
+    return meshctl_run_cluster_status(&opts);
+}
 #ifndef MESHCTL_NO_MAIN
 int main(int argc, char **argv) {
     const char *command = NULL;
@@ -2568,6 +2686,10 @@ int main(int argc, char **argv) {
 
     if (strcmp(command, "rpc") == 0) {
         return meshctl_run_rpc(argc - 2, argv + 2);
+    }
+
+    if (strcmp(command, "cluster") == 0) {
+        return meshctl_run_cluster(argc - 1, argv + 1);
     }
 
     for (i = 2; i < argc; i++) {

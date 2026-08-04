@@ -3323,7 +3323,7 @@ static void mesh_discover_routes(mesh_network_t *mesh) {
 
         char dht_key[128];
         char dht_value[1024];
-        size_t dht_len = sizeof(dht_value);
+        size_t dht_len = sizeof(dht_value) - 1u; /* reserve room for NUL */
 
         fmt(dht_key, sizeof(dht_key), "mesh:{}:routes:{}",
                  mesh->network_id, peer->virtual_ip);
@@ -4765,7 +4765,7 @@ int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t len) {
         mesh_peer_t *p = NULL;
         char dht_key[128];
         char dht_value[256] = {0};
-        size_t dht_len = sizeof(dht_value);
+        size_t dht_len = sizeof(dht_value) - 1u; /* reserve room for NUL */
 
         if (!dst_in_virtual_network) {
             TLOG_DEBUG("Dropping non-mesh packet {} without pinned route policy", dst_ip_str);
@@ -4794,10 +4794,12 @@ int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t len) {
                        mesh->network_id, dst_ip_str);
 
         if (p2p_dht_get(mesh->p2p_node, dht_key, dht_value, &dht_len) == P2P_OK) {
+            /* kademlia_find_value does not NUL-terminate; ensure it. */
+            dht_value[dht_len] = '\0';
             char peer_ip[64];
             int peer_port;
 
-            if (sscanf(dht_value, "%[^:]:%d", peer_ip, &peer_port) == 2) {
+            if (sscanf(dht_value, "%63[^:]:%d", peer_ip, &peer_port) == 2) {
                 p2p_connect(mesh->p2p_node, peer_ip, peer_port);
             }
         }
@@ -5333,16 +5335,18 @@ int mesh_connect_peer(mesh_network_t *mesh, const char *virtual_ip) {
              mesh->network_id, virtual_ip);
 
     char dht_value[256];
-    size_t dht_len = sizeof(dht_value);
+    size_t dht_len = sizeof(dht_value) - 1u; /* reserve room for NUL */
 
     if (p2p_dht_get(mesh->p2p_node, dht_key, dht_value, &dht_len) != P2P_OK) {
         return MESH_ERR_NOT_FOUND;
     }
+    /* kademlia_find_value does not NUL-terminate; ensure it. */
+    dht_value[dht_len] = '\0';
 
     /* Parse and connect */
     char peer_ip[64];
     int peer_port;
-    if (sscanf(dht_value, "%[^:]:%d", peer_ip, &peer_port) != 2) {
+    if (sscanf(dht_value, "%63[^:]:%d", peer_ip, &peer_port) != 2) {
         return MESH_ERR_INVALID_ARG;
     }
 

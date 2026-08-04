@@ -48,9 +48,10 @@ static void cleanup_store_files(const char *path) {
 
   (void)snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
   (void)snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-  (void)turbo_fs_unlink(path);
-  (void)turbo_fs_unlink(lock_path);
-  (void)turbo_fs_unlink(temp_path);
+  /* Only remove files that exist; unlink/stat of a missing file logs ERROR. */
+  if (turbo_fs_access(path, TURBO_FS_ACCESS_EXISTS) == 0) (void)turbo_fs_unlink(path);
+  if (turbo_fs_access(lock_path, TURBO_FS_ACCESS_EXISTS) == 0) (void)turbo_fs_unlink(lock_path);
+  if (turbo_fs_access(temp_path, TURBO_FS_ACCESS_EXISTS) == 0) (void)turbo_fs_unlink(temp_path);
 }
 
 static void test_persists_dedupe_and_recovers_running(void) {

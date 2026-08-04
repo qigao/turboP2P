@@ -6,12 +6,11 @@
 
 #ifdef _WIN32
   #include <winsock2.h>
+  #include <ws2tcpip.h>
 #else
   #include <sys/socket.h>
+  #include <arpa/inet.h>
 #endif
-
-#include <openssl/bio.h>
-#include <openssl/crypto.h>
 
 #include <string.h>
 
@@ -254,33 +253,14 @@ invalid_schema:
 
 static int address_to_host(const mesh_mgmt_endpoint_announcement_v1_t *announcement,
                            char output[MESH_MGMT_ENDPOINT_HOST_MAX]) {
-  BIO_ADDR *address;
-  char *host;
-  int family = announcement->address_family == MESH_MGMT_ENDPOINT_ADDRESS_IPV4 ? AF_INET : AF_INET6;
-  size_t host_length;
-  int result = 0;
+  int family = announcement->address_family == MESH_MGMT_ENDPOINT_ADDRESS_IPV4
+                   ? AF_INET
+                   : AF_INET6;
 
-  if (BIO_sock_init() != 1)
+  if (inet_ntop(family, announcement->address, output, MESH_MGMT_ENDPOINT_HOST_MAX) == NULL) {
     return 0;
-  address = BIO_ADDR_new();
-  if (!address)
-    return 0;
-  if (BIO_ADDR_rawmake(address, family, announcement->address,
-                       address_length(announcement->address_family), 0u) != 1)
-    goto cleanup;
-  host = BIO_ADDR_hostname_string(address, 1);
-  if (!host)
-    goto cleanup;
-  host_length = strlen(host);
-  if (host_length > 0u && host_length < MESH_MGMT_ENDPOINT_HOST_MAX) {
-    memcpy(output, host, host_length + 1u);
-    result = 1;
   }
-  OPENSSL_free(host);
-
-cleanup:
-  BIO_ADDR_free(address);
-  return result;
+  return output[0] != '\\0';
 }
 
 mesh_mgmt_endpoint_record_result_t

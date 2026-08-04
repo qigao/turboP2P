@@ -26,4 +26,7 @@ foreach(test_name ${P2P_TESTS})
 
   # Add as CTest
   add_test(NAME ${test_name} COMMAND ${test_name})
+  if(TARGET turbo_p2p_copy_runtime_dlls)
+    add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
+  endif()
 endforeach()

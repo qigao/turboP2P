@@ -5,7 +5,7 @@
 
 #include "p2p_crypto.h"
 #include "../internal.h"
-#include <monocypher.h>
+#include <turbo_crypto.h>
 #include <platform.h>
 #include <limits.h>
 #include <string.h>
@@ -33,9 +33,9 @@ int p2p_crypto_random(uint8_t *buf, size_t len) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    if (turbo_secure_random(buf, len) != 0) {
+    if (turbo_crypto_random(buf, len) != TURBO_CRYPTO_OK) {
         if (buf && len > 0) {
-            crypto_wipe(buf, len);
+            turbo_crypto_wipe(buf, len);
         }
         return P2P_ERR_CRYPTO;
     }
@@ -55,13 +55,13 @@ int p2p_crypto_generate_identity(p2p_identity_t *identity) {
 
     ret = p2p_crypto_random(generated.secret_key, P2P_KEY_SIZE);
     if (ret != P2P_OK) {
-        crypto_wipe(&generated, sizeof(generated));
+        turbo_crypto_wipe(&generated, sizeof(generated));
         return ret;
     }
 
-    crypto_x25519_public_key(generated.public_key, generated.secret_key);
+    turbo_crypto_x25519_public_key(generated.public_key, generated.secret_key);
     memcpy(identity, &generated, sizeof(*identity));
-    crypto_wipe(&generated, sizeof(generated));
+    turbo_crypto_wipe(&generated, sizeof(generated));
 
     return P2P_OK;
 }
@@ -71,7 +71,7 @@ int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
     if (!identity || !secret_key) return P2P_ERR_INVALID_ARG;
 
     memcpy(identity->secret_key, secret_key, P2P_KEY_SIZE);
-    crypto_x25519_public_key(identity->public_key, identity->secret_key);
+    turbo_crypto_x25519_public_key(identity->public_key, identity->secret_key);
     return P2P_OK;
 }
 
@@ -80,7 +80,7 @@ int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
  * ============================================================================= */
 
 void p2p_crypto_wipe(void *data, size_t len) {
-    crypto_wipe(data, len);
+    turbo_crypto_wipe(data, len);
 }
 
 /* =============================================================================
@@ -93,7 +93,7 @@ int p2p_crypto_session_is_ready(const p2p_crypto_session_t *sess) {
 
 void p2p_crypto_session_destroy(p2p_crypto_session_t *sess) {
     if (sess) {
-        crypto_wipe(sess, sizeof(*sess));
+        turbo_crypto_wipe(sess, sizeof(*sess));
     }
 }
 
@@ -130,12 +130,14 @@ int p2p_crypto_encrypt(p2p_crypto_session_t *sess,
     memcpy(out_nonce, nonce, P2P_NONCE_COUNTER_SIZE);
 
     /* Encrypt with XChaCha20-Poly1305 */
-    crypto_aead_lock(out_ct,            /* ciphertext */
-                     out_tag,           /* tag */
-                     sess->tx_key,      /* key */
-                     nonce,             /* nonce */
-                     NULL, 0,           /* no additional data */
-                     pt, pt_len);       /* plaintext */
+    if (turbo_crypto_aead_lock(out_ct,   /* ciphertext */
+                          out_tag,      /* tag */
+                          sess->tx_key, /* key */
+                          nonce,        /* nonce */
+                          NULL, 0,      /* no additional data */
+                          pt, pt_len) != TURBO_CRYPTO_OK) {
+        return P2P_ERR_CRYPTO;
+    }
 
     sess->tx_nonce++;
     *ct_len = P2P_AEAD_FRAME_OVERHEAD + pt_len;
@@ -172,7 +174,7 @@ int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
     }
 
     /* Verify and decrypt */
-    int ret = crypto_aead_unlock(pt,             /* plaintext */
+    int ret = turbo_crypto_aead_unlock(pt,             /* plaintext */
                                  in_tag,         /* tag */
                                  sess->rx_key,   /* key */
                                  nonce,          /* nonce */
@@ -196,6 +198,12 @@ int p2p_crypto_decrypt(p2p_crypto_session_t *sess,
  * 1. Initiator -> Responder: ephemeral public key
  * 2. Responder -> Initiator: ephemeral public key
  * 3. Both derive shared secret from ECDH
+ *
+ * SECURITY LIMITATION: static keys are sent in plaintext and are not signed,
+ * and there is no key confirmation, so an active man-in-the-middle can
+ * substitute its own static keys. This provides confidentiality but NOT
+ * identity authentication. Do not use for production-grade peer auth;
+ * migrate to a standard Noise XX/KK pattern for that.
  * ============================================================================= */
 
 int p2p_noise_init_initiator(p2p_noise_handshake_t *hs,
@@ -213,7 +221,7 @@ int p2p_noise_init_initiator(p2p_noise_handshake_t *hs,
     if (ret != P2P_OK) {
         return ret;
     }
-    crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
+    turbo_crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
     memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
     memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);
 
@@ -239,7 +247,7 @@ int p2p_noise_init_responder(p2p_noise_handshake_t *hs,
     if (ret != P2P_OK) {
         return ret;
     }
-    crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
+    turbo_crypto_x25519_public_key(hs->ephemeral_public, hs->ephemeral_secret);
     memcpy(hs->local_static_public, identity->public_key, P2P_KEY_SIZE);
     memcpy(hs->local_static_secret, identity->secret_key, P2P_KEY_SIZE);
 
@@ -284,12 +292,17 @@ int p2p_noise_read_message(p2p_noise_handshake_t *hs,
     memcpy(hs->remote_public, data, P2P_KEY_SIZE);
 
     /* Perform ECDH to derive shared secret */
-    crypto_x25519(hs->shared_secret, hs->ephemeral_secret, hs->remote_public);
+    if (turbo_crypto_x25519(hs->shared_secret, hs->ephemeral_secret,
+                            hs->remote_public) != TURBO_CRYPTO_OK) {
+        return P2P_ERR_CRYPTO;
+    }
     if (len >= P2P_KEY_SIZE * 2) {
         memcpy(hs->remote_static_public, data + P2P_KEY_SIZE, P2P_KEY_SIZE);
-        crypto_x25519(hs->static_shared_secret,
-                      hs->local_static_secret,
-                      hs->remote_static_public);
+        if (turbo_crypto_x25519(hs->static_shared_secret,
+                                hs->local_static_secret,
+                                hs->remote_static_public) != TURBO_CRYPTO_OK) {
+            return P2P_ERR_CRYPTO;
+        }
         hs->has_remote_static_public = 1;
     }
 
@@ -333,7 +346,10 @@ int p2p_noise_split(const p2p_noise_handshake_t *hs, p2p_crypto_session_t *sess)
         uint8_t identity_input[P2P_KEY_SIZE * 2];
         memcpy(identity_input, hs->shared_secret, P2P_KEY_SIZE);
         memcpy(identity_input + P2P_KEY_SIZE, hs->static_shared_secret, P2P_KEY_SIZE);
-        crypto_blake2b(tx_input, 32, identity_input, sizeof(identity_input));
+        if (turbo_crypto_blake2b(tx_input, 32, identity_input,
+                              sizeof(identity_input)) != TURBO_CRYPTO_OK) {
+            return P2P_ERR_CRYPTO;
+        }
         memcpy(rx_input, tx_input, 32);
         p2p_crypto_wipe(identity_input, sizeof(identity_input));
     } else {
@@ -351,8 +367,12 @@ int p2p_noise_split(const p2p_noise_handshake_t *hs, p2p_crypto_session_t *sess)
         memcpy(rx_input + 32, "initiator_to_responder__", 24);
     }
 
-    crypto_blake2b(sess->tx_key, 32, tx_input, 56);
-    crypto_blake2b(sess->rx_key, 32, rx_input, 56);
+    if (turbo_crypto_blake2b(sess->tx_key, 32, tx_input, 56) != TURBO_CRYPTO_OK) {
+        return P2P_ERR_CRYPTO;
+    }
+    if (turbo_crypto_blake2b(sess->rx_key, 32, rx_input, 56) != TURBO_CRYPTO_OK) {
+        return P2P_ERR_CRYPTO;
+    }
 
     sess->tx_nonce = 0;
     sess->rx_nonce = 0;
@@ -370,5 +390,5 @@ int p2p_noise_split(const p2p_noise_handshake_t *hs, p2p_crypto_session_t *sess)
 
 void p2p_crypto_sha256(const uint8_t *data, size_t len, uint8_t hash[32]) {
     /* Use BLAKE2b-256 as a secure hash replacement */
-    crypto_blake2b(hash, 32, data, len);
+    (void)turbo_crypto_blake2b(hash, 32, data, len);
 }
