@@ -30,6 +30,29 @@
       "configurePreset": "dev-linux-ninja"
     },
     {
+      "name": "build-security-linux-clang-asan",
+      "displayName": "Build Security Tests (Linux Clang ASan/UBSan/LSan)",
+      "inherits": "ISLinux",
+      "configurePreset": "security-linux-clang-asan"
+    },
+    {
+      "name": "build-security-linux-clang-tsan",
+      "displayName": "Build Security Tests (Linux Clang TSan)",
+      "inherits": "ISLinux",
+      "configurePreset": "security-linux-clang-tsan"
+    },
+    {
+      "name": "build-security-linux-clang-fuzz",
+      "displayName": "Build Security Fuzzers (Linux Clang)",
+      "inherits": "ISLinux",
+      "configurePreset": "security-linux-clang-fuzz",
+      "targets": [
+        "fuzz_p2p_cookie",
+        "fuzz_p2p_message",
+        "fuzz_p2p_noise_read"
+      ]
+    },
+    {
       "name": "build-default-mac",
       "displayName": "Build (Default, Mac)",
       "inherits": "ISMac",

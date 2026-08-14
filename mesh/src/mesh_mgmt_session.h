@@ -12,8 +12,9 @@ extern "C" {
 #endif
 
 #define MESH_MGMT_BUILD_VERSION_MAX 32u
-#define MESH_MGMT_HELLO_V1_MAX_SIZE 579u
-#define MESH_MGMT_HELLO_ACK_V1_SIZE 62u
+#define MESH_MGMT_CHANNEL_BINDING_SIZE 32u
+#define MESH_MGMT_HELLO_V1_MAX_SIZE 615u
+#define MESH_MGMT_HELLO_ACK_V1_SIZE 98u
 #define MESH_MGMT_SESSION_MIN_FRAME 1024u
 #define MESH_MGMT_DIGEST_ENTRIES_MAX 1024u
 #define MESH_MGMT_DELTA_BATCH_MAX 256u
@@ -70,6 +71,7 @@ typedef struct {
     uint8_t management_key[32];
     uint8_t managed_node_id[32];
     uint8_t connection_id[16];
+    uint8_t channel_binding[MESH_MGMT_CHANNEL_BINDING_SIZE];
     uint32_t max_frame;
     uint16_t max_digest_entries;
     uint16_t max_delta_batch;
@@ -83,6 +85,7 @@ typedef struct {
     uint16_t max_digest_entries;
     uint16_t max_delta_batch;
     uint8_t peer_connection_id[16];
+    uint8_t channel_binding[MESH_MGMT_CHANNEL_BINDING_SIZE];
 } mesh_mgmt_hello_ack_v1_t;
 
 typedef struct {
@@ -92,6 +95,7 @@ typedef struct {
     uint8_t max_minor;
     uint64_t features;
     uint8_t connection_id[16];
+    uint8_t channel_binding[MESH_MGMT_CHANNEL_BINDING_SIZE];
     uint32_t max_frame;
     uint16_t max_digest_entries;
     uint16_t max_delta_batch;

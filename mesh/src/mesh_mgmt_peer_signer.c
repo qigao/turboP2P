@@ -63,6 +63,7 @@ mesh_mgmt_peer_signer_init_v1(mesh_mgmt_peer_signer_v1_t *signer,
   uint8_t management_key[32];
   uint8_t issuer_hash[32];
   uint8_t hello_payload[MESH_MGMT_HELLO_V1_MAX_SIZE];
+  mesh_mgmt_hello_v1_t validated_hello;
   size_t hello_payload_len = 0u;
   uint64_t now_ms;
 
@@ -83,8 +84,17 @@ mesh_mgmt_peer_signer_init_v1(mesh_mgmt_peer_signer_v1_t *signer,
   memset(management_key, 0, sizeof(management_key));
   memset(issuer_hash, 0, sizeof(issuer_hash));
   memset(hello_payload, 0, sizeof(hello_payload));
-  session_result = mesh_mgmt_hello_encode_v1(&config->hello, hello_payload, sizeof(hello_payload),
+  validated_hello = config->hello;
+  if (bytes_are_zero(validated_hello.channel_binding,
+                     sizeof(validated_hello.channel_binding))) {
+    /* Generic record publishers reuse this signer but never emit HELLO.
+     * Actual HELLO construction remains fail-closed unless the P2P adapter
+     * injects the authenticated Noise binding into signer->hello. */
+    validated_hello.channel_binding[0] = 1u;
+  }
+  session_result = mesh_mgmt_hello_encode_v1(&validated_hello, hello_payload, sizeof(hello_payload),
                                              &hello_payload_len);
+  mesh_mgmt_crypto_wipe(&validated_hello, sizeof(validated_hello));
   if (session_result != MESH_MGMT_SESSION_OK) {
     mesh_mgmt_crypto_wipe(hello_payload, sizeof(hello_payload));
     return MESH_MGMT_PEER_SIGNER_ENCODE_FAILED;

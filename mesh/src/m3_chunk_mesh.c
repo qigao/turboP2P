@@ -312,11 +312,11 @@ static void mesh_service_on_message(p2p_node_t *node, p2p_peer_t *peer,
   const uint8_t *signer_public_key;
   const uint8_t *payload;
   size_t payload_len;
-  uint8_t peer_channel_key[M3_CHUNK_MESH_CHANNEL_KEY_SIZE];
   m3_chunk_capability_claims_v1_t claims;
   m3_chunk_access_request_v1_t request;
   m3_store_node_result_t store_result;
   uint64_t now_ms = (uint64_t)time(NULL) * 1000u;
+  p2p_peer_security_info_v2_t security_info;
   int trusted = 0;
 
   if (!service || !service->node || !service->store)
@@ -330,16 +330,19 @@ static void mesh_service_on_message(p2p_node_t *node, p2p_peer_t *peer,
     return;
   }
   for (size_t i = 0u; i < service->trusted_count; i++) {
-    if (memcmp(service->trusted_keys[i], signer_public_key,
-               M3_CHUNK_MESH_SIGNER_KEY_SIZE) == 0) {
+    if (mesh_mgmt_crypto_equal_32(service->trusted_keys[i],
+                                  signer_public_key)) {
       trusted = 1;
       break;
     }
   }
+  memset(&security_info, 0, sizeof(security_info));
+  security_info.struct_size = sizeof(security_info);
   if (!trusted ||
-      p2p_peer_get_public_key(peer, peer_channel_key) != P2P_OK ||
-      memcmp(peer_channel_key, channel_public_key,
-             M3_CHUNK_MESH_CHANNEL_KEY_SIZE) != 0 ||
+      p2p_peer_get_security_info_v2(peer, &security_info) != P2P_OK ||
+      !security_info.authenticated ||
+      !mesh_mgmt_crypto_equal_32(security_info.channel_binding,
+                                 channel_public_key) ||
       m3_chunk_mesh_claims_decode_v1(claims_bytes, &claims) !=
           M3_CHUNK_MESH_OK ||
       m3_chunk_mesh_claims_verify_v1(signer_public_key, &claims, signature) !=
@@ -427,8 +430,8 @@ m3_chunk_mesh_result_t m3_chunk_mesh_service_add_trusted_key_v1(
   if (service->trusted_count >= M3_CHUNK_MESH_MAX_TRUSTED_KEYS)
     return M3_CHUNK_MESH_RESOURCE_EXHAUSTED;
   for (size_t i = 0u; i < service->trusted_count; i++) {
-    if (memcmp(service->trusted_keys[i], signer_public_key,
-               M3_CHUNK_MESH_SIGNER_KEY_SIZE) == 0) {
+    if (mesh_mgmt_crypto_equal_32(service->trusted_keys[i],
+                                  signer_public_key)) {
       return M3_CHUNK_MESH_OK;
     }
   }
@@ -618,6 +621,7 @@ m3_chunk_mesh_result_t m3_chunk_mesh_client_put_v1(
     m3_chunk_receipt_v1_t *out_receipt) {
   uint8_t claims_bytes[M3_CHUNK_MESH_CLAIMS_SIZE];
   uint8_t channel_public_key[M3_CHUNK_MESH_CHANNEL_KEY_SIZE];
+  p2p_peer_security_info_v2_t security_info;
   uint8_t frame[M3_CHUNK_MESH_FRAME_MAX];
   size_t frame_size = 0u;
   m3_chunk_mesh_result_t result;
@@ -632,8 +636,13 @@ m3_chunk_mesh_result_t m3_chunk_mesh_client_put_v1(
   result = m3_chunk_mesh_claims_encode_v1(claims, claims_bytes);
   if (result != M3_CHUNK_MESH_OK)
     return result;
-  if (p2p_node_get_public_key(client->node, channel_public_key) != P2P_OK)
+  memset(&security_info, 0, sizeof(security_info));
+  security_info.struct_size = sizeof(security_info);
+  if (p2p_peer_get_security_info_v2(client->peer, &security_info) != P2P_OK ||
+      !security_info.authenticated)
     return M3_CHUNK_MESH_NETWORK;
+  memcpy(channel_public_key, security_info.channel_binding,
+         sizeof(channel_public_key));
   memset(client->pending_correlation, 0, sizeof(client->pending_correlation));
   client->pending_correlation[0] = (uint8_t)(client->port & 0xffu);
   client->pending_correlation[1] = 0x5au;
@@ -668,6 +677,7 @@ m3_chunk_mesh_result_t m3_chunk_mesh_client_get_v1(
     uint8_t *buffer, size_t buffer_size, size_t *out_read, uint64_t timeout_ms) {
   uint8_t claims_bytes[M3_CHUNK_MESH_CLAIMS_SIZE];
   uint8_t channel_public_key[M3_CHUNK_MESH_CHANNEL_KEY_SIZE];
+  p2p_peer_security_info_v2_t security_info;
   uint8_t frame[M3_CHUNK_MESH_FRAME_MAX];
   size_t frame_size = 0u;
   m3_chunk_mesh_result_t result;
@@ -680,8 +690,13 @@ m3_chunk_mesh_result_t m3_chunk_mesh_client_get_v1(
   result = m3_chunk_mesh_claims_encode_v1(claims, claims_bytes);
   if (result != M3_CHUNK_MESH_OK)
     return result;
-  if (p2p_node_get_public_key(client->node, channel_public_key) != P2P_OK)
+  memset(&security_info, 0, sizeof(security_info));
+  security_info.struct_size = sizeof(security_info);
+  if (p2p_peer_get_security_info_v2(client->peer, &security_info) != P2P_OK ||
+      !security_info.authenticated)
     return M3_CHUNK_MESH_NETWORK;
+  memcpy(channel_public_key, security_info.channel_binding,
+         sizeof(channel_public_key));
   memset(client->pending_correlation, 0, sizeof(client->pending_correlation));
   client->pending_correlation[0] = (uint8_t)(client->port & 0xffu);
   client->pending_correlation[1] = 0x5bu;

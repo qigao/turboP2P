@@ -103,7 +103,8 @@ mesh_mgmt_execution_result_t mesh_mgmt_execution_grant_validate_v1(
       bytes_are_zero(grant->deployment_id, sizeof(grant->deployment_id)) ||
       grant->deployment_generation == 0u ||
       bytes_are_zero(grant->package_digest, sizeof(grant->package_digest)) ||
-      grant->operation != MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM ||
+      (grant->operation != MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM &&
+       grant->operation != MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_NATIVE) ||
       grant->capabilities == 0u ||
       (grant->capabilities & ~MESH_MGMT_EXECUTION_CAP_ALL) != 0u ||
       !refs_are_valid(grant->mount_ids, grant->mount_count) ||

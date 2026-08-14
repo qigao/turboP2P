@@ -3,6 +3,35 @@
 #define MESHCTL_NO_MAIN
 #include "../examples/meshctl.c"
 
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+typedef SOCKET meshctl_socket_t;
+#define MESHCTL_TEST_INVALID_SOCKET INVALID_SOCKET
+#else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <sys/socket.h>
+  #include <unistd.h>
+typedef int meshctl_socket_t;
+#define MESHCTL_TEST_INVALID_SOCKET (-1)
+#endif
+
+static meshctl_socket_t meshctl_invalid_socket(void) {
+    return (meshctl_socket_t)MESHCTL_TEST_INVALID_SOCKET;
+}
+
+static void meshctl_close_socket(meshctl_socket_t socket_fd) {
+    if (socket_fd == meshctl_invalid_socket()) {
+        return;
+    }
+#ifdef _WIN32
+    closesocket(socket_fd);
+#else
+    close(socket_fd);
+#endif
+}
+
 static void test_rpc_node_adds_the_default_service_port(void) {
     char endpoint[160] = {0};
 
@@ -66,6 +95,18 @@ static void test_rpc_resolve_builds_only_canonical_node_paths(void) {
                      sizeof(path)),
                  -1);
     check_str_eq(path, "");
+}
+
+static void test_rpc_token_rejects_header_injection_and_oversize(void) {
+    char oversized[MESHD_CTL_RPC_TOKEN_HEADER_MAX + 1u];
+
+    memset(oversized, 'a', sizeof(oversized));
+    oversized[sizeof(oversized) - 1u] = '\0';
+    check_true(meshctl_rpc_token_is_valid(NULL));
+    check_true(meshctl_rpc_token_is_valid(""));
+    check_true(meshctl_rpc_token_is_valid("valid-token"));
+    check_false(meshctl_rpc_token_is_valid("valid\r\nInjected: true"));
+    check_false(meshctl_rpc_token_is_valid(oversized));
 }
 
 /* ---- meshctl cluster (turbo_cmd) ---- */
@@ -224,6 +265,10 @@ spec("meshctl RPC") {
 
         it("builds only canonical verified-service resolve paths") {
             test_rpc_resolve_builds_only_canonical_node_paths();
+        }
+
+        it("rejects token header injection and oversized tokens") {
+            test_rpc_token_rejects_header_injection_and_oversize();
         }
     }
 

@@ -41,9 +41,18 @@ include(CMakeOptions.cmake)
 include(Sanitizers)
 
 find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
+find_package(TurboParser CONFIG REQUIRED PATHS "${TURBOPARSER_ROOT}")
 find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
 find_package(TurboHttp REQUIRED PATHS ${TURBO_HTTP_ROOT})
 find_package(OpenSSL REQUIRED)
+
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+  find_package(FlowMQ CONFIG REQUIRED)
+  if(NOT TARGET FlowMQ::FlowMQ)
+    message(FATAL_ERROR
+            "TURBOP2P_ENABLE_FLOWMQ_IPC requires FlowMQ::FlowMQ")
+  endif()
+endif()
 
 if(TURBOP2P_BUILD_TURBORAFT_M3)
   find_package(TurboRaft CONFIG REQUIRED COMPONENTS Service SQLiteStorage
@@ -64,19 +73,32 @@ if(WIN32 AND (BUILD_TESTS OR BUILD_EXAMPLES))
   if(TARGET TurboHttp::HttpClient)
     list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboHttp::HttpClient>)
   endif()
-  if(TARGET TurboUtils::Mustache)
-    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::Mustache>)
+  if(TARGET TurboHttp::TurboHttp)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboHttp::TurboHttp>)
   endif()
-  if(TARGET TurboUtils::Parser)
-    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::Parser>)
+  if(TARGET TurboParser::Mustache)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboParser::Mustache>)
   endif()
-  if(TARGET TurboUtils::DataBind)
-    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboUtils::DataBind>)
+  if(TARGET TurboParser::Parser)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboParser::Parser>)
+  endif()
+  if(TARGET TurboParser::DataBind)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboParser::DataBind>)
+  endif()
+  if(TARGET FlowMQ::FlowMQ)
+    list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:FlowMQ::FlowMQ>)
   endif()
   if(DEFINED VCPKG_INSTALLED_DIR AND EXISTS
      "${VCPKG_INSTALLED_DIR}/x64-windows/bin/ssl.dll")
     list(APPEND _turbo_p2p_runtime_dlls
          "${VCPKG_INSTALLED_DIR}/x64-windows/bin/ssl.dll")
+  endif()
+  # Imported TurboHTTP binaries are Release-only and depend on BoringSSL's
+  # release crypto.dll even when the local test executable is a Debug target.
+  if(DEFINED VCPKG_INSTALLED_DIR AND EXISTS
+     "${VCPKG_INSTALLED_DIR}/x64-windows/bin/crypto.dll")
+    list(APPEND _turbo_p2p_runtime_dlls
+         "${VCPKG_INSTALLED_DIR}/x64-windows/bin/crypto.dll")
   endif()
   add_custom_target(turbo_p2p_copy_runtime_dlls
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_turbo_p2p_runtime_dlls}

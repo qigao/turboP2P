@@ -83,8 +83,16 @@ def require(cond, msg):
     if not cond:
         raise SystemExit(msg)
 
-require(bootstrap.get("snapshot_version") == 1, "bootstrap snapshot_version mismatch")
-require(joiner.get("snapshot_version") == 1, "joiner snapshot_version mismatch")
+require(bootstrap.get("snapshot_version") == 2, "bootstrap snapshot_version mismatch")
+require(joiner.get("snapshot_version") == 2, "joiner snapshot_version mismatch")
+for label, snapshot in (("bootstrap", bootstrap), ("joiner", joiner)):
+    security = snapshot.get("security") or {}
+    require(security.get("available") is True, f"{label} security unavailable")
+    require(security.get("wire_version") == 2, f"{label} secure wire mismatch")
+    require(isinstance(security.get("rejection_counts"), dict),
+            f"{label} missing security rejection counters")
+    require(isinstance((security.get("handshake_latency") or {}).get("by_role"), dict),
+            f"{label} missing security handshake latency")
 require((bootstrap.get("mesh") or {}).get("direct_peers", 0) >= 1, "bootstrap direct_peers < 1")
 require((joiner.get("mesh") or {}).get("direct_peers", 0) >= 1, "joiner direct_peers < 1")
 

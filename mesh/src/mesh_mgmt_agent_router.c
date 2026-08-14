@@ -344,6 +344,15 @@ static mesh_mgmt_agent_router_result_t validate_template(mesh_mgmt_agent_router_
          sizeof(signer_config.hello.connection_id));
   memcpy(dispatch_config.session.connection_id, router->connection_namespace,
          sizeof(dispatch_config.session.connection_id));
+  /* A template has no transport session yet. This sentinel validates all
+   * remaining fields; mesh_mgmt_p2p_peer_init_v1 replaces it from the one
+   * authenticated P2P security snapshot before either session is created. */
+  memset(signer_config.hello.channel_binding, 0,
+         sizeof(signer_config.hello.channel_binding));
+  memset(dispatch_config.session.channel_binding, 0,
+         sizeof(dispatch_config.session.channel_binding));
+  signer_config.hello.channel_binding[0] = 1u;
+  dispatch_config.session.channel_binding[0] = 1u;
 
   router->last_signer_result = mesh_mgmt_peer_signer_init_v1(&signer, &signer_config);
   mesh_mgmt_crypto_wipe(&signer_config, sizeof(signer_config));

@@ -31,6 +31,7 @@ typedef struct {
   const uint8_t *message;
   size_t message_len;
   uint8_t remote_transport_peer_id[P2P_KEY_SIZE];
+  uint8_t channel_binding[P2P_SECURITY_ID_SIZE];
   mesh_mgmt_p2p_adapter_result_t last_error;
   int last_p2p_result;
   uint8_t initialized;
@@ -44,15 +45,17 @@ int mesh_mgmt_p2p_message_is_mmp_v1(const void *bytes, size_t length);
 
 /**
  * Build transport IO for a key-bearing P2P peer. Initialization fails until
- * p2p_peer_get_public_key() can return the static key learned by the encrypted
- * handshake. Availability alone is not MMP authentication; signed HELLO must
- * still prove the certificate/key/transport binding. The output receives a
- * copy of that transport key.
+ * p2p_peer_get_security_info_v2() proves the peer completed identity policy
+ * validation and Noise key confirmation. Signed HELLO still confirms MMP
+ * roles and certificate semantics. The output receives the authenticated
+ * Noise transport key and the immutable handshake channel binding. Both
+ * outputs are copied from one authenticated security snapshot.
  */
 mesh_mgmt_p2p_adapter_result_t
 mesh_mgmt_p2p_adapter_init_v1(mesh_mgmt_p2p_adapter_v1_t *adapter, p2p_node_t *node,
                               p2p_peer_t *peer, mesh_mgmt_transport_io_v1_t *out_io,
-                              uint8_t out_remote_transport_peer_id[P2P_KEY_SIZE]);
+                              uint8_t out_remote_transport_peer_id[P2P_KEY_SIZE],
+                              uint8_t out_channel_binding[P2P_SECURITY_ID_SIZE]);
 
 void mesh_mgmt_p2p_adapter_destroy_v1(mesh_mgmt_p2p_adapter_v1_t *adapter);
 

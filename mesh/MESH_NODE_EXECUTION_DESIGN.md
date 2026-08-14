@@ -1,9 +1,18 @@
 # Mesh Node Execution with TurboRuntime
 
-状态：架构规范与分阶段实现。E0 schema/journal simulator、E1 本地 prestaged runner core
-和 E2 local durable command adapter core 已有实现；独立 OS worker、真实 signed Grant
-authority 及 MMP network feature 尚未实现。本文不冻结公开 API、配置格式或 MMP wire
-protocol。
+状态：架构规范与分阶段实现。E0 schema/journal、E1 prestaged runner、E2 durable command adapter，
+以及 digest 绑定的 Native/TurboWASM child process boundary 已实现；production profile 强制提供并
+校验 OS sandbox launcher，直接 spawn 仅供测试。独立 `mesh-agent` 的 Function provider 也已在
+副作用前持久化稳定 claim，并在 `RUNNING` 恢复时 fail closed。产品级 Grant authoring、取消协议、
+跨平台 sandbox profile、审计和公开 feature rollout 仍未闭环。本文不冻结公开 API、配置格式或
+MMP wire protocol。
+
+范围更新（2026-08-13）：通用节点功能资源和控制通道改由
+[`MESH_PRODUCT_CONTROL_PLANE.md`](MESH_PRODUCT_CONTROL_PLANE.md) 定义；它将 builtin、Native、
+WASM 作为三个互不包含的 runtime permission，并将“获得权限”与“本机 provider 可用”分开。
+本文定义 prestaged WASM 与 Native process 的隔离执行。实现存在不表示产品默认开放：两者都要求
+本机 immutable catalog、exact digest、signed Grant、本机 policy 和 production sandbox launcher；
+控制消息不能携带 DLL/path/symbol/argv 或 executable bytes。
 
 ## 1. 决策摘要
 
@@ -11,14 +20,20 @@ Mesh 节点执行采用独立、显式启用的 execution plane：
 
 ```text
 Controller / authorized operator
-  -> signed ExecutionGrant + command ID
-  -> MMP targeted command and persistent journal
+  -> signed Function intent / ExecutionGrant + command ID
+  -> Controller durable outbox + agent control WAL
   -> node execution adapter
+  -> provider durable claim journal
   -> isolated execution worker
   -> TurboRuntime
   -> TurboWasm
   -> wasm3
 ```
+
+共享 function intent 在进入该路径前必须先通过
+`RUN_WASM` signed grant、本机 `RUN_WASM` policy 和 WASM runtime availability 三项检查；默认
+availability 为关闭。Native provider 使用独立的 `RUN_NATIVE` 检查，不经过 TurboWasm，也不能
+继承 `RUN_WASM` 或 `MANAGE` 权限。
 
 核心决策：
 
@@ -44,15 +59,18 @@ Controller / authorized operator
 - shared-node MMP runtime、签名 endpoint/RPC service discovery 和持久化 record epoch。
 - 本地 RPC task classification，但当前 node mutation 只开放有限操作。
 
-当前仍缺少：
+当前已实现 internal `COMMAND_REQUEST`/`COMMAND_RESULT` canonical payload、MMP consumer/response、
+durable command journal、签名结果、`meshd` HTTP submit/query adapter 和默认关闭的 execution node
+接线。独立 `mesh-agent` 可执行文件已经组合 outbound H2 sync、WAL/checkpoint、证书 reload/session
+fencing，以及预部署 Native/TurboWASM 子进程 provider。仍缺 product-level Grant authoring、policy
+compiler、公开 feature negotiation、signed rollout、audit closure 和操作系统 service-manager 安装单元。
+Function provider 使用独立、有界、单写者 journal：执行线程先提交稳定的 operation/spec digest 和
+`RUNNING`，再启动 child；ACK 丢失时返回已签名 terminal 结果，重启发现未决 `RUNNING` 时转为
+`FAILED_INDETERMINATE`，禁止盲目重放。control result WAL 成为事实源后，provider 才异步清理 terminal
+claim；启动时还会按恢复后的 control state 清理已提交结果。
 
-- `COMMAND_REQUEST` / `COMMAND_RESULT` 完整 payload 和领域 adapter。
-- 持久化 command journal。
-- product-level Grants、policy compiler、signed rollout 和 audit closure。
-- 独立 `mesh-agent` supervisor/service deployment。
-
-因此 execution plane 不能直接接入现有 `/v1/task-model`，也不能把未实现的 command kind
-当成稳定协议。
+因此 execution plane 已能在内部受控配置中通过现有管理路径触发，但 command kind 仍是 additive
+experimental protocol；不能在缺少 feature negotiation 和产品 Grant authority 时当成稳定公开接口。
 
 ### 2.2 TurboRuntime and TurboWasm
 
@@ -64,8 +82,10 @@ Controller / authorized operator
 - input、stdout、stderr、stack、linear memory、module、deadline、control-flow step、
   host-call 和 copied-byte 配额。
 
-TurboWasm 当前 capability 包含 core、utils、HTTP、file read/write 和 app。它拒绝未知或未授权
-import，并强制 mount、origin、guest-memory 和 invocation quota。
+TurboWasm capability 模型包含 core、utils、HTTP、file read/write 和 app。当前 raw `.wasm` 路径
+没有不可变 application manifest，因此只接受精确的 `core|utils|app` profile；任意子集或额外能力
+在 meshd/Provider 初始化时 fail fast。HTTP、file preopen 与 provider capability 只能在 artifact
+digest 同时绑定 immutable manifest 后开放，不能通过修改本机配置旁路授权。
 
 TurboRuntime isolated provider worker 已提供协议、deadline、输出和进程树生命周期隔离，但当前
 不等同于低权限 OS sandbox。生产 execution worker 仍需部署层账户、Windows Job/Linux cgroup、
@@ -204,7 +224,8 @@ signature
 
 约束：
 
-- `allowed_operation` V1 只有 `RUN_PRESTAGED_WASM`。
+- `allowed_operation` V1 支持 `RUN_PRESTAGED_WASM` 与 `RUN_PRESTAGED_NATIVE`，并必须与本机
+  deployment runtime 精确匹配；类型不匹配在 durable state transition 前拒绝。
 - target、generation 和 package digest 必须精确匹配。
 - grant 不包含 host path、provider DLL path、secret、raw socket 或 environment。
 - mount 使用本机 policy 定义的 mount ID；远程请求只能引用 ID。
@@ -306,6 +327,9 @@ decode canonical payload
 - agent 崩溃后不能猜测 RUNNING 成功；无法确认 worker generation 时进入
   `FAILED_INDETERMINATE`。
 - terminal 状态不可回退。
+- provider claim 只在对应 control operation result 已写入 agent WAL 并 exact ACK 后清理；文件 I/O
+  在单线程 worker 上执行，不阻塞 Mesh/MMP event loop。
+- journal 容量固定；满载或持久化/签名失败后 fail closed，不启动新的副作用。
 
 ## 12. Worker、并发与资源
 
@@ -443,7 +467,8 @@ audit spool failure 由 deployment profile 明确选择：
 剩余风险：
 
 - TurboWasm 只能限制 guest；同进程 native provider 仍是受信代码。
-- isolated provider worker 当前不是低权限 OS sandbox。
+- 仓库内 worker 进程本身不是低权限 OS sandbox；production 必须经过 digest-pinned launcher。launcher
+  的至多 8 个参数按 argv 传递、每项小于 1024 bytes、由 process owner 深拷贝，禁止 shell 拼接。
 - Wasm 逻辑 bug 仍可能产生合法但错误的业务输出。
 - capability provider 错误解释 service/object ID 会破坏上层授权。
 - signer/policy authority 失陷后可签恶意 grant，仍需 rotation、revoke、短 expiry、审批和审计。
@@ -475,15 +500,21 @@ audit spool failure 由 deployment profile 明确选择：
 当前实现进度：
 
 - E0：typed Grant/Request、授权求交、状态机和有界 journal simulator 已实现。
-- E1：deployment registry、digest binding、TurboRuntime raw Wasm runner 和真实 guest test
-  已实现；runner 仍是进程内 core，尚未达到独立低权限 worker 边界。
+- E1：deployment registry、digest binding、TurboRuntime raw Wasm runner 和真实 guest test 已实现。
+  TurboWASM 在一次一进程的 authenticated child protocol 内运行；Native 只执行 prestaged exact-digest
+  executable。两者都有 stdin/stdout/stderr hard cap、timeout 和 process-tree cleanup；production
+  必须经过 exact-digest sandbox launcher。
 - E2：单写者 durable journal store、V1 reader/V2 writer、SHA-256 完整性、原子替换、去重、
   restart recovery、canonical request digest、signed rich result、terminal/result 原子提交和
-  同步本地 orchestrator 已实现。orchestrator 强制注入 Grant verifier，但真实 Grant
-  authority/codec 留在 E3；所有调用仍必须离开 Mesh/MMP event loop。
-- E3-E6：未实现。
+  同步本地 orchestrator 已实现。`mesh-agent` Function provider 已复用该 store，使用稳定
+  operation/spec digest、签名 terminal result、ACK 后异步回收和启动期 control-WAL 对账；故障测试
+  覆盖 terminal ACK 丢失以及 `RUNNING -> FAILED_INDETERMINATE` 不重跑。orchestrator 强制注入 Grant
+  verifier，但产品 Grant authority/codec 留在 E3；所有持久化调用仍必须离开 Mesh/MMP event loop。
+- E3-E5：组件存在但产品 rollout 未闭环；E6 的进程边界、fail-closed launcher gate 和有界 launcher
+  argv 已实现，OS account/token、seccomp/job/cgroup/AppContainer profile、审计与跨平台故障注入仍未完成。
 
-E3 之前不能从网络触发执行；E6 之前不能宣称多租户生产隔离。
+当前仅能通过显式配置、签名 control intent 和精确预部署 catalog 触发内部执行；公开 E3 feature/
+Grant rollout 完成前不能承诺稳定第三方执行接口，E6 之前不能宣称多租户生产隔离。
 
 ## 20. 验证门槛
 

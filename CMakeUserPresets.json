@@ -33,6 +33,7 @@
             "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
                 "TURBO_UTILS_ROOT": "$env{PKG_ROOT}/turboutils",
+                "TURBOPARSER_ROOT": "$env{PKG_ROOT}/turboparser",
                 "TURBO_NET_ROOT": "$env{PKG_ROOT}/turbonet",
                 "TURBO_RAFT_ROOT": "$env{PKG_ROOT}/turboraft",
                 "CMAKE_INSTALL_PREFIX": "$env{PKG_ROOT}/turbohttp",
@@ -57,6 +58,7 @@
             "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
                 "TURBO_UTILS_ROOT": "$env{PKG_ROOT}/turboutils",
+                "TURBOPARSER_ROOT": "$env{PKG_ROOT}/turboparser",
                 "TURBO_NET_ROOT": "$env{PKG_ROOT}/turbonet",
                 "CMAKE_INSTALL_PREFIX": "$env{PKG_ROOT}/turbohttp",
                 "CMAKE_MAKE_PROGRAM": "/usr/bin/ninja",
@@ -79,6 +81,7 @@
                 "CMAKE_PREFIX_PATH": "$env{PROJECT_ROOT}/turbonet/turbo-utils/build/$env{ANDROID_BUILD_VARIANT};$env{PROJECT_ROOT}/turbonet/turbonet/build/$env{ANDROID_BUILD_VARIANT}",
                 "PKG_CONFIG_EXECUTABLE": "${sourceDir}/vcpkg_installed/x64-windows/tools/pkgconf/pkgconf.exe",
                 "TURBO_UTILS_ROOT": "$env{PROJECT_ROOT}/turbonet/turbo-utils/build/$env{ANDROID_BUILD_VARIANT}",
+                "TURBOPARSER_ROOT": "$env{PROJECT_ROOT}/turbonet/turbo-parser/build/$env{ANDROID_BUILD_VARIANT}",
                 "TURBO_NET_ROOT": "$env{PROJECT_ROOT}/turbonet/turbonet/build/$env{ANDROID_BUILD_VARIANT}",
                 "VCPKG_CHAINLOAD_TOOLCHAIN_FILE": "$env{ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake",
                 "VCPKG_INSTALLED_DIR": "${sourceDir}/vcpkg_installed"
@@ -114,6 +117,7 @@
             "cacheVariables": {
                 "CMAKE_PREFIX_PATH": "${sourceDir}/vcpkg_installed/x64-windows",
                 "TURBO_UTILS_ROOT": "$env{PKG_ROOT}/turboutils",
+                "TURBOPARSER_ROOT": "$env{PKG_ROOT}/turboparser",
                 "TURBO_NET_ROOT": "$env{PKG_ROOT}/turbonet"
             },
             "environment": {

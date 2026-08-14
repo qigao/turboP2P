@@ -45,6 +45,82 @@
             "generator": "Ninja"
         },
         {
+            "name": "security-linux-clang-asan",
+            "displayName": "Security (Linux Clang ASan/UBSan/LSan)",
+            "description": "Instrument the complete test tree with Address, UndefinedBehavior, and Leak sanitizers",
+            "inherits": [
+                "ISLinux",
+                "developer-mode",
+                "Clang",
+                "flags-gcc-clang",
+                "pkg-vcpkg"
+            ],
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/linux-clang-asan",
+            "cacheVariables": {
+                "ENABLE_ASAN": false,
+                "ENABLE_SANITIZER_ADDRESS": true,
+                "ENABLE_SANITIZER_UNDEFINED": true,
+                "ENABLE_SANITIZER_LEAK": true,
+                "ENABLE_SANITIZER_THREAD": false,
+                "ENABLE_SANITIZER_MEMORY": false,
+                "BUILD_EXAMPLES": false,
+                "BUILD_TESTS": true,
+                "ENABLE_TESTS": true
+            }
+        },
+        {
+            "name": "security-linux-clang-tsan",
+            "displayName": "Security (Linux Clang TSan)",
+            "description": "Instrument the complete test tree with ThreadSanitizer only",
+            "inherits": [
+                "ISLinux",
+                "Clang",
+                "flags-gcc-clang",
+                "pkg-vcpkg"
+            ],
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/linux-clang-tsan",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "ENABLE_ASAN": false,
+                "ENABLE_SANITIZER_ADDRESS": false,
+                "ENABLE_SANITIZER_UNDEFINED": false,
+                "ENABLE_SANITIZER_LEAK": false,
+                "ENABLE_SANITIZER_THREAD": true,
+                "ENABLE_SANITIZER_MEMORY": false,
+                "BUILD_EXAMPLES": false,
+                "BUILD_TESTS": true,
+                "ENABLE_TESTS": true
+            }
+        },
+        {
+            "name": "security-linux-clang-fuzz",
+            "displayName": "Security (Linux Clang libFuzzer)",
+            "description": "Build the bounded cookie, application codec, and Noise read fuzz targets",
+            "inherits": [
+                "ISLinux",
+                "Clang",
+                "flags-gcc-clang",
+                "pkg-vcpkg"
+            ],
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/linux-clang-fuzz",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "ENABLE_ASAN": false,
+                "ENABLE_SANITIZER_ADDRESS": false,
+                "ENABLE_SANITIZER_UNDEFINED": false,
+                "ENABLE_SANITIZER_LEAK": false,
+                "ENABLE_SANITIZER_THREAD": false,
+                "ENABLE_SANITIZER_MEMORY": false,
+                "BUILD_EXAMPLES": false,
+                "BUILD_TESTS": false,
+                "ENABLE_TESTS": false,
+                "TURBOP2P_BUILD_FUZZERS": true
+            }
+        },
+        {
             "name": "release-mac-ninja",
             "displayName": "Release (Mac, Ninja)",
             "inherits": "base-release-mac",

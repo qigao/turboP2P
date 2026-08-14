@@ -1,5 +1,6 @@
 #include <tinytest.h>
 #include <turbo_mesh.h>
+#include "mesh_test_security.h"
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
@@ -210,6 +211,7 @@ static void test_multi_hop_route_learning_four_nodes_isolated(void) {
     node1_cfg.virtual_ip = "10.42.8.1";
     node1_cfg.virtual_prefix = 16;
     node1_cfg.listen_port = port1;
+    check(mesh_test_security_configure(&node1_cfg, 0));
 
     node1 = mesh_create(&node1_cfg);
     check_not_null(node1);
@@ -223,6 +225,7 @@ static void test_multi_hop_route_learning_four_nodes_isolated(void) {
     node2_cfg.listen_port = port2;
     node2_cfg.bootstrap_peers = bootstrap_node1;
     node2_cfg.bootstrap_count = 1;
+    check(mesh_test_security_configure(&node2_cfg, 1));
 
     node2 = mesh_create(&node2_cfg);
     check_not_null(node2);
@@ -239,6 +242,7 @@ static void test_multi_hop_route_learning_four_nodes_isolated(void) {
     node3_cfg.listen_port = port3;
     node3_cfg.bootstrap_peers = bootstrap_node1;
     node3_cfg.bootstrap_count = 1;
+    check(mesh_test_security_configure(&node3_cfg, 2));
 
     node3 = mesh_create(&node3_cfg);
     check_not_null(node3);
@@ -254,6 +258,7 @@ static void test_multi_hop_route_learning_four_nodes_isolated(void) {
     node4_cfg.bootstrap_peers = bootstrap_node3;
     node4_cfg.bootstrap_count = 1;
     node4_cfg.on_packet_received = on_node4_packet_received;
+    check(mesh_test_security_configure(&node4_cfg, 3));
 
     node4 = mesh_create(&node4_cfg);
     check_not_null(node4);

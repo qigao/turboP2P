@@ -1,5 +1,6 @@
 #include <tinytest.h>
 #include <turbo_mesh.h>
+#include "mesh_test_security.h"
 #include <stdint.h>
 #include <string.h>
 
@@ -52,7 +53,8 @@ static mesh_network_t *mesh_create_started(const char *virtual_ip,
                                            int listen_port,
                                            const char *advertise_ip,
                                            const char **bootstrap_peers,
-                                           int bootstrap_count) {
+                                           int bootstrap_count,
+                                           size_t identity_index) {
     mesh_config_t config;
     mesh_config_init(&config);
     config.virtual_ip = virtual_ip;
@@ -61,6 +63,7 @@ static mesh_network_t *mesh_create_started(const char *virtual_ip,
     config.advertise_ip = advertise_ip;
     config.bootstrap_peers = bootstrap_peers;
     config.bootstrap_count = bootstrap_count;
+    check(mesh_test_security_configure(&config, identity_index));
 
     mesh_network_t *mesh = mesh_create(&config);
     check_not_null(mesh);
@@ -196,9 +199,9 @@ static void test_mesh_leader_restart_recovers_peers(void) {
     peer_wait_ctx_t peer_ctx;
     uint64_t restart_started_ms;
     uint64_t recovered_ms;
-    leader = mesh_create_started("10.42.5.1", 20501, NULL, NULL, 0);
+    leader = mesh_create_started("10.42.5.1", 20501, NULL, NULL, 0, 0);
     sleep_ms(200);
-    node2 = mesh_create_started("10.42.5.2", 20502, NULL, bootstrap_peers, 1);
+    node2 = mesh_create_started("10.42.5.2", 20502, NULL, bootstrap_peers, 1, 1);
 
     meshes[0] = leader;
     meshes[1] = node2;
@@ -220,7 +223,7 @@ static void test_mesh_leader_restart_recovers_peers(void) {
     check(wait_until(&meshes[1], 1, 4000, wait_for_peer_counts, &peer_ctx));
 
     restart_started_ms = now_ms();
-    leader = mesh_create_started("10.42.5.1", 20501, NULL, NULL, 0);
+    leader = mesh_create_started("10.42.5.1", 20501, NULL, NULL, 0, 0);
     meshes[0] = leader;
     peer_ctx.mesh_a = leader;
     peer_ctx.mesh_b = node2;
@@ -267,8 +270,8 @@ static void test_mesh_followers_boot_before_leader(void) {
     uint64_t leader_started_ms;
     uint64_t converged_ms;
 
-    node3 = mesh_create_started("10.42.6.3", 20603, NULL, bootstrap_peers, 1);
-    node2 = mesh_create_started("10.42.6.2", 20602, NULL, bootstrap_peers, 1);
+    node3 = mesh_create_started("10.42.6.3", 20603, NULL, bootstrap_peers, 1, 2);
+    node2 = mesh_create_started("10.42.6.2", 20602, NULL, bootstrap_peers, 1, 1);
 
     meshes[0] = NULL;
     meshes[1] = node2;
@@ -280,7 +283,7 @@ static void test_mesh_followers_boot_before_leader(void) {
     check_false(wait_until(&meshes[1], 2, 2000, wait_for_route, &direct_ctx));
 
     leader_started_ms = now_ms();
-    leader = mesh_create_started("10.42.6.1", 20601, NULL, NULL, 0);
+    leader = mesh_create_started("10.42.6.1", 20601, NULL, NULL, 0, 0);
     meshes[0] = leader;
 
     relay_ctx.leader = leader;

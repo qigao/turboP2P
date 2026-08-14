@@ -51,6 +51,7 @@ static int parse_hex(const char *hex, uint8_t *out, size_t out_cap) {
 
 #ifdef _WIN32
 #include <windows.h>
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
 static volatile LONG g_gateway_pump_stop = 0;
 static HANDLE g_gateway_pump_thread = NULL;
 
@@ -71,6 +72,7 @@ static DWORD WINAPI gateway_node_pump(LPVOID arg) {
   }
   return 0;
 }
+#endif
 #endif
 
 typedef struct {
@@ -134,20 +136,23 @@ static int ensure_directory(const char *path) {
 }
 
 int main(int argc, char **argv) {
+  enum { M3_GATEWAY_MAIN_MAX_RAFT_PEERS = 32 };
   const char *root;
   const char *secret_hex;
   const char *raft_sqlite = NULL;
   int port = 8080;
   int raft_node = 0;
-  tr_raft_node_id_t node_id = 0u;
+  uint64_t node_id = 0u;
   int raft_listen_port = 0;
   const char *cert = NULL;
   const char *key = NULL;
   const char *ca = NULL;
-  tr_raft_node_id_t node_voters[M3_RAFT_NODE_MAX_PEERS + 1u];
-  m3_raft_node_peer_config_t peers[M3_RAFT_NODE_MAX_PEERS];
-  size_t voter_count = 0u;
+  uint64_t node_voters[M3_GATEWAY_MAIN_MAX_RAFT_PEERS + 1u];
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
+  m3_raft_node_peer_config_t peers[M3_GATEWAY_MAIN_MAX_RAFT_PEERS];
   size_t peer_count = 0u;
+#endif
+  size_t voter_count = 0u;
   int mesh_listen_port = 0;
   const char *mesh_key_hex = NULL;
   char mesh_store_hosts[M3_GATEWAY_DATAPANE_MAX_STORES][128];
@@ -156,6 +161,8 @@ int main(int argc, char **argv) {
                         [M3_CHUNK_CAPABILITY_NODE_ID_SIZE];
   uint8_t mesh_store_pubkeys[M3_GATEWAY_DATAPANE_MAX_STORES]
                             [MESH_MGMT_ED25519_PUBLIC_KEY_SIZE];
+  uint8_t mesh_store_transport_keys[M3_GATEWAY_DATAPANE_MAX_STORES]
+                                  [P2P_KEY_SIZE];
   size_t mesh_store_count = 0u;
   uint64_t max_chunk_bytes = UINT64_C(1024) * 1024;
   size_t target_replicas = 2u;
@@ -169,7 +176,9 @@ int main(int argc, char **argv) {
             "usage: %s <store-root> [port] [--raft <sqlite>]\n"
             "       [--raft-node --node-id <id> --raft-listen-port <p> --sqlite <s>\n"
             "        --cert <file> --key <file> --ca <file> --voter <id>...\n"
-            "        --peer <id>@<host>:<port>:<sha256:fp>...]\n",
+            "        --peer <id>@<host>:<port>:<sha256:fp>...]\n"
+            "       [--mesh-listen <port> --mesh-key <hex32>\n"
+            "        --store-peer <id>:<signing-pubkey>:<transport-pubkey>@<host>:<port>...]\n",
             argv[0]);
     return 2;
   }
@@ -186,7 +195,7 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--raft-node") == 0) {
       raft_node = 1;
     } else if (strcmp(argv[i], "--node-id") == 0 && i + 1 < argc) {
-      node_id = (tr_raft_node_id_t)strtoul(argv[++i], NULL, 10);
+      node_id = (uint64_t)strtoull(argv[++i], NULL, 10);
     } else if (strcmp(argv[i], "--raft-listen-port") == 0 && i + 1 < argc) {
       raft_listen_port = atoi(argv[++i]);
     } else if (strcmp(argv[i], "--cert") == 0 && i + 1 < argc) {
@@ -197,7 +206,7 @@ int main(int argc, char **argv) {
       ca = argv[++i];
     } else if (strcmp(argv[i], "--voter") == 0 && i + 1 < argc) {
       if (voter_count < sizeof(node_voters) / sizeof(node_voters[0])) {
-        node_voters[voter_count++] = (tr_raft_node_id_t)strtoul(argv[++i], NULL, 10);
+        node_voters[voter_count++] = (uint64_t)strtoull(argv[++i], NULL, 10);
       }
     } else if (strcmp(argv[i], "--max-chunk") == 0 && i + 1 < argc) {
       max_chunk_bytes = (uint64_t)strtoull(argv[++i], NULL, 10);
@@ -212,34 +221,46 @@ int main(int argc, char **argv) {
       const char *spec = argv[++i];
       const char *at = strchr(spec, '@');
       const char *colon = strchr(spec, ':');
+      const char *transport_colon = colon ? strchr(colon + 1, ':') : NULL;
       char host[128];
       char port_s[16];
       uint8_t id[32];
       uint8_t pub[32];
+      uint8_t transport_pub[32];
 
-      if (at && colon && colon < at &&
+      if (at && colon && transport_colon && colon < transport_colon &&
+          transport_colon < at &&
           mesh_store_count < M3_GATEWAY_DATAPANE_MAX_STORES &&
-          parse_hex_id(colon + 1, (size_t)(at - colon - 1u), pub) == 0 &&
+          parse_hex_id(colon + 1,
+                       (size_t)(transport_colon - colon - 1u), pub) == 0 &&
+          parse_hex_id(transport_colon + 1,
+                       (size_t)(at - transport_colon - 1u),
+                       transport_pub) == 0 &&
           parse_hex_id(spec, (size_t)(colon - spec), id) == 0 &&
           sscanf(at + 1, "%127[^:]:%15[0-9]", host, port_s) == 2) {
         memcpy(mesh_store_ids[mesh_store_count], id, sizeof(id));
         memcpy(mesh_store_pubkeys[mesh_store_count], pub, sizeof(pub));
+        memcpy(mesh_store_transport_keys[mesh_store_count], transport_pub,
+               sizeof(transport_pub));
         snprintf(mesh_store_hosts[mesh_store_count],
                  sizeof(mesh_store_hosts[mesh_store_count]), "%s", host);
         mesh_store_ports[mesh_store_count] = atoi(port_s);
         mesh_store_count++;
       } else {
-        fprintf(stderr, "invalid --store-peer spec (id:pubkey@host:port): %s\n",
+        fprintf(stderr,
+                "invalid --store-peer spec "
+                "(id:signing-pubkey:transport-pubkey@host:port): %s\n",
                 spec);
         return 2;
       }
     } else if (strcmp(argv[i], "--peer") == 0 && i + 1 < argc) {
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
       const char *spec = argv[++i];
       const char *at = strchr(spec, '@');
       char host[128];
       char port_s[16];
       char fingerprint[96];
-      if (at && peer_count < M3_RAFT_NODE_MAX_PEERS &&
+      if (at && peer_count < M3_GATEWAY_MAIN_MAX_RAFT_PEERS &&
           sscanf(at + 1, "%127[^:]:%15[0-9]:%95s", host, port_s, fingerprint) == 3) {
         memset(&peers[peer_count], 0, sizeof(peers[peer_count]));
         peers[peer_count].node_id = (tr_raft_node_id_t)strtoul(spec, NULL, 10);
@@ -255,6 +276,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "invalid --peer spec: %s\n", spec);
         return 2;
       }
+#else
+      fprintf(stderr, "--peer requires a TurboRaft-enabled build\n");
+      return 2;
+#endif
     }
   }
   secret_hex = getenv("M3_SECRET_HEX");
@@ -340,19 +365,28 @@ int main(int argc, char **argv) {
     };
     p2p_node_t *mesh_node = NULL;
     uint8_t mesh_key[32];
+    static const uint8_t mesh_network_id[P2P_SECURITY_ID_SIZE] = {
+        0x4d, 0x33, 0x2d, 0x63, 0x68, 0x75, 0x6e, 0x6b,
+        0x2d, 0x6d, 0x65, 0x73, 0x68, 0x2d, 0x73, 0x65,
+        0x63, 0x75, 0x72, 0x65, 0x2d, 0x77, 0x69, 0x72,
+        0x65, 0x2d, 0x76, 0x32, 0x00, 0x00, 0x00, 0x01,
+    };
 
     if (mesh_listen_port > 0) {
       if (!mesh_key_hex || mesh_store_count == 0u ||
           parse_hex(mesh_key_hex, mesh_key, sizeof(mesh_key)) != 0) {
         fprintf(stderr,
                 "--mesh-listen requires --mesh-key <hex32> and --store-peer "
-                "<id>:<pubkey>@host:port\n");
+                "<id>:<signing-pubkey>:<transport-pubkey>@host:port\n");
         m3_gateway_destroy_v1(&gateway);
         return 1;
       }
       mesh_node = p2p_create("127.0.0.1", mesh_listen_port);
       if (!mesh_node ||
           p2p_node_set_private_key(mesh_node, mesh_key) != P2P_OK ||
+          p2p_node_configure_pinned_security_v2(
+              mesh_node, mesh_network_id, mesh_store_transport_keys[0],
+              mesh_store_count) != P2P_OK ||
           p2p_start_nonblocking(mesh_node) != P2P_OK ||
           m3_gateway_attach_datapane_v1(&gateway, target_replicas,
                                         min_durable_replicas,
@@ -396,7 +430,7 @@ int main(int argc, char **argv) {
   m3_gateway_register_routes_v1(app);
   printf("M3 gateway listening on :%d (store=%s, access-key=%s, metadata=%s)\n", port, root,
          credential.access_key, raft_node ? "raft-node" : (raft_sqlite ? "raft" : "local"));
-#ifdef _WIN32
+#if defined(_WIN32) && defined(TURBO_P2P_M3_RAFT_ENABLED)
   if (raft_node) {
     /* Pump the embedded raft node continuously so elections/heartbeats advance
      * between HTTP requests; handlers sleep-poll instead of touching the node
@@ -409,13 +443,15 @@ int main(int argc, char **argv) {
 
   iris_app_listen(app, port);
 
-#ifdef _WIN32
+#if defined(_WIN32) && defined(TURBO_P2P_M3_RAFT_ENABLED)
   if (g_gateway_pump_thread != NULL) {
     InterlockedExchange(&g_gateway_pump_stop, 1);
     WaitForSingleObject(g_gateway_pump_thread, 5000);
     CloseHandle(g_gateway_pump_thread);
     g_gateway_pump_thread = NULL;
   }
+#endif
+#ifdef _WIN32
   gateway_mesh_pump_stop(&g_mesh_pump);
 #endif
 

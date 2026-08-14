@@ -5,6 +5,7 @@
 
 #include "../internal.h"
 #include "../transfer/transfer.h"
+#include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
 
@@ -192,6 +193,10 @@ void p2p_destroy_clean(p2p_node_t *node) {
     p2p_cleanup_callbacks(node);
     p2p_cleanup_timers(node);
     p2p_cleanup_server(node);
+    p2p_node_cleanup_cookie_gates(node);
+    if (node->private_key_executor) {
+        p2p_private_key_executor_shutdown(node->private_key_executor);
+    }
     p2p_cleanup_peers(node);
     p2p_cleanup_topics(node);
     p2p_cleanup_files(node);
@@ -201,6 +206,27 @@ void p2p_destroy_clean(p2p_node_t *node) {
     p2p_cleanup_connect_suppressions(node);
     p2p_cleanup_dht(node);
     p2p_cleanup_context(node);
+
+    p2p_private_key_executor_destroy(node->private_key_executor);
+    node->private_key_executor = NULL;
+
+    if (node->pinned_trusted_keys) {
+        p2p_crypto_wipe(node->pinned_trusted_keys,
+                        node->pinned_trusted_key_count * P2P_KEY_SIZE);
+        free(node->pinned_trusted_keys);
+        node->pinned_trusted_keys = NULL;
+        node->pinned_trusted_key_count = 0;
+    }
+    p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
+    p2p_crypto_wipe(node->local_credential, sizeof(node->local_credential));
+    p2p_crypto_wipe(&node->local_authenticated_identity,
+                    sizeof(node->local_authenticated_identity));
+    p2p_crypto_wipe(node->source_admission_buckets,
+                    sizeof(node->source_admission_buckets));
+    p2p_crypto_wipe(node->cookie_master_secret,
+                    sizeof(node->cookie_master_secret));
+    p2p_crypto_wipe(node->cookie_gates, sizeof(node->cookie_gates));
+    p2p_crypto_wipe(&node->security_config, sizeof(node->security_config));
     
     turbo_mutex_destroy(&node->mutex);
     free(node);

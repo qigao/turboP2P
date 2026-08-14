@@ -48,7 +48,7 @@ typedef struct {
   int meta_mutation_pending;         /* a node-mode mutation is awaiting apply */
   uint64_t meta_mutation_before;     /* applied index captured at proposal time */
   struct m3_gateway_meta_lookup_bridge_s *node_lookup_bridge; /* in-flight read */
-  tr_raft_node_id_t node_lookup_leader_id; /* leader id for the not-leader result */
+  uint64_t node_lookup_leader_id; /* implementation-neutral leader id */
   uint8_t tenant_id[M3_GATEWAY_TENANT_ID_SIZE];
   uint64_t applied_index;
   char store_root[TURBO_FS_MAX_PATH];

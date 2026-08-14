@@ -5,7 +5,12 @@ find_package(OpenSSL REQUIRED)
 # =============================================================================
 
 # Mesh library sources
-set(MESH_LIB_SOURCES src/mesh.c include/turbo_mesh.h)
+set(MESH_LIB_SOURCES
+  src/mesh.c
+  src/mesh_multi_network.c
+  src/mesh_multi_network_internal.h
+  include/turbo_mesh.h
+  include/turbo_mesh_multi_network.h)
 
 # Internal MMP structural codec. It has no installed headers and is not linked
 # into the data-plane library until the authenticated management agent exists.
@@ -43,6 +48,16 @@ target_link_libraries(mesh_mgmt_identity PUBLIC
   mesh_mgmt_codec mesh_mgmt_crypto)
 set_property(TARGET mesh_mgmt_identity PROPERTY FOLDER "mesh/internal")
 
+add_library(mesh_mgmt_p2p_security STATIC
+  src/mesh_mgmt_p2p_security.c
+  src/mesh_mgmt_p2p_security.h)
+target_include_directories(mesh_mgmt_p2p_security PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_p2p_security PUBLIC
+  mesh_mgmt_identity TurboP2P::P2P
+  PRIVATE TurboNet::Crypto)
+set_property(TARGET mesh_mgmt_p2p_security PROPERTY FOLDER "mesh/internal")
+
 add_library(mesh_mgmt_session STATIC
   src/mesh_mgmt_session.c
   src/mesh_mgmt_session.h)
@@ -69,6 +84,402 @@ add_library(mesh_mgmt_execution STATIC
 target_include_directories(mesh_mgmt_execution PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set_property(TARGET mesh_mgmt_execution PROPERTY FOLDER "mesh/internal")
+
+# Transport-neutral resource and operation contracts shared by H2, WebSocket
+# and MMP adapters. The outbox copies callback-borrowed payloads into a bounded
+# single-owner FIFO before any coroutine suspension or worker handoff.
+add_library(mesh_control_primitives STATIC
+  src/mesh_control_primitives.c
+  src/mesh_control_primitives.h)
+target_include_directories(mesh_control_primitives PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set_property(TARGET mesh_control_primitives PROPERTY FOLDER "mesh/internal")
+
+add_library(meshctl_product STATIC
+  src/meshctl_product.c
+  src/meshctl_product.h)
+target_include_directories(meshctl_product PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+target_link_libraries(meshctl_product PUBLIC
+  TurboParser::Parser TurboParser::Selector TurboHttp::TurboHttp
+  TurboUtils::Core)
+set_property(TARGET meshctl_product PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_product_controller_iris STATIC
+  src/mesh_product_controller_iris.c
+  src/mesh_product_controller_iris.h)
+target_include_directories(mesh_product_controller_iris PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+target_link_libraries(mesh_product_controller_iris PUBLIC
+  mesh_control_primitives TurboHttp::Iris TurboParser::Parser
+  TurboParser::Selector TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_product_controller_iris PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_outbox STATIC
+  src/mesh_control_outbox.c
+  src/mesh_control_outbox.h)
+target_include_directories(mesh_control_outbox PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_outbox
+  PUBLIC mesh_control_primitives TurboUtils::Core)
+set_property(TARGET mesh_control_outbox PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_durable_outbox STATIC
+  src/mesh_control_durable_outbox.c
+  src/mesh_control_durable_outbox.h)
+target_include_directories(mesh_control_durable_outbox PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_durable_outbox
+  PUBLIC mesh_control_primitives TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_control_durable_outbox PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_durable_outbox_worker STATIC
+  src/mesh_control_durable_outbox_worker.c
+  src/mesh_control_durable_outbox_worker.h)
+target_include_directories(mesh_control_durable_outbox_worker PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_durable_outbox_worker
+  PUBLIC mesh_control_durable_outbox TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_control_durable_outbox_worker
+  PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_agent_sync STATIC
+  src/mesh_control_agent_sync.c
+  src/mesh_control_agent_sync.h)
+target_include_directories(mesh_control_agent_sync PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_agent_sync PUBLIC
+  mesh_control_primitives mesh_mgmt_crypto mesh_mgmt_identity)
+set_property(TARGET mesh_control_agent_sync PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_controller_session STATIC
+  src/mesh_control_controller_session.c
+  src/mesh_control_controller_session.h)
+target_include_directories(mesh_control_controller_session PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_controller_session PUBLIC
+  mesh_control_agent_sync mesh_control_durable_outbox_worker
+  mesh_control_status mesh_control_mmp mesh_mgmt_envelope)
+set_property(TARGET mesh_control_controller_session
+  PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_controller_identity STATIC
+  src/mesh_control_controller_identity.c
+  src/mesh_control_controller_identity.h)
+target_include_directories(mesh_control_controller_identity PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_controller_identity PUBLIC
+  mesh_control_controller_session mesh_certificate_lifecycle)
+set_property(TARGET mesh_control_controller_identity
+  PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_controller_iris STATIC
+  src/mesh_control_controller_iris.c
+  src/mesh_control_controller_iris.h)
+target_include_directories(mesh_control_controller_iris PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_controller_iris PUBLIC
+  mesh_control_controller_session TurboHttp::Iris TurboNet::CoroNet
+  TurboUtils::Core)
+set_property(TARGET mesh_control_controller_iris PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_secure_file STATIC
+  src/mesh_secure_file.c
+  src/mesh_secure_file.h)
+target_include_directories(mesh_secure_file PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+if(WIN32)
+  target_link_libraries(mesh_secure_file PRIVATE advapi32)
+endif()
+set_property(TARGET mesh_secure_file PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_certificate_lifecycle STATIC
+  src/mesh_certificate_lifecycle.c
+  src/mesh_certificate_lifecycle.h)
+target_include_directories(mesh_certificate_lifecycle PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_certificate_lifecycle PUBLIC
+  mesh_control_primitives TurboUtils::Core
+  PRIVATE mesh_mgmt_crypto mesh_secure_file OpenSSL::Crypto)
+set_property(TARGET mesh_certificate_lifecycle PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_agent_http_client STATIC
+  src/mesh_control_agent_http_client.c
+  src/mesh_control_agent_http_client.h)
+target_include_directories(mesh_control_agent_http_client PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_agent_http_client PUBLIC
+  mesh_control_agent_sync mesh_control_controller_iris
+  TurboHttp::TurboHttp TurboNet::CoroNet)
+set_property(TARGET mesh_control_agent_http_client PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_channel STATIC
+  src/mesh_control_channel.c
+  src/mesh_control_channel.h)
+target_include_directories(mesh_control_channel PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_channel
+  PUBLIC mesh_control_primitives TurboUtils::Core)
+set_property(TARGET mesh_control_channel PROPERTY FOLDER "mesh/internal")
+
+# Canonical typed local-control frames and the bounded ownership-transfer
+# channel used at the FlowMQ callback/domain-owner boundary. The codec is
+# transport-neutral; the optional FlowMQ adapter is layered above it.
+add_library(mesh_node_ipc STATIC
+  src/mesh_node_ipc.c
+  src/mesh_node_ipc.h
+  src/mesh_node_ipc_channel.c
+  src/mesh_node_ipc_channel.h
+  src/mesh_node_ipc_client.c
+  src/mesh_node_ipc_client.h
+  src/mesh_node_ipc_owner.c
+  src/mesh_node_ipc_owner.h)
+target_include_directories(mesh_node_ipc PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_node_ipc
+  PUBLIC mesh_control_primitives TurboUtils::Core
+  PRIVATE TurboNet::Crypto)
+set_property(TARGET mesh_node_ipc PROPERTY FOLDER "mesh/internal")
+
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+  add_library(mesh_node_ipc_flowmq STATIC
+    src/mesh_node_ipc_flowmq.c
+    src/mesh_node_ipc_flowmq.h)
+  target_include_directories(mesh_node_ipc_flowmq PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_ipc_flowmq PUBLIC
+    mesh_node_ipc FlowMQ::FlowMQ)
+  set_property(TARGET mesh_node_ipc_flowmq PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_node_control_runtime STATIC
+    src/mesh_node_control_runtime.c
+    src/mesh_node_control_runtime.h)
+  target_include_directories(mesh_node_control_runtime PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_control_runtime PUBLIC
+    mesh_node_ipc_flowmq mesh_node_ipc)
+  set_property(TARGET mesh_node_control_runtime PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_node_control_client_runtime STATIC
+    src/mesh_node_control_client_runtime.c
+    src/mesh_node_control_client_runtime.h)
+  target_include_directories(mesh_node_control_client_runtime PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_control_client_runtime PUBLIC
+    mesh_node_ipc_flowmq mesh_node_ipc)
+  set_property(TARGET mesh_node_control_client_runtime PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_node_control_flowmq_provider STATIC
+    src/mesh_node_control_flowmq_provider.c
+    src/mesh_node_control_flowmq_provider.h)
+  target_include_directories(mesh_node_control_flowmq_provider PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_control_flowmq_provider PUBLIC
+    mesh_node_control_client_runtime mesh_control_reconciler
+    mesh_control_document
+    PRIVATE TurboNet::Crypto)
+  set_property(TARGET mesh_node_control_flowmq_provider PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_node_control_flowmq_network_provider STATIC
+    src/mesh_node_control_flowmq_network_provider.c
+    src/mesh_node_control_flowmq_network_provider.h
+    src/mesh_control_network_provider.h)
+  target_include_directories(mesh_node_control_flowmq_network_provider PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_control_flowmq_network_provider PUBLIC
+    mesh_node_control_client_runtime mesh_control_document
+    PRIVATE TurboNet::Crypto)
+  set_property(TARGET mesh_node_control_flowmq_network_provider PROPERTY FOLDER "mesh/internal")
+endif()
+
+add_library(mesh_control_mmp STATIC
+  src/mesh_control_mmp.c
+  src/mesh_control_mmp.h)
+target_include_directories(mesh_control_mmp PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_mmp
+  PUBLIC mesh_control_primitives mesh_mgmt_envelope)
+set_property(TARGET mesh_control_mmp PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_document STATIC
+  src/mesh_control_document.c
+  src/mesh_control_document.h)
+target_include_directories(mesh_control_document PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_document PUBLIC
+  mesh_control_mmp mesh_mgmt_codec PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_control_document PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_network_reconciler STATIC
+  src/mesh_network_reconciler.c
+  src/mesh_network_reconciler.h)
+target_include_directories(mesh_network_reconciler PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(mesh_network_reconciler PUBLIC
+  mesh_control_document mesh PRIVATE TurboNet::Crypto)
+set_property(TARGET mesh_network_reconciler PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_node_ipc_network_executor STATIC
+  src/mesh_node_ipc_network_executor.c
+  src/mesh_node_ipc_network_executor.h)
+target_include_directories(mesh_node_ipc_network_executor PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_node_ipc_network_executor PUBLIC
+  mesh_node_ipc mesh_network_reconciler PRIVATE TurboNet::Crypto)
+set_property(TARGET mesh_node_ipc_network_executor PROPERTY FOLDER "mesh/internal")
+
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+  add_library(mesh_node_network_control_service STATIC
+    src/mesh_node_network_control_service.c
+    src/mesh_node_network_control_service.h)
+  target_include_directories(mesh_node_network_control_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_node_network_control_service PUBLIC
+    mesh_node_control_runtime mesh_node_ipc_network_executor
+    mesh_network_reconciler)
+  set_property(TARGET mesh_node_network_control_service
+    PROPERTY FOLDER "mesh/internal")
+endif()
+
+add_library(mesh_control_iris STATIC
+  src/mesh_control_iris.c
+  src/mesh_control_iris.h)
+target_include_directories(mesh_control_iris PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_iris
+  PUBLIC mesh_control_channel mesh_control_mmp TurboHttp::Iris)
+set_property(TARGET mesh_control_iris PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_state STATIC
+  src/mesh_control_state.c
+  src/mesh_control_state.h)
+target_include_directories(mesh_control_state PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_state PUBLIC mesh_control_primitives)
+set_property(TARGET mesh_control_state PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_status STATIC
+  src/mesh_control_status.c
+  src/mesh_control_status.h)
+target_include_directories(mesh_control_status PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_status PUBLIC
+  mesh_control_state mesh_mgmt_codec)
+set_property(TARGET mesh_control_status PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_policy STATIC
+  src/mesh_control_policy.c
+  src/mesh_control_policy.h)
+target_include_directories(mesh_control_policy PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_policy PUBLIC
+  mesh_control_document mesh_control_primitives)
+set_property(TARGET mesh_control_policy PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_reconciler STATIC
+  src/mesh_control_reconciler.c
+  src/mesh_control_reconciler.h)
+target_include_directories(mesh_control_reconciler PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_reconciler PUBLIC
+  mesh_control_document mesh_control_state)
+set_property(TARGET mesh_control_reconciler PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_owner STATIC
+  src/mesh_control_owner.c
+  src/mesh_control_owner.h)
+target_include_directories(mesh_control_owner PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_owner PUBLIC
+  mesh_control_channel mesh_control_document mesh_control_state mesh_mgmt_replay)
+set_property(TARGET mesh_control_owner PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_checkpoint STATIC
+  src/mesh_control_checkpoint.c
+  src/mesh_control_checkpoint.h)
+target_include_directories(mesh_control_checkpoint PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_checkpoint
+  PUBLIC mesh_control_owner
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_control_checkpoint PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_checkpoint_store STATIC
+  src/mesh_control_checkpoint_store.c
+  src/mesh_control_checkpoint_store.h)
+target_include_directories(mesh_control_checkpoint_store PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_checkpoint_store
+  PUBLIC mesh_control_checkpoint TurboUtils::Core
+  PRIVATE OpenSSL::Crypto)
+set_property(TARGET mesh_control_checkpoint_store PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_wal STATIC
+  src/mesh_control_wal.c
+  src/mesh_control_wal.h)
+target_include_directories(mesh_control_wal PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_wal
+  PUBLIC mesh_control_owner mesh_control_mmp
+  PRIVATE mesh_mgmt_crypto OpenSSL::Crypto TurboUtils::Core)
+set_property(TARGET mesh_control_wal PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_wal_worker STATIC
+  src/mesh_control_wal_worker.c
+  src/mesh_control_wal_worker.h)
+target_include_directories(mesh_control_wal_worker PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_wal_worker
+  PUBLIC mesh_control_checkpoint_store mesh_control_wal TurboUtils::Core
+  PRIVATE mesh_mgmt_crypto)
+set_property(TARGET mesh_control_wal_worker PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_agent STATIC
+  src/mesh_control_agent.c
+  src/mesh_control_agent.h
+  src/mesh_control_network_provider.h)
+target_include_directories(mesh_control_agent PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_agent PUBLIC
+  mesh_control_iris mesh_control_owner mesh_control_policy
+  mesh_control_reconciler mesh_network_reconciler mesh_control_status mesh_control_wal_worker
+  TurboNet::CoroNet TurboHttp::Iris)
+set_property(TARGET mesh_control_agent PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_agent_service STATIC
+  src/mesh_control_agent_service.c
+  src/mesh_control_agent_service.h)
+target_include_directories(mesh_control_agent_service PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_agent_service PUBLIC
+  mesh_control_agent mesh_control_agent_http_client mesh_control_agent_sync
+  mesh_certificate_lifecycle TurboUtils::Core)
+set_property(TARGET mesh_control_agent_service PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_agent_runtime STATIC
+  src/mesh_control_agent_runtime.c
+  src/mesh_control_agent_runtime.h)
+target_include_directories(mesh_control_agent_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_agent_runtime PUBLIC
+  mesh_control_agent_service mesh_certificate_lifecycle)
+set_property(TARGET mesh_control_agent_runtime PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_control_controller_runtime STATIC
+  src/mesh_control_controller_runtime.c
+  src/mesh_control_controller_runtime.h)
+target_include_directories(mesh_control_controller_runtime PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_controller_runtime PUBLIC
+  mesh_control_controller_identity mesh_control_controller_iris
+  mesh_certificate_lifecycle TurboHttp::Iris TurboNet::CoroNet
+  TurboUtils::Core)
+set_property(TARGET mesh_control_controller_runtime
+  PROPERTY FOLDER "mesh/internal")
 
 # Internal single-store M3 immutable CAS. Namespace, Raft, gateway, transport
 # capability and execution authority remain separate layers.
@@ -457,6 +868,30 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
     PRIVATE mesh_mgmt_crypto OpenSSL::Crypto)
   set_property(TARGET mesh_mgmt_execution_orchestrator
     PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_mgmt_execution_process STATIC
+    src/mesh_mgmt_execution_process.c
+    src/mesh_mgmt_execution_process.h)
+  target_include_directories(mesh_mgmt_execution_process PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_mgmt_execution_process
+    PUBLIC mesh_mgmt_execution_orchestrator mesh_mgmt_execution_result
+           mesh_mgmt_execution_runner TurboUtils::Core
+    PRIVATE mesh_mgmt_crypto OpenSSL::Crypto)
+  set_property(TARGET mesh_mgmt_execution_process
+    PROPERTY FOLDER "mesh/internal")
+
+  add_library(mesh_control_execution_provider STATIC
+    src/mesh_control_execution_provider.c
+    src/mesh_control_execution_provider.h)
+  target_include_directories(mesh_control_execution_provider PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(mesh_control_execution_provider
+    PUBLIC mesh_control_reconciler mesh_mgmt_execution_process
+    PRIVATE mesh_mgmt_execution_store mesh_mgmt_crypto TurboUtils::Core
+            OpenSSL::Crypto)
+  set_property(TARGET mesh_control_execution_provider
+    PROPERTY FOLDER "mesh/internal")
 endif()
 
 add_library(mesh_mgmt_dispatch STATIC
@@ -701,7 +1136,8 @@ add_library(mesh_mgmt_agent_runtime STATIC
 target_include_directories(mesh_mgmt_agent_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_agent_runtime PUBLIC
-  mesh_mgmt_agent_router mesh_mgmt_endpoint_publisher mesh_mgmt_service_publisher
+  mesh_mgmt_agent_router mesh_mgmt_endpoint_publisher mesh_mgmt_p2p_security
+  mesh_mgmt_service_publisher
   TurboNet::CoroNet)
 set_property(TARGET mesh_mgmt_agent_runtime PROPERTY FOLDER "mesh/internal")
 
@@ -939,7 +1375,8 @@ target_include_directories(
 # Link libraries
 target_link_libraries(mesh
   PUBLIC TurboUtils::Core TurboP2P::P2P
-  PRIVATE mesh_mgmt_agent_router mesh_flow_ruleset)
+  PRIVATE mesh_mgmt_agent_router mesh_mgmt_crypto mesh_flow_ruleset
+          TurboNet::Crypto)
 
 
 target_link_libraries(mesh PRIVATE  TurboNet::Ice)
@@ -987,6 +1424,19 @@ install(
 # Examples
 # =============================================================================
 
+# Strict private-key file adapter for deployable daemon identities. It is
+# available to daemon tests even when example executables are disabled.
+add_library(meshd_key_file STATIC
+  examples/meshd_key_file.c
+  examples/meshd_key_file.h)
+target_include_directories(meshd_key_file PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+target_link_libraries(meshd_key_file PRIVATE mesh_mgmt_crypto)
+if(WIN32)
+  target_link_libraries(meshd_key_file PRIVATE advapi32)
+endif()
+set_property(TARGET meshd_key_file PROPERTY FOLDER "mesh/internal")
+
 if(BUILD_EXAMPLES)
   add_subdirectory(examples)
 endif()
@@ -1028,4 +1478,3 @@ target_link_libraries(mesh_mgmt_execution_disabled_responder
     PRIVATE
         mesh_mgmt_crypto
 )
-

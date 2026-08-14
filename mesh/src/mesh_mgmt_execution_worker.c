@@ -23,10 +23,18 @@ static void mesh_mgmt_execution_worker_run_job(void *argument) {
   worker = job->worker;
   memset(&result, 0, sizeof(result));
   memset(payload, 0, sizeof(payload));
-  service_result = mesh_mgmt_execution_service_execute_v1(
-      worker->service, &job->command, &job->authorization,
-      worker->has_runner_io != 0u ? &worker->runner_io : NULL, payload,
-      sizeof(payload), &payload_size, &result);
+  if (worker->execute) {
+    service_result = worker->execute(
+        worker->execute_context, worker->service, &job->command,
+        &job->authorization,
+        worker->has_runner_io != 0u ? &worker->runner_io : NULL, payload,
+        sizeof(payload), &payload_size, &result);
+  } else {
+    service_result = mesh_mgmt_execution_service_execute_v1(
+        worker->service, &job->command, &job->authorization,
+        worker->has_runner_io != 0u ? &worker->runner_io : NULL, payload,
+        sizeof(payload), &payload_size, &result);
+  }
   if (service_result != MESH_MGMT_EXECUTION_SERVICE_OK)
     payload_size = 0u;
   worker->completion(worker->completion_context, &job->command, service_result,
@@ -63,6 +71,8 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_init_v1(
   worker->service = config->service;
   worker->completion = config->completion;
   worker->completion_context = config->completion_context;
+  worker->execute = config->execute;
+  worker->execute_context = config->execute_context;
   if (config->runner_io != NULL) {
     worker->runner_io = *config->runner_io;
     worker->has_runner_io = 1u;

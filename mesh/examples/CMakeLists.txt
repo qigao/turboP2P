@@ -118,12 +118,10 @@ add_executable(meshctl
 
 target_link_libraries(meshctl
     PRIVATE mesh
+    meshctl_product
     TurboP2P::P2P
+    TurboHttp::TurboHttp
     TurboUtils::Core)
-
-if(WIN32)
-    target_link_libraries(meshctl PRIVATE ws2_32)
-endif()
 
 target_compile_definitions(meshctl PRIVATE USING_EXAMPLES)
 
@@ -154,17 +152,98 @@ add_executable(meshd
 target_link_libraries(meshd
     PRIVATE mesh tunnel mesh_mgmt_agent_runtime
     mesh_mgmt_execution_rpc_control
-    TurboP2P::P2P)
+    meshd_key_file TurboP2P::P2P)
 
 target_compile_definitions(meshd PRIVATE USING_EXAMPLES)
 
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+    target_sources(meshd PRIVATE meshd_network_control.c)
+    target_link_libraries(meshd PRIVATE
+        mesh_node_network_control_service TurboNet::Crypto)
+    target_compile_definitions(meshd PRIVATE
+        TURBOP2P_ENABLE_FLOWMQ_IPC=1)
+endif()
+
 if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+    add_executable(mesh-execution-worker mesh_execution_worker_main.c)
+    target_link_libraries(mesh-execution-worker PRIVATE
+        mesh_mgmt_execution_process)
+    set_target_properties(mesh-execution-worker PROPERTIES
+        FOLDER "mesh/examples"
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    if(WIN32)
+        add_custom_command(TARGET mesh-execution-worker POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:TurboRuntime::Core> $<TARGET_FILE_DIR:mesh-execution-worker>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:TurboWasm::Runtime> $<TARGET_FILE_DIR:mesh-execution-worker>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:TurboUtils::Core> $<TARGET_FILE_DIR:mesh-execution-worker>)
+        if(ENABLE_SANITIZER_ADDRESS)
+            get_filename_component(mesh_execution_compiler_dir
+                "${CMAKE_C_COMPILER}" DIRECTORY)
+            set(mesh_execution_asan_runtime
+                "${mesh_execution_compiler_dir}/clang_rt.asan_dynamic-x86_64.dll")
+            if(EXISTS "${mesh_execution_asan_runtime}")
+                add_custom_command(TARGET mesh-execution-worker POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${mesh_execution_asan_runtime}"
+                        $<TARGET_FILE_DIR:mesh-execution-worker>)
+            endif()
+        endif()
+    endif()
+
     target_sources(meshd PRIVATE meshd_execution_config.c)
-    target_link_libraries(meshd PRIVATE mesh_mgmt_execution_node)
+    target_link_libraries(meshd PRIVATE mesh_mgmt_execution_node
+        mesh_mgmt_execution_process)
     target_compile_definitions(meshd PRIVATE
         TURBO_P2P_ENABLE_NODE_EXECUTION=1)
 endif()
 
 set_target_properties(meshd PROPERTIES
+    FOLDER "mesh/examples"
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Production product-control agent: durable local WAL, outbound H2 mTLS,
+# certificate reload and optional isolated Native/TurboWASM providers.
+add_executable(mesh-agent
+    mesh_agent_main.c)
+# TurboUtils still ships a legacy compatibility turbo_parser.h. Put the
+# dedicated TurboParser package first so the service gets the structured CLI
+# API from the dependency it explicitly links.
+get_target_property(_mesh_agent_turbo_parser_includes
+    TurboParser::Parser INTERFACE_INCLUDE_DIRECTORIES)
+target_include_directories(mesh-agent SYSTEM BEFORE PRIVATE
+    ${_mesh_agent_turbo_parser_includes})
+target_link_libraries(mesh-agent PRIVATE
+    mesh_control_agent_runtime meshd_key_file
+    TurboParser::Parser TurboUtils::Core)
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+    target_link_libraries(mesh-agent PRIVATE
+        mesh_node_control_flowmq_network_provider FlowMQ::FlowMQ)
+    target_compile_definitions(mesh-agent PRIVATE
+        TURBO_P2P_ENABLE_FLOWMQ_IPC=1)
+endif()
+if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+    target_sources(mesh-agent PRIVATE meshd_execution_config.c)
+    target_link_libraries(mesh-agent PRIVATE
+        mesh_control_execution_provider mesh_mgmt_execution_process)
+    target_compile_definitions(mesh-agent PRIVATE
+        TURBO_P2P_ENABLE_NODE_EXECUTION=1)
+endif()
+set_target_properties(mesh-agent PROPERTIES
+    FOLDER "mesh/examples"
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Production delivery Controller: H2 mTLS agent sync, authenticated signed-MMP
+# ingress, durable outbox recovery and online session fencing.
+add_executable(mesh-controller
+    mesh_controller_main.c)
+target_include_directories(mesh-controller SYSTEM BEFORE PRIVATE
+    ${_mesh_agent_turbo_parser_includes})
+target_link_libraries(mesh-controller PRIVATE
+    mesh_control_controller_runtime meshd_key_file
+    TurboParser::Parser TurboUtils::Core)
+set_target_properties(mesh-controller PROPERTIES
     FOLDER "mesh/examples"
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

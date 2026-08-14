@@ -23,11 +23,19 @@ enum {
   MESHD_EXECUTION_FIELD_INPUT_BYTES = 1u << 12,
   MESHD_EXECUTION_FIELD_STDOUT_BYTES = 1u << 13,
   MESHD_EXECUTION_FIELD_STDERR_BYTES = 1u << 14,
-  MESHD_EXECUTION_FIELD_DEPLOYMENTS = 1u << 15
+  MESHD_EXECUTION_FIELD_DEPLOYMENTS = 1u << 15,
+  MESHD_EXECUTION_FIELD_WORKER_PROGRAM = 1u << 16,
+  MESHD_EXECUTION_FIELD_WORKER_SHA256 = 1u << 17,
+  MESHD_EXECUTION_FIELD_SANDBOX_PROGRAM = 1u << 18,
+  MESHD_EXECUTION_FIELD_SANDBOX_SHA256 = 1u << 19,
+  MESHD_EXECUTION_FIELD_MAX_WORKER_BYTES = 1u << 20,
+  MESHD_EXECUTION_FIELD_MAX_OUTPUT_BYTES = 1u << 21,
+  MESHD_EXECUTION_FIELD_SANDBOX_ARGS = 1u << 22
 };
 
 #define MESHD_EXECUTION_REQUIRED_FIELDS \
-  ((1u << 16) - 1u)
+  ((1u << 22) - 1u)
+#define MESHD_EXECUTION_KNOWN_FIELDS ((1u << 23) - 1u)
 #define MESHD_EXECUTION_WORKER_GENERATION 1u
 
 static char *trim(char *text) {
@@ -96,12 +104,14 @@ static int hex_value(char value) {
   return -1;
 }
 
-static int decode_hex_32(const char *text, uint8_t output[32]) {
+static int decode_hex_exact(const char *text, uint8_t *output,
+                            size_t output_size) {
   size_t index;
 
-  if (!text || strlen(text) != 64u)
+  if (!text || !output || output_size == 0u ||
+      output_size > SIZE_MAX / 2u || strlen(text) != output_size * 2u)
     return -1;
-  for (index = 0u; index < 32u; ++index) {
+  for (index = 0u; index < output_size; ++index) {
     int high = hex_value(text[index * 2u]);
     int low = hex_value(text[index * 2u + 1u]);
     if (high < 0 || low < 0)
@@ -138,38 +148,94 @@ static int parse_capabilities(char *text, uint32_t *out_capabilities) {
   return 0;
 }
 
+static int parse_sandbox_args(meshd_execution_config_t *config, char *text) {
+  char *cursor = strip_quotes(trim(text));
+  if (!cursor[0]) return -1;
+  while (cursor) {
+    char *comma = strchr(cursor, ',');
+    char *argument;
+    size_t size;
+    if (comma) *comma = '\0';
+    argument = trim(cursor);
+    size = strlen(argument);
+    if (size == 0u ||
+        size >= MESH_MGMT_EXECUTION_PROCESS_MAX_SANDBOX_ARG_SIZE_V1 ||
+        config->sandbox_arg_count >=
+            MESH_MGMT_EXECUTION_PROCESS_MAX_SANDBOX_ARGS_V1)
+      return -1;
+    memcpy(config->sandbox_arg_storage[config->sandbox_arg_count], argument,
+           size + 1u);
+    config->sandbox_args[config->sandbox_arg_count] =
+        config->sandbox_arg_storage[config->sandbox_arg_count];
+    config->sandbox_arg_count++;
+    cursor = comma ? comma + 1 : NULL;
+  }
+  return 0;
+}
+
 static int parse_deployment(meshd_execution_config_t *config, char *text) {
   mesh_mgmt_execution_deployment_v1_t *deployment;
-  char *fields[4];
+  char *fields[7];
   char *cursor;
+  size_t field_count = 1u;
+  size_t field_offset = 0u;
   size_t index;
 
   if (config->deployment_count >= MESHD_EXECUTION_MAX_DEPLOYMENTS)
     return -1;
   cursor = strip_quotes(trim(text));
-  for (index = 0u; index < 3u; ++index) {
+  for (index = 0u; index < 6u; ++index) {
     char *comma = strchr(cursor, ',');
-    if (!comma)
-      return -1;
+    if (!comma) break;
     *comma = '\0';
     fields[index] = trim(cursor);
     cursor = comma + 1;
+    field_count++;
   }
-  fields[3] = trim(cursor);
-  if (strchr(fields[3], ',') || fields[3][0] == '\0' ||
-      strlen(fields[3]) >= TURBO_FS_MAX_PATH ||
-      !turbo_fs_path_is_absolute(fields[3]))
+  if (field_count != 4u && field_count != 5u && field_count != 7u)
+    return -1;
+  fields[field_count - 1u] = trim(cursor);
+  if (strchr(fields[field_count - 1u], ',') ||
+      fields[field_count - 1u][0] == '\0' ||
+      strlen(fields[field_count - 1u]) >= TURBO_FS_MAX_PATH ||
+      !turbo_fs_path_is_absolute(fields[field_count - 1u]))
     return -1;
 
   deployment = &config->deployments[config->deployment_count];
   memset(deployment, 0, sizeof(*deployment));
-  if (decode_hex_32(fields[0], deployment->deployment_id) != 0 ||
-      parse_u64(fields[1], &deployment->generation) != 0 ||
+  if (field_count == 5u || field_count == 7u) {
+    if (strcmp(fields[0], "wasm") == 0)
+      deployment->runtime = MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1;
+    else if (strcmp(fields[0], "native") == 0)
+      deployment->runtime =
+          MESH_MGMT_EXECUTION_DEPLOYMENT_NATIVE_PROCESS_V1;
+    else
+      return -1;
+    field_offset = 1u;
+  }
+  if (decode_hex_exact(fields[field_offset], deployment->deployment_id,
+                       sizeof(deployment->deployment_id)) != 0 ||
+      parse_u64(fields[field_offset + 1u], &deployment->generation) != 0 ||
       deployment->generation == 0u ||
-      decode_hex_32(fields[2], deployment->module_digest) != 0)
+      decode_hex_exact(fields[field_offset + 2u], deployment->module_digest,
+                       sizeof(deployment->module_digest)) != 0)
     return -1;
-  memcpy(config->deployment_paths[config->deployment_count], fields[3],
-         strlen(fields[3]) + 1u);
+  if (field_count == 7u) {
+    if (decode_hex_exact(
+            fields[field_offset + 3u],
+            config->deployment_config_digests[config->deployment_count],
+            MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0 ||
+        decode_hex_exact(
+            fields[field_offset + 4u],
+            config->deployment_network_policy_digests
+                [config->deployment_count],
+            MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0)
+      return -1;
+    config->deployment_has_control_binding[config->deployment_count] = 1u;
+    field_offset += 2u;
+  }
+  memcpy(config->deployment_paths[config->deployment_count],
+         fields[field_offset + 3u], strlen(fields[field_offset + 3u]) + 1u);
   deployment->module_path =
       config->deployment_paths[config->deployment_count];
   config->deployment_count++;
@@ -195,6 +261,8 @@ static int parse_scalar(meshd_execution_config_t *config,
       config->mode = MESHD_EXECUTION_MODE_DISABLED;
     else if (strcmp(value, "prestaged_wasm") == 0)
       config->mode = MESHD_EXECUTION_MODE_PRESTAGED_WASM;
+    else if (strcmp(value, "prestaged_isolated") == 0)
+      config->mode = MESHD_EXECUTION_MODE_PRESTAGED_ISOLATED;
     else
       return -1;
   } else if (strcmp(key, "mgmt_execution_store_file") == 0) {
@@ -202,6 +270,35 @@ static int parse_scalar(meshd_execution_config_t *config,
     if (value[0] == '\0' || strlen(value) >= sizeof(config->store_file))
       return -1;
     memcpy(config->store_file, value, strlen(value) + 1u);
+  } else if (strcmp(key, "mgmt_execution_worker_program") == 0) {
+    field = MESHD_EXECUTION_FIELD_WORKER_PROGRAM;
+    if (!turbo_fs_path_is_absolute(value) ||
+        strlen(value) >= sizeof(config->worker_program))
+      return -1;
+    memcpy(config->worker_program, value, strlen(value) + 1u);
+  } else if (strcmp(key, "mgmt_execution_worker_sha256") == 0) {
+    field = MESHD_EXECUTION_FIELD_WORKER_SHA256;
+    if (decode_hex_exact(value, config->worker_sha256,
+                         sizeof(config->worker_sha256)) != 0) return -1;
+  } else if (strcmp(key, "mgmt_execution_sandbox_program") == 0) {
+    field = MESHD_EXECUTION_FIELD_SANDBOX_PROGRAM;
+    if (!turbo_fs_path_is_absolute(value) ||
+        strlen(value) >= sizeof(config->sandbox_program))
+      return -1;
+    memcpy(config->sandbox_program, value, strlen(value) + 1u);
+  } else if (strcmp(key, "mgmt_execution_sandbox_sha256") == 0) {
+    field = MESHD_EXECUTION_FIELD_SANDBOX_SHA256;
+    if (decode_hex_exact(value, config->sandbox_sha256,
+                         sizeof(config->sandbox_sha256)) != 0) return -1;
+  } else if (strcmp(key, "mgmt_execution_sandbox_args") == 0) {
+    field = MESHD_EXECUTION_FIELD_SANDBOX_ARGS;
+    if (parse_sandbox_args(config, value) != 0) return -1;
+  } else if (strcmp(key, "mgmt_execution_max_worker_bytes") == 0) {
+    field = MESHD_EXECUTION_FIELD_MAX_WORKER_BYTES;
+    if (parse_u32(value, &config->maximum_worker_bytes) != 0) return -1;
+  } else if (strcmp(key, "mgmt_execution_max_output_bytes") == 0) {
+    field = MESHD_EXECUTION_FIELD_MAX_OUTPUT_BYTES;
+    if (parse_size(value, &config->maximum_output_bytes) != 0) return -1;
   } else if (strcmp(key, "mgmt_execution_worker_queue_capacity") == 0) {
     field = MESHD_EXECUTION_FIELD_WORKER_QUEUE;
     if (parse_size(value, &config->worker_queue_capacity) != 0)
@@ -348,9 +445,16 @@ int meshd_execution_config_validate(
                    config->seen_fields == MESHD_EXECUTION_FIELD_MODE
                ? 0
                : -1;
-  if (config->mode != MESHD_EXECUTION_MODE_PRESTAGED_WASM ||
-      config->seen_fields != MESHD_EXECUTION_REQUIRED_FIELDS ||
+  if ((config->mode != MESHD_EXECUTION_MODE_PRESTAGED_WASM &&
+       config->mode != MESHD_EXECUTION_MODE_PRESTAGED_ISOLATED) ||
+      (config->seen_fields & MESHD_EXECUTION_REQUIRED_FIELDS) !=
+          MESHD_EXECUTION_REQUIRED_FIELDS ||
+      (config->seen_fields & ~MESHD_EXECUTION_KNOWN_FIELDS) != 0u ||
       config->store_file[0] == '\0' ||
+      config->worker_program[0] == '\0' ||
+      config->sandbox_program[0] == '\0' ||
+      config->maximum_worker_bytes == 0u ||
+      config->maximum_output_bytes < 440u ||
       config->worker_queue_capacity == 0u ||
       config->worker_queue_capacity >
           MESH_MGMT_EXECUTION_WORKER_MAX_QUEUE_CAPACITY ||
@@ -371,6 +475,15 @@ int meshd_execution_config_validate(
       config->limits.stderr_bytes == 0u ||
       config->deployment_count == 0u)
     return -1;
+  {
+    size_t index;
+    for (index = 0u; index < config->deployment_count; ++index)
+      if (config->deployments[index].runtime ==
+              MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1 &&
+          config->capabilities !=
+              MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1)
+        return -1;
+  }
   return 0;
 }
 
@@ -381,11 +494,15 @@ int meshd_execution_config_build_node(
     const uint8_t grant_issuer_key[MESH_MGMT_EXECUTION_DIGEST_SIZE],
     mesh_mgmt_execution_clock_v1_fn clock_now_ms,
     void *clock_context,
+    mesh_mgmt_execution_process_v1_t *execution_process,
     mesh_mgmt_execution_node_config_v1_t *out_config) {
   if (!config || !local_node_id || !result_private_key ||
-      !grant_issuer_key || !clock_now_ms || !out_config ||
-      config->mode != MESHD_EXECUTION_MODE_PRESTAGED_WASM ||
+      !grant_issuer_key || !clock_now_ms || !execution_process || !out_config ||
+      (config->mode != MESHD_EXECUTION_MODE_PRESTAGED_WASM &&
+       config->mode != MESHD_EXECUTION_MODE_PRESTAGED_ISOLATED) ||
       meshd_execution_config_validate(config) != 0)
+    return -1;
+  if (meshd_execution_config_build_process(config, execution_process) != 0)
     return -1;
   memset(out_config, 0, sizeof(*out_config));
   out_config->store_path = config->store_file;
@@ -409,5 +526,35 @@ int meshd_execution_config_build_node(
   out_config->worker_generation = MESHD_EXECUTION_WORKER_GENERATION;
   out_config->clock_now_ms = clock_now_ms;
   out_config->clock_context = clock_context;
+  out_config->execute_runner = mesh_mgmt_execution_process_run_v1;
+  out_config->execute_runner_context = execution_process;
   return 0;
+}
+
+int meshd_execution_config_build_process(
+    const meshd_execution_config_t *config,
+    mesh_mgmt_execution_process_v1_t *execution_process) {
+  mesh_mgmt_execution_process_config_v1_t process_config;
+  if (!config || !execution_process || execution_process->initialized ||
+      (config->mode != MESHD_EXECUTION_MODE_PRESTAGED_WASM &&
+       config->mode != MESHD_EXECUTION_MODE_PRESTAGED_ISOLATED) ||
+      meshd_execution_config_validate(config) != 0)
+    return -1;
+  memset(&process_config, 0, sizeof(process_config));
+  process_config.worker_program = config->worker_program;
+  memcpy(process_config.worker_sha256, config->worker_sha256,
+         sizeof(process_config.worker_sha256));
+  process_config.maximum_worker_bytes = config->maximum_worker_bytes;
+  process_config.sandbox_program = config->sandbox_program;
+  memcpy(process_config.sandbox_sha256, config->sandbox_sha256,
+         sizeof(process_config.sandbox_sha256));
+  process_config.sandbox_args = config->sandbox_args;
+  process_config.sandbox_arg_count = config->sandbox_arg_count;
+  process_config.maximum_output_bytes = config->maximum_output_bytes;
+  process_config.native_capabilities = config->capabilities;
+  return mesh_mgmt_execution_process_init_v1(execution_process,
+                                              &process_config) ==
+                 MESH_MGMT_EXECUTION_RUNNER_OK
+             ? 0
+             : -1;
 }

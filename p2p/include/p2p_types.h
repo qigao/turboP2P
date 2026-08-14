@@ -31,10 +31,7 @@ typedef void (*p2p_transfer_complete_cb)(p2p_transfer_t *transfer, int success,
 #define P2P_MAX_FILEPATH        512
 #define P2P_MAX_FILENAME        256
 #define P2P_MAX_IP              64
-#define P2P_TAG_SIZE            16      /* ChaCha20-Poly1305 tag */
-#define P2P_NONCE_SIZE          24      /* XChaCha20 nonce */
-#define P2P_KEY_SIZE            32      /* ChaCha20 key */
-#define P2P_HANDSHAKE_MAX       128     /* Max handshake message size */
+#define P2P_KEY_SIZE            32      /* X25519 static key material */
 
 #define P2P_FINGER_COUNT        20      /* Chord finger table size (log2 of ID space) */
 #define P2P_SUCCESSOR_LIST_SIZE 8       /* Successor list for fault tolerance */
@@ -67,7 +64,7 @@ typedef enum {
     P2P_MSG_CHUNK_REQUEST = 13,
     P2P_MSG_CHUNK_DATA = 14,
     P2P_MSG_FILE_ACK = 15,
-    P2P_MSG_NOISE_HANDSHAKE = 16,
+    P2P_MSG_RESERVED_LEGACY_HANDSHAKE = 16,
     P2P_MSG_DHT_FIND_NODE = 17,
     P2P_MSG_CUSTOM = 100,
 } p2p_msg_type_t;

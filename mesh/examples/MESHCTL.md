@@ -2,6 +2,11 @@
 
 `meshctl` is the week-1 CLI for validating a two-node developer mesh.
 
+This document describes the current developer tool, the Phase-1 read-only
+Product Controller client, and the placement-selector plan adapter. The
+complete target command tree, Controller API, operations, and content-deletion semantics are specified in
+[`MESHCTL_PRIMITIVES_DESIGN.md`](../MESHCTL_PRIMITIVES_DESIGN.md).
+
 ## Commands
 
 ```text
@@ -10,6 +15,59 @@ meshctl init -o mesh.yaml
 meshctl doctor -c mesh.yaml
 meshctl up -c mesh.yaml
 ```
+
+Product Controller integration commands are:
+
+```text
+meshctl nodes list --endpoint https://controller.example \
+  --mesh demo --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl nodes get node-7 --endpoint https://controller.example \
+  --mesh demo --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl operations get op-42 --endpoint https://controller.example \
+  --mesh demo --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl placements plan release:web-v42 \
+  --selector 'region == "eu-west" && role in ["edge", "cache"] && capability("m3-cache")' \
+  --endpoint https://controller.example --mesh demo \
+  --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl networks list --endpoint https://controller.example --mesh demo \
+  --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl networks plan -f network.json \
+  --endpoint https://controller.example --mesh demo \
+  --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl networks apply -f network.json \
+  --endpoint https://controller.example --mesh demo \
+  --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+
+meshctl networks delete production --drain-timeout-ms 30000 \
+  --endpoint https://controller.example --mesh demo \
+  --ca-file ca.pem --cert-file operator.pem --key-file operator-key.pem
+```
+
+These commands require explicit HTTP/2 and verified mutual TLS. They do not
+follow redirects, retry, fall back to HTTP/1, accept plaintext endpoints, or
+send arbitrary paths. `--timeout-ms` defaults to 10000 and is capped at 30000;
+`--page-size` defaults to 100 and is capped at 1000. Response bodies are capped
+at 1 MiB and must be valid JSON.
+
+The plan command accepts Selector V1 fields `region`, `role`, `node.id`,
+`node.name`, `platform`, `arch`, and `tag.<identifier>`, plus
+`capability("...")`. It validates and canonicalizes locally; the Controller
+adapter does not trust that result and recompiles after mTLS/RBAC. Source is
+capped at 4 KiB, tokens at 512, nesting at 16, list items at 128, and each
+decoded string at 256 bytes.
+
+The matching Iris route adapter is implemented, but no deployable Product
+Controller or authoritative inventory/journal source is wired yet. Network
+plan/apply/delete invokes an injected Controller callback and is therefore an
+integration surface, not a currently deployable management service. Generic
+resource mutations, watch, cancellation, contexts and object transfer remain
+future phases.
 
 While `up` is running, use these local commands:
 
@@ -115,7 +173,7 @@ Current example STUN endpoint:
 
 Stable identity notes:
 
-- `identity_secret_hex` is optional and must be exactly 64 hex characters
+- `identity_secret_hex` is optional only for isolated/ephemeral use and must be exactly 64 hex characters
 - `meshctl genkey` prints a valid `identity_secret_hex` plus the derived `node_id`
 - `meshctl init` writes a starter config file with a freshly generated `identity_secret_hex`
 - if unset, the node uses an ephemeral identity and its mesh node id changes on restart
@@ -124,9 +182,8 @@ Stable identity notes:
 Stream admission notes:
 
 - `stream_enabled` defaults to `false`
-- enabling it advertises Stream V1 only after the current P2P handshake
-  lifecycle; the simplified Noise-like handshake is not standard Noise and is
-  not sufficient production authentication for a dedicated data connection
+- enabling it advertises Stream V1 only after secure wire v2 completes standard
+  Noise XX, identity-policy validation and bilateral READY confirmation
 - both peers must enable it and complete identity-bound HELLO before
   `mesh_peer_stream_ready()` succeeds
 - this gate does not yet create a daemon media/data stream; the internal secure
@@ -183,17 +240,23 @@ Current admission-control format:
 
 - `peer_allow_cidrs:` list of allowed direct-peer virtual IP or CIDR entries
 - example: `10.42.0.1/32`
-- `peer_allow_node_ids:` optional list of allowed stable peer node IDs
+- `peer_allow_node_ids:` optional list of allowed stable peer transport IDs;
+  secure wire v2 also uses this immutable list as the Noise static-key trust
+  store, so an absent peer ID is rejected before application traffic
 - example: `1b...<64 hex chars>...`
 - `peer_protocol_major:` optional direct-peer admission policy by mesh protocol major
 - example: `1`
 
 Current admission-control semantics:
 
-- empty list means allow all peers
+- an empty `peer_allow_cidrs` list does not restrict virtual IPs
+- an empty `peer_allow_node_ids` list trusts no remote transport identity; the
+  node can start for isolated use but cannot form a multi-node Mesh
 - if configured, only matching peers are accepted as direct neighbors during `MESH_HELLO`
 - `peer_allow_cidrs` filters by claimed virtual IP
-- `peer_allow_node_ids` filters by stable node identity derived from the peer public key
+- `peer_allow_node_ids` is required for multi-node operation and is the explicit secure-wire trust boundary, not only a
+  post-connect filter; changing it requires rebuilding/restarting the current
+  node because live trust-snapshot replacement is not yet exposed
 - `peer_protocol_major` requires peers to advertise the configured HELLO protocol major
 - direct connect / direct upgrade attempts to non-matching peers are suppressed
 - this is admission control; use `packet_policy` for static packet filtering

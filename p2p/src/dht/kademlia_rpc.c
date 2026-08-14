@@ -262,13 +262,13 @@ static int lookup_is_self_endpoint(const p2p_node_t *node,
     return 0;
 }
 
-static int lookup_has_connected_identity_locked(const p2p_node_t *node,
-                                                const kad_lookup_node_t *candidate) {
+static p2p_peer_t *lookup_find_connected_identity_locked(
+    const p2p_node_t *node, const kad_lookup_node_t *candidate) {
     p2p_peer_entry_t *entry = NULL;
     p2p_peer_entry_t *tmp = NULL;
 
     if (!node || !candidate || p2p_id_is_zero(candidate->id)) {
-        return 0;
+        return NULL;
     }
 
     HASH_ITER(hh, node->peers_table, entry, tmp) {
@@ -280,13 +280,13 @@ static int lookup_has_connected_identity_locked(const p2p_node_t *node,
         if (memcmp(peer->id, candidate->id, P2P_DHT_KEY_SIZE) != 0) {
             continue;
         }
-        if (strcmp(peer->ip, candidate->ip) == 0 && peer->port == candidate->port) {
-            return 0;
+        if (!peer->destroying && peer->conn &&
+            peer->state == P2P_PEER_STATE_CONNECTED) {
+            return peer;
         }
-        return 1;
     }
 
-    return 0;
+    return NULL;
 }
 
 static int lookup_prepare_wave_action_locked(p2p_node_t *node,
@@ -318,8 +318,7 @@ static int lookup_prepare_wave_action_locked(p2p_node_t *node,
                                 lookup->candidates[i].port);
         peer = entry ? entry->peer : NULL;
         if (peer && peer->is_connected && !peer->destroying && peer->conn &&
-            (peer->state == P2P_PEER_STATE_CONNECTED ||
-             peer->state == P2P_PEER_STATE_HANDSHAKING)) {
+            peer->state == P2P_PEER_STATE_CONNECTED) {
             if (!p2p_peer_hold_locked(peer)) {
                 continue;
             }
@@ -331,8 +330,17 @@ static int lookup_prepare_wave_action_locked(p2p_node_t *node,
             return 1;
         }
 
-        if (lookup_has_connected_identity_locked(node, &lookup->candidates[i])) {
-            lookup->candidates[i].contacted = 1;
+        peer = lookup_find_connected_identity_locked(
+            node, &lookup->candidates[i]);
+        if (peer) {
+            if (!p2p_peer_hold_locked(peer)) {
+                continue;
+            }
+            action->type = LOOKUP_WAVE_ACTION_SEND;
+            action->peer = peer;
+            action->msg_type = lookup->type;
+            memcpy(action->target, lookup->target, sizeof(action->target));
+            action->candidate_index = i;
             return 1;
         }
 
@@ -359,8 +367,12 @@ static int lookup_mark_sent_request_locked(p2p_dht_lookup_t *lookup,
     }
 
     candidate = &lookup->candidates[action->candidate_index];
-    if (strcmp(candidate->ip, action->peer->ip) != 0 ||
-        candidate->port != action->peer->port) {
+    if ((strcmp(candidate->ip, action->peer->ip) != 0 ||
+         candidate->port != action->peer->port) &&
+        (p2p_id_is_zero(candidate->id) ||
+         p2p_id_is_zero(action->peer->id) ||
+         memcmp(candidate->id, action->peer->id,
+                P2P_DHT_KEY_SIZE) != 0)) {
         return 0;
     }
 

@@ -2,9 +2,11 @@
 #include <p2p.h>
 #include <turbo_thread.h>
 #include <turbo_parser.h>
+#include <turbo_http.h>
 #include <tlog.h>
 #include "mesh_config.h"
 #include "mesh_runtime_health.h"
+#include "meshctl_product.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,37 +14,22 @@
 #include <signal.h>
 #include <stdint.h>
 #include <time.h>
-#include <errno.h>
 
 #define MESH_SNAPSHOT_VERSION 1
 
 #ifdef _WIN32
 #include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #else
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
 #endif
 
 #define MESHD_CTL_RPC_ADDR_DEFAULT "127.0.0.1:7878"
 #define MESHD_CTL_RPC_PORT_DEFAULT 7878
-#define MESHD_CTL_RPC_INITIAL_BUF_SIZE 8192
-
-#ifdef _WIN32
-typedef SOCKET meshctl_socket_t;
-#else
-typedef int meshctl_socket_t;
-#endif
-
-#ifdef _WIN32
-#define MESHD_CTL_INVALID_SOCKET INVALID_SOCKET
-#else
-#define MESHD_CTL_INVALID_SOCKET (-1)
-#endif
+#define MESHD_CTL_RPC_TIMEOUT_MS 5000
+#define MESHD_CTL_RPC_MAX_RESPONSE_SIZE (1024u * 1024u)
+#define MESHD_CTL_RPC_MAX_HEADER_SIZE (32u * 1024u)
+#define MESHD_CTL_RPC_URL_MAX 512u
+#define MESHD_CTL_RPC_TOKEN_HEADER_MAX 256u
 
 #define MESHCTL_MAX_COMMAND 256
 #define MESHCTL_COMMAND_QUEUE_SIZE 16
@@ -106,51 +93,6 @@ static int meshctl_parse_bool_arg(const char *value, int *out) {
     }
 
     return -1;
-}
-
-static meshctl_socket_t meshctl_invalid_socket(void) {
-    return (meshctl_socket_t)MESHD_CTL_INVALID_SOCKET;
-}
-
-static int meshctl_socket_is_valid(meshctl_socket_t socket_fd) {
-    return socket_fd != meshctl_invalid_socket();
-}
-
-static void meshctl_close_socket(meshctl_socket_t socket_fd) {
-    if (!meshctl_socket_is_valid(socket_fd)) {
-        return;
-    }
-
-#ifdef _WIN32
-    closesocket(socket_fd);
-#else
-    close(socket_fd);
-#endif
-}
-
-static int meshctl_socket_send_all(meshctl_socket_t socket_fd, const char *data, size_t len) {
-    size_t offset = 0;
-
-    while (offset < len) {
-        int sent = send(socket_fd, data + offset, (int)(len - offset), 0);
-        if (sent > 0) {
-            offset += (size_t)sent;
-            continue;
-        }
-
-#ifdef _WIN32
-        if (WSAGetLastError() == WSAEWOULDBLOCK || WSAGetLastError() == WSAEINPROGRESS) {
-            continue;
-        }
-#else
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            continue;
-        }
-#endif
-        return -1;
-    }
-
-    return 0;
 }
 
 static int meshctl_parse_host_port(const char *value, char *host, size_t host_size, uint16_t *port) {
@@ -363,18 +305,45 @@ static void meshctl_rpc_print_task_response(const char *body) {
     printf("%s\n", body);
 }
 
+static int meshctl_rpc_token_is_valid(const char *token) {
+    size_t token_len = 0u;
+
+    if (!token || token[0] == '\0') {
+        return 1;
+    }
+    token_len = strlen(token);
+    return token_len <= MESHD_CTL_RPC_TOKEN_HEADER_MAX - sizeof("X-Meshd-Token: ") &&
+           strchr(token, '\r') == NULL && strchr(token, '\n') == NULL;
+}
+
+static int meshctl_rpc_method(const char *method, http_method_t *out_method) {
+    if (!method || !out_method) {
+        return -1;
+    }
+    if (strcmp(method, "GET") == 0) {
+        *out_method = HTTP_GET;
+        return 0;
+    }
+    if (strcmp(method, "POST") == 0) {
+        *out_method = HTTP_POST;
+        return 0;
+    }
+    return -1;
+}
+
 static int meshctl_rpc_send(const char *addr, const char *path, const char *method, const char *token, int print_raw) {
-    meshctl_socket_t socket_fd = meshctl_invalid_socket();
+    turbo_http_options_t options;
+    turbo_http_t *client = NULL;
+    http_response_t *response = NULL;
+    http_method_t http_method = HTTP_GET;
     char host[128] = {0};
     uint16_t port = 0;
-    char req[1024] = {0};
-    char *response = NULL;
-    size_t response_capacity = MESHD_CTL_RPC_INITIAL_BUF_SIZE;
-    size_t total_read = 0;
-    int body_len = 0;
-    char *body = NULL;
-    int read_bytes = 0;
+    char url[MESHD_CTL_RPC_URL_MAX] = {0};
     char token_header[256] = {0};
+    const char *headers[1] = {0};
+    int header_count = 0;
+    int written = 0;
+    int result = 1;
 
     if (!addr || !path || !method) {
         fprintf(stderr, "RPC call missing arguments\n");
@@ -385,154 +354,86 @@ static int meshctl_rpc_send(const char *addr, const char *path, const char *meth
         fprintf(stderr, "Invalid --rpc-address format: %s\n", addr);
         return 1;
     }
-
-    if (!meshctl_socket_is_valid(socket_fd)) {
-        struct addrinfo hints;
-        struct addrinfo *addresses = NULL;
-        struct addrinfo *address = NULL;
-        char service[6] = {0};
-
-#ifdef _WIN32
-        WSADATA wsa_data;
-        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
-            fprintf(stderr, "Failed to initialize Winsock\n");
-            return 1;
-        }
-#endif
-
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_protocol = IPPROTO_TCP;
-        snprintf(service, sizeof(service), "%u", (unsigned)port);
-        if (getaddrinfo(host, service, &hints, &addresses) != 0) {
-            fprintf(stderr, "Failed to resolve RPC node: %s\n", host);
-#ifdef _WIN32
-            WSACleanup();
-#endif
-            return 1;
-        }
-
-        for (address = addresses; address; address = address->ai_next) {
-            socket_fd = (meshctl_socket_t)socket(address->ai_family,
-                                                 address->ai_socktype,
-                                                 address->ai_protocol);
-            if (!meshctl_socket_is_valid(socket_fd)) {
-                continue;
-            }
-            if (connect(socket_fd,
-                        address->ai_addr,
-                        (int)address->ai_addrlen) == 0) {
-                break;
-            }
-            meshctl_close_socket(socket_fd);
-            socket_fd = meshctl_invalid_socket();
-        }
-        freeaddrinfo(addresses);
-
-        if (!meshctl_socket_is_valid(socket_fd)) {
-            fprintf(stderr,
-                    "Failed to connect to RPC node %s:%u through the mesh route\n",
-                    host,
-                    (unsigned)port);
-#ifdef _WIN32
-            WSACleanup();
-#endif
-            return 1;
-        }
+    if (path[0] != '/' || meshctl_rpc_method(method, &http_method) != 0) {
+        fprintf(stderr, "Invalid RPC method or path\n");
+        return 1;
     }
-
-    response = (char *)malloc(response_capacity);
-    if (!response) {
-        fprintf(stderr, "Failed to allocate RPC response buffer\n");
-        meshctl_close_socket(socket_fd);
-#ifdef _WIN32
-        WSACleanup();
-#endif
+    if (!meshctl_rpc_token_is_valid(token)) {
+        fprintf(stderr, "Invalid RPC token: too long or contains a line break\n");
         return 1;
     }
 
     if (token && token[0] != '\0') {
-        snprintf(token_header, sizeof(token_header), "X-Meshd-Token: %s\r\n", token);
+        written = snprintf(token_header, sizeof(token_header), "X-Meshd-Token: %s", token);
+        if (written < 0 || (size_t)written >= sizeof(token_header)) {
+            fprintf(stderr, "RPC token header exceeds the configured limit\n");
+            return 1;
+        }
+        headers[0] = token_header;
+        header_count = 1;
     }
 
-    snprintf(req, sizeof(req),
-             "%s %s HTTP/1.1\r\n"
-             "Host: %s:%u\r\n"
-             "Connection: close\r\n"
-             "%s"
-             "\r\n",
-             method,
-             path,
-             host,
-             (unsigned)port,
-             token_header);
-
-    if (meshctl_socket_send_all(socket_fd, req, strlen(req)) != 0) {
-        fprintf(stderr, "Failed to send RPC request\n");
-        free(response);
-        response = NULL;
-        meshctl_close_socket(socket_fd);
-#ifdef _WIN32
-        WSACleanup();
-#endif
+    written = snprintf(url, sizeof(url), "http://%s:%u%s", host, (unsigned)port, path);
+    if (written < 0 || (size_t)written >= sizeof(url)) {
+        fprintf(stderr, "RPC URL exceeds the configured limit\n");
         return 1;
     }
 
-    do {
-        if (total_read + 1 >= response_capacity) {
-            size_t new_capacity = response_capacity * 2;
-            char *grown = (char *)realloc(response, new_capacity);
-            if (!grown) {
-                fprintf(stderr, "Failed to grow RPC response buffer\n");
-                free(response);
-                response = NULL;
-                meshctl_close_socket(socket_fd);
-#ifdef _WIN32
-                WSACleanup();
-#endif
-                return 1;
-            }
-            response = grown;
-            response_capacity = new_capacity;
-        }
+    if (turbo_http_options_init(&options, sizeof(options)) != TURBO_OK) {
+        fprintf(stderr, "Failed to initialize RPC HTTP options\n");
+        return 1;
+    }
+    options.transport = TURBO_HTTP_TRANSPORT_H1;
+    options.follow_redirects = 0;
+    options.max_redirects = 0;
+    memset(&options.retry, 0, sizeof(options.retry));
+    options.timeout_ms = MESHD_CTL_RPC_TIMEOUT_MS;
+    if (turbo_http_create_sync(&options, &client) != TURBO_OK || !client) {
+        fprintf(stderr, "Failed to create RPC HTTP client\n");
+        return 1;
+    }
+    turbo_http_set_max_response_size(client, MESHD_CTL_RPC_MAX_RESPONSE_SIZE);
+    turbo_http_set_max_response_header_size(client, MESHD_CTL_RPC_MAX_HEADER_SIZE);
 
-        read_bytes = recv(socket_fd, response + total_read, (int)(response_capacity - total_read - 1), 0);
-        if (read_bytes <= 0) {
-            break;
-        }
-        total_read += read_bytes;
-    } while (1);
-
-    response[total_read] = '\0';
-    meshctl_close_socket(socket_fd);
-#ifdef _WIN32
-    WSACleanup();
-#endif
-
-    body = strstr(response, "\r\n\r\n");
-    if (body) {
-        body += 4;
-        body_len = (int)strlen(body);
-    } else {
-        body = response;
-        body_len = (int)strlen(response);
+    response = turbo_http_request_sync(client, http_method, url, headers, header_count, NULL, 0u);
+    if (!response) {
+        fprintf(stderr, "RPC request failed: response allocation failed\n");
+        goto cleanup;
+    }
+    if (response->error_code != HTTP_ERROR_NONE) {
+        fprintf(stderr,
+                "RPC request failed for %s:%u: %s%s%s%s\n",
+                host,
+                (unsigned)port,
+                http_error_to_str(response->error_code),
+                response->error ? " (" : "",
+                response->error ? response->error : "",
+                response->error ? ")" : "");
+        goto cleanup;
     }
 
-    if (body_len > 0) {
+    if (response->body && response->body_len > 0u) {
         if (print_raw) {
-            printf("%s\n", body);
-        } else if (meshctl_rpc_is_task_model_response(body)) {
-            meshctl_rpc_print_task_response(body);
+            fwrite(response->body, 1u, response->body_len, stdout);
+            fputc('\n', stdout);
+        } else if (meshctl_rpc_is_task_model_response(response->body)) {
+            meshctl_rpc_print_task_response(response->body);
         } else {
-            printf("%s\n", body);
+            fwrite(response->body, 1u, response->body_len, stdout);
+            fputc('\n', stdout);
         }
-    } else {
-        printf("%s\n", response);
+    } else if (response->headers && response->headers_len > 0u) {
+        fwrite(response->headers, 1u, response->headers_len, stdout);
+        fputc('\n', stdout);
     }
+    result = 0;
 
-    free(response);
-    return 0;
+cleanup:
+    if (response) {
+        http_response_free(response);
+    }
+    turbo_http_destroy(client);
+    return result;
 }
 
 static int meshctl_config_add_bootstrap(meshctl_config_t *cfg, const char *value) {
@@ -2676,6 +2577,10 @@ int main(int argc, char **argv) {
     }
 
     command = argv[1];
+
+    if (meshctl_product_is_command(command)) {
+        return meshctl_product_run(argc, argv);
+    }
     if (strcmp(command, "genkey") == 0) {
         return meshctl_run_genkey();
     }

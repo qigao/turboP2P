@@ -3,6 +3,7 @@
 
 #include "mesh_mgmt_agent_router.h"
 #include "mesh_mgmt_endpoint_publisher.h"
+#include "mesh_mgmt_p2p_security.h"
 #include "mesh_mgmt_service_publisher.h"
 
 #ifdef __cplusplus
@@ -75,6 +76,12 @@ typedef struct {
   size_t max_peers;
   const mesh_mgmt_peer_signer_config_v1_t *signer_template;
   const mesh_mgmt_dispatch_config_v1_t *dispatch_template;
+  /* Dedicated-mode secure-wire trust policy, copied during init. Shared mode
+   * inherits the mesh node policy and requires these fields to remain zero. */
+  uint64_t p2p_minimum_principal_epoch;
+  uint64_t p2p_required_remote_roles;
+  const uint64_t *p2p_revoked_certificate_serials;
+  size_t p2p_revoked_certificate_serial_count;
   size_t endpoint_capacity;
   uint64_t retry_base_ms;
   uint64_t retry_max_ms;
@@ -98,8 +105,10 @@ typedef struct {
 
 /**
  * Single-event-loop composition root. In dedicated mode it owns the node and
- * listener. In shared_mesh mode it borrows the mesh node and attaches its
- * router through the mesh callback bridge. signer_template and
+ * listener and derives the mandatory secure-wire v2 provider from the local
+ * signer certificate plus dispatch trust anchor. In shared_mesh mode it
+ * borrows the already secured mesh node and attaches its router through the
+ * mesh callback bridge. signer_template and
  * dispatch_template are immutable borrows and must outlive the runtime. No
  * method is thread-safe.
  */
@@ -110,6 +119,7 @@ typedef struct {
   mesh_mgmt_endpoint_pool_v1_t endpoint_pool;
   mesh_mgmt_endpoint_publisher_v1_t endpoint_publisher;
   mesh_mgmt_service_publisher_v1_t service_publisher;
+  mesh_mgmt_p2p_security_provider_v2_t p2p_security_provider;
   mesh_mgmt_agent_admit_peer_fn admit_peer;
   mesh_mgmt_agent_router_event_fn on_event;
   mesh_mgmt_agent_router_non_mmp_fn on_non_mmp;
@@ -146,6 +156,21 @@ mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
+
+/**
+ * Atomically install a dedicated runtime's remote trust snapshot and
+ * revalidate all established Noise sessions before processing more traffic.
+ * This command must run on the runtime's CoroNet owner thread. READY and
+ * RUNNING states are accepted; shared_mesh mode is rejected because the
+ * borrowed Mesh node owns its security policy. If revalidation cannot
+ * complete, P2P disconnects every established security session before this
+ * function returns MESH_MGMT_AGENT_RUNTIME_P2P_FAILED.
+ */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_update_remote_trust_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_p2p_remote_trust_v2_t *trust,
+    p2p_security_revalidation_result_v2_t *out_revalidation);
 
 /** Verify one untrusted signed endpoint frame before updating dial state. */
 mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_apply_endpoint_frame_v1(

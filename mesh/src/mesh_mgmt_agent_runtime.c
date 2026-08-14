@@ -95,6 +95,8 @@ static void runtime_release_initialized(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (runtime->node && runtime->owns_node) {
     p2p_destroy(runtime->node);
   }
+  mesh_mgmt_p2p_security_provider_destroy_v2(
+      &runtime->p2p_security_provider);
   runtime->node = NULL;
   runtime->shared_mesh = NULL;
   runtime->owns_node = 0u;
@@ -105,6 +107,8 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
                                 const mesh_mgmt_agent_runtime_config_v1_t *config) {
   mesh_mgmt_agent_router_config_v1_t router_config;
   mesh_mgmt_endpoint_pool_config_v1_t endpoint_config;
+  mesh_mgmt_p2p_security_config_v2_t security_config;
+  p2p_security_config_v2_t p2p_security_config;
   int shared_mode;
   size_t index;
 
@@ -116,10 +120,17 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
         !config->p2p_private_key)) ||
       (shared_mode &&
        (config->listen_host || config->listen_port != 0u || config->p2p_private_key ||
-        config->bootstrap_count != 0u)) ||
+        config->bootstrap_count != 0u ||
+        config->p2p_minimum_principal_epoch != 0u ||
+        config->p2p_required_remote_roles != 0u ||
+        config->p2p_revoked_certificate_serial_count != 0u)) ||
       config->max_peers == 0u ||
       config->max_peers > MESH_MGMT_AGENT_ROUTER_MAX_PEERS || !config->signer_template ||
       !config->dispatch_template || config->endpoint_capacity == 0u ||
+      (config->p2p_revoked_certificate_serial_count > 0u &&
+       !config->p2p_revoked_certificate_serials) ||
+      config->p2p_revoked_certificate_serial_count >
+          MESH_MGMT_P2P_REVOKED_SERIAL_LIMIT ||
       config->endpoint_capacity > MESH_MGMT_ENDPOINT_POOL_MAX_ENDPOINTS ||
       config->first_endpoint_record_epoch == 0u || config->first_service_record_epoch == 0u ||
       config->bootstrap_count > config->endpoint_capacity ||
@@ -154,6 +165,37 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
       return runtime->last_error;
     }
     runtime->last_p2p_result = p2p_node_set_private_key(runtime->node, config->p2p_private_key);
+    if (runtime->last_p2p_result != P2P_OK) {
+      runtime_release_initialized(runtime);
+      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
+      return runtime->last_error;
+    }
+    memset(&security_config, 0, sizeof(security_config));
+    security_config.local_certificate =
+        config->signer_template->hello.certificate;
+    security_config.local_certificate_len =
+        sizeof(config->signer_template->hello.certificate);
+    security_config.trusted_issuer_key =
+        config->dispatch_template->session.trusted_issuer_key;
+    security_config.mesh_id_hash =
+        config->dispatch_template->session.expected_mesh_id_hash;
+    security_config.minimum_principal_epoch =
+        config->p2p_minimum_principal_epoch;
+    security_config.required_remote_roles =
+        config->p2p_required_remote_roles;
+    security_config.revoked_serials =
+        config->p2p_revoked_certificate_serials;
+    security_config.revoked_serial_count =
+        config->p2p_revoked_certificate_serial_count;
+    security_config.now_ms = config->signer_template->now_ms;
+    security_config.now_context = config->signer_template->callback_context;
+    runtime->last_p2p_result = mesh_mgmt_p2p_security_provider_init_v2(
+        &runtime->p2p_security_provider, &security_config,
+        &p2p_security_config);
+    if (runtime->last_p2p_result == P2P_OK) {
+      runtime->last_p2p_result = p2p_node_configure_security_v2(
+          runtime->node, &p2p_security_config);
+    }
     if (runtime->last_p2p_result != P2P_OK) {
       runtime_release_initialized(runtime);
       runtime->last_error = MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
@@ -297,6 +339,36 @@ mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
       return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
     (void)coro_context_run(p2p_get_loop(runtime->node), TURBO_RUN_NOWAIT);
   }
+  return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
+}
+
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_update_remote_trust_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_p2p_remote_trust_v2_t *trust,
+    p2p_security_revalidation_result_v2_t *out_revalidation) {
+  if (!runtime || !trust || !out_revalidation ||
+      out_revalidation->struct_size != sizeof(*out_revalidation))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  memset((uint8_t *)out_revalidation + sizeof(out_revalidation->struct_size),
+         0, sizeof(*out_revalidation) - sizeof(out_revalidation->struct_size));
+  if ((runtime->state != MESH_MGMT_AGENT_RUNTIME_READY &&
+       runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING) ||
+      runtime->in_api || !runtime->node || !runtime->owns_node ||
+      !runtime->p2p_security_provider.initialized)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+
+  runtime->in_api = 1u;
+  runtime->last_p2p_result =
+      mesh_mgmt_p2p_security_provider_update_remote_trust_v2(
+          &runtime->p2p_security_provider, trust);
+  if (runtime->last_p2p_result != P2P_OK)
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
+
+  runtime->last_p2p_result =
+      p2p_node_revalidate_security_v2(runtime->node, out_revalidation);
+  if (runtime->last_p2p_result != P2P_OK)
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
   return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }
 

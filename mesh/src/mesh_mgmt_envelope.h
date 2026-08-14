@@ -91,7 +91,7 @@ typedef struct {
 } mesh_mgmt_verified_envelope_v1_t;
 
 /**
- * Build and sign one MMP/1.0 frame. The caller owns every input and output
+ * Build and sign one MMP/1.1 frame. The caller owns every input and output
  * buffer; input and output ranges must not overlap. On insufficient capacity,
  * out_len receives the required size and output remains untouched. Other
  * failures set out_len to zero; a failure after encoding clears written bytes.
@@ -103,7 +103,7 @@ mesh_mgmt_envelope_result_t mesh_mgmt_envelope_sign_v1(
     size_t *out_len);
 
 /**
- * Verify structural framing, the exact MMP/1.0 common-header schema, payload
+ * Verify structural framing, the exact MMP/1.1 common-header schema, payload
  * hash, and the domain-separated Ed25519 signature. The returned frame view
  * borrows the input bytes, which must outlive it. Output is zeroed on failure.
  */

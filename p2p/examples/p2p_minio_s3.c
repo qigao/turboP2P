@@ -17,6 +17,7 @@
  */
 
 #include "p2p.h"
+#include "p2p_example_security.h"
 #include <iris/iris.h>
 #include <turbo_fs.h>
 #include <turbo_mmap.h>
@@ -627,7 +628,14 @@ int main(int argc, char **argv) {
     /* Initialize P2P Node */
     int port = 33333;
     const char *ip = "0.0.0.0";
-    if (argc > 1) port = atoi(argv[1]);
+    if (argc < 5) {
+        fprintf(stderr,
+                "usage: %s <port> <network-id-hex32> <secret-hex32> "
+                "<trusted-public-hex32> [bootstrap-host bootstrap-port]\n",
+                argv[0]);
+        return 1;
+    }
+    port = atoi(argv[1]);
  
 
     /* Initialize Logger */
@@ -654,6 +662,13 @@ int main(int argc, char **argv) {
         TLOG_ERROR("Failed to create node");
         return 1;
     }
+    if (p2p_example_configure_pinned_peer(
+            g_node, argv[2], argv[3], argv[4]) != P2P_OK) {
+        TLOG_ERROR("Failed to configure secure wire v2 identity");
+        p2p_destroy(g_node);
+        g_node = NULL;
+        return 1;
+    }
 
     /* Start P2P in non-blocking mode (so we can run Iris loop? 
        Iris typically takes over the main loop or runs on its own headers. 
@@ -667,6 +682,8 @@ int main(int argc, char **argv) {
 
     if (p2p_start_nonblocking(g_node) != 0) {
         TLOG_ERROR("Failed to start P2P");
+        p2p_destroy(g_node);
+        g_node = NULL;
         return 1;
     }
 
@@ -689,9 +706,9 @@ int main(int argc, char **argv) {
 
     /* Connect to a bootstrap peer if provided */
     /* Connect to a bootstrap peer if provided */
-    if (argc > 3) {
-        TLOG_INFO("Connecting to bootstrap {}:{}...", argv[2], atoi(argv[3]));
-        p2p_connect(g_node, argv[2], atoi(argv[3]));
+    if (argc >= 7) {
+        TLOG_INFO("Connecting to bootstrap {}:{}...", argv[5], atoi(argv[6]));
+        p2p_connect(g_node, argv[5], atoi(argv[6]));
     }
 
     /* Run Loop */

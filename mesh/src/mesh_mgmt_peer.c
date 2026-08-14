@@ -74,6 +74,8 @@ static int hello_matches_local_config(const mesh_mgmt_peer_v1_t *peer,
   return hello->major == MESH_MGMT_MAJOR_V1 && hello->min_minor == config->min_minor &&
          hello->max_minor == config->max_minor && hello->features == config->features &&
          mesh_mgmt_crypto_equal_16(hello->connection_id, config->connection_id) &&
+         mesh_mgmt_crypto_equal_32(hello->channel_binding,
+                                   config->channel_binding) &&
          hello->max_frame == config->max_frame &&
          hello->max_digest_entries == config->max_digest_entries &&
          hello->max_delta_batch == config->max_delta_batch;
@@ -127,7 +129,10 @@ static int ack_values_equal(const mesh_mgmt_hello_ack_v1_t *left,
          left->max_frame == right->max_frame &&
          left->max_digest_entries == right->max_digest_entries &&
          left->max_delta_batch == right->max_delta_batch &&
-         mesh_mgmt_crypto_equal_16(left->peer_connection_id, right->peer_connection_id);
+         mesh_mgmt_crypto_equal_16(left->peer_connection_id,
+                                   right->peer_connection_id) &&
+         mesh_mgmt_crypto_equal_32(left->channel_binding,
+                                   right->channel_binding);
 }
 
 static int header_matches_local_session(const mesh_mgmt_header_v1_t *header,

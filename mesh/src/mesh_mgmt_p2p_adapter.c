@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+_Static_assert(P2P_SECURITY_ID_SIZE == 32,
+               "MMP requires the 32-byte Noise handshake hash");
+
 static const uint8_t MESH_MGMT_P2P_MAGIC[4] = {'T', 'M', 'G', 'M'};
 
 static int bytes_are_zero(const uint8_t *bytes, size_t length) {
@@ -81,28 +84,39 @@ int mesh_mgmt_p2p_message_is_mmp_v1(const void *bytes, size_t length) {
 mesh_mgmt_p2p_adapter_result_t
 mesh_mgmt_p2p_adapter_init_v1(mesh_mgmt_p2p_adapter_v1_t *adapter, p2p_node_t *node,
                               p2p_peer_t *peer, mesh_mgmt_transport_io_v1_t *out_io,
-                              uint8_t out_remote_transport_peer_id[P2P_KEY_SIZE]) {
-  uint8_t peer_key[P2P_KEY_SIZE];
+                              uint8_t out_remote_transport_peer_id[P2P_KEY_SIZE],
+                              uint8_t out_channel_binding[P2P_SECURITY_ID_SIZE]) {
+  p2p_peer_security_info_v2_t security_info;
   int result;
 
-  if (!adapter || !node || !peer || !out_io || !out_remote_transport_peer_id)
+  if (!adapter || !node || !peer || !out_io || !out_remote_transport_peer_id ||
+      !out_channel_binding)
     return MESH_MGMT_P2P_ADAPTER_INVALID_ARG;
   if (adapter->initialized || adapter->node || adapter->peer)
     return MESH_MGMT_P2P_ADAPTER_INVALID_STATE;
 
   memset(out_io, 0, sizeof(*out_io));
   memset(out_remote_transport_peer_id, 0, P2P_KEY_SIZE);
-  memset(peer_key, 0, sizeof(peer_key));
-  result = p2p_peer_get_public_key(peer, peer_key);
-  if (result != P2P_OK || bytes_are_zero(peer_key, sizeof(peer_key))) {
-    memset(peer_key, 0, sizeof(peer_key));
+  memset(out_channel_binding, 0, P2P_SECURITY_ID_SIZE);
+  memset(&security_info, 0, sizeof(security_info));
+  security_info.struct_size = sizeof(security_info);
+  result = p2p_peer_get_security_info_v2(peer, &security_info);
+  if (result != P2P_OK || !security_info.authenticated ||
+      bytes_are_zero(security_info.remote_noise_static,
+                     sizeof(security_info.remote_noise_static)) ||
+      bytes_are_zero(security_info.channel_binding,
+                     sizeof(security_info.channel_binding))) {
+    memset(&security_info, 0, sizeof(security_info));
     return MESH_MGMT_P2P_ADAPTER_TRANSPORT_ID_UNAVAILABLE;
   }
 
   memset(adapter, 0, sizeof(*adapter));
   adapter->node = node;
   adapter->peer = peer;
-  memcpy(adapter->remote_transport_peer_id, peer_key, sizeof(peer_key));
+  memcpy(adapter->remote_transport_peer_id,
+         security_info.remote_noise_static, P2P_KEY_SIZE);
+  memcpy(adapter->channel_binding, security_info.channel_binding,
+         sizeof(adapter->channel_binding));
   adapter->last_error = MESH_MGMT_P2P_ADAPTER_OK;
   adapter->last_p2p_result = P2P_OK;
   adapter->initialized = 1u;
@@ -111,8 +125,11 @@ mesh_mgmt_p2p_adapter_init_v1(mesh_mgmt_p2p_adapter_v1_t *adapter, p2p_node_t *n
   out_io->recv = p2p_adapter_recv;
   out_io->release = p2p_adapter_release;
   out_io->send = p2p_adapter_send;
-  memcpy(out_remote_transport_peer_id, peer_key, sizeof(peer_key));
-  memset(peer_key, 0, sizeof(peer_key));
+  memcpy(out_remote_transport_peer_id,
+         security_info.remote_noise_static, P2P_KEY_SIZE);
+  memcpy(out_channel_binding, security_info.channel_binding,
+         P2P_SECURITY_ID_SIZE);
+  memset(&security_info, 0, sizeof(security_info));
   return MESH_MGMT_P2P_ADAPTER_OK;
 }
 

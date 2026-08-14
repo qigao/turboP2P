@@ -8,10 +8,11 @@
  * - Chat
  * - Upload/download files
  *
- * Usage: ./p2p_client <ip> <port> [bootstrap_ip] [bootstrap_port]
+ * Usage: see main() for the required secure-wire identity arguments.
  */
 
 #include "../include/p2p.h"
+#include "p2p_example_security.h"
 #include <CoroNet/turbo_coro_context.h>
 #include <stdio.h>
 #include <string.h>
@@ -451,18 +452,24 @@ static void process_stdin_command(void *arg1, void *arg2) {
 
 /* Main */
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        printf("Usage: %s <ip> <port> [bootstrap_ip] [bootstrap_port]\n", argv[0]);
-        printf("\nExamples:\n");
-        printf("  %s 0.0.0.0 8000\n", argv[0]);
-        printf("  %s 0.0.0.0 8001 127.0.0.1 8000\n", argv[0]);
+    if (argc < 6) {
+        printf("Usage: %s <ip> <port> <network-id-hex32> <secret-hex32> "
+               "<trusted-public-hex32> [bootstrap_ip] [bootstrap_port]\n", argv[0]);
+        printf("\nExample:\n");
+        printf("  %s 0.0.0.0 8001 <shared-network-id> <local-secret> "
+               "<peer-public> 127.0.0.1 8000\n", argv[0]);
         return 1;
     }
-
     /* Create node */
     p2p_node_t *node = p2p_create(argv[1], atoi(argv[2]));
     if (!node) {
         TLOG_ERROR("Failed to create node");
+        return 1;
+    }
+    if (p2p_example_configure_pinned_peer(
+            node, argv[3], argv[4], argv[5]) != P2P_OK) {
+        fprintf(stderr, "Failed to configure secure wire v2 identity\n");
+        p2p_destroy(node);
         return 1;
     }
 
@@ -489,9 +496,9 @@ int main(int argc, char *argv[]) {
     p2p_set_message_handler(node, on_message, NULL);
 
     /* Connect to bootstrap if provided */
-    if (argc >= 5) {
-        printf("Connecting to bootstrap %s:%s...\n", argv[3], argv[4]);
-        int ret = p2p_connect(node, argv[3], atoi(argv[4]));
+    if (argc >= 8) {
+        printf("Connecting to bootstrap %s:%s...\n", argv[6], argv[7]);
+        int ret = p2p_connect(node, argv[6], atoi(argv[7]));
         if (ret == P2P_OK) {
             TLOG_INFO("Connected to bootstrap!");
             printf("Connected to bootstrap!\n");

@@ -32,6 +32,7 @@ typedef enum {
 typedef enum {
   MESH_MGMT_EXECUTION_OPERATION_NONE = 0,
   MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM = 1,
+  MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_NATIVE = 2,
 } mesh_mgmt_execution_operation_t;
 
 typedef enum {
@@ -44,6 +45,15 @@ typedef enum {
   MESH_MGMT_EXECUTION_CAP_MESH_SERVICE = 1u << 6,
   MESH_MGMT_EXECUTION_CAP_ALL = 0x7fu,
 } mesh_mgmt_execution_capability_t;
+
+/**
+ * Exact capability profile of the V1 raw-WASM loader. Raw modules do not
+ * carry an immutable application manifest, so this profile is intentionally
+ * fixed until package-manifest loading is introduced.
+ */
+#define MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1                        \
+  (MESH_MGMT_EXECUTION_CAP_CORE | MESH_MGMT_EXECUTION_CAP_UTILS |           \
+   MESH_MGMT_EXECUTION_CAP_APP)
 
 typedef enum {
   MESH_MGMT_EXECUTION_INPUT_NONE = 0,

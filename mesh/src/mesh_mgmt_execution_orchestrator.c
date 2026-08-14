@@ -1,6 +1,7 @@
 #include "mesh_mgmt_execution_orchestrator.h"
 
 #include "mesh_mgmt_crypto.h"
+#include "turbo_fs.h"
 
 #include <openssl/evp.h>
 #include <string.h>
@@ -111,6 +112,8 @@ mesh_mgmt_execution_orchestrator_init_v1(
   orchestrator->verify_grant_context = config->verify_grant_context;
   orchestrator->clock_now_ms = config->clock_now_ms;
   orchestrator->clock_context = config->clock_context;
+  orchestrator->execute_runner = config->execute_runner;
+  orchestrator->execute_runner_context = config->execute_runner_context;
   orchestrator->initialized = 1u;
   return MESH_MGMT_EXECUTION_ORCHESTRATOR_OK;
 }
@@ -133,8 +136,10 @@ mesh_mgmt_execution_orchestrator_execute_v1(
     const mesh_mgmt_execution_runner_io_v1_t *io,
     mesh_mgmt_execution_result_v1_t *out_result) {
   mesh_mgmt_execution_effective_policy_v1_t effective_policy;
+  mesh_mgmt_execution_deployment_v1_t deployment;
   mesh_mgmt_execution_journal_entry_v1_t entry;
   mesh_mgmt_execution_runner_output_v1_t runner_output;
+  char deployment_path[TURBO_FS_MAX_PATH];
   uint8_t request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint64_t now_ms;
   uint64_t started_at_ms;
@@ -163,6 +168,18 @@ mesh_mgmt_execution_orchestrator_execute_v1(
       mesh_mgmt_execution_authorize_v1(
           grant, authorization, &effective_policy) !=
           MESH_MGMT_EXECUTION_OK)
+    return MESH_MGMT_EXECUTION_ORCHESTRATOR_AUTH_FAILED;
+  if (mesh_mgmt_execution_runner_resolve_v1(
+          orchestrator->runner, request->deployment_id,
+          request->deployment_generation, &deployment, deployment_path,
+          sizeof(deployment_path)) != MESH_MGMT_EXECUTION_RUNNER_OK ||
+      (grant->operation ==
+           MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM &&
+       deployment.runtime != MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1) ||
+      (grant->operation ==
+           MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_NATIVE &&
+       deployment.runtime !=
+           MESH_MGMT_EXECUTION_DEPLOYMENT_NATIVE_PROCESS_V1))
     return MESH_MGMT_EXECUTION_ORCHESTRATOR_AUTH_FAILED;
   if (mesh_mgmt_execution_request_digest_v1(request, request_digest) !=
       MESH_MGMT_EXECUTION_RESULT_OK)
@@ -202,9 +219,14 @@ mesh_mgmt_execution_orchestrator_execute_v1(
   if (started_at_ms == 0u)
     return MESH_MGMT_EXECUTION_ORCHESTRATOR_CLOCK_FAILED;
   memset(&runner_output, 0, sizeof(runner_output));
-  runner_code = mesh_mgmt_execution_runner_run_v1(
-      orchestrator->runner, request, &effective_policy, started_at_ms, io,
-      &runner_output);
+  runner_code = orchestrator->execute_runner
+                    ? orchestrator->execute_runner(
+                          orchestrator->execute_runner_context,
+                          orchestrator->runner, request, &effective_policy,
+                          started_at_ms, io, &runner_output)
+                    : mesh_mgmt_execution_runner_run_v1(
+                          orchestrator->runner, request, &effective_policy,
+                          started_at_ms, io, &runner_output);
   finished_at_ms = orchestrator->clock_now_ms(orchestrator->clock_context);
   if (finished_at_ms < started_at_ms)
     return MESH_MGMT_EXECUTION_ORCHESTRATOR_CLOCK_FAILED;

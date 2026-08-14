@@ -14,7 +14,7 @@ foreach(test_name ${P2P_TESTS})
 
   target_link_libraries(${test_name} PRIVATE p2p TurboUtils::Core
                                              TurboNet::CoroNet TurboUtils::TinyTest
-                                              uthash)
+                                             TurboP2P::NoiseProtocol uthash)
 
   target_include_directories(
     ${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include

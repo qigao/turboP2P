@@ -149,6 +149,77 @@ static void test_prepare_is_nonmutating_and_commit_rejects_stale_token(void) {
     mesh_mgmt_replay_destroy_v1(&gate);
 }
 
+static void test_checkpoint_round_trip_preserves_sequence_and_live_ids(void) {
+    mesh_mgmt_replay_gate_v1_t source;
+    mesh_mgmt_replay_gate_v1_t restored;
+    mesh_mgmt_header_v1_t header;
+    mesh_mgmt_replay_entry_v1_t entries[4];
+    mesh_mgmt_replay_snapshot_v1_t snapshot;
+
+    prepare_gate(&source, 4u, 100u);
+    prepare_header(&header, 1u, 0x91, 900u, 5000u);
+    check_int_eq(prepare_and_commit(&source, &header, 1000u),
+                 MESH_MGMT_REPLAY_OK);
+    prepare_header(&header, 2u, 0x92, 900u, 5000u);
+    check_int_eq(prepare_and_commit(&source, &header, 1050u),
+                 MESH_MGMT_REPLAY_OK);
+    check_int_eq(mesh_mgmt_replay_export_v1(
+                     &source, entries, 4u, &snapshot),
+                 MESH_MGMT_REPLAY_OK);
+    check_size_eq(snapshot.entry_count, 2u);
+
+    prepare_gate(&restored, 4u, 100u);
+    check_int_eq(mesh_mgmt_replay_import_v1(
+                     &restored, &snapshot, entries, 1120u),
+                 MESH_MGMT_REPLAY_OK);
+    check_true(restored.has_sequence);
+    check_hex64_eq(restored.last_sequence, 2u);
+    check_true(restored.generation > snapshot.generation);
+    check_true(restored.entries[0].occupied);
+    check_false(restored.entries[1].occupied);
+    prepare_header(&header, 2u, 0x93, 1100u, 2000u);
+    check_int_eq(prepare_and_commit(&restored, &header, 1120u),
+                 MESH_MGMT_REPLAY_REPLAYED);
+    prepare_header(&header, 3u, 0x92, 1100u, 2000u);
+    check_int_eq(prepare_and_commit(&restored, &header, 1120u),
+                 MESH_MGMT_REPLAY_REPLAYED);
+    prepare_header(&header, 3u, 0x94, 1100u, 2000u);
+    check_int_eq(prepare_and_commit(&restored, &header, 1120u),
+                 MESH_MGMT_REPLAY_OK);
+    mesh_mgmt_replay_destroy_v1(&restored);
+    mesh_mgmt_replay_destroy_v1(&source);
+}
+
+static void test_checkpoint_import_rejects_duplicate_ids_atomically(void) {
+    mesh_mgmt_replay_gate_v1_t source;
+    mesh_mgmt_replay_gate_v1_t restored;
+    mesh_mgmt_header_v1_t header;
+    mesh_mgmt_replay_entry_v1_t entries[2];
+    mesh_mgmt_replay_snapshot_v1_t snapshot;
+
+    prepare_gate(&source, 2u, 100u);
+    prepare_header(&header, 1u, 0xa1, 900u, 5000u);
+    check_int_eq(prepare_and_commit(&source, &header, TEST_NOW_MS),
+                 MESH_MGMT_REPLAY_OK);
+    prepare_header(&header, 2u, 0xa2, 900u, 5000u);
+    check_int_eq(prepare_and_commit(&source, &header, TEST_NOW_MS),
+                 MESH_MGMT_REPLAY_OK);
+    check_int_eq(mesh_mgmt_replay_export_v1(
+                     &source, entries, 2u, &snapshot),
+                 MESH_MGMT_REPLAY_OK);
+    memcpy(entries[1].message_id, entries[0].message_id,
+           sizeof(entries[1].message_id));
+    prepare_gate(&restored, 2u, 100u);
+    check_int_eq(mesh_mgmt_replay_import_v1(
+                     &restored, &snapshot, entries, TEST_NOW_MS),
+                 MESH_MGMT_REPLAY_INVALID_SCHEMA);
+    check_false(restored.has_sequence);
+    check_false(restored.entries[0].occupied);
+    check_false(restored.entries[1].occupied);
+    mesh_mgmt_replay_destroy_v1(&restored);
+    mesh_mgmt_replay_destroy_v1(&source);
+}
+
 spec("mesh management replay gate") {
     describe("bounded per-session replay state") {
         it("accepts only newer sequences and unique message IDs") {
@@ -162,6 +233,12 @@ spec("mesh management replay gate") {
         }
         it("does not mutate during prepare and rejects stale commits") {
             test_prepare_is_nonmutating_and_commit_rejects_stale_token();
+        }
+        it("restores sequence state and omits expired cached IDs") {
+            test_checkpoint_round_trip_preserves_sequence_and_live_ids();
+        }
+        it("rejects duplicate checkpoint IDs without partial import") {
+            test_checkpoint_import_rejects_duplicate_ids_atomically();
         }
     }
 }

@@ -17,8 +17,7 @@ extern "C" {
 #define MESH_MGMT_EXECUTION_NODE_MAX_DEPLOYMENTS \
   MESH_MGMT_EXECUTION_RUNNER_MAX_DEPLOYMENTS
 #define MESH_MGMT_EXECUTION_NODE_RAW_CAPABILITIES \
-  (MESH_MGMT_EXECUTION_CAP_CORE | MESH_MGMT_EXECUTION_CAP_UTILS | \
-   MESH_MGMT_EXECUTION_CAP_APP)
+  MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1
 
 typedef enum {
   MESH_MGMT_EXECUTION_NODE_OK = 0,
@@ -55,6 +54,8 @@ typedef struct {
   uint64_t worker_generation;
   mesh_mgmt_execution_clock_v1_fn clock_now_ms;
   void *clock_context;
+  mesh_mgmt_execution_orchestrator_runner_v1_fn execute_runner;
+  void *execute_runner_context;
 } mesh_mgmt_execution_node_config_v1_t;
 
 /**

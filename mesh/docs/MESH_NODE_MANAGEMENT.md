@@ -9,7 +9,7 @@
 ### 1.1 生成密钥与初始化配置
 
 ```powershell
-# 生成节点身份密钥（Ed25519），输出 identity_secret_hex 与 node_id
+# 生成 transport X25519 身份材料，输出 identity_secret_hex 与公开 node_id
 meshctl genkey
 
 # 生成启动配置 mesh.yaml
@@ -18,7 +18,18 @@ meshctl init -o mesh.yaml --node-name node-a --network-id mymesh `
     --bootstrap 10.42.0.2:7878 --ice-enabled false
 ```
 
-`init` 写入 `identity_secret_hex` 到配置；`--bootstrap` 可重复添加；`--stun` 可重复添加。
+`init` 当前仍写入 `identity_secret_hex`，仅适合作为隔离开发起点；`--bootstrap`
+可重复添加，`--stun` 可重复添加。部署 `meshd` 时必须把该 64 字符私钥值迁入
+owner-only 的独立文件，并在 YAML 中改用：
+
+```yaml
+identity_private_key_file: C:\ProgramData\meshd\transport.key
+```
+
+Linux 文件必须属于 daemon uid 且无 group/other 权限；Windows ACL 的 allow ACE
+只能属于当前服务账户、LocalSystem 或 Administrators。`meshd doctor` 会在启动网络前
+检查文件类型、链接/reparse、owner、权限/ACL 与精确编码。management mode 不接受
+YAML 内联私钥，也不会在文件失败时回退到临时身份。
 
 ### 1.2 启动 / 自检 / 停止
 
@@ -135,6 +146,37 @@ mesh_flow_ruleset_apply_replace_v1(&ruleset, 1u, 1u, MESH_FLOW_ACTION_ALLOW, rul
 - `mesh_mgmt_execution_*`：orchestrator / runner / worker / store / result / wire /
   rpc registry + control（远程执行调度）
 - `mesh_task_lease` / `mesh_task_lease_raft` / `mesh_task_execution_guard`：任务租约与执行护栏
+- `mesh_control_*`：类型化 desired-state 资源、签名 MMP、agent WAL/checkpoint、operation/receipt
+  和有界 provider reconcile
+- `mesh_node_control_flowmq_network_provider`：把 Network APPLY/DELETE 从 `mesh-agent` 通过本机
+  FlowMQ/mTLS 交给唯一持有 fabric 的 `meshd`
+- `mesh_control_execution_provider` + `mesh_mgmt_execution_process`：把预部署且 digest 绑定的
+  Native/TurboWASM assignment 交给独立子进程，并强制 durable claim、deadline、输出上限、
+  lost-ACK replay、重启 indeterminate fencing 和进程树清理
+
+### 8.1 当前可执行的生产链原语
+
+`事实`：当前代码已经能用类型化原语定义 Network desired state，并触发节点上的预注册功能：
+
+```text
+operator / product API
+  -> Controller durable outbox
+  -> agent outbound H2/mTLS typed sync
+  -> agent authenticated WAL + policy admission
+  -> Network: FlowMQ/mTLS -> meshd -> userspace fabric reconcile
+     Function: bounded provider -> isolated Native/TurboWASM child
+  -> retained RESULT -> result WAL -> observed state -> exact ACK
+```
+
+这不是通用 `map/reduce`，也不是把命令作为 `pub/sub` 广播。资源/operation 是控制语义，H2 和
+FlowMQ 只负责有界传输；调度可以在 Controller 端把 selector 展开为多个独立、可审计 operation，
+节点端仍逐个执行带 generation、precondition、provider ID 和 digest 的确定性命令。控制消息不接受
+shell、任意 argv、宿主路径、下载后执行或未预注册 native binary。
+
+`边界`：当前 Network 执行落在 userspace multi-Network fabric，尚不等于完整 OS TUN/route/DNS/IPAM
+事务；Function 只允许本机预部署的 Native/TurboWASM deployment。产品级用户/审批与 Grant 签发、
+Controller 数据库、跨节点 observation/audit 汇总、service-manager 安装、平台 keystore 和自动证书轮换
+仍是发布门槛。因此可以称为“原语和进程链已接通”，不能称为多租户控制产品已经完成。
 
 RPC 动作：`meshctl rpc ... task-model`（查询任务模型）。
 

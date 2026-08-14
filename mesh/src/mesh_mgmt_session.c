@@ -20,6 +20,7 @@ typedef enum {
     HELLO_FIELD_MAX_FRAME = 0x000d,
     HELLO_FIELD_MAX_DIGEST_ENTRIES = 0x000e,
     HELLO_FIELD_MAX_DELTA_BATCH = 0x000f,
+    HELLO_FIELD_CHANNEL_BINDING = 0x0010,
 } mesh_mgmt_hello_field_v1_t;
 
 typedef enum {
@@ -30,6 +31,7 @@ typedef enum {
     ACK_FIELD_MAX_DIGEST_ENTRIES = 0x0005,
     ACK_FIELD_MAX_DELTA_BATCH = 0x0006,
     ACK_FIELD_PEER_CONNECTION_ID = 0x0007,
+    ACK_FIELD_CHANNEL_BINDING = 0x0008,
 } mesh_mgmt_ack_field_v1_t;
 
 static int visible_ascii(const uint8_t *bytes, size_t length) {
@@ -65,6 +67,8 @@ static int hello_limits_are_valid(const mesh_mgmt_hello_v1_t *hello) {
            !bytes_are_zero(hello->management_key, 32) &&
            !bytes_are_zero(hello->managed_node_id, 32) &&
            !bytes_are_zero(hello->connection_id, 16) &&
+           !bytes_are_zero(hello->channel_binding,
+                           sizeof(hello->channel_binding)) &&
            hello->max_frame >= MESH_MGMT_SESSION_MIN_FRAME &&
            hello->max_frame <= MESH_MGMT_FRAME_MAX &&
            hello->max_digest_entries > 0u &&
@@ -151,6 +155,7 @@ mesh_mgmt_session_result_t mesh_mgmt_hello_encode_v1(
                             hello->max_digest_entries);
     offset += write_u16_tlv(output + offset, HELLO_FIELD_MAX_DELTA_BATCH,
                             hello->max_delta_batch);
+    WRITE_HELLO_FIELD(HELLO_FIELD_CHANNEL_BINDING, channel_binding);
 #undef WRITE_HELLO_FIELD
     *out_len = offset;
     return offset == required ? MESH_MGMT_SESSION_OK
@@ -216,6 +221,7 @@ mesh_mgmt_session_result_t mesh_mgmt_hello_decode_v1(
                       mesh_mgmt_wire_read_u16);
     READ_HELLO_SCALAR(HELLO_FIELD_MAX_DELTA_BATCH, max_delta_batch, 2,
                       mesh_mgmt_wire_read_u16);
+    READ_HELLO_FIELD(HELLO_FIELD_CHANNEL_BINDING, channel_binding);
 #undef READ_HELLO_SCALAR
 #undef READ_HELLO_FIELD
     if (mesh_mgmt_tlv_reader_next(&reader, &field) != 0 ||
@@ -234,7 +240,9 @@ static int ack_schema_is_valid(const mesh_mgmt_hello_ack_v1_t *ack) {
            ack->max_digest_entries <= MESH_MGMT_DIGEST_ENTRIES_MAX &&
            ack->max_delta_batch > 0u &&
            ack->max_delta_batch <= MESH_MGMT_DELTA_BATCH_MAX &&
-           !bytes_are_zero(ack->peer_connection_id, 16);
+           !bytes_are_zero(ack->peer_connection_id, 16) &&
+           !bytes_are_zero(ack->channel_binding,
+                           sizeof(ack->channel_binding));
 }
 
 mesh_mgmt_session_result_t mesh_mgmt_hello_ack_encode_v1(
@@ -271,6 +279,10 @@ mesh_mgmt_session_result_t mesh_mgmt_hello_ack_encode_v1(
     offset += mesh_mgmt_wire_write_tlv(output + offset,
                                        ACK_FIELD_PEER_CONNECTION_ID,
                                        ack->peer_connection_id, 16);
+    offset += mesh_mgmt_wire_write_tlv(output + offset,
+                                       ACK_FIELD_CHANNEL_BINDING,
+                                       ack->channel_binding,
+                                       sizeof(ack->channel_binding));
     *out_len = offset;
     return offset == MESH_MGMT_HELLO_ACK_V1_SIZE
                ? MESH_MGMT_SESSION_OK
@@ -312,6 +324,11 @@ mesh_mgmt_session_result_t mesh_mgmt_hello_ack_decode_v1(
     if (!mesh_mgmt_wire_read_field(&reader, ACK_FIELD_PEER_CONNECTION_ID, 16,
                                    &field)) return MESH_MGMT_SESSION_INVALID_SCHEMA;
     memcpy(out_ack->peer_connection_id, field.value, 16);
+    if (!mesh_mgmt_wire_read_field(&reader, ACK_FIELD_CHANNEL_BINDING,
+                                   MESH_MGMT_CHANNEL_BINDING_SIZE,
+                                   &field)) return MESH_MGMT_SESSION_INVALID_SCHEMA;
+    memcpy(out_ack->channel_binding, field.value,
+           sizeof(out_ack->channel_binding));
     if (mesh_mgmt_tlv_reader_next(&reader, &field) != 0 ||
         !ack_schema_is_valid(out_ack)) {
         memset(out_ack, 0, sizeof(*out_ack));
@@ -324,6 +341,8 @@ static int config_is_valid(const mesh_mgmt_session_config_v1_t *config) {
     return !bytes_are_zero(config->expected_mesh_id_hash, 32) &&
            !bytes_are_zero(config->trusted_issuer_key, 32) &&
            !bytes_are_zero(config->connection_id, 16) &&
+           !bytes_are_zero(config->channel_binding,
+                           sizeof(config->channel_binding)) &&
            config->min_minor <= config->max_minor &&
            config->min_minor <= MESH_MGMT_MINOR_V1 &&
            config->max_minor >= MESH_MGMT_MINOR_V1 &&
@@ -509,6 +528,8 @@ mesh_mgmt_session_result_t mesh_mgmt_session_accept_hello_v1(
                                    certificate.management_key) ||
         !mesh_mgmt_crypto_equal_32(envelope->header.origin_node_id,
                                    certificate.managed_node_id) ||
+        !mesh_mgmt_crypto_equal_32(hello.channel_binding,
+                                   session->config.channel_binding) ||
         bytes_are_zero(envelope->header.session_id,
                        sizeof(envelope->header.session_id)) ||
         envelope->header.incarnation == 0u ||
@@ -536,6 +557,8 @@ mesh_mgmt_session_result_t mesh_mgmt_session_accept_hello_v1(
     out_ack->max_digest_entries = session->negotiated.max_digest_entries;
     out_ack->max_delta_batch = session->negotiated.max_delta_batch;
     memcpy(out_ack->peer_connection_id, hello.connection_id, 16);
+    memcpy(out_ack->channel_binding, session->config.channel_binding,
+           sizeof(out_ack->channel_binding));
     return MESH_MGMT_SESSION_OK;
 }
 
@@ -594,6 +617,8 @@ mesh_mgmt_session_result_t mesh_mgmt_session_accept_hello_ack_v1(
                                    session->remote_session_id) ||
         !mesh_mgmt_crypto_equal_16(ack.peer_connection_id,
                                    session->config.connection_id) ||
+        !mesh_mgmt_crypto_equal_32(ack.channel_binding,
+                                   session->config.channel_binding) ||
         ack.selected_major != session->negotiated.major ||
         ack.selected_minor != session->negotiated.minor ||
         ack.features != session->negotiated.features ||

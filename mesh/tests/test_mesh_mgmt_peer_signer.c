@@ -111,6 +111,8 @@ static void prepare_fixture(signer_fixture_t *fixture) {
          sizeof(fixture->config.hello.managed_node_id));
   fill_bytes(fixture->config.hello.connection_id, sizeof(fixture->config.hello.connection_id),
              0xb0u);
+  fill_bytes(fixture->config.hello.channel_binding,
+             sizeof(fixture->config.hello.channel_binding), 0xc0u);
   fixture->config.hello.max_frame = MESH_MGMT_FRAME_MAX;
   fixture->config.hello.max_digest_entries = 128u;
   fixture->config.hello.max_delta_batch = 64u;
@@ -133,6 +135,8 @@ static void prepare_ack(mesh_mgmt_hello_ack_v1_t *ack, const mesh_mgmt_hello_v1_
   ack->max_digest_entries = hello->max_digest_entries;
   ack->max_delta_batch = hello->max_delta_batch;
   memcpy(ack->peer_connection_id, hello->connection_id, sizeof(ack->peer_connection_id));
+  memcpy(ack->channel_binding, hello->channel_binding,
+         sizeof(ack->channel_binding));
 }
 
 static void test_signer_builds_bound_hello_and_ack(void) {
@@ -177,6 +181,9 @@ static void test_signer_builds_bound_hello_and_ack(void) {
   check_mem_eq(hello_envelope.header.message_id, expected_message_id, sizeof(expected_message_id));
   check_mem_eq(decoded_hello.connection_id, fixture.config.hello.connection_id,
                sizeof(decoded_hello.connection_id));
+  check_mem_eq(decoded_hello.channel_binding,
+               fixture.config.hello.channel_binding,
+               sizeof(decoded_hello.channel_binding));
 
   check_int_eq(mesh_mgmt_peer_signer_build_ack_v1(&signer, &expected_ack, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);

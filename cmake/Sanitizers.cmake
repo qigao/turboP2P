@@ -8,19 +8,34 @@ option(ENABLE_SANITIZER_LEAK "Enable LeakSanitizer" OFF)
 option(ENABLE_SANITIZER_THREAD "Enable ThreadSanitizer" OFF)
 option(ENABLE_SANITIZER_MEMORY "Enable MemorySanitizer (Clang only)" OFF)
 
+# Validate once at configure time.  The project applies sanitizer flags at
+# directory scope, so validation inside add_sanitizers() alone would not run
+# for normal product and test targets.
+if(ENABLE_SANITIZER_THREAD AND
+   (ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_LEAK OR
+    ENABLE_SANITIZER_MEMORY))
+    message(FATAL_ERROR
+            "ThreadSanitizer cannot be combined with AddressSanitizer, LeakSanitizer, or MemorySanitizer")
+endif()
+if(ENABLE_SANITIZER_MEMORY AND
+   (ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_LEAK OR
+    ENABLE_SANITIZER_THREAD OR ENABLE_SANITIZER_UNDEFINED))
+    message(FATAL_ERROR "MemorySanitizer cannot be combined with other sanitizers")
+endif()
+if(ENABLE_SANITIZER_MEMORY AND NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "MemorySanitizer requires Clang")
+endif()
+if(MSVC AND
+   (ENABLE_SANITIZER_UNDEFINED OR ENABLE_SANITIZER_LEAK OR
+    ENABLE_SANITIZER_THREAD OR ENABLE_SANITIZER_MEMORY))
+    message(FATAL_ERROR
+            "MSVC supports only ENABLE_SANITIZER_ADDRESS in this project")
+endif()
+
 # Function to add sanitizer flags to a target
 function(add_sanitizers target_name)
     set(SANITIZER_FLAGS "")
     set(SANITIZER_LINK_FLAGS "")
-    
-    # Check for conflicting sanitizers
-    if(ENABLE_SANITIZER_THREAD AND (ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_LEAK OR ENABLE_SANITIZER_MEMORY))
-        message(FATAL_ERROR "ThreadSanitizer cannot be combined with AddressSanitizer, LeakSanitizer, or MemorySanitizer")
-    endif()
-    
-    if(ENABLE_SANITIZER_MEMORY AND (ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_LEAK OR ENABLE_SANITIZER_THREAD))
-        message(FATAL_ERROR "MemorySanitizer cannot be combined with other sanitizers")
-    endif()
     
     # AddressSanitizer
     if(ENABLE_SANITIZER_ADDRESS)
@@ -131,5 +146,72 @@ if(ENABLE_SANITIZER_ADDRESS OR ENABLE_SANITIZER_UNDEFINED OR ENABLE_SANITIZER_LE
         if(NOT MSVC)
             add_compile_options(-O1 -g)
         endif()
+    endif()
+
+    # This module is included before the project adds vendor and product
+    # targets.  Apply the selected instrumentation at directory scope so an
+    # enabled cache option cannot silently produce uninstrumented binaries.
+    # add_sanitizers() remains available to downstream targets created outside
+    # this directory tree.
+    if(MSVC)
+        if(ENABLE_SANITIZER_ADDRESS)
+            add_compile_options(/fsanitize=address)
+        endif()
+        if(ENABLE_SANITIZER_UNDEFINED)
+            message(WARNING "UndefinedBehaviorSanitizer is not supported by MSVC")
+        endif()
+        if(ENABLE_SANITIZER_LEAK)
+            message(WARNING "LeakSanitizer is not supported by MSVC")
+        endif()
+        if(ENABLE_SANITIZER_THREAD)
+            message(WARNING "ThreadSanitizer is not supported by MSVC")
+        endif()
+        if(ENABLE_SANITIZER_MEMORY)
+            message(WARNING "MemorySanitizer is not supported by MSVC")
+        endif()
+    else()
+        set(_turbo_p2p_sanitizer_compile_options)
+        set(_turbo_p2p_sanitizer_link_options)
+        if(ENABLE_SANITIZER_ADDRESS)
+            list(APPEND _turbo_p2p_sanitizer_compile_options
+                 -fsanitize=address -fno-omit-frame-pointer
+                 -fno-optimize-sibling-calls)
+            list(APPEND _turbo_p2p_sanitizer_link_options -fsanitize=address)
+        endif()
+        if(ENABLE_SANITIZER_UNDEFINED)
+            list(APPEND _turbo_p2p_sanitizer_compile_options
+                 -fsanitize=undefined -fno-omit-frame-pointer)
+            list(APPEND _turbo_p2p_sanitizer_link_options
+                 -fsanitize=undefined)
+            if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+                list(APPEND _turbo_p2p_sanitizer_compile_options
+                     -fsanitize=integer -fsanitize=nullability)
+                list(APPEND _turbo_p2p_sanitizer_link_options
+                     -fsanitize=integer -fsanitize=nullability)
+            endif()
+        endif()
+        if(ENABLE_SANITIZER_LEAK)
+            list(APPEND _turbo_p2p_sanitizer_compile_options
+                 -fsanitize=leak -fno-omit-frame-pointer)
+            list(APPEND _turbo_p2p_sanitizer_link_options -fsanitize=leak)
+        endif()
+        if(ENABLE_SANITIZER_THREAD)
+            list(APPEND _turbo_p2p_sanitizer_compile_options
+                 -fsanitize=thread -fno-omit-frame-pointer)
+            list(APPEND _turbo_p2p_sanitizer_link_options -fsanitize=thread)
+        endif()
+        if(ENABLE_SANITIZER_MEMORY)
+            if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+                message(FATAL_ERROR "MemorySanitizer is only supported by Clang")
+            endif()
+            list(APPEND _turbo_p2p_sanitizer_compile_options
+                 -fsanitize=memory -fsanitize-memory-track-origins
+                 -fno-omit-frame-pointer)
+            list(APPEND _turbo_p2p_sanitizer_link_options -fsanitize=memory)
+        endif()
+        add_compile_options(${_turbo_p2p_sanitizer_compile_options})
+        add_link_options(${_turbo_p2p_sanitizer_link_options})
+        unset(_turbo_p2p_sanitizer_compile_options)
+        unset(_turbo_p2p_sanitizer_link_options)
     endif()
 endif()

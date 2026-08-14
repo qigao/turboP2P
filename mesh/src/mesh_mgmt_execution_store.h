@@ -86,6 +86,15 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_get_result_v1(
     const uint8_t command_id[MESH_MGMT_EXECUTION_ID_SIZE],
     mesh_mgmt_execution_result_v1_t *out_result);
 
+/**
+ * Removes one terminal command after its outcome has been committed to the
+ * owning control-plane WAL. Non-terminal commands are never removable.
+ */
+mesh_mgmt_execution_store_result_t
+mesh_mgmt_execution_store_forget_terminal_v1(
+    mesh_mgmt_execution_store_v1_t *store,
+    const uint8_t command_id[MESH_MGMT_EXECUTION_ID_SIZE]);
+
 #ifdef __cplusplus
 }
 #endif

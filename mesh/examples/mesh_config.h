@@ -19,11 +19,31 @@ extern "C" {
 #define MESH_NODE_MAX_MAGIC_DNS_RECORDS 32
 #define MESH_NODE_MAX_PACKET_POLICY_RULES 32
 
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_PORT 24443
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_NETWORK_CAPACITY 16u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_OPERATION_CAPACITY 256u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_CHANNEL_CAPACITY 256u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_RETAINED_BYTES (16u * 1024u * 1024u)
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_COMMAND_BUDGET 32u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_SEND_BUDGET 32u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_IO_TIMEOUT_MS 1000u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_HEARTBEAT_INTERVAL_MS 1000u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_HEARTBEAT_TIMEOUT_MS 5000u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_DELETE_DRAIN_TIMEOUT_MS 5000u
+#define MESH_NODE_NETWORK_CONTROL_DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS 5000u
+#define MESH_NODE_NETWORK_CONTROL_MAX_NETWORK_CAPACITY 64u
+#define MESH_NODE_NETWORK_CONTROL_MAX_OPERATION_CAPACITY 4096u
+#define MESH_NODE_NETWORK_CONTROL_MAX_CHANNEL_CAPACITY 4096u
+#define MESH_NODE_NETWORK_CONTROL_MAX_RETAINED_BYTES (64u * 1024u * 1024u)
+#define MESH_NODE_NETWORK_CONTROL_MIN_FRAME_BYTES (64u * 1024u)
+#define MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS (10u * 60u * 1000u)
+
 typedef struct {
     char node_name[64];
     char network_id[64];
     char virtual_ip[16];
     char advertise_ip[64];
+    char identity_private_key_file[260];
     char identity_secret_hex[65];
     char mgmt_private_key_file[260];
     char mgmt_certificate_file[260];
@@ -32,6 +52,31 @@ typedef struct {
     char mgmt_mesh_id_hex[65];
     uint64_t mgmt_first_record_epoch;
     char mgmt_record_epoch_file[260];
+    int network_control_enabled;
+    int network_control_port;
+    char network_control_certificate_file[260];
+    char network_control_private_key_file[260];
+    char network_control_client_ca_file[260];
+    char network_control_identity[256];
+    char network_control_expected_peer_identity[256];
+    char network_control_expected_peer_certificate_sha256[72];
+    char network_control_expected_peer_certificate_sha256_next[72];
+    uint64_t network_control_identity_policy_generation;
+    char network_control_mesh_id_hex[65];
+    char network_control_provider_id_hex[65];
+    char network_control_membership_issuer_id_hex[65];
+    char network_control_membership_issuer_key_file[260];
+    size_t network_control_network_capacity;
+    size_t network_control_operation_capacity;
+    size_t network_control_channel_capacity;
+    size_t network_control_channel_max_retained_bytes;
+    size_t network_control_command_budget;
+    size_t network_control_send_budget;
+    uint64_t network_control_io_timeout_ms;
+    uint64_t network_control_heartbeat_interval_ms;
+    uint64_t network_control_heartbeat_timeout_ms;
+    uint64_t network_control_delete_drain_timeout_ms;
+    uint64_t network_control_shutdown_drain_timeout_ms;
     unsigned int virtual_prefix;
     int listen_port;
     int ice_enabled;
@@ -78,6 +123,7 @@ void mesh_node_config_init(mesh_node_config_t *cfg);
 int mesh_node_config_load(mesh_node_config_t *cfg, const char *path);
 int mesh_node_config_validate(const mesh_node_config_t *cfg);
 int mesh_node_config_management_enabled(const mesh_node_config_t *cfg);
+int mesh_node_config_network_control_enabled(const mesh_node_config_t *cfg);
 void mesh_node_config_print(const mesh_node_config_t *cfg);
 int mesh_node_parse_bootstrap_endpoint(const char *value,
                                        char *ip,

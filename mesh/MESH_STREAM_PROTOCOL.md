@@ -142,12 +142,13 @@ disconnect callback. No second reader is attached to the existing
 `turbo_stream`: it remains owned by P2P framing. The admission gate therefore
 does not yet attach `mesh_stream_transport` to a daemon data connection.
 
-This gate is not production cryptographic proof by itself. The current
-`p2p_noise_*` implementation is explicitly a simplified Noise-like handshake,
-not a complete Noise protocol implementation, and its receive path replaces
-the configured remote public key with the received ephemeral key. Stream V1
-must therefore not describe this lifecycle as standard Noise authentication or
-use it as the only identity proof for a dedicated data connection.
+The P2P boundary now uses standard secure-wire v2 Noise XX and publishes a peer
+only after identity-policy validation plus bilateral encrypted READY. Stream V1
+must consume `p2p_peer_get_security_info_v2()` and preserve its channel binding
+when a dedicated data connection is introduced. This is an implemented
+cryptographic baseline, not evidence that the remaining fixed-vector,
+independent-interoperability, fuzz, key-store and security-review release gates
+have passed.
 
 ### Authenticated channel lifecycle
 

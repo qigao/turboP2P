@@ -12,7 +12,8 @@
 void p2p_message_init(p2p_message_t *msg, p2p_msg_type_t type);
 
 /**
- * Serialize a message for network transmission
+ * Serialize a message using the canonical application wire schema. Native
+ * struct padding and host byte order are never serialized.
  * @param msg Message to serialize
  * @param out Output buffer (allocated by function, caller frees)
  * @param out_len Output length
@@ -26,7 +27,8 @@ int p2p_message_serialize(const p2p_message_t *msg, uint8_t **out, size_t *out_l
  * @param len Input length
  * @param msg Output message
  * @param consumed Bytes consumed from input
- * @return P2P_OK on success, P2P_ERR_INVALID_ARG if need more data
+ * @return P2P_OK on success, P2P_ERR_PROTOCOL for malformed or incomplete
+ * input, or P2P_ERR_INVALID_ARG for invalid API arguments
  */
 int p2p_message_deserialize(const uint8_t *data, size_t len,
                              p2p_message_t *msg, size_t *consumed);

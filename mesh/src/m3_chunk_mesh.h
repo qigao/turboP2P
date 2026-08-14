@@ -64,8 +64,8 @@ m3_chunk_mesh_result_t m3_chunk_mesh_claims_verify_v1(
     const uint8_t signature[M3_CHUNK_MESH_SIGNATURE_SIZE]);
 
 /**
- * Encode one request/response frame. channel_public_key is the gateway's
- * p2p X25519 identity and signer_public_key its Ed25519 capability key;
+ * Encode one request/response frame. channel_public_key carries the secure
+ * wire v2 Noise channel binding and signer_public_key the Ed25519 capability key;
  * the store binds the signer to the authenticated channel and to an
  * allowlisted key. status is the response result code (M3_CHUNK_MESH_OK on
  * success, otherwise a m3_store_node_result_t or m3_chunk_mesh_result_t).

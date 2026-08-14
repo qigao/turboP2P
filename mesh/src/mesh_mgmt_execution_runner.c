@@ -9,15 +9,13 @@
 #include <string.h>
 
 #define MESH_MGMT_EXECUTION_RUNNER_HASH_CHUNK (16u * 1024u)
-#define MESH_MGMT_EXECUTION_RUNNER_CAPABILITIES                              \
-  (MESH_MGMT_EXECUTION_CAP_CORE | MESH_MGMT_EXECUTION_CAP_UTILS |           \
-   MESH_MGMT_EXECUTION_CAP_APP)
 
 struct mesh_mgmt_execution_deployment_entry_v1_s {
   uint8_t deployment_id[MESH_MGMT_EXECUTION_ID_SIZE];
   uint64_t generation;
   uint8_t module_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   char module_path[TURBO_FS_MAX_PATH];
+  mesh_mgmt_execution_deployment_runtime_v1_t runtime;
   uint8_t occupied;
 };
 
@@ -216,6 +214,9 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_register_v1(
       deployment->generation == 0u ||
       bytes_are_zero(deployment->module_digest,
                      MESH_MGMT_EXECUTION_DIGEST_SIZE) ||
+      (deployment->runtime != MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1 &&
+       deployment->runtime !=
+           MESH_MGMT_EXECUTION_DEPLOYMENT_NATIVE_PROCESS_V1) ||
       !path_is_absolute(deployment->module_path) || path_size == 0u ||
       path_size >= TURBO_FS_MAX_PATH)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_DEPLOYMENT;
@@ -233,6 +234,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_register_v1(
                MESH_MGMT_EXECUTION_ID_SIZE) == 0) {
       if (memcmp(entry->module_digest, deployment->module_digest,
                  MESH_MGMT_EXECUTION_DIGEST_SIZE) == 0 &&
+          entry->runtime == deployment->runtime &&
           strcmp(entry->module_path, deployment->module_path) == 0)
         return MESH_MGMT_EXECUTION_RUNNER_OK;
       return MESH_MGMT_EXECUTION_RUNNER_CONFLICT;
@@ -246,9 +248,37 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_register_v1(
   free_entry->generation = deployment->generation;
   memcpy(free_entry->module_digest, deployment->module_digest,
          MESH_MGMT_EXECUTION_DIGEST_SIZE);
+  free_entry->runtime = deployment->runtime;
   memcpy(free_entry->module_path, deployment->module_path, path_size + 1u);
   free_entry->occupied = 1u;
   runner->count += 1u;
+  return MESH_MGMT_EXECUTION_RUNNER_OK;
+}
+
+mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_resolve_v1(
+    const mesh_mgmt_execution_runner_v1_t *runner,
+    const uint8_t deployment_id[MESH_MGMT_EXECUTION_ID_SIZE],
+    uint64_t generation, mesh_mgmt_execution_deployment_v1_t *out_deployment,
+    char *module_path, size_t module_path_capacity) {
+  const mesh_mgmt_execution_deployment_entry_v1_t *entry;
+  size_t path_size;
+  if (!runner || !runner->entries || !deployment_id || generation == 0u ||
+      !out_deployment || !module_path)
+    return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
+  entry = find_deployment(runner, deployment_id, generation);
+  if (!entry) return MESH_MGMT_EXECUTION_RUNNER_NOT_FOUND;
+  path_size = strlen(entry->module_path) + 1u;
+  if (module_path_capacity < path_size)
+    return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
+  memset(out_deployment, 0, sizeof(*out_deployment));
+  memcpy(out_deployment->deployment_id, entry->deployment_id,
+         sizeof(out_deployment->deployment_id));
+  out_deployment->generation = entry->generation;
+  memcpy(out_deployment->module_digest, entry->module_digest,
+         sizeof(out_deployment->module_digest));
+  out_deployment->runtime = entry->runtime;
+  memcpy(module_path, entry->module_path, path_size);
+  out_deployment->module_path = module_path;
   return MESH_MGMT_EXECUTION_RUNNER_OK;
 }
 
@@ -282,7 +312,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_run_v1(
        request->output_mode != MESH_MGMT_EXECUTION_OUTPUT_DIGEST))
     return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
   if (effective_policy->capabilities !=
-      MESH_MGMT_EXECUTION_RUNNER_CAPABILITIES)
+      MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1)
     return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
   if (request->inline_input_size > effective_policy->limits.input_bytes)
     return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
@@ -292,6 +322,8 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_run_v1(
                       request->deployment_generation);
   if (!deployment)
     return MESH_MGMT_EXECUTION_RUNNER_NOT_FOUND;
+  if (deployment->runtime != MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1)
+    return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
   if (memcmp(deployment->module_digest, request->package_digest,
              MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0)
     return MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;

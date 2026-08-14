@@ -10,6 +10,11 @@
 #include "mesh_mgmt_mesh_bridge.h"
 #include "mesh_config.h"
 #include "mesh_runtime_health.h"
+#include "meshd_key_file.h"
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+#include "meshd_network_control.h"
+#include <turbo_error.h>
+#endif
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
 #include "mesh_mgmt_execution_node.h"
 #include "meshd_execution_config.h"
@@ -20,11 +25,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
 
-#define MESH_SNAPSHOT_VERSION 1
+#define MESH_SNAPSHOT_VERSION 2
 
 #define MESHD_MGMT_HTTP_HEADER_MAX_SIZE 8192u
 #define MESHD_MGMT_HTTP_RECV_CHUNK_SIZE 2048u
@@ -32,6 +38,8 @@
 #define MESHD_MGMT_HTTP_BODY_MAX_SIZE \
     MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1
 #define MESHD_MGMT_RESPONSE_BUF_SIZE 16384
+#define MESHD_SECURITY_JSON_MAX_SIZE 8192u
+#define MESHD_NETWORK_CONTROL_JSON_MAX_SIZE 2048u
 #define MESHD_NODE_ID_HEX_LENGTH 64
 #define MESHD_MGMT_FRAME_TTL_MS 30000u
 #define MESHD_MGMT_SERVICE_PUBLISH_INTERVAL_MS 10000u
@@ -348,6 +356,9 @@ static volatile sig_atomic_t g_status_flush_requested = 0;
 #endif
 static mesh_network_t *g_mesh = NULL;
 static tunnel_t *g_tunnel = NULL;
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+static meshd_network_control_t g_network_control;
+#endif
 static mesh_node_config_t g_config;
 static uint64_t g_started_ms = 0;
 static uint32_t g_mgmt_task_counter = 0;
@@ -363,6 +374,7 @@ static int g_execution_rpc_configured = 0;
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
 static meshd_execution_config_t g_execution_local_config;
 static mesh_mgmt_execution_node_v1_t g_execution_node;
+static mesh_mgmt_execution_process_v1_t g_execution_process;
 static int g_execution_node_configured = 0;
 #endif
 
@@ -699,6 +711,7 @@ static void meshd_management_reset(void) {
         mesh_mgmt_execution_node_destroy_v1(&g_execution_node);
     }
     memset(&g_execution_node, 0, sizeof(g_execution_node));
+    mesh_mgmt_execution_process_destroy_v1(&g_execution_process);
     g_execution_node_configured = 0;
 #endif
     meshd_management_epoch_close(&g_management_epoch_state);
@@ -908,10 +921,17 @@ static int meshd_management_start(mesh_network_t *mesh,
     execution_enabled =
         config->mgmt_execution_grant_issuer_key_file[0] != '\0';
 
-    if (meshd_read_hex_file_exact(config->mgmt_private_key_file,
-                                  g_management_signer.private_key,
-                                  sizeof(g_management_signer.private_key)) != 0 ||
-        meshd_read_hex_file_exact(config->mgmt_certificate_file,
+    {
+        meshd_key_file_result_t key_result = meshd_private_key_file_read(
+            config->mgmt_private_key_file,
+            g_management_signer.private_key);
+        if (key_result != MESHD_KEY_FILE_OK) {
+            fprintf(stderr, "Failed to load management private key: %s\n",
+                    meshd_key_file_result_string(key_result));
+            goto failed;
+        }
+    }
+    if (meshd_read_hex_file_exact(config->mgmt_certificate_file,
                                   g_management_signer.hello.certificate,
                                   sizeof(g_management_signer.hello.certificate)) != 0 ||
         meshd_read_hex_file_exact(config->mgmt_trusted_issuer_key_file,
@@ -920,7 +940,7 @@ static int meshd_management_start(mesh_network_t *mesh,
         meshd_decode_hex_exact(config->mgmt_mesh_id_hex,
                                g_management_signer.expected_mesh_id_hash,
                                sizeof(g_management_signer.expected_mesh_id_hash)) != 0) {
-        fprintf(stderr, "Failed to load exact management key/certificate material\n");
+        fprintf(stderr, "Failed to load exact public management enrollment material\n");
         goto failed;
     }
     if (execution_enabled &&
@@ -1069,6 +1089,7 @@ static int meshd_management_start(mesh_network_t *mesh,
                 execution_grant_issuer_key,
                 meshd_execution_clock_now_ms,
                 NULL,
+                &g_execution_process,
                 &node_execution_config) != 0 ||
             mesh_mgmt_execution_node_init_v1(
                 &g_execution_node,
@@ -1881,10 +1902,300 @@ static int meshd_build_health_json(char *out, size_t out_size) {
     return 0;
 }
 
+static int meshd_json_buffer_appendf(char *out, size_t out_size,
+                                     size_t *length, const char *format, ...) {
+    va_list args;
+    int written;
+
+    if (!out || !length || !format || *length >= out_size) {
+        return -1;
+    }
+    va_start(args, format);
+    written = vsnprintf(out + *length, out_size - *length, format, args);
+    va_end(args);
+    if (written < 0 || (size_t)written >= out_size - *length) {
+        return -1;
+    }
+    *length += (size_t)written;
+    return 0;
+}
+
+static int meshd_json_buffer_append_u64_array(char *out, size_t out_size,
+                                               size_t *length,
+                                               const uint64_t *values,
+                                               size_t value_count) {
+    size_t index;
+
+    if (meshd_json_buffer_appendf(out, out_size, length, "[") != 0) {
+        return -1;
+    }
+    for (index = 0; index < value_count; ++index) {
+        if (meshd_json_buffer_appendf(
+                out, out_size, length, "%s%llu", index ? "," : "",
+                (unsigned long long)values[index]) != 0) {
+            return -1;
+        }
+    }
+    return meshd_json_buffer_appendf(out, out_size, length, "]");
+}
+
+static int meshd_json_buffer_append_latency_bounds(
+    char *out, size_t out_size, size_t *length,
+    const uint64_t bounds[P2P_SECURITY_LATENCY_BUCKET_COUNT_V3]) {
+    size_t index;
+
+    if (!bounds ||
+        bounds[P2P_SECURITY_LATENCY_BUCKET_COUNT_V3 - 1U] != UINT64_MAX ||
+        meshd_json_buffer_appendf(out, out_size, length, "[") != 0) {
+        return -1;
+    }
+    for (index = 0; index + 1U < P2P_SECURITY_LATENCY_BUCKET_COUNT_V3;
+         ++index) {
+        if (meshd_json_buffer_appendf(
+                out, out_size, length, "%s%llu", index ? "," : "",
+                (unsigned long long)bounds[index]) != 0) {
+            return -1;
+        }
+    }
+    return meshd_json_buffer_appendf(out, out_size, length, ",null]");
+}
+
+static int meshd_build_security_json(char *out, size_t out_size,
+                                     mesh_network_t *mesh) {
+    static const char *const rejection_names
+        [P2P_SECURITY_REJECTION_REASON_COUNT] = {
+            "pending_global",
+            "pending_source",
+            "source_rate",
+            "source_bucket_capacity",
+            "send_budget",
+            "handshake_timeout",
+            "handshake_protocol",
+            "handshake_crypto",
+            "handshake_identity",
+            "handshake_resource",
+            "session_protocol",
+            "session_crypto",
+            "session_key_limit",
+            "session_resource",
+            "revalidation_rejected",
+            "revalidation_identity_change",
+            "revalidation_fail_closed",
+            "cookie_gate_capacity",
+            "cookie_protocol",
+            "cookie_expired",
+            "cookie_auth",
+        };
+    static const char *const role_names
+        [P2P_SECURITY_HANDSHAKE_ROLE_COUNT_V3] = {
+            "initiator", "responder",
+        };
+    static const char *const stage_names
+        [P2P_SECURITY_HANDSHAKE_STAGE_COUNT_V3] = {
+            "cookie", "preface", "noise", "ready",
+        };
+    p2p_node_security_status_v3_t status = {0};
+    size_t length = 0;
+    size_t index;
+    size_t role;
+    size_t stage;
+
+    if (!out || out_size == 0) {
+        return -1;
+    }
+    out[0] = '\0';
+    status.struct_size = sizeof(status);
+    if (!mesh || mesh_get_security_status_v3(mesh, &status) != MESH_OK) {
+        int written =
+            snprintf(out, out_size, "{\"available\":false}");
+        if (written < 0 || (size_t)written >= out_size) {
+            out[0] = '\0';
+            return -1;
+        }
+        return 0;
+    }
+
+    if (meshd_json_buffer_appendf(
+            out, out_size, &length,
+            "{\"available\":true,\"wire_version\":%u,"
+            "\"noise_suite_id\":%u,"
+            "\"noise_suite\":\"Noise_XX_25519_ChaChaPoly_BLAKE2s\","
+            "\"send_budget\":{\"limit_bytes\":%llu,"
+            "\"reserved_bytes\":%llu,\"available_bytes\":%llu,"
+            "\"transport_reservations\":%llu,\"rejections\":%llu},"
+            "\"source_admission\":{\"burst\":%u,\"refill_per_second\":%u,"
+            "\"bucket_limit\":%u,\"active_buckets\":%llu},"
+            "\"cookie_gate\":{\"limit\":%u,\"active\":%llu,"
+            "\"challenges_issued\":%llu,\"verifications_succeeded\":%llu},"
+            "\"rejection_counts\":{",
+            (unsigned int)status.secure_wire_version,
+            (unsigned int)status.noise_suite,
+            (unsigned long long)status.security.send_budget_bytes,
+            (unsigned long long)status.security.reserved_send_capacity_bytes,
+            (unsigned long long)status.security.available_send_capacity_bytes,
+            (unsigned long long)status.security.transport_reservations,
+            (unsigned long long)status.security.send_budget_rejections,
+            (unsigned int)status.security.source_admission_burst,
+            (unsigned int)status.security.source_admission_refill_per_second,
+            (unsigned int)status.security.source_admission_bucket_limit,
+            (unsigned long long)status.security.active_source_admission_buckets,
+            (unsigned int)status.security.cookie_gate_limit,
+            (unsigned long long)status.security.active_cookie_gates,
+            (unsigned long long)status.security.cookie_challenges_issued,
+            (unsigned long long)status.security.cookie_verifications_succeeded) !=
+        0) {
+        goto overflow;
+    }
+    for (index = 0; index < P2P_SECURITY_REJECTION_REASON_COUNT; ++index) {
+        if (meshd_json_buffer_appendf(
+                out, out_size, &length, "%s\"%s\":%llu",
+                index ? "," : "", rejection_names[index],
+                (unsigned long long)status.security.rejection_counts[index]) !=
+            0) {
+            goto overflow;
+        }
+    }
+    if (meshd_json_buffer_appendf(
+            out, out_size, &length,
+            "},\"private_key_executor\":{\"available\":%s",
+            status.private_key_executor_available ? "true" : "false") != 0) {
+        goto overflow;
+    }
+    if (status.private_key_executor_available &&
+        meshd_json_buffer_appendf(
+            out, out_size, &length,
+            ",\"workers\":%u,\"operation_capacity\":%u,"
+            "\"operation_timeout_ms\":%u,\"active_operations\":%llu,"
+            "\"queued_operations\":%llu,\"accepting\":%s,"
+            "\"submitted\":%llu,\"completed\":%llu,\"rejected\":%llu,"
+            "\"timed_out\":%llu,\"cancelled\":%llu,"
+            "\"completion_post_failures\":%llu",
+            (unsigned int)status.private_key_executor.workers,
+            (unsigned int)status.private_key_executor.operation_capacity,
+            (unsigned int)status.private_key_executor.operation_timeout_ms,
+            (unsigned long long)status.private_key_executor.active_operations,
+            (unsigned long long)status.private_key_executor.queued_operations,
+            status.private_key_executor.accepting ? "true" : "false",
+            (unsigned long long)status.private_key_executor.submitted,
+            (unsigned long long)status.private_key_executor.completed,
+            (unsigned long long)status.private_key_executor.rejected,
+            (unsigned long long)status.private_key_executor.timed_out,
+            (unsigned long long)status.private_key_executor.cancelled,
+            (unsigned long long)
+                status.private_key_executor.completion_post_failures) != 0) {
+        goto overflow;
+    }
+    if (meshd_json_buffer_appendf(
+            out, out_size, &length,
+            "},\"handshake_latency\":{\"bucket_upper_bounds_ms\":") != 0 ||
+        meshd_json_buffer_append_latency_bounds(
+            out, out_size, &length,
+            status.latency_bucket_upper_bounds_ms) != 0 ||
+        meshd_json_buffer_appendf(out, out_size, &length,
+                                  ",\"by_role\":{") != 0) {
+        goto overflow;
+    }
+    for (role = 0; role < P2P_SECURITY_HANDSHAKE_ROLE_COUNT_V3; ++role) {
+        if (meshd_json_buffer_appendf(
+                out, out_size, &length, "%s\"%s\":{",
+                role ? "," : "", role_names[role]) != 0) {
+            goto overflow;
+        }
+        for (stage = 0; stage < P2P_SECURITY_HANDSHAKE_STAGE_COUNT_V3;
+             ++stage) {
+            const p2p_security_handshake_latency_v3_t *latency =
+                &status.handshake_latency[role][stage];
+
+            if (meshd_json_buffer_appendf(
+                    out, out_size, &length,
+                    "%s\"%s\":{\"completed\":%llu,\"total_ms\":%llu,"
+                    "\"maximum_ms\":%llu,\"buckets\":",
+                    stage ? "," : "", stage_names[stage],
+                    (unsigned long long)latency->completed,
+                    (unsigned long long)latency->total_ms,
+                    (unsigned long long)latency->maximum_ms) != 0 ||
+                meshd_json_buffer_append_u64_array(
+                    out, out_size, &length, latency->buckets,
+                    P2P_SECURITY_LATENCY_BUCKET_COUNT_V3) != 0 ||
+                meshd_json_buffer_appendf(out, out_size, &length, "}") != 0) {
+                goto overflow;
+            }
+        }
+        if (meshd_json_buffer_appendf(out, out_size, &length, "}") != 0) {
+            goto overflow;
+        }
+    }
+    if (meshd_json_buffer_appendf(out, out_size, &length, "}}}") != 0) {
+        goto overflow;
+    }
+    return 0;
+
+overflow:
+    out[0] = '\0';
+    return -1;
+}
+
+static int meshd_build_network_control_json(char *out, size_t out_size) {
+    int written;
+    if (!out || out_size == 0u) {
+        return -1;
+    }
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config) &&
+        g_network_control.service.lifecycle !=
+            MESH_NODE_NETWORK_CONTROL_UNINITIALIZED_V1) {
+        mesh_node_network_control_service_stats_v1_t stats;
+        memset(&stats, 0, sizeof(stats));
+        if (mesh_node_network_control_service_get_stats_v1(
+                &g_network_control.service, &stats) != MESH_CONTROL_OK) {
+            written = snprintf(
+                out, out_size,
+                "{\"enabled\":true,\"available\":false}");
+        } else {
+            written = snprintf(
+                out, out_size,
+                "{\"enabled\":true,\"available\":true,\"lifecycle\":%u,"
+                "\"owned_networks\":%zu,\"network_capacity\":%zu,"
+                "\"retained_operations\":%zu,\"operation_capacity\":%zu,"
+                "\"inbound_pending\":%zu,\"inbound_retained_bytes\":%zu,"
+                "\"outbound_pending\":%zu,\"outbound_retained_bytes\":%zu,"
+                "\"received\":%llu,\"receive_rejected\":%llu,"
+                "\"sent\":%llu,\"send_failed\":%llu}",
+                (unsigned int)stats.lifecycle,
+                stats.owned_networks, stats.network_capacity,
+                stats.runtime.owner.retained_operations,
+                stats.runtime.owner.operation_capacity,
+                stats.runtime.inbound.pending,
+                stats.runtime.inbound.retained_bytes,
+                stats.runtime.outbound.pending,
+                stats.runtime.outbound.retained_bytes,
+                (unsigned long long)stats.runtime.transport.received,
+                (unsigned long long)stats.runtime.transport.receive_rejected,
+                (unsigned long long)stats.runtime.transport.sent,
+                (unsigned long long)stats.runtime.transport.send_failed);
+        }
+        if (written < 0 || (size_t)written >= out_size) {
+            out[0] = '\0';
+            return -1;
+        }
+        return 0;
+    }
+#endif
+    written = snprintf(out, out_size,
+                       "{\"enabled\":false,\"available\":false}");
+    if (written < 0 || (size_t)written >= out_size) {
+        out[0] = '\0';
+        return -1;
+    }
+    return 0;
+}
+
 static int meshd_build_status_json(char *out, size_t out_size) {
     mesh_stats_t stats;
     mesh_diag_info_t diag;
     char health_body[1024] = {0};
+    char security_body[MESHD_SECURITY_JSON_MAX_SIZE] = {0};
+    char network_control_body[MESHD_NETWORK_CONTROL_JSON_MAX_SIZE] = {0};
     uint64_t now_ms = meshd_now_ms();
     int written = 0;
     int peer_count = 0;
@@ -1894,6 +2205,14 @@ static int meshd_build_status_json(char *out, size_t out_size) {
         return -1;
     }
     out[0] = '\0';
+    if (meshd_build_security_json(security_body, sizeof(security_body),
+                                  g_mesh) != 0) {
+        return -1;
+    }
+    if (meshd_build_network_control_json(
+            network_control_body, sizeof(network_control_body)) != 0) {
+        return -1;
+    }
 
     if (!g_mesh) {
         meshd_build_health_json(health_body, sizeof(health_body));
@@ -1901,6 +2220,7 @@ static int meshd_build_status_json(char *out, size_t out_size) {
                            "{\"running\":false,\"node_name\":\"%s\",\"network_id\":\"%s\","
                            "\"virtual_ip\":\"%s\",\"listen_port\":%d,\"uptime_ms\":%llu,"
                            "\"rpc\":{\"enabled\":%s,\"endpoint\":\"%s\",\"virtual_host\":\"%s\",\"port\":%u},"
+                           "\"security\":%s,\"network_control\":%s,"
                            "\"peer_count\":0,\"route_count\":0,\"dht_entries\":0,"
                            "\"health\":%s,\"connected_relay_routes\":0,"
                            "\"control_plane_refreshes\":0}",
@@ -1913,6 +2233,8 @@ static int meshd_build_status_json(char *out, size_t out_size) {
                            g_mgmt_server.service_endpoint,
                            g_mgmt_server.virtual_host,
                            g_mgmt_server.service_port,
+                           security_body,
+                           network_control_body,
                            health_body[0] ? health_body : "{\"state\":\"unavailable\",\"reason\":\"not_ready\","
                                                            "\"summary\":\"mesh unavailable\","
                                                            "\"path_mode\":\"isolated\","
@@ -1950,6 +2272,7 @@ static int meshd_build_status_json(char *out, size_t out_size) {
                        "{\"running\":%s,\"node_name\":\"%s\",\"network_id\":\"%s\","
                        "\"virtual_ip\":\"%s\",\"listen_port\":%d,\"uptime_ms\":%llu,"
                        "\"rpc\":{\"enabled\":%s,\"endpoint\":\"%s\",\"virtual_host\":\"%s\",\"port\":%u},"
+                       "\"security\":%s,\"network_control\":%s,"
                        "\"peer_count\":%d,\"route_count\":%d,\"dht_entries\":%u,"
                        "\"health\":%s,\"connected_relay_routes\":%u,"
                        "\"control_plane_refreshes\":%u}",
@@ -1963,6 +2286,8 @@ static int meshd_build_status_json(char *out, size_t out_size) {
                        g_mgmt_server.service_endpoint,
                        g_mgmt_server.virtual_host,
                        g_mgmt_server.service_port,
+                       security_body,
+                       network_control_body,
                        peer_count,
                        route_count,
                        stats.dht_entries,
@@ -2979,6 +3304,15 @@ static void meshd_write_control_plane_json(FILE *fp,
     fputc('}', fp);
 }
 
+static void meshd_write_network_control_json(FILE *fp) {
+    char body[MESHD_NETWORK_CONTROL_JSON_MAX_SIZE];
+    if (meshd_build_network_control_json(body, sizeof(body)) != 0) {
+        fputs("{\"enabled\":false,\"available\":false}", fp);
+    } else {
+        fputs(body, fp);
+    }
+}
+
 static void meshd_write_status_json(FILE *fp, void *user_data) {
     meshd_status_context_t *ctx = (meshd_status_context_t *)user_data;
     mesh_stats_t mesh_stats;
@@ -2999,6 +3333,7 @@ static void meshd_write_status_json(FILE *fp, void *user_data) {
     char vip_key[128];
     char reverse_key[128];
     char routes_key[128];
+    char security_body[MESHD_SECURITY_JSON_MAX_SIZE] = {0};
     int has_reverse_key = 0;
 
     memset(&mesh_stats, 0, sizeof(mesh_stats));
@@ -3012,6 +3347,11 @@ static void meshd_write_status_json(FILE *fp, void *user_data) {
     tunnel_get_stats(ctx->tunnel, &tunnel_stats);
     if (mesh_get_node_id(ctx->mesh, node_id, sizeof(node_id)) != MESH_OK) {
         node_id[0] = '\0';
+    }
+    if (meshd_build_security_json(security_body, sizeof(security_body),
+                                  ctx->mesh) != 0) {
+        snprintf(security_body, sizeof(security_body),
+                 "{\"available\":false}");
     }
     snprintf(vip_key, sizeof(vip_key), "mesh:%s:ip:%s",
              g_config.network_id, g_config.virtual_ip);
@@ -3035,7 +3375,10 @@ static void meshd_write_status_json(FILE *fp, void *user_data) {
     fputs(",\"advertise_ip\":", fp);
     meshd_json_string(fp, g_config.advertise_ip[0] ? g_config.advertise_ip : "");
     fprintf(fp, ",\"identity_configured\":%s",
-            g_config.identity_secret_hex[0] ? "true" : "false");
+            (g_config.identity_private_key_file[0] ||
+             g_config.identity_secret_hex[0])
+                ? "true"
+                : "false");
     fputs(",\"node_id\":", fp);
     meshd_json_string(fp, node_id);
     fprintf(fp, ",\"listen_port\":%d", g_config.listen_port);
@@ -3059,6 +3402,10 @@ static void meshd_write_status_json(FILE *fp, void *user_data) {
             g_running ? "true" : "false",
             (unsigned long long)(now_ms - g_started_ms),
             (long long)wall_clock);
+
+    fprintf(fp, ",\"security\":%s", security_body);
+    fputs(",\"network_control\":", fp);
+    meshd_write_network_control_json(fp);
 
     fprintf(fp, ",\"mesh\":{\"direct_peers\":%d,\"relay_routes\":%d,\"route_policy\":%d,"
                 "\"peer_admission\":%d,\"peer_identity_admission\":%d,\"peer_protocol_major_policy\":%u,"
@@ -3333,6 +3680,7 @@ static void meshd_usage(const char *argv0) {
     printf("  %s run -c <mesh.yaml> [--status-file <path>] [--pid-file <path>] [--status-interval-ms <n>]\n",
            argv0);
     printf("             [--rpc-listen <ip:port>] [--rpc-token <token>]\n");
+    printf("             [--network-control] [--network-control-port <port>]\n");
 }
 
 static void meshd_doctor_result(const char *label, int ok, const char *detail) {
@@ -3649,6 +3997,18 @@ static void meshd_free_tunnel_config(tunnel_config_t *tun_cfg) {
     tun_cfg->tun.ipv4_netmask = NULL;
 }
 
+static int meshd_doctor_check_private_key(const char *label,
+                                          const char *path) {
+    uint8_t private_key[MESHD_PRIVATE_KEY_SIZE];
+    meshd_key_file_result_t result =
+        meshd_private_key_file_read(path, private_key);
+
+    mesh_mgmt_crypto_wipe(private_key, sizeof(private_key));
+    meshd_doctor_result(label, result == MESHD_KEY_FILE_OK,
+                        meshd_key_file_result_string(result));
+    return result == MESHD_KEY_FILE_OK;
+}
+
 static int meshd_run_doctor(const char *config_path) {
     mesh_node_config_t cfg;
     int ok = 1;
@@ -3663,6 +4023,35 @@ static int meshd_run_doctor(const char *config_path) {
     }
 
     meshd_doctor_result("config", 1, "parsed and validated");
+    if (cfg.identity_private_key_file[0] != '\0') {
+        ok &= meshd_doctor_check_private_key(
+            "identity_private_key_file", cfg.identity_private_key_file);
+    } else {
+        meshd_doctor_result(
+            "identity_private_key_file", 1,
+            cfg.identity_secret_hex[0] ? "inline-dev identity" : "ephemeral identity");
+    }
+    if (mesh_node_config_management_enabled(&cfg)) {
+        ok &= meshd_doctor_check_private_key("mgmt_private_key_file",
+                                             cfg.mgmt_private_key_file);
+    }
+    if (mesh_node_config_network_control_enabled(&cfg)) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+        uint8_t issuer_key[MESH_NETWORK_IDENTITY_SIZE];
+        int issuer_ok = meshd_read_hex_file_exact(
+            cfg.network_control_membership_issuer_key_file,
+            issuer_key, sizeof(issuer_key)) == 0;
+        meshd_doctor_result("network_control_membership_issuer_key_file",
+                            issuer_ok,
+                            issuer_ok ? "exact public key" : "invalid public key file");
+        mesh_mgmt_crypto_wipe(issuer_key, sizeof(issuer_key));
+        ok &= issuer_ok;
+#else
+        meshd_doctor_result("network_control", 0,
+                            "binary was built without FlowMQ IPC support");
+        ok = 0;
+#endif
+    }
     ok &= meshd_doctor_check_listen_port(cfg.listen_port);
     ok &= meshd_doctor_check_tunnel_access();
     ok &= meshd_doctor_check_bootstrap_peers(&cfg);
@@ -3672,12 +4061,111 @@ static int meshd_run_doctor(const char *config_path) {
     return ok ? 0 : 1;
 }
 
+static int meshd_mesh_create(const mesh_config_t *mesh_cfg) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        meshd_network_control_config_t control_config;
+        memset(&control_config, 0, sizeof(control_config));
+        control_config.node = &g_config;
+        control_config.underlay = mesh_cfg;
+        if (meshd_decode_hex_exact(g_config.network_control_mesh_id_hex,
+                                   control_config.mesh_id,
+                                   sizeof(control_config.mesh_id)) != 0 ||
+            meshd_decode_hex_exact(g_config.network_control_provider_id_hex,
+                                   control_config.provider_id,
+                                   sizeof(control_config.provider_id)) != 0 ||
+            meshd_decode_hex_exact(
+                g_config.network_control_membership_issuer_id_hex,
+                control_config.issuer_id,
+                sizeof(control_config.issuer_id)) != 0 ||
+            meshd_read_hex_file_exact(
+                g_config.network_control_membership_issuer_key_file,
+                control_config.issuer_public_key,
+                sizeof(control_config.issuer_public_key)) != 0 ||
+            turbo_secure_random(control_config.sender_incarnation,
+                                sizeof(control_config.sender_incarnation)) != 0) {
+            fprintf(stderr,
+                    "Failed to load exact Network control identity material\n");
+            mesh_mgmt_crypto_wipe(&control_config, sizeof(control_config));
+            return -1;
+        }
+        if (meshd_network_control_init(&g_network_control,
+                                       &control_config) != 0) {
+            fprintf(stderr,
+                    "Failed to initialize Network control fabric and FlowMQ endpoint\n");
+            mesh_mgmt_crypto_wipe(&control_config, sizeof(control_config));
+            return -1;
+        }
+        mesh_mgmt_crypto_wipe(&control_config, sizeof(control_config));
+        g_mesh = meshd_network_control_borrow_underlay(&g_network_control);
+        return g_mesh ? 0 : -1;
+    }
+#endif
+    g_mesh = mesh_create(mesh_cfg);
+    return g_mesh ? 0 : -1;
+}
+
+static int meshd_mesh_start(void) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        return meshd_network_control_start(&g_network_control) == 0
+                   ? MESH_OK
+                   : MESH_ERR_NETWORK;
+    }
+#endif
+    return mesh_start(g_mesh);
+}
+
+static int meshd_mesh_poll(int timeout_ms) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        return meshd_network_control_poll(&g_network_control, timeout_ms) == 0
+                   ? MESH_OK
+                   : MESH_ERR_NETWORK;
+    }
+#endif
+    return mesh_poll(g_mesh, timeout_ms);
+}
+
+static int meshd_mesh_stop(void) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        size_t abandoned_operations = 0u;
+        int result = meshd_network_control_shutdown(
+            &g_network_control, &abandoned_operations);
+        if (result > 0) {
+            fprintf(stderr,
+                    "Network control drain deadline expired; abandoned %zu volatile result(s)\n",
+                    abandoned_operations);
+        }
+        return result;
+    }
+#endif
+    mesh_stop(g_mesh);
+    return 0;
+}
+
+static void meshd_mesh_destroy(void) {
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        meshd_network_control_destroy(&g_network_control);
+        g_mesh = NULL;
+        return;
+    }
+#endif
+    if (g_mesh) {
+        mesh_destroy(g_mesh);
+        g_mesh = NULL;
+    }
+}
+
 static int meshd_run(const char *config_path,
                      const mesh_node_config_t *override_cfg,
                      const char *rpc_listen,
                      const char *rpc_token) {
     mesh_config_t mesh_cfg;
     tunnel_config_t tun_cfg;
+    uint8_t transport_private_key[MESHD_PRIVATE_KEY_SIZE];
     int ret = 0;
     uint64_t last_status_ms = 0;
 
@@ -3703,11 +4191,33 @@ static int meshd_run(const char *config_path,
         if (override_cfg->status_interval_ms != 0) {
             g_config.status_interval_ms = override_cfg->status_interval_ms;
         }
+        if (override_cfg->network_control_enabled) {
+            g_config.network_control_enabled = 1;
+        }
+        if (override_cfg->network_control_port != 0) {
+            g_config.network_control_port =
+                override_cfg->network_control_port;
+        }
     }
 
     if (mesh_node_config_validate(&g_config) != 0) {
         return 1;
     }
+#ifdef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config) &&
+        flowmq_coronet_tls_require_tls13() != TURBO_OK) {
+        fprintf(stderr,
+                "Failed to establish the process-wide TLS 1.3-only network control profile\n");
+        return 1;
+    }
+#endif
+#ifndef TURBOP2P_ENABLE_FLOWMQ_IPC
+    if (mesh_node_config_network_control_enabled(&g_config)) {
+        fprintf(stderr,
+                "network_control_enabled requires a build with TURBOP2P_ENABLE_FLOWMQ_IPC\n");
+        return 1;
+    }
+#endif
 
     meshd_init_logger();
     meshd_init_signals();
@@ -3733,13 +4243,30 @@ static int meshd_run(const char *config_path,
         return 1;
     }
 
+    memset(transport_private_key, 0, sizeof(transport_private_key));
     mesh_config_init(&mesh_cfg);
     mesh_cfg.virtual_ip = g_config.virtual_ip;
     mesh_cfg.virtual_prefix = (uint8_t)g_config.virtual_prefix;
     mesh_cfg.listen_port = g_config.listen_port;
     mesh_cfg.advertise_ip = g_config.advertise_ip[0] ? g_config.advertise_ip : NULL;
-    mesh_cfg.identity_secret_hex =
-        g_config.identity_secret_hex[0] ? g_config.identity_secret_hex : NULL;
+    if (g_config.identity_private_key_file[0] != '\0') {
+        meshd_key_file_result_t key_result = meshd_private_key_file_read(
+            g_config.identity_private_key_file, transport_private_key);
+        if (key_result != MESHD_KEY_FILE_OK) {
+            fprintf(stderr, "Failed to load transport private key: %s\n",
+                    meshd_key_file_result_string(key_result));
+            tunnel_destroy(g_tunnel);
+            g_tunnel = NULL;
+            meshd_free_tunnel_config(&tun_cfg);
+            tunnel_shutdown();
+            return 1;
+        }
+        mesh_cfg.identity_private_key = transport_private_key;
+        mesh_cfg.identity_private_key_size = sizeof(transport_private_key);
+    } else {
+        mesh_cfg.identity_secret_hex =
+            g_config.identity_secret_hex[0] ? g_config.identity_secret_hex : NULL;
+    }
     mesh_cfg.network_id = g_config.network_id;
     mesh_cfg.enable_ice = g_config.ice_enabled;
     mesh_cfg.ice_stun_servers = g_config.stun_servers;
@@ -3769,8 +4296,10 @@ static int meshd_run(const char *config_path,
     mesh_cfg.on_packet_received = meshd_on_mesh_packet;
     mesh_cfg.user_data = g_tunnel;
 
-    g_mesh = mesh_create(&mesh_cfg);
-    if (!g_mesh) {
+    ret = meshd_mesh_create(&mesh_cfg);
+    mesh_mgmt_crypto_wipe(transport_private_key,
+                          sizeof(transport_private_key));
+    if (ret != 0 || !g_mesh) {
         fprintf(stderr, "Failed to create mesh\n");
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
@@ -3781,8 +4310,7 @@ static int meshd_run(const char *config_path,
     if (g_config.stream_enabled &&
         mesh_stream_admission_enable(g_mesh) != MESH_OK) {
         fprintf(stderr, "Failed to enable stream admission\n");
-        mesh_destroy(g_mesh);
-        g_mesh = NULL;
+        meshd_mesh_destroy();
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
         meshd_free_tunnel_config(&tun_cfg);
@@ -3790,8 +4318,7 @@ static int meshd_run(const char *config_path,
         return 1;
     }
     if (meshd_management_start(g_mesh, &g_config) != 0) {
-        mesh_destroy(g_mesh);
-        g_mesh = NULL;
+        meshd_mesh_destroy();
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
         meshd_free_tunnel_config(&tun_cfg);
@@ -3808,8 +4335,7 @@ static int meshd_run(const char *config_path,
     if (ret != TUNNEL_OK) {
         fprintf(stderr, "Failed to start tunnel: %s\n", tunnel_error_string(ret));
         meshd_management_stop();
-        mesh_destroy(g_mesh);
-        g_mesh = NULL;
+        meshd_mesh_destroy();
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
         meshd_free_tunnel_config(&tun_cfg);
@@ -3817,13 +4343,12 @@ static int meshd_run(const char *config_path,
         return 1;
     }
 
-    ret = mesh_start(g_mesh);
+    ret = meshd_mesh_start();
     if (ret != MESH_OK) {
         fprintf(stderr, "Failed to start mesh: %s\n", mesh_error_string((mesh_error_t)ret));
         tunnel_stop(g_tunnel);
         meshd_management_stop();
-        mesh_destroy(g_mesh);
-        g_mesh = NULL;
+        meshd_mesh_destroy();
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
         meshd_free_tunnel_config(&tun_cfg);
@@ -3840,8 +4365,8 @@ static int meshd_run(const char *config_path,
                                 g_config.virtual_ip) != 0) {
         tunnel_stop(g_tunnel);
         meshd_management_stop();
-        mesh_destroy(g_mesh);
-        g_mesh = NULL;
+        (void)meshd_mesh_stop();
+        meshd_mesh_destroy();
         tunnel_destroy(g_tunnel);
         g_tunnel = NULL;
         meshd_free_tunnel_config(&tun_cfg);
@@ -3857,8 +4382,8 @@ static int meshd_run(const char *config_path,
             meshd_mgmt_server_stop(&g_mgmt_server);
             tunnel_stop(g_tunnel);
             meshd_management_stop();
-            mesh_destroy(g_mesh);
-            g_mesh = NULL;
+            (void)meshd_mesh_stop();
+            meshd_mesh_destroy();
             tunnel_destroy(g_tunnel);
             g_tunnel = NULL;
             meshd_free_tunnel_config(&tun_cfg);
@@ -3873,7 +4398,11 @@ static int meshd_run(const char *config_path,
 
     while (meshd_is_running()) {
         tunnel_poll(g_tunnel, 100);
-        mesh_poll(g_mesh, 100);
+        if (meshd_mesh_poll(100) != MESH_OK) {
+            fprintf(stderr, "Mesh owner loop failed\n");
+            ret = 1;
+            break;
+        }
         meshd_mgmt_accept_and_serve(&g_mgmt_server);
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
         (void)meshd_execution_drain();
@@ -3909,15 +4438,16 @@ static int meshd_run(const char *config_path,
     meshd_remove_pid_file();
     meshd_mgmt_server_stop(&g_mgmt_server);
     meshd_management_stop();
-    mesh_stop(g_mesh);
-    mesh_destroy(g_mesh);
-    g_mesh = NULL;
+    if (meshd_mesh_stop() != 0) {
+        ret = 1;
+    }
+    meshd_mesh_destroy();
     tunnel_stop(g_tunnel);
     tunnel_destroy(g_tunnel);
     g_tunnel = NULL;
     meshd_free_tunnel_config(&tun_cfg);
     tunnel_shutdown();
-    return 0;
+    return ret == 0 ? 0 : 1;
 }
 
 #ifndef MESHD_NO_MAIN
@@ -3957,6 +4487,31 @@ int main(int argc, char **argv) {
 
         if (strcmp(argv[i], "--status-interval-ms") == 0 && i + 1 < argc) {
             override_cfg.status_interval_ms = (unsigned int)strtoul(argv[i + 1], NULL, 10);
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--network-control") == 0) {
+            override_cfg.network_control_enabled = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--network-control-port") == 0) {
+            char *end = NULL;
+            long port;
+            if (i + 1 >= argc) {
+                fprintf(stderr, "--network-control-port requires a value\n");
+                return 1;
+            }
+            errno = 0;
+            port = strtol(argv[i + 1], &end, 10);
+            if (errno != 0 || !end || *end != '\0' ||
+                port < 1 || port > 65535) {
+                fprintf(stderr, "Invalid --network-control-port: %s\n",
+                        argv[i + 1]);
+                return 1;
+            }
+            override_cfg.network_control_port = (int)port;
             i++;
             continue;
         }

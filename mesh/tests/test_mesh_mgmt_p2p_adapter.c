@@ -27,6 +27,31 @@
 #define TEST_FRAME_CAPACITY 256u
 #define TEST_NOW_MS 100000u
 
+static const uint8_t CAPACITY_PROBE_KEY[P2P_KEY_SIZE] = {
+    0xa1u, 0xa2u, 0xa3u, 0xa4u, 0xa5u, 0xa6u, 0xa7u, 0xa8u,
+    0xa9u, 0xaau, 0xabu, 0xacu, 0xadu, 0xaeu, 0xafu, 0xb0u,
+    0xb1u, 0xb2u, 0xb3u, 0xb4u, 0xb5u, 0xb6u, 0xb7u, 0xb8u,
+    0xb9u, 0xbau, 0xbbu, 0xbcu, 0xbdu, 0xbeu, 0xbfu, 0xc0u,
+};
+static const uint8_t TEST_P2P_NETWORK_ID[P2P_SECURITY_ID_SIZE] = {
+    0x4d, 0x4d, 0x50, 0x2d, 0x50, 0x32, 0x50, 0x2d,
+    0x54, 0x65, 0x73, 0x74, 0x2d, 0x4e, 0x65, 0x74,
+    0x77, 0x6f, 0x72, 0x6b, 0x2d, 0x76, 0x32, 0x2d,
+    0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31,
+};
+
+static void test_bytes_to_hex(const uint8_t *bytes, size_t length,
+                              char *output) {
+  static const char hex[] = "0123456789abcdef";
+  size_t index;
+
+  for (index = 0; index < length; ++index) {
+    output[index * 2u] = hex[bytes[index] >> 4];
+    output[index * 2u + 1u] = hex[bytes[index] & 0x0fu];
+  }
+  output[length * 2u] = '\0';
+}
+
 typedef struct {
   p2p_node_t *node1;
   p2p_node_t *node2;
@@ -221,6 +246,7 @@ static int create_nodes(p2p_adapter_test_state_t *state, unsigned short *out_nod
   };
   unsigned short port1;
   unsigned short port2;
+  uint8_t trusted_keys[3 * P2P_KEY_SIZE];
 
   if (!state || !out_node1_port || pick_loopback_ports(&port1, &port2) != 0)
     return -11;
@@ -231,6 +257,18 @@ static int create_nodes(p2p_adapter_test_state_t *state, unsigned short *out_nod
   if (p2p_node_set_private_key(state->node1, NODE1_KEY) != P2P_OK ||
       p2p_node_set_private_key(state->node2, NODE2_KEY) != P2P_OK)
     return -13;
+  if (p2p_node_get_public_key(state->node1, trusted_keys) != P2P_OK ||
+      p2p_node_get_public_key(state->node2,
+                              trusted_keys + P2P_KEY_SIZE) != P2P_OK ||
+      p2p_public_key_from_private_key(CAPACITY_PROBE_KEY,
+                                      trusted_keys + 2u * P2P_KEY_SIZE) !=
+          P2P_OK ||
+      p2p_node_configure_pinned_security_v2(state->node1, TEST_P2P_NETWORK_ID,
+                                            trusted_keys, 3u) != P2P_OK ||
+      p2p_node_configure_pinned_security_v2(state->node2, TEST_P2P_NETWORK_ID,
+                                            trusted_keys, 3u) != P2P_OK)
+    return -18;
+  memset(trusted_keys, 0, sizeof(trusted_keys));
   *out_node1_port = port1;
   return 0;
 }
@@ -679,6 +717,8 @@ static void test_authenticated_peer_identity_and_message_lifetime(void) {
   mesh_mgmt_transport_receipt_v1_t receipt;
   uint8_t expected_remote_key[P2P_KEY_SIZE];
   uint8_t remote_key[P2P_KEY_SIZE];
+  uint8_t channel_binding[P2P_SECURITY_ID_SIZE];
+  p2p_peer_security_info_v2_t security_info;
   uint8_t frame[TEST_FRAME_CAPACITY];
   uint8_t coalesced[TEST_FRAME_CAPACITY * 2u];
   size_t frame_len;
@@ -688,6 +728,7 @@ static void test_authenticated_peer_identity_and_message_lifetime(void) {
   memset(&io, 0, sizeof(io));
   memset(&transport, 0, sizeof(transport));
   memset(&receipt, 0, sizeof(receipt));
+  memset(&security_info, 0, sizeof(security_info));
   frame_len = encode_test_frame(frame, sizeof(frame));
   check_size_gt(frame_len, 0u);
   check_int_eq(start_nodes(&state), 0);
@@ -697,10 +738,16 @@ static void test_authenticated_peer_identity_and_message_lifetime(void) {
   }
 
   check_int_eq(p2p_node_get_public_key(state.node2, expected_remote_key), P2P_OK);
+  security_info.struct_size = sizeof(security_info);
+  check_int_eq(p2p_peer_get_security_info_v2(state.node1_peer, &security_info),
+               P2P_OK);
   check_int_eq(
-      mesh_mgmt_p2p_adapter_init_v1(&adapter, state.node1, state.node1_peer, &io, remote_key),
+      mesh_mgmt_p2p_adapter_init_v1(&adapter, state.node1, state.node1_peer,
+                                    &io, remote_key, channel_binding),
       MESH_MGMT_P2P_ADAPTER_OK);
   check_mem_eq(remote_key, expected_remote_key, sizeof(remote_key));
+  check_mem_eq(channel_binding, security_info.channel_binding,
+               sizeof(channel_binding));
   check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
 
   check_false(mesh_mgmt_p2p_message_is_mmp_v1("MESH_HELLO", 10u));
@@ -766,6 +813,8 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
   mesh_mgmt_p2p_peer_v1_t runtime1;
   mesh_mgmt_p2p_peer_v1_t runtime2;
   mesh_mgmt_p2p_peer_v1_t rejected_runtime;
+  p2p_peer_security_info_v2_t security_info1;
+  p2p_peer_security_info_v2_t security_info2;
   uint8_t transport_key1[P2P_KEY_SIZE];
   uint8_t transport_key2[P2P_KEY_SIZE];
   uint8_t execution_payload[
@@ -779,6 +828,8 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
   memset(&runtime1, 0, sizeof(runtime1));
   memset(&runtime2, 0, sizeof(runtime2));
   memset(&rejected_runtime, 0, sizeof(rejected_runtime));
+  memset(&security_info1, 0, sizeof(security_info1));
+  memset(&security_info2, 0, sizeof(security_info2));
   callbacks1.next_message_byte = 0x20u;
   callbacks2.next_message_byte = 0x80u;
   state.runtime1_result = MESH_MGMT_P2P_PEER_OK;
@@ -829,6 +880,20 @@ static void test_two_authenticated_p2p_peers_complete_signed_handshake(void) {
 
   check_int_eq(mesh_mgmt_p2p_peer_init_v1(&runtime1, &config1), MESH_MGMT_P2P_PEER_OK);
   check_int_eq(mesh_mgmt_p2p_peer_init_v1(&runtime2, &config2), MESH_MGMT_P2P_PEER_OK);
+  security_info1.struct_size = sizeof(security_info1);
+  security_info2.struct_size = sizeof(security_info2);
+  check_int_eq(p2p_peer_get_security_info_v2(state.node1_peer, &security_info1),
+               P2P_OK);
+  check_int_eq(p2p_peer_get_security_info_v2(state.node2_peer, &security_info2),
+               P2P_OK);
+  check_mem_eq(runtime1.signer.hello.channel_binding,
+               security_info1.channel_binding, P2P_SECURITY_ID_SIZE);
+  check_mem_eq(runtime1.protocol_peer.connection.dispatcher.session.config.channel_binding,
+               security_info1.channel_binding, P2P_SECURITY_ID_SIZE);
+  check_mem_eq(runtime2.signer.hello.channel_binding,
+               security_info2.channel_binding, P2P_SECURITY_ID_SIZE);
+  check_mem_eq(runtime2.protocol_peer.connection.dispatcher.session.config.channel_binding,
+               security_info2.channel_binding, P2P_SECURITY_ID_SIZE);
   state.runtime1 = &runtime1;
   state.runtime2 = &runtime2;
   check_int_eq(mesh_mgmt_p2p_peer_handle_message_v1(&runtime1, "MESH_HELLO", 10u, TEST_NOW_MS),
@@ -880,11 +945,6 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
       31u, 29u, 27u, 25u, 23u, 21u, 19u, 17u, 15u, 13u, 11u, 9u,  7u, 5u, 3u, 1u,
   };
   static const char LEGACY_MESSAGE[] = "legacy-mesh-message";
-  static const uint8_t CAPACITY_PROBE_KEY[P2P_KEY_SIZE] = {
-      0xa1u, 0xa2u, 0xa3u, 0xa4u, 0xa5u, 0xa6u, 0xa7u, 0xa8u, 0xa9u, 0xaau, 0xabu,
-      0xacu, 0xadu, 0xaeu, 0xafu, 0xb0u, 0xb1u, 0xb2u, 0xb3u, 0xb4u, 0xb5u, 0xb6u,
-      0xb7u, 0xb8u, 0xb9u, 0xbau, 0xbbu, 0xbcu, 0xbdu, 0xbeu, 0xbfu, 0xc0u,
-  };
   p2p_adapter_test_state_t state;
   runtime_callbacks_t signer_callbacks1;
   runtime_callbacks_t signer_callbacks2;
@@ -1102,8 +1162,18 @@ static void test_agent_router_owns_callbacks_and_reconnect_lifecycle(void) {
   check_not_null(capacity_probe);
   if (capacity_probe) {
     uint64_t deadline = turbo_monotonic_ms() + TEST_CONNECT_TIMEOUT_MS;
+    uint8_t trusted_keys[3 * P2P_KEY_SIZE];
 
     check_int_eq(p2p_node_set_private_key(capacity_probe, CAPACITY_PROBE_KEY), P2P_OK);
+    check_int_eq(p2p_node_get_public_key(state.node1, trusted_keys), P2P_OK);
+    check_int_eq(p2p_node_get_public_key(state.node2,
+                                         trusted_keys + P2P_KEY_SIZE), P2P_OK);
+    check_int_eq(p2p_node_get_public_key(capacity_probe,
+                                         trusted_keys + 2u * P2P_KEY_SIZE), P2P_OK);
+    check_int_eq(p2p_node_configure_pinned_security_v2(
+                      capacity_probe, TEST_P2P_NETWORK_ID, trusted_keys, 3u),
+                 P2P_OK);
+    memset(trusted_keys, 0, sizeof(trusted_keys));
     check_int_eq(p2p_start_nonblocking(capacity_probe), P2P_OK);
     check_int_eq(p2p_connect(capacity_probe, "127.0.0.1", (int)node1_port), P2P_OK);
     while (router_callbacks1.failure_count == 0u && turbo_monotonic_ms() < deadline) {
@@ -1213,6 +1283,14 @@ static void test_mesh_bridge_shares_callbacks_and_detaches_without_disconnect(vo
   char node1_endpoint[64];
   uint8_t transport_key1[P2P_KEY_SIZE];
   uint8_t transport_key2[P2P_KEY_SIZE];
+  uint8_t pinned_public_key1[P2P_KEY_SIZE];
+  uint8_t pinned_public_key2[P2P_KEY_SIZE];
+  char identity_secret1[65];
+  char identity_secret2[65];
+  char pinned_node_id1[65];
+  char pinned_node_id2[65];
+  const char *node1_allowed_ids[1];
+  const char *node2_allowed_ids[1];
   uint64_t deadline;
   unsigned short port1 = 0u;
   unsigned short port2 = 0u;
@@ -1244,18 +1322,34 @@ static void test_mesh_bridge_shares_callbacks_and_detaches_without_disconnect(vo
     goto cleanup;
   snprintf(node1_endpoint, sizeof(node1_endpoint), "127.0.0.1:%u", (unsigned int)port1);
   node2_bootstraps[0] = node1_endpoint;
+  check_int_eq(p2p_public_key_from_private_key(MANAGEMENT_KEY1,
+                                               pinned_public_key1), P2P_OK);
+  check_int_eq(p2p_public_key_from_private_key(MANAGEMENT_KEY2,
+                                               pinned_public_key2), P2P_OK);
+  test_bytes_to_hex(MANAGEMENT_KEY1, sizeof(MANAGEMENT_KEY1), identity_secret1);
+  test_bytes_to_hex(MANAGEMENT_KEY2, sizeof(MANAGEMENT_KEY2), identity_secret2);
+  test_bytes_to_hex(pinned_public_key1, sizeof(pinned_public_key1), pinned_node_id1);
+  test_bytes_to_hex(pinned_public_key2, sizeof(pinned_public_key2), pinned_node_id2);
+  node1_allowed_ids[0] = pinned_node_id2;
+  node2_allowed_ids[0] = pinned_node_id1;
 
   mesh_config_init(&mesh_config1);
   mesh_config1.virtual_ip = "10.42.30.1";
   mesh_config1.listen_port = (int)port1;
   mesh_config1.advertise_ip = "127.0.0.1";
   mesh_config1.network_id = "mgmt-shared-node-test";
+  mesh_config1.identity_secret_hex = identity_secret1;
+  mesh_config1.peer_allow_node_ids = node1_allowed_ids;
+  mesh_config1.peer_allow_node_id_count = 1;
 
   mesh_config_init(&mesh_config2);
   mesh_config2.virtual_ip = "10.42.30.2";
   mesh_config2.listen_port = (int)port2;
   mesh_config2.advertise_ip = "127.0.0.1";
   mesh_config2.network_id = "mgmt-shared-node-test";
+  mesh_config2.identity_secret_hex = identity_secret2;
+  mesh_config2.peer_allow_node_ids = node2_allowed_ids;
+  mesh_config2.peer_allow_node_id_count = 1;
   mesh_config2.bootstrap_peers = node2_bootstraps;
   mesh_config2.bootstrap_count = 1;
 
@@ -1828,12 +1922,15 @@ static void test_agent_runtime_owns_listener_policy_and_reconnect(void) {
   mesh_mgmt_p2p_peer_config_v1_t peer_config2;
   mesh_mgmt_agent_bootstrap_v1_t bootstrap2;
   mesh_mgmt_endpoint_snapshot_v1_t endpoint_snapshot;
+  mesh_mgmt_p2p_remote_trust_v2_t remote_trust;
+  p2p_security_revalidation_result_v2_t revalidation;
   runtime_callbacks_t signer_callbacks1;
   runtime_callbacks_t signer_callbacks2;
   router_callbacks_t callbacks1;
   router_callbacks_t callbacks2;
   uint8_t transport_id1[P2P_KEY_SIZE];
   uint8_t transport_id2[P2P_KEY_SIZE];
+  uint64_t revoked_serial = 12u;
   uint64_t deadline;
   unsigned short port1 = 0u;
   unsigned short port2 = 0u;
@@ -1847,6 +1944,8 @@ static void test_agent_runtime_owns_listener_policy_and_reconnect(void) {
   memset(&callbacks1, 0, sizeof(callbacks1));
   memset(&callbacks2, 0, sizeof(callbacks2));
   memset(&bootstrap2, 0, sizeof(bootstrap2));
+  memset(&remote_trust, 0, sizeof(remote_trust));
+  memset(&revalidation, 0, sizeof(revalidation));
   signer_callbacks1.next_message_byte = 0x21u;
   signer_callbacks2.next_message_byte = 0x81u;
   callbacks1.next_namespace_byte = 0x12u;
@@ -1943,6 +2042,21 @@ static void test_agent_runtime_owns_listener_policy_and_reconnect(void) {
                                                    &endpoint_snapshot),
                MESH_MGMT_ENDPOINT_POOL_OK);
   check_int_eq(endpoint_snapshot.state, MESH_MGMT_ENDPOINT_ACTIVE);
+
+  remote_trust.struct_size = sizeof(remote_trust);
+  remote_trust.minimum_remote_principal_epoch = 1u;
+  remote_trust.required_remote_roles = MESH_MGMT_ROLE_OPERATOR;
+  remote_trust.revoked_serials = &revoked_serial;
+  remote_trust.revoked_serial_count = 1u;
+  revalidation.struct_size = sizeof(revalidation);
+  check_int_eq(mesh_mgmt_agent_runtime_update_remote_trust_v2(
+                   &runtime1_restart, &remote_trust, &revalidation),
+               MESH_MGMT_AGENT_RUNTIME_OK);
+  check_size_eq(revalidation.examined_sessions, 1u);
+  check_size_eq(revalidation.provider_rejections, 1u);
+  check_size_eq(revalidation.disconnected_sessions, 1u);
+  check_size_eq(revalidation.retained_sessions, 0u);
+  check_size_eq(revalidation.identity_changes, 0u);
 
   mesh_mgmt_agent_runtime_destroy_v1(&runtime2);
   mesh_mgmt_agent_runtime_destroy_v1(&runtime1_restart);

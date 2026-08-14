@@ -6,6 +6,7 @@ enable_testing()
 
 set(MESH_TEST_SOURCES
     test_mesh.c
+    test_mesh_multi_network.c
     test_mesh_faults.c
     test_mesh_multihop.c
     test_mesh_paths.c
@@ -14,6 +15,36 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_envelope.c
     test_mesh_mgmt_replay.c
     test_mesh_mgmt_execution.c
+    test_mesh_control_primitives.c
+    test_mesh_control_outbox.c
+    test_mesh_control_durable_outbox.c
+    test_mesh_control_durable_outbox_worker.c
+    test_mesh_control_agent_sync.c
+    test_mesh_control_controller_session.c
+    test_mesh_control_controller_identity.c
+    test_mesh_control_controller_runtime.c
+    test_mesh_control_agent_controller_e2e.c
+    test_mesh_control_agent_service.c
+    test_mesh_control_agent_runtime.c
+    test_mesh_certificate_lifecycle.c
+    test_mesh_control_channel.c
+    test_mesh_node_ipc.c
+    test_mesh_control_mmp.c
+    test_mesh_control_document.c
+    test_mesh_network_reconciler.c
+    test_mesh_control_iris.c
+    test_mesh_control_state.c
+    test_mesh_control_status.c
+    test_mesh_control_policy.c
+    test_mesh_control_reconciler.c
+    test_mesh_control_owner.c
+    test_mesh_control_checkpoint.c
+    test_mesh_control_checkpoint_store.c
+    test_mesh_control_wal.c
+    test_mesh_control_wal_worker.c
+    test_mesh_control_agent.c
+    test_meshctl_product.c
+    test_mesh_product_controller_iris.c
     test_mesh_mgmt_execution_store.c
     test_m3_namespace_local_store.c
 
@@ -46,6 +77,7 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_session.c
     test_mesh_mgmt_peer_signer.c
     test_mesh_mgmt_transport.c
+    test_mesh_mgmt_p2p_security.c
     test_mesh_mgmt_p2p_adapter.c
     test_mesh_mgmt_endpoint_pool.c
     test_mesh_mgmt_endpoint_record.c
@@ -60,10 +92,15 @@ set(MESH_TEST_SOURCES
     test_mesh_stream_registry.c
     test_mesh_stream_coronet.c
     test_meshctl_rpc.c
+    test_meshd_key_file.c
     test_mesh_mgmt_execution_rpc_registry.c
     test_mesh_mgmt_execution_rpc_control.c
     test_mesh_mgmt_execution_disabled_responder.c
     test_meshd_runtime.c)
+
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+    list(APPEND MESH_TEST_SOURCES test_mesh_node_ipc_flowmq.c)
+endif()
 
 if(TURBO_P2P_ENABLE_NODE_EXECUTION)
     set(MESH_MGMT_EXECUTION_TEST_WASM
@@ -73,8 +110,23 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
         MAX_MEMORY 262144
         OUTPUT ${MESH_MGMT_EXECUTION_TEST_WASM}
         NO_CHECK)
+    set(MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM
+        "${CMAKE_CURRENT_BINARY_DIR}/mesh_mgmt_execution_test_success_guest.wasm")
+    turbo_add_wasm_application(mesh_mgmt_execution_test_success_guest
+        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/data/execution_success_guest.c
+        MAX_MEMORY 262144
+        OUTPUT ${MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM}
+        NO_CHECK)
+    add_executable(mesh_native_test_worker
+        mesh_native_test_worker_main.c)
+    set_target_properties(mesh_native_test_worker PROPERTIES
+        FOLDER "mesh/tests"
+        RUNTIME_OUTPUT_DIRECTORY
+            "${CMAKE_BINARY_DIR}/node-execution-test-bin")
     list(APPEND MESH_TEST_SOURCES
         test_mesh_mgmt_execution_runner.c
+        test_mesh_mgmt_execution_process.c
+        test_mesh_control_execution_provider.c
         test_mesh_mgmt_execution_orchestrator.c
         test_mesh_mgmt_execution_node.c
         test_meshd_execution_config.c)
@@ -110,11 +162,49 @@ foreach(test_source ${MESH_TEST_SOURCES})
                 ${CMAKE_CURRENT_SOURCE_DIR}/../examples)
 
     set(extra_test_libs)
+    if(test_name STREQUAL "test_mesh")
+        list(APPEND extra_test_libs TurboNet::Crypto)
+    endif()
+    if(test_name STREQUAL "test_mesh_multi_network")
+        list(APPEND extra_test_libs TurboNet::Crypto TurboP2P::P2P)
+    endif()
+    if(test_name STREQUAL "test_mesh_network_reconciler")
+        list(APPEND extra_test_libs mesh_network_reconciler
+            mesh_node_ipc_network_executor
+            TurboNet::Crypto TurboP2P::P2P)
+    endif()
+    if(test_name STREQUAL "test_mesh_node_ipc_flowmq")
+        target_sources(${test_name} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/../examples/meshd_network_control.c)
+        list(APPEND extra_test_libs mesh_node_ipc_flowmq
+            mesh_node_control_runtime mesh_node_control_client_runtime
+            mesh_node_control_flowmq_provider
+            mesh_node_control_flowmq_network_provider
+            mesh_node_network_control_service
+            TurboNet::Crypto TurboP2P::P2P)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_FLOWMQ_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/ca.pem"
+            MESH_TEST_FLOWMQ_SERVER_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-cert.pem"
+            MESH_TEST_FLOWMQ_SERVER_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-key.pem"
+            MESH_TEST_FLOWMQ_SERVER_NEXT_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-next-cert.pem"
+            MESH_TEST_FLOWMQ_SERVER_NEXT_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-next-key.pem"
+            MESH_TEST_FLOWMQ_SERVER_CLIENT_AUTH_ONLY_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-client-auth-only-cert.pem"
+            MESH_TEST_FLOWMQ_SERVER_CLIENT_AUTH_ONLY_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-client-auth-only-key.pem"
+            MESH_TEST_FLOWMQ_CLIENT_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-current-cert.pem"
+            MESH_TEST_FLOWMQ_CLIENT_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-current-key.pem"
+            MESH_TEST_FLOWMQ_CLIENT_NEXT_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-next-cert.pem"
+            MESH_TEST_FLOWMQ_CLIENT_NEXT_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-next-key.pem")
+        if(WIN32)
+            list(APPEND extra_test_libs ws2_32)
+        endif()
+    endif()
     if(test_name STREQUAL "test_meshd_runtime")
         target_sources(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_runtime_health.c)
-        list(APPEND extra_test_libs tunnel mesh_mgmt_agent_runtime TurboP2P::P2P)
+        list(APPEND extra_test_libs tunnel mesh_mgmt_agent_runtime
+            meshd_key_file TurboP2P::P2P)
         if(TURBO_P2P_ENABLE_NODE_EXECUTION)
             target_sources(${test_name} PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/../examples/meshd_execution_config.c)
@@ -123,14 +213,26 @@ foreach(test_source ${MESH_TEST_SOURCES})
                 TURBO_P2P_ENABLE_NODE_EXECUTION=1)
         endif()
     endif()
+    if(test_name STREQUAL "test_meshd_key_file")
+        list(APPEND extra_test_libs meshd_key_file)
+        if(WIN32)
+            list(APPEND extra_test_libs advapi32)
+        endif()
+    endif()
     if(test_name STREQUAL "test_meshctl_rpc")
         target_sources(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_runtime_health.c)
-        list(APPEND extra_test_libs TurboP2P::P2P)
+        list(APPEND extra_test_libs TurboP2P::P2P TurboHttp::TurboHttp)
         if(WIN32)
             list(APPEND extra_test_libs ws2_32)
         endif()
+    endif()
+    if(test_name STREQUAL "test_meshctl_product")
+        list(APPEND extra_test_libs meshctl_product)
+    endif()
+    if(test_name STREQUAL "test_mesh_product_controller_iris")
+        list(APPEND extra_test_libs mesh_product_controller_iris)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_codec")
         list(APPEND extra_test_libs mesh_mgmt_codec)
@@ -281,6 +383,24 @@ foreach(test_source ${MESH_TEST_SOURCES})
             MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}")
         list(APPEND extra_test_libs mesh_mgmt_execution_runner)
     endif()
+    if(test_name STREQUAL "test_mesh_mgmt_execution_process")
+        add_dependencies(${test_name} mesh_mgmt_execution_test_guest
+            mesh-execution-worker mesh_native_test_worker)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}"
+            MESH_TEST_EXECUTION_WORKER="$<TARGET_FILE:mesh-execution-worker>"
+            MESH_TEST_NATIVE_WORKER="$<TARGET_FILE:mesh_native_test_worker>")
+        list(APPEND extra_test_libs mesh_mgmt_execution_process)
+    endif()
+    if(test_name STREQUAL "test_mesh_control_execution_provider")
+        add_dependencies(${test_name} mesh_mgmt_execution_test_success_guest
+            mesh-execution-worker mesh_native_test_worker)
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_EXECUTION_SUCCESS_WASM="${MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM}"
+            MESH_TEST_EXECUTION_WORKER="$<TARGET_FILE:mesh-execution-worker>"
+            MESH_TEST_NATIVE_WORKER="$<TARGET_FILE:mesh_native_test_worker>")
+        list(APPEND extra_test_libs mesh_control_execution_provider)
+    endif()
     if(test_name STREQUAL "test_mesh_mgmt_execution_orchestrator")
         add_dependencies(${test_name} mesh_mgmt_execution_test_guest)
         target_compile_definitions(${test_name} PRIVATE
@@ -298,7 +418,8 @@ foreach(test_source ${MESH_TEST_SOURCES})
     if(test_name STREQUAL "test_meshd_execution_config")
         target_sources(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/meshd_execution_config.c)
-        list(APPEND extra_test_libs mesh_mgmt_execution_node)
+        list(APPEND extra_test_libs
+            mesh_mgmt_execution_node mesh_mgmt_execution_process)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_session")
         list(APPEND extra_test_libs
@@ -312,6 +433,9 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_transport")
         list(APPEND extra_test_libs mesh_mgmt_transport)
+    endif()
+    if(test_name STREQUAL "test_mesh_mgmt_p2p_security")
+        list(APPEND extra_test_libs mesh_mgmt_p2p_security)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_p2p_adapter")
         list(APPEND extra_test_libs mesh_mgmt_agent_runtime)
@@ -371,7 +495,9 @@ foreach(test_source ${MESH_TEST_SOURCES})
 
     set(test_runtime_output_directory "${CMAKE_BINARY_DIR}/bin")
     if(test_name STREQUAL "test_mesh_mgmt_execution_runner" OR
-       test_name STREQUAL "test_mesh_mgmt_execution_orchestrator")
+       test_name STREQUAL "test_mesh_mgmt_execution_orchestrator" OR
+       test_name STREQUAL "test_mesh_mgmt_execution_process" OR
+       test_name STREQUAL "test_mesh_control_execution_provider")
         set(test_runtime_output_directory
             "${CMAKE_BINARY_DIR}/node-execution-test-bin")
     endif()
@@ -379,14 +505,187 @@ foreach(test_source ${MESH_TEST_SOURCES})
         FOLDER "mesh/tests"
         RUNTIME_OUTPUT_DIRECTORY ${test_runtime_output_directory})
 
+    if(WIN32 AND (test_name STREQUAL "test_mesh_mgmt_execution_runner" OR
+                  test_name STREQUAL "test_mesh_mgmt_execution_orchestrator" OR
+                  test_name STREQUAL "test_mesh_mgmt_execution_process" OR
+                  test_name STREQUAL "test_mesh_control_execution_provider"))
+        add_custom_command(TARGET ${test_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_turbo_p2p_runtime_dlls} $<TARGET_FILE_DIR:${test_name}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:TurboRuntime::Core> $<TARGET_FILE_DIR:${test_name}>
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:TurboWasm::Runtime> $<TARGET_FILE_DIR:${test_name}>)
+    endif()
+
     add_test(NAME ${test_name} COMMAND ${test_name})
     if(TARGET turbo_p2p_copy_runtime_dlls)
         add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
     endif()
 endforeach()
 
+if(TURBOP2P_ENABLE_FLOWMQ_IPC)
+    add_executable(test_mesh_node_ipc_flowmq_process
+        test_mesh_node_ipc_flowmq_process.c)
+    target_include_directories(test_mesh_node_ipc_flowmq_process
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
+                ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_link_libraries(test_mesh_node_ipc_flowmq_process
+        PRIVATE mesh_node_ipc_flowmq TurboUtils::Core)
+    target_compile_definitions(test_mesh_node_ipc_flowmq_process PRIVATE
+        MESH_TEST_FLOWMQ_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/ca.pem"
+        MESH_TEST_FLOWMQ_SERVER_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-cert.pem"
+        MESH_TEST_FLOWMQ_SERVER_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-key.pem"
+        MESH_TEST_FLOWMQ_CLIENT_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-current-cert.pem"
+        MESH_TEST_FLOWMQ_CLIENT_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/client-current-key.pem")
+    if(WIN32)
+        target_link_libraries(test_mesh_node_ipc_flowmq_process PRIVATE ws2_32)
+    endif()
+    set_target_properties(test_mesh_node_ipc_flowmq_process PROPERTIES
+        FOLDER "mesh/tests"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+    add_test(NAME test_mesh_node_ipc_flowmq_process
+        COMMAND test_mesh_node_ipc_flowmq_process)
+    set_tests_properties(test_mesh_node_ipc_flowmq_process PROPERTIES
+        LABELS "mesh;flowmq;cross-process;security"
+        TIMEOUT 20)
+    if(TARGET turbo_p2p_copy_runtime_dlls)
+        add_dependencies(test_mesh_node_ipc_flowmq_process
+            turbo_p2p_copy_runtime_dlls)
+    endif()
+endif()
+
 target_link_libraries(test_mesh_mgmt_execution_rpc_registry PRIVATE
     mesh_mgmt_execution_rpc_registry
+)
+
+target_link_libraries(test_mesh_control_primitives PRIVATE
+    mesh_control_primitives
+)
+
+target_link_libraries(test_mesh_control_outbox PRIVATE
+    mesh_control_outbox
+)
+
+target_link_libraries(test_mesh_control_durable_outbox PRIVATE
+    mesh_control_durable_outbox
+)
+
+target_link_libraries(test_mesh_control_durable_outbox_worker PRIVATE
+    mesh_control_durable_outbox_worker
+)
+
+target_link_libraries(test_mesh_control_agent_sync PRIVATE
+    mesh_control_agent_sync
+)
+
+target_link_libraries(test_mesh_control_controller_session PRIVATE
+    mesh_control_controller_session mesh_control_mmp mesh_control_status
+)
+
+target_link_libraries(test_mesh_control_controller_identity PRIVATE
+    mesh_control_controller_identity
+)
+target_compile_definitions(test_mesh_control_controller_identity PRIVATE
+    MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
+
+target_link_libraries(test_mesh_control_controller_runtime PRIVATE
+    mesh_control_controller_runtime
+)
+target_compile_definitions(test_mesh_control_controller_runtime PRIVATE
+    MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
+
+target_link_libraries(test_mesh_control_agent_controller_e2e PRIVATE
+    mesh_control_agent_runtime mesh_control_controller_runtime
+    mesh_control_document mesh_control_mmp TurboUtils::Core
+)
+target_compile_definitions(test_mesh_control_agent_controller_e2e PRIVATE
+    MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
+if(WIN32)
+    target_link_libraries(test_mesh_control_agent_controller_e2e PRIVATE ws2_32)
+endif()
+
+target_link_libraries(test_mesh_control_agent_service PRIVATE
+    mesh_control_agent_service mesh_control_status
+)
+
+target_link_libraries(test_mesh_control_agent_runtime PRIVATE
+    mesh_control_agent_runtime mesh_control_status
+)
+target_compile_definitions(test_mesh_control_agent_runtime PRIVATE
+    MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
+
+target_link_libraries(test_mesh_certificate_lifecycle PRIVATE
+    mesh_certificate_lifecycle
+)
+target_compile_definitions(test_mesh_certificate_lifecycle PRIVATE
+    MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
+
+target_link_libraries(test_mesh_control_channel PRIVATE
+    mesh_control_channel
+)
+
+target_link_libraries(test_mesh_node_ipc PRIVATE
+    mesh_node_ipc
+)
+
+target_link_libraries(test_mesh_control_mmp PRIVATE
+    mesh_control_mmp
+)
+
+target_link_libraries(test_mesh_control_document PRIVATE
+    mesh_control_document
+)
+
+target_link_libraries(test_mesh_control_iris PRIVATE
+    mesh_control_iris
+)
+
+target_link_libraries(test_mesh_control_state PRIVATE
+    mesh_control_state
+)
+
+target_link_libraries(test_mesh_control_status PRIVATE
+    mesh_control_status
+)
+
+target_link_libraries(test_mesh_control_policy PRIVATE
+    mesh_control_policy
+)
+
+target_link_libraries(test_mesh_control_reconciler PRIVATE
+    mesh_control_reconciler
+)
+
+target_link_libraries(test_mesh_control_owner PRIVATE
+    mesh_control_owner mesh_control_mmp
+)
+
+target_link_libraries(test_mesh_control_checkpoint PRIVATE
+    mesh_control_checkpoint mesh_control_mmp
+)
+
+target_link_libraries(test_mesh_control_checkpoint_store PRIVATE
+    mesh_control_checkpoint_store
+)
+
+target_link_libraries(test_mesh_control_wal PRIVATE
+    mesh_control_wal mesh_control_mmp mesh_mgmt_crypto
+)
+
+target_link_libraries(test_mesh_control_wal_worker PRIVATE
+    mesh_control_wal_worker mesh_control_mmp mesh_mgmt_crypto
+)
+
+target_link_libraries(test_mesh_control_agent PRIVATE
+    mesh_control_agent TurboHttp::TurboHttp
+)
+if(WIN32)
+    target_link_libraries(test_mesh_control_agent PRIVATE ws2_32)
+endif()
+target_compile_definitions(test_mesh_control_agent PRIVATE
+    MESH_CONTROL_AGENT_TEST_CERT="${CMAKE_CURRENT_SOURCE_DIR}/data/localhost-cert.pem"
+    MESH_CONTROL_AGENT_TEST_KEY="${CMAKE_CURRENT_SOURCE_DIR}/data/localhost-key.pem"
 )
 
 target_link_libraries(test_mesh_mgmt_execution_rpc_control PRIVATE

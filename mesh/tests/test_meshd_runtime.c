@@ -3,6 +3,57 @@
 #define MESHD_NO_MAIN
 #include "../examples/meshd.c"
 
+#ifdef _WIN32
+#include <aclapi.h>
+#else
+#include <sys/stat.h>
+#endif
+
+static int meshd_test_set_private_key_permissions(const char *path,
+                                                  int allow_everyone) {
+#ifdef _WIN32
+    BYTE token_user_buffer[512];
+    HANDLE token = NULL;
+    DWORD token_user_size = 0u;
+    TOKEN_USER *token_user;
+    EXPLICIT_ACCESSA entry;
+    PACL acl = NULL;
+    DWORD result;
+
+    if (!path || allow_everyone ||
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return -1;
+    }
+    if (!GetTokenInformation(token, TokenUser, token_user_buffer,
+                             sizeof(token_user_buffer), &token_user_size)) {
+        CloseHandle(token);
+        return -1;
+    }
+    token_user = (TOKEN_USER *)token_user_buffer;
+    memset(&entry, 0, sizeof(entry));
+    entry.grfAccessPermissions = GENERIC_ALL;
+    entry.grfAccessMode = SET_ACCESS;
+    entry.grfInheritance = NO_INHERITANCE;
+    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    entry.Trustee.TrusteeType = TRUSTEE_IS_USER;
+    entry.Trustee.ptstrName = (LPSTR)token_user->User.Sid;
+    result = SetEntriesInAclA(1u, &entry, NULL, &acl);
+    if (result == ERROR_SUCCESS) {
+        result = SetNamedSecurityInfoA(
+            (LPSTR)path, SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            NULL, NULL, acl, NULL);
+    }
+    if (acl) {
+        LocalFree(acl);
+    }
+    CloseHandle(token);
+    return result == ERROR_SUCCESS ? 0 : -1;
+#else
+    return chmod(path, allow_everyone ? 0644 : 0600);
+#endif
+}
+
 static void meshd_test_reset_signal_state(void) {
     g_running = 1;
 #ifndef _WIN32
@@ -298,7 +349,106 @@ static void test_status_publishes_rpc_service_not_internal_bind(void) {
     check_int_eq(meshd_build_status_json(status, sizeof(status)), 0);
     check_str_contains(status, "\"endpoint\":\"http://10.42.0.9:29090\"");
     check_str_contains(status, "\"virtual_host\":\"10.42.0.9\"");
+    check_str_contains(status, "\"security\":{\"available\":false}");
     check_null(strstr(status, g_mgmt_server.bind_host));
+}
+
+static void test_status_exports_bounded_security_without_secret_material(void) {
+    static const char identity_secret[] =
+        "abababababababababababababababababababababababababababababababab";
+    mesh_config_t mesh_config;
+    meshd_status_context_t status_context = {0};
+    char rpc_status[MESHD_MGMT_RESPONSE_BUF_SIZE] = {0};
+    char file_status[MESHD_MGMT_RESPONSE_BUF_SIZE] = {0};
+    char too_small[8] = {0};
+    FILE *status_file;
+    size_t bytes_read;
+    size_t rpc_status_length;
+
+    memset(&g_config, 0, sizeof(g_config));
+    memset(&g_mgmt_server, 0, sizeof(g_mgmt_server));
+    g_started_ms = meshd_now_ms();
+    snprintf(g_config.node_name, sizeof(g_config.node_name), "%s",
+             "security-status-node");
+    snprintf(g_config.network_id, sizeof(g_config.network_id), "%s",
+             "security-status-network");
+    snprintf(g_config.virtual_ip, sizeof(g_config.virtual_ip), "%s",
+             "10.42.0.10");
+    snprintf(g_config.identity_secret_hex,
+             sizeof(g_config.identity_secret_hex), "%s", identity_secret);
+    g_config.virtual_prefix = 16;
+    g_config.listen_port = 29091;
+
+    mesh_config_init(&mesh_config);
+    mesh_config.virtual_ip = g_config.virtual_ip;
+    mesh_config.virtual_prefix = g_config.virtual_prefix;
+    mesh_config.network_id = g_config.network_id;
+    mesh_config.listen_port = g_config.listen_port;
+    mesh_config.identity_secret_hex = identity_secret;
+    g_mesh = mesh_create(&mesh_config);
+    check_not_null(g_mesh);
+    if (!g_mesh) {
+        return;
+    }
+
+    check_int_eq(meshd_build_security_json(too_small, sizeof(too_small),
+                                           g_mesh),
+                 -1);
+    check_int_eq(too_small[0], '\0');
+    check_int_eq(meshd_build_status_json(rpc_status, sizeof(rpc_status)), 0);
+    check_str_contains(rpc_status,
+                       "\"security\":{\"available\":true");
+    check_str_contains(
+        rpc_status,
+        "\"network_control\":{\"enabled\":false,\"available\":false}");
+    check_str_contains(rpc_status, "\"wire_version\":2");
+    check_str_contains(rpc_status, "\"rejection_counts\":{");
+    check_str_contains(rpc_status, "\"handshake_latency\":{");
+    check_str_contains(
+        rpc_status,
+        "\"bucket_upper_bounds_ms\":[1,5,10,25,50,100,250,500,1000,2500,5000,null]");
+    rpc_status_length = strlen(rpc_status);
+    check(rpc_status_length > 0U);
+    if (rpc_status_length > 0U) {
+        check_int_eq(rpc_status[rpc_status_length - 1U], '}');
+    }
+    check_null(strstr(rpc_status, identity_secret));
+    check_null(strstr(rpc_status, "remote_noise_static"));
+    check_null(strstr(rpc_status, "channel_binding"));
+    check_null(strstr(rpc_status, "credential_digest"));
+
+    status_file = tmpfile();
+    check_not_null(status_file);
+    if (status_file) {
+        status_context.mesh = g_mesh;
+        status_context.tunnel = NULL;
+        meshd_write_status_json(status_file, &status_context);
+        fflush(status_file);
+        rewind(status_file);
+        bytes_read = fread(file_status, 1, sizeof(file_status) - 1U,
+                           status_file);
+        file_status[bytes_read] = '\0';
+        fclose(status_file);
+        check(bytes_read < sizeof(file_status) - 1U);
+        check(bytes_read > 1U);
+        if (bytes_read > 1U) {
+            check_int_eq(file_status[bytes_read - 2U], '}');
+            check_int_eq(file_status[bytes_read - 1U], '\n');
+        }
+        check_str_contains(file_status, "\"snapshot_version\":2");
+        check_str_contains(file_status,
+                           "\"security\":{\"available\":true");
+        check_str_contains(
+            file_status,
+            "\"network_control\":{\"enabled\":false,\"available\":false}");
+        check_str_contains(file_status, "\"private_key_executor\":{");
+        check_null(strstr(file_status, identity_secret));
+    }
+
+    mesh_destroy(g_mesh);
+    g_mesh = NULL;
+    memset(&g_config, 0, sizeof(g_config));
+    memset(&g_mgmt_server, 0, sizeof(g_mgmt_server));
 }
 
 static void test_rpc_token_accepts_only_an_exact_header(void) {
@@ -356,10 +506,10 @@ static void test_management_config_requires_complete_enrollment_material(void) {
     check_false(mesh_node_config_management_enabled(&config));
     check_int_eq(mesh_node_config_validate(&config), -1);
 
-    snprintf(config.identity_secret_hex,
-             sizeof(config.identity_secret_hex),
-             "%064x",
-             1);
+    snprintf(config.identity_private_key_file,
+             sizeof(config.identity_private_key_file),
+             "%s",
+             "transport.key");
     snprintf(config.mgmt_certificate_file,
              sizeof(config.mgmt_certificate_file),
              "%s",
@@ -388,6 +538,12 @@ static void test_management_config_requires_complete_enrollment_material(void) {
              "execution-grant.issuer");
     check_true(mesh_node_config_management_enabled(&config));
     check_int_eq(mesh_node_config_validate(&config), 0);
+
+    snprintf(config.identity_secret_hex,
+             sizeof(config.identity_secret_hex),
+             "%064x",
+             1);
+    check_int_eq(mesh_node_config_validate(&config), -1);
 }
 
 static void test_execution_issuer_requires_management_enrollment(void) {
@@ -400,6 +556,117 @@ static void test_execution_issuer_requires_management_enrollment(void) {
              "execution-grant.issuer");
     check_false(mesh_node_config_management_enabled(&config));
     check_int_eq(mesh_node_config_validate(&config), -1);
+}
+
+static void test_network_control_config_is_default_off_and_fail_fast(void) {
+    static const char valid_config[] =
+        "identity_private_key_file: transport.key\n"
+        "network_control_enabled: true\n"
+        "network_control_port: 25000\n"
+        "network_control_certificate_file: server.pem\n"
+        "network_control_private_key_file: server.key\n"
+        "network_control_client_ca_file: client-ca.pem\n"
+        "network_control_identity: meshd:node-a\n"
+        "network_control_expected_peer_identity: mesh-agent:node-a\n"
+        "network_control_expected_peer_certificate_sha256: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "network_control_identity_policy_generation: 1\n"
+        "network_control_mesh_id_hex: 0000000000000000000000000000000000000000000000000000000000000001\n"
+        "network_control_provider_id_hex: 0000000000000000000000000000000000000000000000000000000000000002\n"
+        "network_control_membership_issuer_id_hex: 0000000000000000000000000000000000000000000000000000000000000003\n"
+        "network_control_membership_issuer_key_file: issuer.pub\n"
+        "network_control_network_capacity: 8\n"
+        "network_control_operation_capacity: 32\n"
+        "network_control_channel_capacity: 64\n"
+        "network_control_channel_max_retained_bytes: 1048576\n"
+        "network_control_command_budget: 8\n"
+        "network_control_send_budget: 8\n"
+        "network_control_io_timeout_ms: 1500\n"
+        "network_control_heartbeat_interval_ms: 500\n"
+        "network_control_heartbeat_timeout_ms: 2000\n"
+        "network_control_delete_drain_timeout_ms: 3000\n"
+        "network_control_shutdown_drain_timeout_ms: 4000\n";
+    mesh_node_config_t config;
+    char *path;
+
+    mesh_node_config_init(&config);
+    check_false(mesh_node_config_network_control_enabled(&config));
+    check_int_eq(mesh_node_config_validate(&config), 0);
+
+    config.network_control_enabled = 1;
+    check_int_eq(mesh_node_config_validate(&config), -1);
+    snprintf(config.identity_private_key_file,
+             sizeof(config.identity_private_key_file), "%s", "transport.key");
+    snprintf(config.network_control_certificate_file,
+             sizeof(config.network_control_certificate_file), "%s", "server.pem");
+    snprintf(config.network_control_private_key_file,
+             sizeof(config.network_control_private_key_file), "%s", "server.key");
+    snprintf(config.network_control_client_ca_file,
+             sizeof(config.network_control_client_ca_file), "%s", "client-ca.pem");
+    snprintf(config.network_control_identity,
+             sizeof(config.network_control_identity), "%s", "meshd:node-a");
+    snprintf(config.network_control_expected_peer_identity,
+             sizeof(config.network_control_expected_peer_identity), "%s",
+             "mesh-agent:node-a");
+    snprintf(config.network_control_expected_peer_certificate_sha256,
+             sizeof(config.network_control_expected_peer_certificate_sha256),
+             "%s",
+             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    config.network_control_identity_policy_generation = 1u;
+    snprintf(config.network_control_mesh_id_hex,
+             sizeof(config.network_control_mesh_id_hex), "%064x", 1);
+    snprintf(config.network_control_provider_id_hex,
+             sizeof(config.network_control_provider_id_hex), "%064x", 2);
+    snprintf(config.network_control_membership_issuer_id_hex,
+             sizeof(config.network_control_membership_issuer_id_hex), "%064x", 3);
+    snprintf(config.network_control_membership_issuer_key_file,
+             sizeof(config.network_control_membership_issuer_key_file), "%s",
+             "network-membership.issuer");
+    check_true(mesh_node_config_network_control_enabled(&config));
+    check_int_eq(mesh_node_config_validate(&config), 0);
+
+    config.network_control_command_budget =
+        config.network_control_channel_capacity + 1u;
+    check_int_eq(mesh_node_config_validate(&config), -1);
+    config.network_control_command_budget =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_COMMAND_BUDGET;
+    config.network_control_heartbeat_timeout_ms =
+        config.network_control_heartbeat_interval_ms;
+    check_int_eq(mesh_node_config_validate(&config), -1);
+
+    path = tt_make_temp_file("meshd-network-control-config", ".yaml");
+    check_not_null(path);
+    if (!path) {
+        return;
+    }
+    check_int_eq(tt_write_file(
+                     path, "network_control_enabled: maybe\n",
+                     sizeof("network_control_enabled: maybe\n") - 1u),
+                 0);
+    mesh_node_config_init(&config);
+    check_int_eq(mesh_node_config_load(&config, path), -1);
+    (void)tt_remove_file(path);
+    free(path);
+
+    path = tt_make_temp_file("meshd-network-control-valid", ".yaml");
+    check_not_null(path);
+    if (!path) {
+        return;
+    }
+    check_int_eq(tt_write_file(path, valid_config,
+                               sizeof(valid_config) - 1u),
+                 0);
+    mesh_node_config_init(&config);
+    check_int_eq(mesh_node_config_load(&config, path), 0);
+    check_int_eq(mesh_node_config_validate(&config), 0);
+    check_true(mesh_node_config_network_control_enabled(&config));
+    check_int_eq(config.network_control_port, 25000);
+    check_size_eq(config.network_control_network_capacity, 8u);
+    check_size_eq(config.network_control_operation_capacity, 32u);
+    check_size_eq(config.network_control_channel_capacity, 64u);
+    check_size_eq(config.network_control_channel_max_retained_bytes, 1048576u);
+    check_uint_eq(config.network_control_shutdown_drain_timeout_ms, 4000u);
+    (void)tt_remove_file(path);
+    free(path);
 }
 
 static void test_management_epoch_state_rejects_corrupt_data(void) {
@@ -841,8 +1108,11 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
     char endpoint1[64];
     char transport_secret_hex1[65];
     char transport_secret_hex2[65];
+    char transport_peer_id_hex1[65];
+    char transport_peer_id_hex2[65];
     char mesh_id_hex[65];
     char managed_node_id2_hex[65];
+    char *transport_key_path = NULL;
     char *management_key_path = NULL;
     char *certificate_path = NULL;
     char *issuer_path = NULL;
@@ -877,6 +1147,8 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
     int execution_completed = 0;
     meshd_service_resolve_result_t resolve_result =
         MESHD_SERVICE_RESOLVE_NOT_FOUND;
+    const char *mesh1_trusted_node_ids[1] = {transport_peer_id_hex2};
+    const char *mesh2_trusted_node_ids[1] = {transport_peer_id_hex1};
 
     memset(&signer2, 0, sizeof(signer2));
     memset(&dispatch2, 0, sizeof(dispatch2));
@@ -898,6 +1170,16 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
                           transport_secret_hex1);
     meshd_test_hex_encode(transport_secret2, sizeof(transport_secret2),
                           transport_secret_hex2);
+    check_int_eq(p2p_public_key_from_private_key(transport_secret1,
+                                                 transport_peer_id1),
+                 P2P_OK);
+    check_int_eq(p2p_public_key_from_private_key(transport_secret2,
+                                                 transport_peer_id2),
+                 P2P_OK);
+    meshd_test_hex_encode(transport_peer_id1, sizeof(transport_peer_id1),
+                          transport_peer_id_hex1);
+    meshd_test_hex_encode(transport_peer_id2, sizeof(transport_peer_id2),
+                          transport_peer_id_hex2);
     meshd_test_hex_encode(mesh_id_hash, sizeof(mesh_id_hash), mesh_id_hex);
     meshd_test_hex_encode(managed_node_id2, sizeof(managed_node_id2),
                           managed_node_id2_hex);
@@ -915,12 +1197,16 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
     mesh_config1.listen_port = (int)port1;
     mesh_config1.advertise_ip = "127.0.0.1";
     mesh_config1.identity_secret_hex = transport_secret_hex1;
+    mesh_config1.peer_allow_node_ids = mesh1_trusted_node_ids;
+    mesh_config1.peer_allow_node_id_count = 1;
     mesh_config1.network_id = "meshd-management-e2e";
     mesh_config_init(&mesh_config2);
     mesh_config2.virtual_ip = "10.42.40.2";
     mesh_config2.listen_port = (int)port2;
     mesh_config2.advertise_ip = "127.0.0.1";
     mesh_config2.identity_secret_hex = transport_secret_hex2;
+    mesh_config2.peer_allow_node_ids = mesh2_trusted_node_ids;
+    mesh_config2.peer_allow_node_id_count = 1;
     mesh_config2.network_id = "meshd-management-e2e";
     mesh_config2.bootstrap_peers = bootstraps2;
     mesh_config2.bootstrap_count = 1;
@@ -960,25 +1246,35 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
                      2u, certificate2),
                  0);
 
+    transport_key_path = tt_make_temp_file("meshd-transport-key", ".hex");
     management_key_path = tt_make_temp_file("meshd-mgmt-key", ".hex");
     certificate_path = tt_make_temp_file("meshd-mgmt-cert", ".hex");
     issuer_path = tt_make_temp_file("meshd-mgmt-issuer", ".hex");
     execution_issuer_path =
         tt_make_temp_file("meshd-execution-issuer", ".hex");
     epoch_path = tt_make_temp_file("meshd-mgmt-epoch", ".txt");
+    check_not_null(transport_key_path);
     check_not_null(management_key_path);
     check_not_null(certificate_path);
     check_not_null(issuer_path);
     check_not_null(execution_issuer_path);
     check_not_null(epoch_path);
-    if (!management_key_path || !certificate_path || !issuer_path ||
+    if (!transport_key_path || !management_key_path || !certificate_path || !issuer_path ||
         !execution_issuer_path || !epoch_path) {
         goto cleanup;
     }
     check_int_eq(tt_remove_file(epoch_path), 0);
     check_int_eq(meshd_test_write_hex_file(
+                     transport_key_path, transport_secret1,
+                     sizeof(transport_secret1)),
+                 0);
+    check_int_eq(meshd_test_set_private_key_permissions(transport_key_path, 0),
+                 0);
+    check_int_eq(meshd_test_write_hex_file(
                      management_key_path, MANAGEMENT_KEY1,
                      sizeof(MANAGEMENT_KEY1)),
+                 0);
+    check_int_eq(meshd_test_set_private_key_permissions(management_key_path, 0),
                  0);
     check_int_eq(meshd_test_write_hex_file(
                      certificate_path, certificate1, sizeof(certificate1)),
@@ -992,9 +1288,9 @@ static void test_production_management_loader_resolves_remote_signed_service(voi
                  0);
 
     mesh_node_config_init(&daemon_config1);
-    snprintf(daemon_config1.identity_secret_hex,
-             sizeof(daemon_config1.identity_secret_hex), "%s",
-             transport_secret_hex1);
+    snprintf(daemon_config1.identity_private_key_file,
+             sizeof(daemon_config1.identity_private_key_file), "%s",
+             transport_key_path);
     snprintf(daemon_config1.mgmt_private_key_file,
              sizeof(daemon_config1.mgmt_private_key_file), "%s",
              management_key_path);
@@ -1181,6 +1477,10 @@ cleanup:
         (void)tt_remove_file(management_key_path);
         free(management_key_path);
     }
+    if (transport_key_path) {
+        (void)tt_remove_file(transport_key_path);
+        free(transport_key_path);
+    }
     if (epoch_path) {
         char epoch_lock_path[TURBO_FS_MAX_PATH + 6];
         snprintf(epoch_lock_path, sizeof(epoch_lock_path), "%s.lock", epoch_path);
@@ -1344,6 +1644,10 @@ spec("meshd runtime") {
             test_status_publishes_rpc_service_not_internal_bind();
         }
 
+        it("exports bounded security status without secret material") {
+            test_status_exports_bounded_security_without_secret_material();
+        }
+
         it("resolves only injected verified virtual RPC services") {
             test_node_resolve_exposes_only_verified_virtual_service();
         }
@@ -1378,6 +1682,10 @@ spec("meshd runtime") {
 
         it("does not allow an execution issuer without management enrollment") {
             test_execution_issuer_requires_management_enrollment();
+        }
+
+        it("keeps Network control default-off and validates it fail-fast") {
+            test_network_control_config_is_default_off_and_fail_fast();
         }
 
         it("rejects corrupt persistent management epoch state") {

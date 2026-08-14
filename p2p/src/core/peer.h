@@ -10,6 +10,8 @@
 #include <CoroNet/turbo_callbacks.h>
 #include <stdbool.h>
 
+typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
+
 /**
  * Get string representation of peer state
  */
@@ -26,6 +28,8 @@ p2p_peer_t* p2p_peer_create(p2p_node_t *node, const char *ip, int port);
 void p2p_peer_destroy(p2p_peer_t *peer);
 int p2p_peer_hold(p2p_peer_t *peer);
 void p2p_peer_release(p2p_peer_t *peer);
+void p2p_peer_complete_private_key_operation(
+    p2p_private_key_operation_t *operation, int was_current);
 
 /**
  * Initiate outbound connection to peer
@@ -73,11 +77,6 @@ int p2p_peer_id_cmp(const p2p_peer_t *a, const p2p_peer_t *b);
  * Start Noise XX handshake as initiator
  */
 int p2p_peer_start_handshake(p2p_peer_t *peer);
-
-/**
- * Handle incoming handshake message
- */
-int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg);
 
 int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx);
 void p2p_peer_stream_close(void *handle);

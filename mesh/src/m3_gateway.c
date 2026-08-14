@@ -26,6 +26,15 @@
 #endif
 
 /* Metadata backend abstraction: local store (default) or raft (Phase 2a). */
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
+static void gateway_capture_node_leader(m3_gateway_t *g) {
+  tr_raft_node_id_t leader_id = 0u;
+
+  if (m3_raft_node_leader(g->node, &leader_id) == TURBO_OK) {
+    g->node_lookup_leader_id = (uint64_t)leader_id;
+  }
+}
+
 static int gateway_meta_put_start(m3_gateway_t *g, const char *bucket, const char *object,
                                     const uint8_t *manifest_bytes, size_t manifest_size) {
   int leader = 0;
@@ -33,7 +42,7 @@ static int gateway_meta_put_start(m3_gateway_t *g, const char *bucket, const cha
   g->node_meta_not_leader = 0;
   if (m3_raft_node_is_leader(g->node, &leader) != TURBO_OK || !leader) {
     g->node_meta_not_leader = 1;
-    (void)m3_raft_node_leader(g->node, &g->node_lookup_leader_id);
+    gateway_capture_node_leader(g);
     return -1;
   }
   g->meta_mutation_before = m3_raft_node_applied_index(g->node);
@@ -57,6 +66,7 @@ static int gateway_meta_wait(m3_gateway_t *g) {
   }
   return g->meta_mutation_pending ? -1 : 0;
 }
+#endif
 
 static int gateway_meta_put(m3_gateway_t *g, const char *bucket, const char *object,
                             const uint8_t *manifest_bytes, size_t manifest_size) {
@@ -84,6 +94,7 @@ static int gateway_meta_put(m3_gateway_t *g, const char *bucket, const char *obj
              : -1;
 }
 
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
 static int gateway_meta_tombstone_start(m3_gateway_t *g, const char *bucket,
                                           const char *object) {
   int leader = 0;
@@ -91,7 +102,7 @@ static int gateway_meta_tombstone_start(m3_gateway_t *g, const char *bucket,
   g->node_meta_not_leader = 0;
   if (m3_raft_node_is_leader(g->node, &leader) != TURBO_OK || !leader) {
     g->node_meta_not_leader = 1;
-    (void)m3_raft_node_leader(g->node, &g->node_lookup_leader_id);
+    gateway_capture_node_leader(g);
     return -1;
   }
   g->meta_mutation_before = m3_raft_node_applied_index(g->node);
@@ -101,6 +112,7 @@ static int gateway_meta_tombstone_start(m3_gateway_t *g, const char *bucket,
   g->meta_mutation_pending = 1;
   return 0;
 }
+#endif
 
 static int gateway_meta_tombstone(m3_gateway_t *g, const char *bucket, const char *object) {
 #ifdef TURBO_P2P_M3_RAFT_ENABLED
@@ -133,6 +145,7 @@ static int gateway_meta_persist(m3_gateway_t *g) {
              : -1;
 }
 
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
 static m3_namespace_lookup_result_t node_lookup_start(void *context,
                                                        const m3_namespace_lookup_request_v1_t *request,
                                                        m3_namespace_lookup_complete_cb complete_cb,
@@ -149,12 +162,13 @@ static m3_namespace_lookup_result_t node_lookup_start(void *context,
     /* Linearizable reads are leader-only; surface the leader id so the caller
      * can route (HTTP 307/503, or control-plane forwarding). */
     g->node_lookup_not_leader = 1;
-    (void)m3_raft_node_leader(g->node, &g->node_lookup_leader_id);
+    gateway_capture_node_leader(g);
     return M3_NAMESPACE_LOOKUP_UNAVAILABLE;
   }
   raft_adapter = m3_gateway_raft_lookup_v1(m3_raft_node_gateway(g->node));
   return raft_adapter.start(raft_adapter.context, request, complete_cb, user_data);
 }
+#endif
 
 static m3_namespace_lookup_adapter_v1_t gateway_meta_lookup(m3_gateway_t *g) {
 #ifdef TURBO_P2P_M3_RAFT_ENABLED
@@ -185,7 +199,7 @@ static int gateway_meta_list(m3_gateway_t *g, const uint8_t *bucket, size_t buck
     g->node_lookup_not_leader = 0;
     if (m3_raft_node_is_leader(g->node, &leader) != TURBO_OK || !leader) {
       g->node_lookup_not_leader = 1;
-      (void)m3_raft_node_leader(g->node, &g->node_lookup_leader_id);
+      gateway_capture_node_leader(g);
       return -1;
     }
     return m3_raft_node_list(g->node, g->tenant_id, bucket, bucket_size, prefix,
@@ -615,12 +629,15 @@ int m3_gateway_put_object_start_v1(m3_gateway_t *g, const char *bucket,
                           &manifest_size);
   if (rc != 0)
     return rc;
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
   if (g->node) {
     if (gateway_meta_put_start(g, bucket, object, manifest_bytes, manifest_size) != 0) {
       rc = g->node_meta_not_leader ? 1 : -1;
       goto cleanup;
     }
-  } else if (gateway_meta_put(g, bucket, object, manifest_bytes, manifest_size) != 0) {
+  } else
+#endif
+  if (gateway_meta_put(g, bucket, object, manifest_bytes, manifest_size) != 0) {
     rc = g->node_meta_not_leader ? 1 : -1;
     goto cleanup;
   }
@@ -644,8 +661,10 @@ int m3_gateway_put_object_v1(m3_gateway_t *g, const char *bucket, const char *ob
 
   if (rc != 0)
     return rc;
+#ifdef TURBO_P2P_M3_RAFT_ENABLED
   if (g->node && gateway_meta_wait(g) != 0)
     return -1;
+#endif
   return 0;
 }
 
@@ -2276,7 +2295,7 @@ static int gateway_meta_update_placement_start(m3_gateway_t *g, const char *buck
   g->node_meta_not_leader = 0;
   if (m3_raft_node_is_leader(g->node, &leader) != TURBO_OK || !leader) {
     g->node_meta_not_leader = 1;
-    (void)m3_raft_node_leader(g->node, &g->node_lookup_leader_id);
+    gateway_capture_node_leader(g);
     return -1;
   }
   g->meta_mutation_before = m3_raft_node_applied_index(g->node);

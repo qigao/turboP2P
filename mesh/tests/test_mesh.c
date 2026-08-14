@@ -15,6 +15,7 @@
 #include <string.h>
 #include <CoroNet/turbo_coro_context.h>
 #include <tlog.h>
+#include <turbo_crypto.h>
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -31,9 +32,100 @@ static char g_last_peer_ip[64];
 static int g_last_peer_port = 0;
 static tlog_t *g_test_logger = NULL;
 
+enum { MESH_TEST_IDENTITY_COUNT = 3 };
+
+static const char *const g_mesh_test_identity_secrets[MESH_TEST_IDENTITY_COUNT] = {
+    "1111111111111111111111111111111111111111111111111111111111111111",
+    "2222222222222222222222222222222222222222222222222222222222222222",
+    "3333333333333333333333333333333333333333333333333333333333333333",
+};
+static char g_mesh_test_identity_public_hex[MESH_TEST_IDENTITY_COUNT][65];
+static const char *g_mesh_test_trusted_node_ids[MESH_TEST_IDENTITY_COUNT];
+static int g_mesh_test_identities_ready = 0;
+
 typedef struct {
     int packet_received_count;
 } mesh_packet_counter_t;
+
+static int mesh_test_initialize_identities(void) {
+    static const char hex[] = "0123456789abcdef";
+    uint8_t secret[P2P_KEY_SIZE];
+    uint8_t public_key[P2P_KEY_SIZE];
+
+    if (g_mesh_test_identities_ready) {
+        return 1;
+    }
+
+    for (size_t identity_index = 0;
+         identity_index < MESH_TEST_IDENTITY_COUNT;
+         ++identity_index) {
+        memset(secret, (int)((identity_index + 1u) * 0x11u), sizeof(secret));
+        if (p2p_public_key_from_private_key(secret, public_key) != P2P_OK) {
+            memset(secret, 0, sizeof(secret));
+            memset(public_key, 0, sizeof(public_key));
+            return 0;
+        }
+        for (size_t byte_index = 0; byte_index < sizeof(public_key); ++byte_index) {
+            g_mesh_test_identity_public_hex[identity_index][byte_index * 2u] =
+                hex[public_key[byte_index] >> 4u];
+            g_mesh_test_identity_public_hex[identity_index][byte_index * 2u + 1u] =
+                hex[public_key[byte_index] & 0x0fu];
+        }
+        g_mesh_test_identity_public_hex[identity_index][64] = '\0';
+        g_mesh_test_trusted_node_ids[identity_index] =
+            g_mesh_test_identity_public_hex[identity_index];
+    }
+
+    memset(secret, 0, sizeof(secret));
+    memset(public_key, 0, sizeof(public_key));
+    g_mesh_test_identities_ready = 1;
+    return 1;
+}
+
+static int mesh_test_configure_identity(mesh_config_t *config, size_t identity_index) {
+    if (!config || identity_index >= MESH_TEST_IDENTITY_COUNT ||
+        !mesh_test_initialize_identities()) {
+        return 0;
+    }
+
+    config->identity_secret_hex = g_mesh_test_identity_secrets[identity_index];
+    config->peer_allow_node_ids = g_mesh_test_trusted_node_ids;
+    config->peer_allow_node_id_count = MESH_TEST_IDENTITY_COUNT;
+    return 1;
+}
+
+static int mesh_test_configure_p2p_trust(p2p_node_t **nodes, size_t node_count) {
+    static const uint8_t network_id_hash[P2P_SECURITY_ID_SIZE] = {
+        0x4d, 0x65, 0x73, 0x68, 0x2d, 0x4e, 0x6f, 0x69,
+        0x73, 0x65, 0x2d, 0x76, 0x32, 0x2d, 0x74, 0x65,
+        0x73, 0x74, 0x2d, 0x6e, 0x65, 0x74, 0x77, 0x6f,
+        0x72, 0x6b, 0x2d, 0x69, 0x64, 0x2d, 0x30, 0x31,
+    };
+    uint8_t trusted_keys[MESH_TEST_IDENTITY_COUNT * P2P_KEY_SIZE];
+
+    if (!nodes || node_count == 0 || node_count > MESH_TEST_IDENTITY_COUNT) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    memset(trusted_keys, 0, sizeof(trusted_keys));
+    for (size_t index = 0; index < node_count; ++index) {
+        if (!nodes[index] ||
+            p2p_node_get_public_key(nodes[index],
+                                    trusted_keys + index * P2P_KEY_SIZE) != P2P_OK) {
+            memset(trusted_keys, 0, sizeof(trusted_keys));
+            return P2P_ERR_INVALID_STATE;
+        }
+    }
+    for (size_t index = 0; index < node_count; ++index) {
+        int result = p2p_node_configure_pinned_security_v2(
+            nodes[index], network_id_hash, trusted_keys, node_count);
+        if (result != P2P_OK) {
+            memset(trusted_keys, 0, sizeof(trusted_keys));
+            return result;
+        }
+    }
+    memset(trusted_keys, 0, sizeof(trusted_keys));
+    return P2P_OK;
+}
 
 static void mesh_test_logger_init(void) {
     if (g_test_logger) {
@@ -192,6 +284,233 @@ void test_mesh_create_destroy(void) {
     printf("[TEST] ✓ Mesh create/destroy successful\n");
 }
 
+static void test_mesh_forwards_bounded_security_status_v3(void) {
+    mesh_config_t config;
+    mesh_network_t *mesh;
+    p2p_node_security_status_v3_t status = {0};
+
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.0.8";
+    config.listen_port = 19998;
+    mesh = mesh_create(&config);
+    check_not_null(mesh);
+    if (!mesh) {
+        return;
+    }
+
+    status.struct_size = sizeof(status) - 1U;
+    check_int_eq(MESH_ERR_INVALID_ARG,
+                 mesh_get_security_status_v3(mesh, &status));
+    status.struct_size = sizeof(status);
+    check_int_eq(MESH_ERR_INVALID_ARG,
+                 mesh_get_security_status_v3(NULL, &status));
+    check_int_eq(MESH_OK, mesh_get_security_status_v3(mesh, &status));
+    check_uint_eq(sizeof(status), status.struct_size);
+    check_int_eq(P2P_SECURE_WIRE_VERSION_V2, status.secure_wire_version);
+    check_int_eq(P2P_NOISE_SUITE_XX_25519_CHACHAPOLY_BLAKE2S,
+                 status.noise_suite);
+    check_uint_eq(sizeof(status.security), status.security.struct_size);
+    check(status.security.send_budget_bytes > 0U);
+    check_uint_eq(P2P_SECURITY_LATENCY_BUCKET_COUNT_V3,
+                  sizeof(status.latency_bucket_upper_bounds_ms) /
+                      sizeof(status.latency_bucket_upper_bounds_ms[0]));
+
+    mesh_destroy(mesh);
+}
+
+static void test_mesh_accepts_borrowed_binary_identity(void) {
+    static const char hex[] = "0123456789abcdef";
+    mesh_config_t config;
+    mesh_network_t *mesh;
+    uint8_t private_key[P2P_KEY_SIZE];
+    uint8_t public_key[P2P_KEY_SIZE];
+    char expected_node_id[P2P_KEY_SIZE * 2u + 1u];
+    char actual_node_id[P2P_KEY_SIZE * 2u + 1u];
+    size_t index;
+
+    memset(private_key, 0x5au, sizeof(private_key));
+    memset(public_key, 0, sizeof(public_key));
+    memset(expected_node_id, 0, sizeof(expected_node_id));
+    memset(actual_node_id, 0, sizeof(actual_node_id));
+    check_int_eq(p2p_public_key_from_private_key(private_key, public_key),
+                 P2P_OK);
+    for (index = 0u; index < sizeof(public_key); ++index) {
+        expected_node_id[index * 2u] = hex[public_key[index] >> 4u];
+        expected_node_id[index * 2u + 1u] = hex[public_key[index] & 0x0fu];
+    }
+
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.0.9";
+    config.listen_port = 19999;
+    config.identity_private_key = private_key;
+    config.identity_private_key_size = sizeof(private_key);
+    mesh = mesh_create(&config);
+    check_not_null(mesh);
+    if (mesh) {
+        check_int_eq(mesh_get_node_id(mesh, actual_node_id,
+                                      sizeof(actual_node_id)),
+                     MESH_OK);
+        check_str_eq(actual_node_id, expected_node_id);
+        mesh_destroy(mesh);
+    }
+    memset(private_key, 0, sizeof(private_key));
+    memset(public_key, 0, sizeof(public_key));
+}
+
+typedef struct {
+    uint8_t private_key[P2P_KEY_SIZE];
+    uint8_t public_key[P2P_KEY_SIZE];
+    size_t public_key_calls;
+    size_t calculate_calls;
+} mesh_test_private_key_provider_context_t;
+
+static int mesh_test_provider_get_public_key(
+    void *context, uint8_t public_key_out[P2P_KEY_SIZE]) {
+    mesh_test_private_key_provider_context_t *provider_context =
+        (mesh_test_private_key_provider_context_t *)context;
+
+    provider_context->public_key_calls++;
+    memcpy(public_key_out, provider_context->public_key, P2P_KEY_SIZE);
+    return P2P_OK;
+}
+
+static int mesh_test_provider_calculate(
+    void *context, const uint8_t remote_public_key[P2P_KEY_SIZE],
+    uint8_t shared_key_out[P2P_KEY_SIZE]) {
+    mesh_test_private_key_provider_context_t *provider_context =
+        (mesh_test_private_key_provider_context_t *)context;
+
+    provider_context->calculate_calls++;
+    return turbo_crypto_x25519(shared_key_out, provider_context->private_key,
+                               remote_public_key) == TURBO_CRYPTO_OK
+               ? P2P_OK
+               : P2P_ERR_CRYPTO;
+}
+
+static int mesh_test_blocking_provider_calculate(
+    void *context, const uint8_t remote_public_key[P2P_KEY_SIZE],
+    uint64_t monotonic_deadline_ms,
+    const p2p_private_key_cancel_v4_t *cancel,
+    uint8_t shared_key_out[P2P_KEY_SIZE]) {
+    (void)monotonic_deadline_ms;
+    (void)cancel;
+    return mesh_test_provider_calculate(context, remote_public_key,
+                                        shared_key_out);
+}
+
+static void test_mesh_accepts_opaque_identity_provider(void) {
+    static const char hex[] = "0123456789abcdef";
+    mesh_test_private_key_provider_context_t provider_context = {0};
+    p2p_private_key_provider_v3_t provider = {0};
+    mesh_config_t config;
+    mesh_network_t *mesh;
+    char expected_node_id[P2P_KEY_SIZE * 2u + 1u] = {0};
+    char actual_node_id[P2P_KEY_SIZE * 2u + 1u] = {0};
+    size_t index;
+
+    memset(provider_context.private_key, 0x7cu,
+           sizeof(provider_context.private_key));
+    check_int_eq(P2P_OK,
+                 p2p_public_key_from_private_key(
+                     provider_context.private_key,
+                     provider_context.public_key));
+    for (index = 0; index < sizeof(provider_context.public_key); ++index) {
+        expected_node_id[index * 2u] =
+            hex[provider_context.public_key[index] >> 4u];
+        expected_node_id[index * 2u + 1u] =
+            hex[provider_context.public_key[index] & 0x0fu];
+    }
+    provider.struct_size = sizeof(provider);
+    provider.get_public_key = mesh_test_provider_get_public_key;
+    provider.calculate_x25519 = mesh_test_provider_calculate;
+    provider.context = &provider_context;
+
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.0.11";
+    config.listen_port = 20000;
+    config.identity_private_key_provider = &provider;
+    mesh = mesh_create(&config);
+    check_not_null(mesh);
+    check_uint_eq(1, provider_context.public_key_calls);
+    check_uint_eq(1, provider_context.calculate_calls);
+    if (mesh) {
+        check_int_eq(MESH_OK, mesh_get_node_id(mesh, actual_node_id,
+                                               sizeof(actual_node_id)));
+        check_str_eq(expected_node_id, actual_node_id);
+        mesh_destroy(mesh);
+    }
+    turbo_crypto_wipe(&provider_context, sizeof(provider_context));
+}
+
+static void test_mesh_accepts_blocking_identity_provider(void) {
+    mesh_test_private_key_provider_context_t provider_context = {0};
+    p2p_blocking_private_key_provider_v4_t provider = {0};
+    mesh_config_t config;
+    mesh_network_t *mesh;
+
+    memset(provider_context.private_key, 0x5du,
+           sizeof(provider_context.private_key));
+    check_int_eq(P2P_OK,
+                 p2p_public_key_from_private_key(
+                     provider_context.private_key,
+                     provider_context.public_key));
+    provider.struct_size = sizeof(provider);
+    provider.get_public_key = mesh_test_provider_get_public_key;
+    provider.calculate_x25519 = mesh_test_blocking_provider_calculate;
+    provider.context = &provider_context;
+    provider.executor_capacity = 2;
+    provider.operation_timeout_ms = 500;
+
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.0.12";
+    config.listen_port = 20001;
+    config.identity_blocking_private_key_provider = &provider;
+    mesh = mesh_create(&config);
+    check_not_null(mesh);
+    check_uint_eq(1, provider_context.public_key_calls);
+    check_uint_eq(1, provider_context.calculate_calls);
+    if (mesh) {
+        mesh_destroy(mesh);
+    }
+    turbo_crypto_wipe(&provider_context, sizeof(provider_context));
+}
+
+static void test_mesh_rejects_ambiguous_or_malformed_binary_identity(void) {
+    mesh_config_t config;
+    p2p_private_key_provider_v3_t provider = {0};
+    uint8_t private_key[P2P_KEY_SIZE];
+
+    memset(private_key, 0x6bu, sizeof(private_key));
+    mesh_config_init(&config);
+    config.virtual_ip = "10.42.0.10";
+    config.identity_private_key = private_key;
+    config.identity_private_key_size = sizeof(private_key) - 1u;
+    check_null(mesh_create(&config));
+
+    config.identity_private_key_size = sizeof(private_key);
+    config.identity_secret_hex = g_mesh_test_identity_secrets[0];
+    check_null(mesh_create(&config));
+
+    config.identity_private_key = NULL;
+    config.identity_private_key_size = sizeof(private_key);
+    config.identity_secret_hex = NULL;
+    check_null(mesh_create(&config));
+
+    config.identity_private_key_size = 0u;
+    config.identity_secret_hex = g_mesh_test_identity_secrets[0];
+    config.identity_private_key_provider = &provider;
+    check_null(mesh_create(&config));
+
+    config.identity_secret_hex = NULL;
+    config.identity_private_key_provider = NULL;
+    config.identity_private_key = private_key;
+    config.identity_private_key_size = sizeof(private_key);
+    config.identity_blocking_private_key_provider =
+        (const p2p_blocking_private_key_provider_v4_t *)&provider;
+    check_null(mesh_create(&config));
+    memset(private_key, 0, sizeof(private_key));
+}
+
 /**
  * Test 2: P2P node creation
  */
@@ -281,11 +600,15 @@ void test_mesh_start_stop(void) {
  * Test 5: P2P server listening
  */
 void test_p2p_server_listening(void) {
+    p2p_node_t *nodes[1];
+
     printf("\n[TEST] test_p2p_server_listening\n");
 
     /* Create P2P node */
     p2p_node_t *node = p2p_create("127.0.0.1", 31001);
     check_not_null(node);
+    nodes[0] = node;
+    check_int_eq(P2P_OK, mesh_test_configure_p2p_trust(nodes, 1));
     printf("[TEST] ✓ P2P node created on port 31001\n");
 
     /* Start P2P server */
@@ -332,6 +655,8 @@ static void test_p2p_peer_disconnected_cb(p2p_peer_t *peer, void *user_data) {
 }
 
 void test_p2p_peer_callbacks(void) {
+    p2p_node_t *nodes[2];
+
     printf("\n[TEST] test_p2p_peer_callbacks\n");
 
     /* Create server node */
@@ -343,11 +668,6 @@ void test_p2p_peer_callbacks(void) {
                            test_p2p_peer_disconnected_cb, NULL);
     printf("[TEST] ✓ Callbacks registered\n");
 
-    /* Start server */
-    int ret = p2p_start_nonblocking(server);
-    check_int_eq(P2P_OK, ret);
-    printf("[TEST] ✓ Server started on port 32001\n");
-
     /* Create client node */
     p2p_node_t *client = p2p_create("127.0.0.1", 32002);
     check_not_null(client);
@@ -355,6 +675,15 @@ void test_p2p_peer_callbacks(void) {
     /* Set callbacks on client too */
     p2p_set_peer_callbacks(client, test_p2p_peer_connected_cb,
                            test_p2p_peer_disconnected_cb, NULL);
+
+    nodes[0] = server;
+    nodes[1] = client;
+    check_int_eq(P2P_OK, mesh_test_configure_p2p_trust(nodes, 2));
+
+    /* Start server */
+    int ret = p2p_start_nonblocking(server);
+    check_int_eq(P2P_OK, ret);
+    printf("[TEST] ✓ Server started on port 32001\n");
 
     /* Start client */
     ret = p2p_start_nonblocking(client);
@@ -528,6 +857,7 @@ void test_packet_routing(void) {
     config1.virtual_ip = "10.42.0.1";
     config1.virtual_prefix = 16;
     config1.listen_port = 35001;
+    check(mesh_test_configure_identity(&config1, 0));
     config1.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
@@ -538,6 +868,7 @@ void test_packet_routing(void) {
     config2.virtual_ip = "10.42.0.2";
     config2.virtual_prefix = 16;
     config2.listen_port = 35002;
+    check(mesh_test_configure_identity(&config2, 1));
     config2.on_packet_received = on_packet_received;
 
     const char *bootstrap[] = {"127.0.0.1:35001"};
@@ -609,6 +940,7 @@ void test_mesh_two_nodes_connect(void) {
     config1.virtual_ip = "10.42.0.1";
     config1.virtual_prefix = 16;
     config1.listen_port = 19995;
+    check(mesh_test_configure_identity(&config1, 0));
     config1.on_peer_connected = on_peer_connected;
     config1.on_peer_disconnected = on_peer_disconnected;
     config1.on_packet_received = on_packet_received;
@@ -631,6 +963,7 @@ void test_mesh_two_nodes_connect(void) {
     config2.virtual_ip = "10.42.0.2";
     config2.virtual_prefix = 16;
     config2.listen_port = 19996;
+    check(mesh_test_configure_identity(&config2, 1));
     config2.bootstrap_peers = bootstrap_peers;
     config2.bootstrap_count = 1;
     config2.on_peer_connected = on_peer_connected;
@@ -694,6 +1027,7 @@ void test_hello_handshake(void) {
     config1.virtual_ip = "10.42.0.100";
     config1.virtual_prefix = 16;
     config1.listen_port = 20001;
+    check(mesh_test_configure_identity(&config1, 0));
     config1.on_peer_connected = on_peer_connected;
     config1.on_peer_disconnected = on_peer_disconnected;
 
@@ -712,6 +1046,7 @@ void test_hello_handshake(void) {
     config2.virtual_ip = "10.42.0.200";
     config2.virtual_prefix = 16;
     config2.listen_port = 20002;
+    check(mesh_test_configure_identity(&config2, 1));
     config2.bootstrap_peers = bootstrap_peers;
     config2.bootstrap_count = 1;
     config2.on_peer_connected = on_peer_connected;
@@ -776,6 +1111,7 @@ void test_virtual_ip_lookup(void) {
     config1.virtual_ip = "10.42.1.1";
     config1.virtual_prefix = 16;
     config1.listen_port = 20101;
+    check(mesh_test_configure_identity(&config1, 0));
 
     mesh_network_t *mesh1 = mesh_create(&config1);
     check_not_null(mesh1);
@@ -788,6 +1124,7 @@ void test_virtual_ip_lookup(void) {
     config2.virtual_ip = "10.42.1.2";
     config2.virtual_prefix = 16;
     config2.listen_port = 20102;
+    check(mesh_test_configure_identity(&config2, 1));
     config2.bootstrap_peers = bootstrap_peers;
     config2.bootstrap_count = 1;
 
@@ -870,6 +1207,7 @@ void test_packet_routing_with_hello(void) {
     config1.virtual_ip = "10.42.2.1";
     config1.virtual_prefix = 16;
     config1.listen_port = 20201;
+    check(mesh_test_configure_identity(&config1, 0));
     config1.on_packet_received = on_packet_received;
 
     mesh_network_t *mesh1 = mesh_create(&config1);
@@ -886,6 +1224,7 @@ void test_packet_routing_with_hello(void) {
     config2.virtual_ip = "10.42.2.2";
     config2.virtual_prefix = 16;
     config2.listen_port = 20202;
+    check(mesh_test_configure_identity(&config2, 1));
     config2.bootstrap_peers = bootstrap_peers;
     config2.bootstrap_count = 1;
     config2.on_packet_received = on_packet_received;
@@ -970,6 +1309,7 @@ void test_route_learning(void) {
     leader_cfg.virtual_ip = "10.42.3.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20301;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
 
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -981,6 +1321,7 @@ void test_route_learning(void) {
     node2_cfg.virtual_ip = "10.42.3.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20302;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
 
@@ -993,6 +1334,7 @@ void test_route_learning(void) {
     node3_cfg.virtual_ip = "10.42.3.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20303;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
 
@@ -1195,6 +1537,7 @@ static void test_stream_capability_requires_authenticated_bilateral_admission(vo
     leader_cfg.virtual_ip = "10.42.19.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20931;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.on_peer_disconnected = mesh_test_stream_peer_disconnected;
     leader_cfg.user_data = &observer;
     leader = mesh_create(&leader_cfg);
@@ -1210,6 +1553,7 @@ static void test_stream_capability_requires_authenticated_bilateral_admission(vo
     enabled_cfg.virtual_ip = "10.42.19.2";
     enabled_cfg.virtual_prefix = 16;
     enabled_cfg.listen_port = 20932;
+    check(mesh_test_configure_identity(&enabled_cfg, 1));
     enabled_cfg.bootstrap_peers = enabled_bootstrap;
     enabled_cfg.bootstrap_count = 1;
     enabled = mesh_create(&enabled_cfg);
@@ -1227,6 +1571,7 @@ static void test_stream_capability_requires_authenticated_bilateral_admission(vo
     disabled_cfg.virtual_ip = "10.42.19.3";
     disabled_cfg.virtual_prefix = 16;
     disabled_cfg.listen_port = 20933;
+    check(mesh_test_configure_identity(&disabled_cfg, 2));
     disabled_cfg.bootstrap_peers = disabled_bootstrap;
     disabled_cfg.bootstrap_count = 1;
     disabled = mesh_create(&disabled_cfg);
@@ -1293,12 +1638,11 @@ static void test_stream_capability_requires_authenticated_bilateral_admission(vo
     check_uint_eq(0u, leader_disabled_info.negotiated_capabilities & MESH_CAP_STREAM_V1);
     check_uint_eq(0u, disabled_leader_info.negotiated_capabilities & MESH_CAP_STREAM_V1);
 
-    mesh_test_stop_destroy(&disabled);
-    nodes[2] = NULL;
-    mesh_test_stop_destroy(&enabled);
-    nodes[1] = NULL;
-    for (int i = 0; leader && observer.disconnect_count < 2 && i < 40; i++) {
-        mesh_test_poll_many(nodes, 1, 1, 100, 50);
+    if (leader && leader_disabled_peer) {
+        mesh_disconnect_peer(leader, leader_disabled_peer);
+    }
+    if (leader && leader_enabled_peer) {
+        mesh_disconnect_peer(leader, leader_enabled_peer);
     }
 
     check(observer.disconnect_count >= 2);
@@ -1331,6 +1675,7 @@ void test_connect_peer_uses_advertise_ip(void) {
     leader_cfg.virtual_ip = "10.42.4.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20401;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.advertise_ip = "127.0.0.1";
 
     leader = mesh_create(&leader_cfg);
@@ -1345,6 +1690,7 @@ void test_connect_peer_uses_advertise_ip(void) {
     node2_cfg.virtual_ip = "10.42.4.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20402;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1356,6 +1702,7 @@ void test_connect_peer_uses_advertise_ip(void) {
     node3_cfg.virtual_ip = "10.42.4.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20403;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.advertise_ip = "127.0.0.1";
@@ -1447,6 +1794,7 @@ void test_ice_signaling_two_nodes(void) {
     cfg1.virtual_ip = "10.42.9.11";
     cfg1.virtual_prefix = 16;
     cfg1.listen_port = 20891;
+    check(mesh_test_configure_identity(&cfg1, 0));
     cfg1.enable_ice = 1;
     cfg1.ice_allow_loopback = 1;
     cfg1.on_packet_received = on_packet_received_counting;
@@ -1457,6 +1805,7 @@ void test_ice_signaling_two_nodes(void) {
     cfg2.virtual_ip = "10.42.9.12";
     cfg2.virtual_prefix = 16;
     cfg2.listen_port = 20892;
+    check(mesh_test_configure_identity(&cfg2, 1));
     cfg2.bootstrap_peers = bootstrap_peers;
     cfg2.bootstrap_count = 1;
     cfg2.enable_ice = 1;
@@ -1594,6 +1943,7 @@ void test_routed_ice_direct_path_three_nodes(void) {
     leader_cfg.virtual_ip = "10.42.8.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20801;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
     leader_started = (mesh_start(leader) == MESH_OK);
@@ -1606,6 +1956,7 @@ void test_routed_ice_direct_path_three_nodes(void) {
     node2_cfg.virtual_ip = "10.42.8.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20802;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.enable_ice = 1;
@@ -1619,6 +1970,7 @@ void test_routed_ice_direct_path_three_nodes(void) {
     node3_cfg.virtual_ip = "10.42.8.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20803;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.enable_ice = 1;
@@ -1752,6 +2104,7 @@ void test_direct_path_preferred_over_relay(void) {
     leader_cfg.virtual_ip = "10.42.7.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20701;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.advertise_ip = "127.0.0.1";
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -1765,6 +2118,7 @@ void test_direct_path_preferred_over_relay(void) {
     node2_cfg.virtual_ip = "10.42.7.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20702;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1776,6 +2130,7 @@ void test_direct_path_preferred_over_relay(void) {
     node3_cfg.virtual_ip = "10.42.7.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20703;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.advertise_ip = "127.0.0.1";
@@ -1944,6 +2299,7 @@ void test_pinned_route_overrides_direct_path(void) {
     leader_cfg.virtual_ip = "10.42.11.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20711;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.advertise_ip = "127.0.0.1";
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -1957,6 +2313,7 @@ void test_pinned_route_overrides_direct_path(void) {
     node2_cfg.virtual_ip = "10.42.11.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20712;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.route_rules = node2_rules;
@@ -1970,6 +2327,7 @@ void test_pinned_route_overrides_direct_path(void) {
     node3_cfg.virtual_ip = "10.42.11.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20713;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.advertise_ip = "127.0.0.1";
@@ -2118,6 +2476,7 @@ void test_peer_admission_allowlist(void) {
     leader_cfg.virtual_ip = "10.42.14.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20721;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
     leader_cfg.peer_allow_count = 1;
     leader = mesh_create(&leader_cfg);
@@ -2132,6 +2491,7 @@ void test_peer_admission_allowlist(void) {
     node2_cfg.virtual_ip = "10.42.14.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20722;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -2143,6 +2503,7 @@ void test_peer_admission_allowlist(void) {
     node3_cfg.virtual_ip = "10.42.14.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20723;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3 = mesh_create(&node3_cfg);
@@ -2229,6 +2590,7 @@ void test_peer_admission_allowlist_blocks_relay_forwarding(void) {
     leader_cfg.virtual_ip = "10.42.15.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20731;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
     leader_cfg.peer_allow_count = 1;
     leader_cfg.route_rules = leader_rules;
@@ -2245,6 +2607,7 @@ void test_peer_admission_allowlist_blocks_relay_forwarding(void) {
     node2_cfg.virtual_ip = "10.42.15.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20732;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.route_rules = node2_rules;
@@ -2318,6 +2681,7 @@ void test_peer_admission_allowlist_blocks_learned_routes(void) {
     leader_cfg.virtual_ip = "10.42.16.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20741;
+    check(mesh_test_configure_identity(&leader_cfg, 0));
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
     leader_started = (mesh_start(leader) == MESH_OK);
@@ -2330,6 +2694,7 @@ void test_peer_admission_allowlist_blocks_learned_routes(void) {
     node2_cfg.virtual_ip = "10.42.16.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20742;
+    check(mesh_test_configure_identity(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.peer_allow_cidrs = node2_allow_cidrs;
@@ -2343,6 +2708,7 @@ void test_peer_admission_allowlist_blocks_learned_routes(void) {
     node3_cfg.virtual_ip = "10.42.16.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20743;
+    check(mesh_test_configure_identity(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3 = mesh_create(&node3_cfg);
@@ -2415,6 +2781,21 @@ spec("mesh vpn") {
 
     describe("basic lifecycle") {
         it("creates and destroys mesh") { test_mesh_create_destroy(); }
+        it("forwards the bounded atomic p2p security snapshot") {
+            test_mesh_forwards_bounded_security_status_v3();
+        }
+        it("accepts a borrowed binary transport identity") {
+            test_mesh_accepts_borrowed_binary_identity();
+        }
+        it("accepts an opaque transport identity provider") {
+            test_mesh_accepts_opaque_identity_provider();
+        }
+        it("accepts a blocking opaque transport identity provider") {
+            test_mesh_accepts_blocking_identity_provider();
+        }
+        it("rejects ambiguous or malformed binary identities") {
+            test_mesh_rejects_ambiguous_or_malformed_binary_identity();
+        }
         it("creates a p2p node") { test_p2p_node_creation(); }
         it("starts and stops mesh") { test_mesh_start_stop(); }
     }

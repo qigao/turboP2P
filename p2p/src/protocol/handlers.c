@@ -227,8 +227,13 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
     turbo_mutex_lock(&node->mutex);
-    /* Sync identity */
-    memcpy(peer->id, msg->payload.ping.node_id, P2P_DHT_KEY_SIZE);
+    if (p2p_id_is_zero(msg->payload.ping.node_id) ||
+        memcmp(peer->id, msg->payload.ping.node_id,
+               P2P_DHT_KEY_SIZE) != 0) {
+        turbo_mutex_unlock(&node->mutex);
+        p2p_peer_disconnect(peer);
+        return P2P_ERR_UNTRUSTED_IDENTITY;
+    }
     p2p_publish_peer_route(node, &msg->payload.ping);
     
     /* Sync Vivaldi coordinates */
@@ -309,7 +314,13 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     now_ms = turbo_hrtime() / 1000000U;
     turbo_mutex_lock(&node->mutex);
-    memcpy(peer->id, msg->payload.ping.node_id, P2P_DHT_KEY_SIZE);
+    if (p2p_id_is_zero(msg->payload.ping.node_id) ||
+        memcmp(peer->id, msg->payload.ping.node_id,
+               P2P_DHT_KEY_SIZE) != 0) {
+        turbo_mutex_unlock(&node->mutex);
+        p2p_peer_disconnect(peer);
+        return P2P_ERR_UNTRUSTED_IDENTITY;
+    }
     p2p_publish_peer_route(node, &msg->payload.ping);
 
     sample_accepted = p2p_peer_record_rtt_sample_locked(

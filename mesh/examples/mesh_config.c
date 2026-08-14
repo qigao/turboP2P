@@ -80,6 +80,22 @@ static int mesh_node_parse_identity_secret_hex(const char *hex) {
     return 1;
 }
 
+static int mesh_node_parse_certificate_sha256(const char *fingerprint) {
+    static const char prefix[] = "sha256:";
+    size_t i;
+    if (!fingerprint || strlen(fingerprint) != 71u ||
+        memcmp(fingerprint, prefix, sizeof(prefix) - 1u) != 0) {
+        return 0;
+    }
+    for (i = sizeof(prefix) - 1u; i < 71u; ++i) {
+        if (!((fingerprint[i] >= '0' && fingerprint[i] <= '9') ||
+              (fingerprint[i] >= 'a' && fingerprint[i] <= 'f'))) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int mesh_node_parse_u64(const char *value, uint64_t *out) {
     char *end = NULL;
     unsigned long long parsed;
@@ -94,6 +110,30 @@ static int mesh_node_parse_u64(const char *value, uint64_t *out) {
     }
     *out = (uint64_t)parsed;
     return 1;
+}
+
+static int mesh_node_parse_size(const char *value, size_t *out) {
+    uint64_t parsed = 0u;
+    if (!out || !mesh_node_parse_u64(value, &parsed) || parsed > SIZE_MAX) {
+        return 0;
+    }
+    *out = (size_t)parsed;
+    return 1;
+}
+
+static int mesh_node_parse_bool(const char *value, int *out) {
+    if (!value || !out) {
+        return 0;
+    }
+    if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0) {
+        *out = 1;
+        return 1;
+    }
+    if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0) {
+        *out = 0;
+        return 1;
+    }
+    return 0;
 }
 
 static int mesh_node_parse_cidr(const char *cidr) {
@@ -674,6 +714,30 @@ void mesh_node_config_init(mesh_node_config_t *cfg) {
     cfg->stream_enabled = 0;
     cfg->ice_allow_loopback = 0;
     cfg->status_interval_ms = 1000;
+    cfg->network_control_port = MESH_NODE_NETWORK_CONTROL_DEFAULT_PORT;
+    cfg->network_control_identity_policy_generation = 1u;
+    cfg->network_control_network_capacity =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_NETWORK_CAPACITY;
+    cfg->network_control_operation_capacity =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_OPERATION_CAPACITY;
+    cfg->network_control_channel_capacity =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_CHANNEL_CAPACITY;
+    cfg->network_control_channel_max_retained_bytes =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_RETAINED_BYTES;
+    cfg->network_control_command_budget =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_COMMAND_BUDGET;
+    cfg->network_control_send_budget =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_SEND_BUDGET;
+    cfg->network_control_io_timeout_ms =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_IO_TIMEOUT_MS;
+    cfg->network_control_heartbeat_interval_ms =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_HEARTBEAT_INTERVAL_MS;
+    cfg->network_control_heartbeat_timeout_ms =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_HEARTBEAT_TIMEOUT_MS;
+    cfg->network_control_delete_drain_timeout_ms =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_DELETE_DRAIN_TIMEOUT_MS;
+    cfg->network_control_shutdown_drain_timeout_ms =
+        MESH_NODE_NETWORK_CONTROL_DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
 }
 
 int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
@@ -950,6 +1014,9 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
                 strncpy(cfg->virtual_ip, value, sizeof(cfg->virtual_ip) - 1);
             } else if (strcmp(key, "advertise_ip") == 0) {
                 strncpy(cfg->advertise_ip, value, sizeof(cfg->advertise_ip) - 1);
+            } else if (strcmp(key, "identity_private_key_file") == 0) {
+                strncpy(cfg->identity_private_key_file, value,
+                        sizeof(cfg->identity_private_key_file) - 1);
             } else if (strcmp(key, "identity_secret_hex") == 0) {
                 strncpy(cfg->identity_secret_hex, value, sizeof(cfg->identity_secret_hex) - 1);
             } else if (strcmp(key, "mgmt_private_key_file") == 0) {
@@ -975,6 +1042,103 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
             } else if (strcmp(key, "mgmt_record_epoch_file") == 0) {
                 strncpy(cfg->mgmt_record_epoch_file, value,
                         sizeof(cfg->mgmt_record_epoch_file) - 1);
+            } else if (strcmp(key, "network_control_enabled") == 0) {
+                if (!mesh_node_parse_bool(value, &cfg->network_control_enabled)) {
+                    fprintf(stderr, "Invalid network_control_enabled: %s\n", value);
+                    fclose(fp);
+                    return -1;
+                }
+            } else if (strcmp(key, "network_control_port") == 0) {
+                cfg->network_control_port = (int)strtol(value, NULL, 10);
+            } else if (strcmp(key, "network_control_certificate_file") == 0) {
+                strncpy(cfg->network_control_certificate_file, value,
+                        sizeof(cfg->network_control_certificate_file) - 1);
+            } else if (strcmp(key, "network_control_private_key_file") == 0) {
+                strncpy(cfg->network_control_private_key_file, value,
+                        sizeof(cfg->network_control_private_key_file) - 1);
+            } else if (strcmp(key, "network_control_client_ca_file") == 0) {
+                strncpy(cfg->network_control_client_ca_file, value,
+                        sizeof(cfg->network_control_client_ca_file) - 1);
+            } else if (strcmp(key, "network_control_identity") == 0) {
+                strncpy(cfg->network_control_identity, value,
+                        sizeof(cfg->network_control_identity) - 1);
+            } else if (strcmp(key, "network_control_expected_peer_identity") == 0) {
+                strncpy(cfg->network_control_expected_peer_identity, value,
+                        sizeof(cfg->network_control_expected_peer_identity) - 1);
+            } else if (strcmp(key, "network_control_expected_peer_certificate_sha256") == 0) {
+                strncpy(cfg->network_control_expected_peer_certificate_sha256,
+                        value,
+                        sizeof(cfg->network_control_expected_peer_certificate_sha256) - 1);
+            } else if (strcmp(key, "network_control_expected_peer_certificate_sha256_next") == 0) {
+                strncpy(cfg->network_control_expected_peer_certificate_sha256_next,
+                        value,
+                        sizeof(cfg->network_control_expected_peer_certificate_sha256_next) - 1);
+            } else if (strcmp(key, "network_control_identity_policy_generation") == 0) {
+                if (!mesh_node_parse_u64(
+                        value,
+                        &cfg->network_control_identity_policy_generation))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_mesh_id_hex") == 0) {
+                strncpy(cfg->network_control_mesh_id_hex, value,
+                        sizeof(cfg->network_control_mesh_id_hex) - 1);
+            } else if (strcmp(key, "network_control_provider_id_hex") == 0) {
+                strncpy(cfg->network_control_provider_id_hex, value,
+                        sizeof(cfg->network_control_provider_id_hex) - 1);
+            } else if (strcmp(key, "network_control_membership_issuer_id_hex") == 0) {
+                strncpy(cfg->network_control_membership_issuer_id_hex, value,
+                        sizeof(cfg->network_control_membership_issuer_id_hex) - 1);
+            } else if (strcmp(key, "network_control_membership_issuer_key_file") == 0) {
+                strncpy(cfg->network_control_membership_issuer_key_file, value,
+                        sizeof(cfg->network_control_membership_issuer_key_file) - 1);
+            } else if (strcmp(key, "network_control_network_capacity") == 0) {
+                if (!mesh_node_parse_size(
+                        value, &cfg->network_control_network_capacity))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_operation_capacity") == 0) {
+                if (!mesh_node_parse_size(
+                        value, &cfg->network_control_operation_capacity))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_channel_capacity") == 0) {
+                if (!mesh_node_parse_size(
+                        value, &cfg->network_control_channel_capacity))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_channel_max_retained_bytes") == 0) {
+                if (!mesh_node_parse_size(
+                        value,
+                        &cfg->network_control_channel_max_retained_bytes))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_command_budget") == 0) {
+                if (!mesh_node_parse_size(
+                        value, &cfg->network_control_command_budget))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_send_budget") == 0) {
+                if (!mesh_node_parse_size(
+                        value, &cfg->network_control_send_budget))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_io_timeout_ms") == 0) {
+                if (!mesh_node_parse_u64(
+                        value, &cfg->network_control_io_timeout_ms))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_heartbeat_interval_ms") == 0) {
+                if (!mesh_node_parse_u64(
+                        value,
+                        &cfg->network_control_heartbeat_interval_ms))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_heartbeat_timeout_ms") == 0) {
+                if (!mesh_node_parse_u64(
+                        value,
+                        &cfg->network_control_heartbeat_timeout_ms))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_delete_drain_timeout_ms") == 0) {
+                if (!mesh_node_parse_u64(
+                        value,
+                        &cfg->network_control_delete_drain_timeout_ms))
+                    goto invalid_network_control_number;
+            } else if (strcmp(key, "network_control_shutdown_drain_timeout_ms") == 0) {
+                if (!mesh_node_parse_u64(
+                        value,
+                        &cfg->network_control_shutdown_drain_timeout_ms))
+                    goto invalid_network_control_number;
             } else if (strcmp(key, "virtual_prefix") == 0) {
                 cfg->virtual_prefix = (unsigned int)strtoul(value, NULL, 10);
             } else if (strcmp(key, "listen_port") == 0) {
@@ -994,6 +1158,12 @@ int mesh_node_config_load(mesh_node_config_t *cfg, const char *path) {
             } else if (strcmp(key, "peer_protocol_major") == 0) {
                 cfg->peer_protocol_major = (unsigned int)strtoul(value, NULL, 10);
             }
+            continue;
+
+invalid_network_control_number:
+            fprintf(stderr, "Invalid %s: %s\n", key, value);
+            fclose(fp);
+            return -1;
         }
     }
 
@@ -1008,6 +1178,10 @@ int mesh_node_config_management_enabled(const mesh_node_config_t *cfg) {
            cfg->mgmt_mesh_id_hex[0] != '\0' &&
            cfg->mgmt_first_record_epoch != 0u &&
            cfg->mgmt_record_epoch_file[0] != '\0';
+}
+
+int mesh_node_config_network_control_enabled(const mesh_node_config_t *cfg) {
+    return cfg && cfg->network_control_enabled != 0;
 }
 
 int mesh_node_config_validate(const mesh_node_config_t *cfg) {
@@ -1029,6 +1203,12 @@ int mesh_node_config_validate(const mesh_node_config_t *cfg) {
         fprintf(stderr, "Invalid identity_secret_hex: expected 64 hex characters\n");
         return -1;
     }
+    if (cfg->identity_private_key_file[0] != '\0' &&
+        cfg->identity_secret_hex[0] != '\0') {
+        fprintf(stderr,
+                "identity_private_key_file and identity_secret_hex are mutually exclusive\n");
+        return -1;
+    }
 
     mgmt_field_count += cfg->mgmt_private_key_file[0] != '\0';
     mgmt_field_count += cfg->mgmt_certificate_file[0] != '\0';
@@ -1041,8 +1221,9 @@ int mesh_node_config_validate(const mesh_node_config_t *cfg) {
         return -1;
     }
     if (mesh_node_config_management_enabled(cfg)) {
-        if (cfg->identity_secret_hex[0] == '\0') {
-            fprintf(stderr, "Management mode requires stable identity_secret_hex\n");
+        if (cfg->identity_private_key_file[0] == '\0') {
+            fprintf(stderr,
+                    "Management mode requires identity_private_key_file\n");
             return -1;
         }
         if (!mesh_node_parse_identity_secret_hex(cfg->mgmt_mesh_id_hex)) {
@@ -1052,6 +1233,92 @@ int mesh_node_config_validate(const mesh_node_config_t *cfg) {
     } else if (cfg->mgmt_execution_grant_issuer_key_file[0] != '\0') {
         fprintf(stderr,
                 "Execution Grant issuer requires complete management configuration\n");
+        return -1;
+    }
+
+    if (mesh_node_config_network_control_enabled(cfg)) {
+        if (cfg->identity_private_key_file[0] == '\0') {
+            fprintf(stderr,
+                    "Network control requires identity_private_key_file\n");
+            return -1;
+        }
+        if (cfg->network_control_certificate_file[0] == '\0' ||
+            cfg->network_control_private_key_file[0] == '\0' ||
+            cfg->network_control_client_ca_file[0] == '\0' ||
+            cfg->network_control_membership_issuer_key_file[0] == '\0' ||
+            cfg->network_control_identity[0] == '\0' ||
+            cfg->network_control_expected_peer_identity[0] == '\0' ||
+            cfg->network_control_expected_peer_certificate_sha256[0] == '\0' ||
+            cfg->network_control_identity_policy_generation == 0u) {
+            fprintf(stderr,
+                    "Network control requires TLS files, identities, certificate binding, and membership issuer key\n");
+            return -1;
+        }
+        if (!mesh_node_parse_certificate_sha256(
+                cfg->network_control_expected_peer_certificate_sha256) ||
+            (cfg->network_control_expected_peer_certificate_sha256_next[0] != '\0' &&
+             !mesh_node_parse_certificate_sha256(
+                 cfg->network_control_expected_peer_certificate_sha256_next))) {
+            fprintf(stderr,
+                    "Network control peer certificate fingerprints must use sha256: plus 64 lowercase hex characters\n");
+            return -1;
+        }
+        if (!mesh_node_parse_identity_secret_hex(
+                cfg->network_control_mesh_id_hex) ||
+            !mesh_node_parse_identity_secret_hex(
+                cfg->network_control_provider_id_hex) ||
+            !mesh_node_parse_identity_secret_hex(
+                cfg->network_control_membership_issuer_id_hex)) {
+            fprintf(stderr,
+                    "Network control mesh, provider, and issuer IDs must be 64 hex characters\n");
+            return -1;
+        }
+    }
+    if (cfg->network_control_port < 1 ||
+        cfg->network_control_port > 65535) {
+        fprintf(stderr, "Invalid network_control_port: %d\n",
+                cfg->network_control_port);
+        return -1;
+    }
+    if (cfg->network_control_network_capacity == 0u ||
+        cfg->network_control_network_capacity >
+            MESH_NODE_NETWORK_CONTROL_MAX_NETWORK_CAPACITY ||
+        cfg->network_control_operation_capacity == 0u ||
+        cfg->network_control_operation_capacity >
+            MESH_NODE_NETWORK_CONTROL_MAX_OPERATION_CAPACITY ||
+        cfg->network_control_channel_capacity == 0u ||
+        cfg->network_control_channel_capacity >
+            MESH_NODE_NETWORK_CONTROL_MAX_CHANNEL_CAPACITY ||
+        cfg->network_control_channel_max_retained_bytes <
+            MESH_NODE_NETWORK_CONTROL_MIN_FRAME_BYTES ||
+        cfg->network_control_channel_max_retained_bytes >
+            MESH_NODE_NETWORK_CONTROL_MAX_RETAINED_BYTES ||
+        cfg->network_control_command_budget == 0u ||
+        cfg->network_control_command_budget >
+            cfg->network_control_channel_capacity ||
+        cfg->network_control_send_budget == 0u ||
+        cfg->network_control_send_budget >
+            cfg->network_control_channel_capacity) {
+        fprintf(stderr, "Invalid bounded network_control capacity or budget\n");
+        return -1;
+    }
+    if (cfg->network_control_io_timeout_ms == 0u ||
+        cfg->network_control_io_timeout_ms >
+            MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS ||
+        cfg->network_control_heartbeat_interval_ms == 0u ||
+        cfg->network_control_heartbeat_interval_ms >
+            MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS ||
+        cfg->network_control_heartbeat_timeout_ms <=
+            cfg->network_control_heartbeat_interval_ms ||
+        cfg->network_control_heartbeat_timeout_ms >
+            MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS ||
+        cfg->network_control_delete_drain_timeout_ms == 0u ||
+        cfg->network_control_delete_drain_timeout_ms >
+            MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS ||
+        cfg->network_control_shutdown_drain_timeout_ms == 0u ||
+        cfg->network_control_shutdown_drain_timeout_ms >
+            MESH_NODE_NETWORK_CONTROL_MAX_TIMEOUT_MS) {
+        fprintf(stderr, "Invalid network_control timeout configuration\n");
         return -1;
     }
 
@@ -1181,13 +1448,31 @@ void mesh_node_config_print(const mesh_node_config_t *cfg) {
            cfg->magic_dns_domain[0] ? cfg->magic_dns_domain : "(unset)");
     printf("virtual_ip     : %s/%u\n", cfg->virtual_ip, cfg->virtual_prefix);
     printf("advertise_ip   : %s\n", cfg->advertise_ip[0] ? cfg->advertise_ip : "(unset)");
-    printf("identity       : %s\n", cfg->identity_secret_hex[0] ? "configured" : "(ephemeral)");
+    printf("identity       : %s\n",
+           cfg->identity_private_key_file[0]
+               ? "private-key-file"
+               : (cfg->identity_secret_hex[0] ? "inline-dev" : "(ephemeral)"));
     printf("management     : %s\n",
            mesh_node_config_management_enabled(cfg) ? "shared-node" : "disabled");
     printf("node_execution : %s\n",
            cfg->mgmt_execution_grant_issuer_key_file[0] != '\0'
                ? "enabled"
                : "disabled");
+    printf("network_control: %s\n",
+           mesh_node_config_network_control_enabled(cfg)
+               ? "flowmq-mtls-loopback"
+               : "disabled");
+    if (mesh_node_config_network_control_enabled(cfg)) {
+        printf("network_control_port: %d\n", cfg->network_control_port);
+        printf("network_control_identity_policy_generation: %llu\n",
+               (unsigned long long)
+                   cfg->network_control_identity_policy_generation);
+        printf("network_control_capacity: networks=%zu operations=%zu channels=%zu retained=%zu\n",
+               cfg->network_control_network_capacity,
+               cfg->network_control_operation_capacity,
+               cfg->network_control_channel_capacity,
+               cfg->network_control_channel_max_retained_bytes);
+    }
     if (mesh_node_config_management_enabled(cfg)) {
         printf("mgmt_epoch     : %llu\n",
                (unsigned long long)cfg->mgmt_first_record_epoch);

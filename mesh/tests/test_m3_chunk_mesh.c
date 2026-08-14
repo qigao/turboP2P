@@ -217,6 +217,13 @@ static void test_store_service_over_p2p(void) {
   pump_ctx_t gateway_pump;
   uint8_t store_public_key[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE];
   uint8_t gateway_public_key[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE];
+  uint8_t p2p_trusted_keys[2 * P2P_KEY_SIZE];
+  static const uint8_t p2p_network_id[P2P_SECURITY_ID_SIZE] = {
+      0x4d, 0x33, 0x2d, 0x43, 0x68, 0x75, 0x6e, 0x6b,
+      0x2d, 0x4d, 0x65, 0x73, 0x68, 0x2d, 0x76, 0x32,
+      0x2d, 0x54, 0x65, 0x73, 0x74, 0x2d, 0x4e, 0x65,
+      0x74, 0x77, 0x6f, 0x72, 0x6b, 0x2d, 0x30, 0x31,
+  };
   uint8_t store_node_id[32];
   m3_chunk_capability_claims_v1_t claims;
   m3_chunk_receipt_v1_t receipt;
@@ -242,6 +249,15 @@ static void test_store_service_over_p2p(void) {
   check_not_null(store_node);
   check_not_null(gateway_node);
   check_int_eq(P2P_OK, p2p_node_set_private_key(gateway_node, GATEWAY_KEY));
+  check_int_eq(P2P_OK, p2p_node_get_public_key(store_node, p2p_trusted_keys));
+  check_int_eq(P2P_OK,
+               p2p_node_get_public_key(gateway_node,
+                                       p2p_trusted_keys + P2P_KEY_SIZE));
+  check_int_eq(P2P_OK, p2p_node_configure_pinned_security_v2(
+                            store_node, p2p_network_id, p2p_trusted_keys, 2u));
+  check_int_eq(P2P_OK, p2p_node_configure_pinned_security_v2(
+                            gateway_node, p2p_network_id, p2p_trusted_keys, 2u));
+  memset(p2p_trusted_keys, 0, sizeof(p2p_trusted_keys));
 
   memset(&service, 0, sizeof(service));
   memset(&router, 0, sizeof(router));

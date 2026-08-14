@@ -73,8 +73,8 @@ static void prepare_context(test_context_t *context) {
   check_size_eq(certificate_len, MESH_MGMT_CERTIFICATE_V1_SIZE);
 
   context->hello.major = MESH_MGMT_MAJOR_V1;
-  context->hello.min_minor = 0;
-  context->hello.max_minor = 0;
+  context->hello.min_minor = MESH_MGMT_MINOR_V1;
+  context->hello.max_minor = MESH_MGMT_MINOR_V1;
   context->hello.features = MESH_MGMT_FEATURE_MEMBERSHIP | MESH_MGMT_FEATURE_TARGETED_RPC;
   context->hello.platform = MESH_MGMT_PLATFORM_LINUX;
   memcpy(context->hello.build_version, "1.2.3-test", 10);
@@ -87,16 +87,21 @@ static void prepare_context(test_context_t *context) {
   memcpy(context->hello.management_key, context->remote_public_key, 32);
   memcpy(context->hello.managed_node_id, context->managed_node_id, 32);
   memcpy(context->hello.connection_id, context->remote_connection_id, 16);
+  fill_bytes(context->hello.channel_binding,
+             sizeof(context->hello.channel_binding), 0xc0);
   context->hello.max_frame = 12000;
   context->hello.max_digest_entries = 64;
   context->hello.max_delta_batch = 32;
 
   memcpy(context->session_config.expected_mesh_id_hash, context->mesh_id_hash, 32);
   memcpy(context->session_config.trusted_issuer_key, context->root_public_key, 32);
-  context->session_config.min_minor = 0;
-  context->session_config.max_minor = 0;
+  context->session_config.min_minor = MESH_MGMT_MINOR_V1;
+  context->session_config.max_minor = MESH_MGMT_MINOR_V1;
   context->session_config.features = MESH_MGMT_FEATURE_MEMBERSHIP | MESH_MGMT_FEATURE_ANTI_ENTROPY;
   fill_bytes(context->session_config.connection_id, 16, 0xd0);
+  memcpy(context->session_config.channel_binding,
+         context->hello.channel_binding,
+         sizeof(context->session_config.channel_binding));
   context->session_config.max_frame = MESH_MGMT_FRAME_MAX;
   context->session_config.max_digest_entries = 128;
   context->session_config.max_delta_batch = 64;
@@ -108,7 +113,7 @@ static size_t encode_hello_payload(const test_context_t *context,
   check_int_eq(
       mesh_mgmt_hello_encode_v1(&context->hello, output, MESH_MGMT_HELLO_V1_MAX_SIZE, &output_len),
       MESH_MGMT_SESSION_OK);
-  check_size_eq(output_len, 557);
+  check_size_eq(output_len, 593);
   return output_len;
 }
 
@@ -243,12 +248,14 @@ static void test_session_establishes_only_after_mutual_ack(void) {
   check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
   accept_valid_hello(&context, &session, &ack);
   check_int_eq(session.state, MESH_MGMT_SESSION_NEGOTIATING);
-  check_uint_eq(ack.selected_minor, 0);
+  check_uint_eq(ack.selected_minor, MESH_MGMT_MINOR_V1);
   check_hex64_eq(ack.features, MESH_MGMT_FEATURE_MEMBERSHIP);
   check_uint_eq(ack.max_frame, 12000);
   check_uint_eq(ack.max_digest_entries, 64);
   check_uint_eq(ack.max_delta_batch, 32);
   check_mem_eq(ack.peer_connection_id, context.remote_connection_id, 16);
+  check_mem_eq(ack.channel_binding, context.session_config.channel_binding,
+               sizeof(ack.channel_binding));
   check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
   check_int_eq(session.state, MESH_MGMT_SESSION_NEGOTIATING);
 
@@ -311,6 +318,80 @@ static void test_session_rejects_transport_and_header_binding_mismatch(void) {
   check_int_eq(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
                                                  context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
+  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+}
+
+static void test_session_rejects_cross_noise_session_replay(void) {
+  test_context_t context;
+  mesh_mgmt_session_v1_t session;
+  mesh_mgmt_hello_ack_v1_t ack;
+  uint8_t hello_payload[MESH_MGMT_HELLO_V1_MAX_SIZE];
+  uint8_t hello_frame[MESH_MGMT_FRAME_MAX];
+  uint8_t ack_payload[MESH_MGMT_HELLO_ACK_V1_SIZE];
+  uint8_t ack_frame[MESH_MGMT_FRAME_MAX];
+  size_t hello_payload_len;
+  size_t hello_frame_len;
+  size_t ack_payload_len = 0u;
+  size_t ack_frame_len;
+
+  prepare_context(&context);
+  hello_payload_len = encode_hello_payload(&context, hello_payload);
+  hello_frame_len = sign_remote_frame(
+      &context, MESH_MGMT_KIND_HELLO, hello_payload, hello_payload_len,
+      TEST_CERT_SERIAL, hello_frame);
+  context.session_config.channel_binding[0] ^= 1u;
+  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+               MESH_MGMT_SESSION_OK);
+  check_int_eq(mesh_mgmt_session_accept_hello_v1(
+                   &session, hello_frame, hello_frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &ack),
+               MESH_MGMT_SESSION_AUTH_FAILED);
+  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+
+  prepare_context(&context);
+  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+               MESH_MGMT_SESSION_OK);
+  check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session),
+               MESH_MGMT_SESSION_OK);
+  accept_valid_hello(&context, &session, &ack);
+  check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session),
+               MESH_MGMT_SESSION_OK);
+  memcpy(ack.peer_connection_id, context.session_config.connection_id,
+         sizeof(ack.peer_connection_id));
+  ack.channel_binding[0] ^= 1u;
+  check_int_eq(mesh_mgmt_hello_ack_encode_v1(
+                   &ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
+               MESH_MGMT_SESSION_OK);
+  ack_frame_len = sign_remote_frame(
+      &context, MESH_MGMT_KIND_HELLO_ACK, ack_payload, ack_payload_len,
+      TEST_CERT_SERIAL, ack_frame);
+  check_int_eq(mesh_mgmt_session_accept_hello_ack_v1(
+                   &session, ack_frame, ack_frame_len, TEST_NOW_MS),
+               MESH_MGMT_SESSION_AUTH_FAILED);
+  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+}
+
+static void test_session_rejects_pre_binding_hello_schema(void) {
+  test_context_t context;
+  mesh_mgmt_session_v1_t session;
+  mesh_mgmt_hello_ack_v1_t ack;
+  uint8_t hello_payload[MESH_MGMT_HELLO_V1_MAX_SIZE];
+  uint8_t hello_frame[MESH_MGMT_FRAME_MAX];
+  size_t hello_payload_len;
+  size_t hello_frame_len;
+
+  prepare_context(&context);
+  hello_payload_len = encode_hello_payload(&context, hello_payload);
+  hello_payload_len -= MESH_MGMT_CHANNEL_BINDING_SIZE + 4u;
+  hello_frame_len = sign_remote_frame(
+      &context, MESH_MGMT_KIND_HELLO, hello_payload, hello_payload_len,
+      TEST_CERT_SERIAL, hello_frame);
+  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+               MESH_MGMT_SESSION_OK);
+  check_int_eq(mesh_mgmt_session_accept_hello_v1(
+                   &session, hello_frame, hello_frame_len,
+                   context.transport_peer_id, TEST_NOW_MS, &ack),
+               MESH_MGMT_SESSION_INVALID_SCHEMA);
   check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
@@ -870,6 +951,8 @@ static void build_connection_handshake(const test_context_t *context,
                             ? context->hello.max_delta_batch
                             : context->session_config.max_delta_batch;
   memcpy(ack.peer_connection_id, context->session_config.connection_id, 16);
+  memcpy(ack.channel_binding, context->session_config.channel_binding,
+         sizeof(ack.channel_binding));
   check_int_eq(
       mesh_mgmt_hello_ack_encode_v1(&ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
       MESH_MGMT_SESSION_OK);
@@ -1126,6 +1209,8 @@ static void build_local_peer_handshake(const test_context_t *context,
                             ? context->hello.max_delta_batch
                             : context->session_config.max_delta_batch;
   memcpy(ack.peer_connection_id, context->remote_connection_id, 16);
+  memcpy(ack.channel_binding, context->session_config.channel_binding,
+         sizeof(ack.channel_binding));
   check_int_eq(
       mesh_mgmt_hello_ack_encode_v1(&ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
       MESH_MGMT_SESSION_OK);
@@ -1285,10 +1370,12 @@ static void test_peer_rejects_signed_mismatched_ack_after_commit(void) {
   uint8_t ack_frame[MESH_MGMT_FRAME_MAX];
   uint8_t local_hello_frame[MESH_MGMT_FRAME_MAX];
   uint8_t local_ack_frame[MESH_MGMT_FRAME_MAX];
+  uint8_t wrong_binding_hello_frame[MESH_MGMT_FRAME_MAX];
   size_t hello_frame_len = 0u;
   size_t ack_frame_len = 0u;
   size_t local_hello_frame_len = 0u;
   size_t local_ack_frame_len = 0u;
+  size_t wrong_binding_hello_frame_len = 0u;
 
   memset(&fake, 0, sizeof(fake));
   memset(&capture, 0, sizeof(capture));
@@ -1298,10 +1385,15 @@ static void test_peer_rejects_signed_mismatched_ack_after_commit(void) {
   build_connection_handshake(&context, hello_frame, &hello_frame_len, ack_frame, &ack_frame_len);
   build_local_peer_handshake(&context, local_hello_frame, &local_hello_frame_len, local_ack_frame,
                              &local_ack_frame_len);
+  context.session_config.channel_binding[0] ^= 1u;
+  build_local_peer_handshake(&context, wrong_binding_hello_frame,
+                             &wrong_binding_hello_frame_len,
+                             local_ack_frame, &local_ack_frame_len);
+  context.session_config.channel_binding[0] ^= 1u;
   builder.hello_frame = local_hello_frame;
   builder.hello_frame_len = local_hello_frame_len;
-  builder.ack_frame = ack_frame;
-  builder.ack_frame_len = ack_frame_len;
+  builder.ack_frame = local_ack_frame;
+  builder.ack_frame_len = local_ack_frame_len;
   fake.frames[0] = hello_frame;
   fake.frame_lengths[0] = hello_frame_len;
   fake.frame_count = 1u;
@@ -1399,6 +1491,39 @@ static void test_peer_rejects_invalid_local_hello_before_io(void) {
   mesh_mgmt_peer_destroy_v1(&peer);
 }
 
+static void test_peer_rejects_local_hello_for_other_noise_session(void) {
+  test_context_t context;
+  connection_fake_io_t fake;
+  connection_event_capture_t capture;
+  peer_builder_t builder;
+  mesh_mgmt_peer_config_v1_t config;
+  mesh_mgmt_peer_v1_t peer;
+  uint8_t local_hello_frame[MESH_MGMT_FRAME_MAX];
+  uint8_t local_ack_frame[MESH_MGMT_FRAME_MAX];
+  size_t local_hello_frame_len = 0u;
+  size_t local_ack_frame_len = 0u;
+
+  memset(&fake, 0, sizeof(fake));
+  memset(&capture, 0, sizeof(capture));
+  memset(&builder, 0, sizeof(builder));
+  memset(&peer, 0, sizeof(peer));
+  prepare_peer_config(&context, &fake, &capture, &builder, &config);
+  build_local_peer_handshake(&context, local_hello_frame,
+                             &local_hello_frame_len, local_ack_frame,
+                             &local_ack_frame_len);
+  config.connection.dispatch.session.channel_binding[0] ^= 1u;
+  builder.hello_frame = local_hello_frame;
+  builder.hello_frame_len = local_hello_frame_len;
+
+  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS),
+               MESH_MGMT_PEER_BUILD_FAILED);
+  check_int_eq(peer.last_builder_result,
+               MESH_MGMT_PEER_BUILDER_INVALID_HELLO);
+  check_size_eq(fake.send_count, 0u);
+  mesh_mgmt_peer_destroy_v1(&peer);
+}
+
 spec("mesh management identity and HELLO session") {
   describe("direct trust certificate") {
     it("verifies issuer, mesh, node and key claims") {
@@ -1423,6 +1548,12 @@ spec("mesh management identity and HELLO session") {
     }
     it("binds HELLO_ACK to the HELLO origin session") {
       test_session_rejects_ack_from_changed_origin_session();
+    }
+    it("rejects HELLO and ACK replay across Noise sessions") {
+      test_session_rejects_cross_noise_session_replay();
+    }
+    it("rejects the pre-channel-binding HELLO schema") {
+      test_session_rejects_pre_binding_hello_schema();
     }
   }
   describe("observer-only raw frame dispatcher") {
@@ -1456,6 +1587,9 @@ spec("mesh management identity and HELLO session") {
   describe("automatic adjacent peer handshake") {
     it("rejects an invalid local HELLO before socket IO") {
       test_peer_rejects_invalid_local_hello_before_io();
+    }
+    it("rejects a local HELLO bound to another Noise session") {
+      test_peer_rejects_local_hello_for_other_noise_session();
     }
     it("sends HELLO and ACK only after accepted receipt commit") {
       test_peer_automates_hello_and_ack_after_receipt_commit();

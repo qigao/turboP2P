@@ -60,6 +60,42 @@
          "rhs": "Linux"
        },
        "configurePreset": "release-linux-ninja"
+    },
+    {
+       "name": "test-security-linux-clang-asan",
+       "displayName": "Security Tests (Linux Clang ASan/UBSan/LSan)",
+       "inherits": "base-test",
+       "condition": {
+         "type": "equals",
+         "lhs": "${hostSystemName}",
+         "rhs": "Linux"
+       },
+       "configurePreset": "security-linux-clang-asan",
+       "execution": {
+         "timeout": 300
+       },
+       "environment": {
+         "ASAN_OPTIONS": "detect_leaks=1:check_initialization_order=1:strict_init_order=1:halt_on_error=1",
+         "LSAN_OPTIONS": "exitcode=23",
+         "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+       }
+    },
+    {
+       "name": "test-security-linux-clang-tsan",
+       "displayName": "Security Tests (Linux Clang TSan)",
+       "inherits": "base-test",
+       "condition": {
+         "type": "equals",
+         "lhs": "${hostSystemName}",
+         "rhs": "Linux"
+       },
+       "configurePreset": "security-linux-clang-tsan",
+       "execution": {
+         "timeout": 900
+       },
+       "environment": {
+         "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1"
+       }
     }
   ]
 }

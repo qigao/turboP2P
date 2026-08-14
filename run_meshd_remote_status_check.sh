@@ -109,11 +109,12 @@ path = sys.argv[1]
 with open(path, "r", encoding="utf-8") as f:
     obj = json.load(f)
 
-if obj.get("snapshot_version") != 1:
+if obj.get("snapshot_version") != 2:
     raise SystemExit("snapshot_version mismatch")
 
 node = obj.get("node") or {}
 runtime = obj.get("runtime") or {}
+security = obj.get("security") or {}
 control_plane = obj.get("control_plane") or {}
 summary = control_plane.get("summary") or {}
 health = control_plane.get("health") or {}
@@ -131,6 +132,14 @@ if not isinstance(node.get("protocol_minor"), int):
     raise SystemExit("node.protocol_minor is not an int")
 if runtime.get("running") is not True:
     raise SystemExit("runtime.running is not true")
+if security.get("available") is not True:
+    raise SystemExit("security snapshot is unavailable")
+if security.get("wire_version") != 2:
+    raise SystemExit("secure wire version mismatch")
+if not isinstance(security.get("rejection_counts"), dict):
+    raise SystemExit("security rejection counters are missing")
+if not isinstance((security.get("handshake_latency") or {}).get("by_role"), dict):
+    raise SystemExit("security handshake latency is missing")
 if not all(k in control_plane for k in ("summary", "health", "dht", "diagnostics")):
     raise SystemExit("control_plane sections are incomplete")
 if not isinstance(summary.get("dht_entries"), int):

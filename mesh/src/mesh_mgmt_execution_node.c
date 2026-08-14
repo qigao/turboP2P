@@ -136,6 +136,8 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_init_v1(
   orchestrator_config.verify_grant_context = node;
   orchestrator_config.clock_now_ms = config->clock_now_ms;
   orchestrator_config.clock_context = config->clock_context;
+  orchestrator_config.execute_runner = config->execute_runner;
+  orchestrator_config.execute_runner_context = config->execute_runner_context;
   if (mesh_mgmt_execution_orchestrator_init_v1(
           &node->orchestrator, &orchestrator_config) !=
       MESH_MGMT_EXECUTION_ORCHESTRATOR_OK) {

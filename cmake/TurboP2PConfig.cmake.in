@@ -2,6 +2,8 @@
 
 include(CMakeFindDependencyMacro)
 
+find_dependency(TurboParser CONFIG REQUIRED)
+
 # Find dependencies (add more as needed)
 
 include("${CMAKE_CURRENT_LIST_DIR}/TurboP2PTargets.cmake")

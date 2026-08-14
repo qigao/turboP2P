@@ -33,6 +33,24 @@ static int verify_grant(void *context,
   return 0;
 }
 
+static mesh_mgmt_execution_runner_result_t test_execute_runner(
+    void *context, const mesh_mgmt_execution_runner_v1_t *runner,
+    const mesh_mgmt_execution_request_v1_t *request,
+    const mesh_mgmt_execution_effective_policy_v1_t *effective_policy,
+    uint64_t now_ms, const mesh_mgmt_execution_runner_io_v1_t *io,
+    mesh_mgmt_execution_runner_output_v1_t *out) {
+  (void)context;
+  (void)runner;
+  (void)request;
+  (void)effective_policy;
+  (void)now_ms;
+  (void)io;
+  memset(out, 0, sizeof(*out));
+  out->guest_exit_code = 7;
+  out->invocations = 1u;
+  return MESH_MGMT_EXECUTION_RUNNER_OK;
+}
+
 typedef struct {
   turbo_mutex_t mutex;
   turbo_cond_t condition;
@@ -240,9 +258,19 @@ static void test_executes_once_and_replays_signed_result(void) {
   config.verify_grant_context = &context;
   config.clock_now_ms = test_clock;
   config.clock_context = &context;
+  config.execute_runner = test_execute_runner;
   check_int_eq(mesh_mgmt_execution_orchestrator_init_v1(
                    &orchestrator, &config),
                MESH_MGMT_EXECUTION_ORCHESTRATOR_OK);
+
+  terminal_generation = store.journal.generation;
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_NATIVE;
+  check_int_eq(mesh_mgmt_execution_orchestrator_execute_v1(
+                   &orchestrator, &grant, &request, &authorization, NULL,
+                   &first_result),
+               MESH_MGMT_EXECUTION_ORCHESTRATOR_AUTH_FAILED);
+  check_uint_eq(store.journal.generation, terminal_generation);
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
 
   check_int_eq(mesh_mgmt_execution_orchestrator_execute_v1(
                    &orchestrator, &grant, &request, &authorization, NULL,
@@ -262,7 +290,7 @@ static void test_executes_once_and_replays_signed_result(void) {
   check_mem_eq(repeated_result.signature, first_result.signature,
                sizeof(first_result.signature));
   check_uint_eq(store.journal.generation, terminal_generation);
-  check_uint_eq(context.verifies, 2u);
+  check_uint_eq(context.verifies, 3u);
 
   memset(&command, 0, sizeof(command));
   command.grant = grant;

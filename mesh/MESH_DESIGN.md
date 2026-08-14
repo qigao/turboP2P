@@ -102,7 +102,8 @@ operator UX are defined.
 The current admission surface is intentionally small:
 
 - `peer_allow_cidrs` gates direct peer admission by virtual IP.
-- `peer_allow_node_ids` gates direct peer admission by stable node identity.
+- `peer_allow_node_ids` is both the secure-wire static-key trust store and the
+  direct peer admission gate for stable node identity.
 - `peer_protocol_major` gates direct peer admission by mesh protocol generation.
 - `packet_policy_rules` gates data-plane packets by direction, source/dest CIDR,
   IP protocol, and source/dest port.
@@ -127,9 +128,12 @@ The internal ACL should use four dimensions:
 | Resource | peer virtual IP/CIDR, destination CIDR, control message class | named services, route advertisements |
 | Effect | allow or deny | priority, audit-only, expiry |
 
-Default behavior stays compatible:
+Secure-wire v2 intentionally changes the old default:
 
-- no configured policy means current permissive mesh behavior.
+- no node-ID trust store means isolated startup: the node trusts itself but no
+  remote transport identity.
+- no virtual-IP or packet policy remains permissive within the explicitly
+  trusted peer set.
 - existing allowlist fields compile to allow rules for the corresponding
   direct peer subjects.
 - packet policy defaults to allow when no rules exist for the packet direction.

@@ -157,15 +157,16 @@ RFC 9266 exporter query 作为类型、open-state、版本和客户端证书验�
 非 TLS 1.3 或客户端未验证 server certificate 均在分配 transport 状态前拒绝。adapter 释放
 每个 recv buffer，但不关闭 socket。
 
-当前另有内部 `mesh_mgmt_p2p_adapter`：它只接受 `p2p_peer_get_public_key()` 已能返回加密握手
-静态公钥的 peer，并把该 32-byte key 作为 remote transport peer ID。每条 `P2P_MSG_CUSTOM`
+当前另有内部 `mesh_mgmt_p2p_adapter`：它只接受
+`p2p_peer_get_security_info_v2()` 返回 `authenticated`、非零 Noise static key 与非零 handshake
+hash 的 peer，并从同一值快照复制 remote transport peer ID 与 channel binding。每条 `P2P_MSG_CUSTOM`
 必须承载且只承载一个不超过 16 KiB 的完整 MMP frame；callback bytes 必须在 callback 返回前
 由 transport 同步消费和 release。adapter 发送前仍由通用 transport 完整解码 frame，因此不会
 触发 P2P API 对超大 payload 的静默截断。外层 handler 先按 `TMGM` magic 分流，旧 custom
 payload 返回 `NOT_MMP` 且不改变 MMP 状态。该 adapter 不是 TLS adapter 的 fallback，也不注册
-handler、不拥有 peer/node。静态公钥“可读取”本身不等于节点已认证；只有后续 signed HELLO
-通过 certificate/management-key/transport-key 联合校验后才建立 MMP identity。P2P 握手身份
-绑定、降级和密钥派生专项审查仍是 production 门槛。
+handler、不拥有 peer/node。后续 signed HELLO/ACK 还必须通过 certificate、management key、
+transport key 与当前 Noise channel binding 的联合校验才建立 MMP identity。独立实现互操作、
+持续 fuzz、跨平台 sanitizer 与外部密码协议审查仍是 production 门槛。
 
 agent 使用独立的 management-transport X25519 identity，不读取或复用数据面 X25519
 private key。管理证书同时绑定 transport peer ID、Ed25519 management key 和被管理的
@@ -173,9 +174,9 @@ data-plane node ID；HELLO 必须把 transport 认证结果与该绑定逐项比
 
 当前 P2P 加密接收路径已对可靠有序 stream 强制校验预期 nonce/counter；这只关闭相邻
 transport replay，不替代 MMP 的端到端 sequence、duplicate cache 和 command journal。
-production binding 的剩余安全门槛是对握手身份绑定、降级、密钥派生及 MMP 多层 replay
-状态做专项审查。在门槛全部通过前，MMP 只允许实验环境的 observer 模式，不能执行远程
-副作用。
+Noise/MMP 会话绑定、降级硬拒绝和相邻 replay 基线已有自动测试；production binding 的剩余
+安全门槛是独立互操作、持续 fuzz、跨平台 sanitizer、stateless listener cookie、密钥安全存储
+及独立安全审查。在门槛全部通过前，MMP 不能宣称已通过生产安全认证。
 
 MMP/1 targeted RPC 只允许 direct 或一层 management relay：
 
@@ -261,7 +262,7 @@ fixed prefix：
 |------|------|------|
 | magic | 4 bytes | ASCII `TMGM` |
 | major | u8 | MMP/1 为 `1` |
-| minor | u8 | 首版为 `0` |
+| minor | u8 | 当前安全基线为 `1`；`0` 不含 Noise channel binding，硬拒绝 |
 | kind | u8 | 见消息类型表 |
 | flags | u8 | 未知 flag 必须拒绝 |
 | header_length | u16 | network byte order，最大 512 |
@@ -318,10 +319,10 @@ signature 字段自身不包含在签名输入中。接收端先完成 frame 长
 密码运算前验证 magic、major、已知 kind/flag、16 KiB frame、512 B header、精确总长以及
 header/payload TLV 的严格升序、去重和边界。envelope 冻结上表 14 个 common-header field ID，
 按固定宽度 canonical 编解码，计算并常量时间比较 payload BLAKE2b-256，并验证 domain-separated
-Ed25519 signature；只有完整通过后才返回 borrowed payload view 与已解码 header。MMP/1.0
-当前拒绝未知 header field 和非零 minor；HELLO 虽能协商 minor 0，未来 minor 仍必须先增加
-对应 envelope/parser 才能开放。identity/session 已实现 direct trust certificate、frame/cert
-时间窗口、HELLO/ACK schema、transport/key/node/session/incarnation binding 和
+Ed25519 signature；只有完整通过后才返回 borrowed payload view 与已解码 header。MMP/1.1
+当前拒绝未知 header field 和非 `1` minor，不提供 1.0 fallback。identity/session 已实现 direct
+trust certificate、frame/cert 时间窗口、HELLO/ACK schema、transport/key/node/session/
+incarnation/Noise-channel binding 和
 capability/resource negotiation。Stream V1 ticket request/issued payload 与 signed endpoint
 record payload 已有固定 schema；前者还有认证 session 到 responder ticket store 的领域适配，
 其余消息 payload schema 仍未实现。
@@ -388,6 +389,7 @@ HELLO payload 包含：
 - principal type；node principal 还必须声明 management key 与 data-plane node ID 的绑定。
 - 每连接随机 `connection_id`，只用于重复连接的确定性裁决，不作为身份。
 - 本地最大 frame、digest entries 和 delta batch limits。
+- 当前 Noise 握手的 32-byte handshake hash；它是本连接的 `channel_binding`，不是长期身份。
 
 协商结果取双方能力交集和各项资源限制的较小值。major 不同直接返回
 `UNSUPPORTED_VERSION`；未知 minor 和 feature 被忽略，不能隐式启用。
@@ -399,7 +401,7 @@ transport peer ID 与 managed node ID；operator/CI/policy authority 不伪造 n
 role 和 target scope 约束。
 首次 trust root 通过本机配置/部署注入，不进行 trust-on-first-use。
 
-当前 MMP/1.0 certificate wire format 冻结为以下 canonical TLV。`issuer_signature` 的签名
+当前 certificate v1 wire format 冻结为以下 canonical TLV。`issuer_signature` 的签名
 输入为 `"TurboMesh-MMP-Cert-v1\0" || field 0x0001..0x000d`；signature TLV 自身不进入
 签名输入。
 
@@ -424,18 +426,21 @@ role 和 target scope 约束。
 该 direct trust anchor public key 的 BLAKE2b-256。多级 chain、rotation overlap、revocation
 cache 和 quorum issuer 尚未进入这个切片，不能把 direct-validator 宣称为完整 PKI。
 
-HELLO/HELLO_ACK payload field ID 同样固定。HELLO 为 `0x0001..0x000f`：major、min_minor、
+HELLO/HELLO_ACK payload field ID 同样固定。HELLO 为 `0x0001..0x0010`：major、min_minor、
 max_minor、features、platform、build_version、certificate、issuer_chain_hash、principal_type、
 management_key、managed_node_id、connection_id、max_frame、max_digest_entries、
-max_delta_batch。HELLO_ACK 为 `0x0001..0x0007`：selected_major、selected_minor、features、
-max_frame、max_digest_entries、max_delta_batch、peer_connection_id。两者都必须严格升序且
-不允许 minor 0 的未知字段。
+max_delta_batch、channel_binding。HELLO_ACK 为 `0x0001..0x0008`：selected_major、
+selected_minor、features、max_frame、max_digest_entries、max_delta_batch、peer_connection_id、
+channel_binding。两者都必须严格升序；缺少 binding、全零 binding 或额外字段均拒绝。
 
 当前内部 `mesh_mgmt_session` 状态机要求双方都发送 HELLO、验证远端 HELLO、发送 ACK 并
 收到与本地协商结果完全一致的 ACK 后才进入 `ESTABLISHED`。HELLO 验证逐项比较 transport
 peer ID、certificate management key、managed node ID、envelope origin、mesh、principal
 epoch、certificate serial 和有效期；任一失败令该 session 进入 terminal `FAILED`。未建立
 session 的其他 kind fail closed；建立后仍按 negotiated feature gate 拒绝未协商能力。
+HELLO 与 HELLO_ACK 的 binding 都在 management envelope 的 payload hash 和 Ed25519 签名覆盖
+范围内，并且必须等于 adapter 从同一 authenticated P2P security snapshot 复制的 Noise handshake
+hash；因此合法证书和签名也不能把握手帧搬到另一条 Noise 会话。
 session 接口接收 raw frame 并在边界内部强制执行 envelope verification，不接受由调用方
 声称“已验证”的可伪造 C struct。HELLO 验证成功后保存签名 header 的 `session_id` 与
 `incarnation`，HELLO_ACK 及建立后的每个 frame 都必须与其一致，禁止在同一相邻 session
@@ -457,7 +462,7 @@ socket；CoroNet adapter 只在 live TLS 1.3 socket 上构造借用 IO。实际 
 当前内部 `mesh_mgmt_peer` 在 connection owner 之上驱动相邻握手，但不持有私钥：未来 agent
 注入 HELLO/HELLO_ACK builder，builder 只在同步调用期间借出完整 signed frame。driver 在任何
 socket send 前重新验证本地 HELLO signature、direct-trust certificate、时间、mesh、transport
-identity、node/management identity、connection ID、features 与资源上限；并保存 HELLO 的本地
+identity、node/management identity、connection ID、Noise channel binding、features 与资源上限；并保存 HELLO 的本地
 origin session binding。收到远端 HELLO 后，先让 consumer 接受 typed event 并提交 receipt，
 再调用 ACK builder；返回的 ACK 必须签名有效、与 accepted negotiation 逐字段一致，并与本地
 HELLO 使用同一 principal/node/session/incarnation/epoch/certificate binding。builder 失败、签名
@@ -472,10 +477,12 @@ payload 编码或签名失败均不推进 sequence，也不返回可发送 frame
 生产默认没有弱随机 fallback。该模块不生成、读取或持久化 key，不替代 OS keychain/受限密钥文件。
 
 当前内部 `mesh_mgmt_p2p_peer` 是一个 per-connected-peer composition root：初始化时比较
-`p2p_node_get_public_key()` 与本地证书 transport binding，以远端已学习的 P2P 静态公钥初始化
-connection，再组合 adapter、短期 signer 和 peer driver。它能在真实的两个加密 P2P 节点之间
+`p2p_node_get_public_key()` 与本地证书 transport binding，从同一次
+`p2p_peer_get_security_info_v2()` 快照复制远端 Noise static key 和 handshake channel binding，
+再把 binding 注入 signer HELLO 与 dispatcher session 后组合 adapter、短期 signer 和 peer driver。
+它能在真实的两个加密 P2P 节点之间
 双向发送 signed HELLO/HELLO_ACK 并建立 session；本地 transport key 不匹配、未认证远端、
-非完整单 frame borrow、签名或协议失败都会 fail closed。它借用 node/peer，不注册全局 callback，
+非完整单 frame borrow、binding 不一致、签名或协议失败都会 fail closed。它借用 node/peer，不注册全局 callback，
 也不负责 peer 表或连接策略。
 
 当前内部 `mesh_mgmt_agent_router` 在一个 P2P node 上独占 peer/message callback，使用

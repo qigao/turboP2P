@@ -61,7 +61,8 @@ static int mesh_mgmt_kind_requires_target(uint8_t kind) {
     return kind == MESH_MGMT_KIND_COMMAND_REQUEST ||
            kind == MESH_MGMT_KIND_COMMAND_ACCEPTED ||
            kind == MESH_MGMT_KIND_COMMAND_RESULT ||
-           kind == MESH_MGMT_KIND_COMMAND_STATUS;
+           kind == MESH_MGMT_KIND_COMMAND_STATUS ||
+           kind == MESH_MGMT_KIND_CONTROL_FRAME;
 }
 
 static int mesh_mgmt_bytes_are_zero(const uint8_t *bytes, size_t length) {

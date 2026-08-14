@@ -16,8 +16,11 @@ mesh_mgmt_p2p_peer_init_v1(mesh_mgmt_p2p_peer_v1_t *runtime,
                            const mesh_mgmt_p2p_peer_config_v1_t *config) {
   mesh_mgmt_transport_io_v1_t io;
   mesh_mgmt_peer_config_v1_t peer_config;
+  mesh_mgmt_peer_signer_config_v1_t signer_config;
+  mesh_mgmt_dispatch_config_v1_t dispatch_config;
   uint8_t local_transport_peer_id[P2P_KEY_SIZE];
   uint8_t remote_transport_peer_id[P2P_KEY_SIZE];
+  uint8_t channel_binding[P2P_SECURITY_ID_SIZE];
   int p2p_result;
 
   if (!runtime || !config || !config->node || !config->peer || !config->on_event)
@@ -30,8 +33,11 @@ mesh_mgmt_p2p_peer_init_v1(mesh_mgmt_p2p_peer_v1_t *runtime,
 
   memset(&io, 0, sizeof(io));
   memset(&peer_config, 0, sizeof(peer_config));
+  memset(&signer_config, 0, sizeof(signer_config));
+  memset(&dispatch_config, 0, sizeof(dispatch_config));
   memset(local_transport_peer_id, 0, sizeof(local_transport_peer_id));
   memset(remote_transport_peer_id, 0, sizeof(remote_transport_peer_id));
+  memset(channel_binding, 0, sizeof(channel_binding));
   p2p_result = p2p_node_get_public_key(config->node, local_transport_peer_id);
   if (p2p_result != P2P_OK ||
       !mesh_mgmt_crypto_equal_32(local_transport_peer_id, config->signer.local_transport_peer_id)) {
@@ -41,15 +47,23 @@ mesh_mgmt_p2p_peer_init_v1(mesh_mgmt_p2p_peer_v1_t *runtime,
 
   memset(runtime, 0, sizeof(*runtime));
   runtime->last_adapter_result = mesh_mgmt_p2p_adapter_init_v1(
-      &runtime->adapter, config->node, config->peer, &io, remote_transport_peer_id);
+      &runtime->adapter, config->node, config->peer, &io,
+      remote_transport_peer_id, channel_binding);
   if (runtime->last_adapter_result != MESH_MGMT_P2P_ADAPTER_OK)
     goto adapter_failed;
 
-  runtime->last_signer_result = mesh_mgmt_peer_signer_init_v1(&runtime->signer, &config->signer);
+  signer_config = config->signer;
+  dispatch_config = config->dispatch;
+  memcpy(signer_config.hello.channel_binding, channel_binding,
+         sizeof(signer_config.hello.channel_binding));
+  memcpy(dispatch_config.session.channel_binding, channel_binding,
+         sizeof(dispatch_config.session.channel_binding));
+  runtime->last_signer_result =
+      mesh_mgmt_peer_signer_init_v1(&runtime->signer, &signer_config);
   if (runtime->last_signer_result != MESH_MGMT_PEER_SIGNER_OK)
     goto signer_failed;
 
-  peer_config.connection.dispatch = config->dispatch;
+  peer_config.connection.dispatch = dispatch_config;
   peer_config.connection.io = io;
   memcpy(peer_config.connection.transport_peer_id, remote_transport_peer_id,
          sizeof(remote_transport_peer_id));
@@ -68,6 +82,9 @@ mesh_mgmt_p2p_peer_init_v1(mesh_mgmt_p2p_peer_v1_t *runtime,
   runtime->last_error = MESH_MGMT_P2P_PEER_OK;
   memset(local_transport_peer_id, 0, sizeof(local_transport_peer_id));
   memset(remote_transport_peer_id, 0, sizeof(remote_transport_peer_id));
+  mesh_mgmt_crypto_wipe(channel_binding, sizeof(channel_binding));
+  mesh_mgmt_crypto_wipe(&signer_config, sizeof(signer_config));
+  mesh_mgmt_crypto_wipe(&dispatch_config, sizeof(dispatch_config));
   return MESH_MGMT_P2P_PEER_OK;
 
 peer_failed:
@@ -76,6 +93,9 @@ signer_failed:
   mesh_mgmt_p2p_adapter_destroy_v1(&runtime->adapter);
   memset(local_transport_peer_id, 0, sizeof(local_transport_peer_id));
   memset(remote_transport_peer_id, 0, sizeof(remote_transport_peer_id));
+  mesh_mgmt_crypto_wipe(channel_binding, sizeof(channel_binding));
+  mesh_mgmt_crypto_wipe(&signer_config, sizeof(signer_config));
+  mesh_mgmt_crypto_wipe(&dispatch_config, sizeof(dispatch_config));
   memset(&runtime->protocol_peer, 0, sizeof(runtime->protocol_peer));
   runtime->last_error = runtime->last_signer_result != MESH_MGMT_PEER_SIGNER_OK
                             ? MESH_MGMT_P2P_PEER_SIGNER_FAILED
@@ -85,6 +105,9 @@ signer_failed:
 adapter_failed:
   memset(local_transport_peer_id, 0, sizeof(local_transport_peer_id));
   memset(remote_transport_peer_id, 0, sizeof(remote_transport_peer_id));
+  mesh_mgmt_crypto_wipe(channel_binding, sizeof(channel_binding));
+  mesh_mgmt_crypto_wipe(&signer_config, sizeof(signer_config));
+  mesh_mgmt_crypto_wipe(&dispatch_config, sizeof(dispatch_config));
   runtime->last_error = MESH_MGMT_P2P_PEER_ADAPTER_FAILED;
   return runtime->last_error;
 }

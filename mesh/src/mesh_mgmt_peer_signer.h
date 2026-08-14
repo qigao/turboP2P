@@ -43,8 +43,11 @@ typedef struct {
 } mesh_mgmt_peer_signer_config_v1_t;
 
 /**
- * Single event-loop owner for local HELLO/ACK construction. The signer copies
- * the management seed and wipes it on destroy; persistence remains external.
+ * Single event-loop owner for signed management frames. The signer copies the
+ * management seed and wipes it on destroy; persistence remains external. A
+ * zero HELLO channel binding is permitted only for record-only users. HELLO
+ * construction remains fail-closed until a transport composition root has
+ * supplied a nonzero binding before initialization.
  */
 typedef struct {
   uint8_t private_key[MESH_MGMT_ED25519_PRIVATE_KEY_SIZE];

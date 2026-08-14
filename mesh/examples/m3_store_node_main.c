@@ -254,6 +254,14 @@ static int run_mesh_serve(m3_store_node_config_v1_t *config,
   p2p_node_t *p2p = NULL;
   mesh_pump_ctx_t pump = {0};
   uint8_t public_key[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE];
+  uint8_t trusted_transport_keys[M3_CHUNK_MESH_MAX_TRUSTED_KEYS]
+                                [P2P_KEY_SIZE];
+  static const uint8_t mesh_network_id[P2P_SECURITY_ID_SIZE] = {
+      0x4d, 0x33, 0x2d, 0x63, 0x68, 0x75, 0x6e, 0x6b,
+      0x2d, 0x6d, 0x65, 0x73, 0x68, 0x2d, 0x73, 0x65,
+      0x63, 0x75, 0x72, 0x65, 0x2d, 0x77, 0x69, 0x72,
+      0x65, 0x2d, 0x76, 0x32, 0x00, 0x00, 0x00, 0x01,
+  };
 
   memset(&node, 0, sizeof(node));
   memset(&service, 0, sizeof(service));
@@ -267,6 +275,27 @@ static int run_mesh_serve(m3_store_node_config_v1_t *config,
     m3_store_node_destroy_v1(&node);
     return 1;
   }
+  memset(trusted_transport_keys, 0, sizeof(trusted_transport_keys));
+  for (size_t i = 0u; i < gateway_count; i++) {
+    if (p2p_public_key_from_private_key(
+            gateway_keys[i], trusted_transport_keys[i]) != P2P_OK) {
+      fprintf(stderr, "trusted gateway transport key %zu invalid\n", i);
+      p2p_destroy(p2p);
+      m3_store_node_destroy_v1(&node);
+      return 1;
+    }
+  }
+  if (p2p_node_set_private_key(p2p, config->signing_private_key) != P2P_OK ||
+      p2p_node_configure_pinned_security_v2(
+          p2p, mesh_network_id, trusted_transport_keys[0],
+          gateway_count) != P2P_OK) {
+    fprintf(stderr, "p2p identity configuration failed\n");
+    memset(trusted_transport_keys, 0, sizeof(trusted_transport_keys));
+    p2p_destroy(p2p);
+    m3_store_node_destroy_v1(&node);
+    return 1;
+  }
+  memset(trusted_transport_keys, 0, sizeof(trusted_transport_keys));
   if (m3_chunk_mesh_service_init_v1(&service, p2p, &node) !=
       M3_CHUNK_MESH_OK) {
     fprintf(stderr, "mesh service init failed\n");

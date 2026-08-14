@@ -217,7 +217,7 @@ static void test_envelope_rejects_unnegotiated_minor(void) {
     size_t frame_len = 0;
 
     fill_test_input(&input);
-    input.minor = 1;
+    input.minor = 0;
     check_int_eq(mesh_mgmt_envelope_sign_v1(
                      &input, frame, sizeof(frame), &frame_len),
                  MESH_MGMT_ENVELOPE_UNSUPPORTED_VERSION);
@@ -225,7 +225,7 @@ static void test_envelope_rejects_unnegotiated_minor(void) {
 
     fill_test_input(&input);
     frame_len = sign_test_frame(&input, frame);
-    frame[5] = 1;
+    frame[5] = 0;
     check_int_eq(mesh_mgmt_envelope_verify_v1(frame, frame_len, &verified),
                  MESH_MGMT_ENVELOPE_UNSUPPORTED_VERSION);
 }
@@ -259,7 +259,7 @@ static void test_envelope_reports_capacity_without_partial_output(void) {
 }
 
 spec("mesh management signed envelope") {
-    describe("MMP/1.0 common header authentication") {
+    describe("MMP/1.1 common header authentication") {
         it("round trips all frozen header fields and derived values") {
             test_envelope_round_trips_authenticated_common_header();
         }
@@ -269,7 +269,7 @@ spec("mesh management signed envelope") {
         it("rejects a modified domain-separated signature") {
             test_envelope_rejects_signature_tampering();
         }
-        it("rejects an unknown required-header field in minor zero") {
+        it("rejects an unknown required-header field in the current minor") {
             test_envelope_rejects_unknown_v1_header_field();
         }
         it("enforces expiry and command-target constraints") {

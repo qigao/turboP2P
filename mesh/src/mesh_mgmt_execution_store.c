@@ -389,10 +389,13 @@ static mesh_mgmt_execution_store_result_t load_snapshot(
   if (mesh_mgmt_execution_journal_import_v1(&store->journal, entries,
                                              count) !=
           MESH_MGMT_EXECUTION_OK ||
-      store->journal.generation != generation) {
+      store->journal.generation > generation) {
     result = MESH_MGMT_EXECUTION_STORE_CORRUPT;
     goto cleanup;
   }
+  /* Terminal compaction may remove the entry carrying the highest mutation
+   * generation. The integrity-checked header remains the monotonic fact. */
+  store->journal.generation = generation;
   result = MESH_MGMT_EXECUTION_STORE_OK;
 
 cleanup:
@@ -683,6 +686,35 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_transition_v1(
   result = map_journal_result(journal_result);
   if (result != MESH_MGMT_EXECUTION_STORE_OK)
     return result;
+  result = persist_snapshot(store);
+  if (result != MESH_MGMT_EXECUTION_STORE_OK)
+    restore_rollback(store, saved_count, saved_generation);
+  return result;
+}
+
+mesh_mgmt_execution_store_result_t
+mesh_mgmt_execution_store_forget_terminal_v1(
+    mesh_mgmt_execution_store_v1_t *store,
+    const uint8_t command_id[MESH_MGMT_EXECUTION_ID_SIZE]) {
+  size_t index;
+  size_t saved_count;
+  uint64_t saved_generation;
+  mesh_mgmt_execution_store_result_t result;
+
+  if (!store || !store->open || !command_id)
+    return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
+  index = find_entry_index(store, command_id);
+  if (index == store->journal.capacity)
+    return MESH_MGMT_EXECUTION_STORE_NOT_FOUND;
+  if (!mesh_mgmt_execution_state_is_terminal_v1(
+          store->journal.entries[index].state))
+    return MESH_MGMT_EXECUTION_STORE_INVALID_STATE;
+  save_rollback(store, &saved_count, &saved_generation);
+  memset(&store->journal.entries[index], 0,
+         sizeof(store->journal.entries[index]));
+  memset(&store->results[index], 0, sizeof(store->results[index]));
+  store->journal.count--;
+  store->journal.generation++;
   result = persist_snapshot(store);
   if (result != MESH_MGMT_EXECUTION_STORE_OK)
     restore_rollback(store, saved_count, saved_generation);

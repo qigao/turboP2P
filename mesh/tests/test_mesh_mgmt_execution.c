@@ -95,6 +95,10 @@ static void test_typed_schema_rejects_ambiguous_authority(void) {
   check_int_eq(mesh_mgmt_execution_request_bind_v1(&grant, &request),
                MESH_MGMT_EXECUTION_OK);
 
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_NATIVE;
+  check_int_eq(mesh_mgmt_execution_grant_validate_v1(&grant, TEST_NOW_MS),
+               MESH_MGMT_EXECUTION_OK);
+
   grant.capabilities |= 1u << 31;
   check_int_eq(mesh_mgmt_execution_grant_validate_v1(&grant, TEST_NOW_MS),
                MESH_MGMT_EXECUTION_INVALID_SCHEMA);

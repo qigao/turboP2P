@@ -51,6 +51,15 @@ typedef struct {
     uint8_t prepared;
 } mesh_mgmt_replay_preparation_v1_t;
 
+typedef struct {
+    mesh_mgmt_replay_binding_v1_t binding;
+    uint64_t last_sequence;
+    uint64_t generation;
+    size_t entry_count;
+    uint8_t has_sequence;
+    uint8_t bound;
+} mesh_mgmt_replay_snapshot_v1_t;
+
 /**
  * Per-authenticated-origin replay state. One event-loop owner must serialize
  * prepare/commit/destroy calls; this type does not provide internal locking.
@@ -89,6 +98,26 @@ mesh_mgmt_replay_result_t mesh_mgmt_replay_prepare_v1(
 mesh_mgmt_replay_result_t mesh_mgmt_replay_commit_v1(
     mesh_mgmt_replay_gate_v1_t *gate,
     const mesh_mgmt_replay_preparation_v1_t *preparation);
+
+/**
+ * Exports all occupied replay entries. Counts are always returned;
+ * insufficient output capacity returns RESOURCE_EXHAUSTED without a partial
+ * copy. The caller owns the copied entries.
+ */
+mesh_mgmt_replay_result_t mesh_mgmt_replay_export_v1(
+    const mesh_mgmt_replay_gate_v1_t *gate,
+    mesh_mgmt_replay_entry_v1_t *entries, size_t entry_capacity,
+    mesh_mgmt_replay_snapshot_v1_t *out_snapshot);
+
+/**
+ * Imports a checkpoint into an initialized and identically bound empty gate.
+ * Expired cache entries are omitted, but last_sequence remains authoritative.
+ * Validation failure leaves the gate unchanged.
+ */
+mesh_mgmt_replay_result_t mesh_mgmt_replay_import_v1(
+    mesh_mgmt_replay_gate_v1_t *gate,
+    const mesh_mgmt_replay_snapshot_v1_t *snapshot,
+    const mesh_mgmt_replay_entry_v1_t *entries, uint64_t now_ms);
 
 #ifdef __cplusplus
 }

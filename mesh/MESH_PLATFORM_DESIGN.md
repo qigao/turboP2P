@@ -9,6 +9,8 @@
 [`MESH_MANAGEMENT_PROTOCOL.md`](MESH_MANAGEMENT_PROTOCOL.md)；面向用户的身份、Grants、
 Controller API/CLI 与审计产品面见
 [`MESH_PRODUCT_CONTROL_PLANE.md`](MESH_PRODUCT_CONTROL_PLANE.md)。
+一个安全 Mesh 下共享 underlay 的多逻辑 Network、membership、地址池、重叠 CIDR 和隔离迁移见
+[`MESH_MULTI_NETWORK_DESIGN.md`](MESH_MULTI_NETWORK_DESIGN.md)。
 运行在 Mesh 之上的可选分布式对象存储 M3 见
 [`M3_DISTRIBUTED_STORAGE_DESIGN.md`](M3_DISTRIBUTED_STORAGE_DESIGN.md)；M3 是独立业务服务，
 不改变本文件定义的 Mesh networking-only core 边界。
@@ -663,7 +665,8 @@ STOPPED -> PREFLIGHT -> OS_STAGED -> MESH_READY
 生产 profile 必须等待以下门槛全部满足：
 
 - 密码学随机数失败或短读能向上传播，不能继续使用部分初始化 key/nonce。
-- 采用经审查的标准握手/KDF，不以简化的“Noise-like”流程代替协议验证。
+- secure wire 已采用标准 Noise XX；生产发布仍须完成固定向量、独立实现互操作、持续 fuzz、
+  跨平台 sanitizer 与独立安全审查。
 - data envelope 的 AEAD associated data 绑定 origin、destination、session/path epoch、
   sequence、payload kind 和必要转发头。
 - receive path 有有界滑动 replay window，并测试重复、乱序、counter wrap 和重连旧包。

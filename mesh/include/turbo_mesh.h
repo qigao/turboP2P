@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <platform.h>
+#include <p2p.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -59,6 +60,12 @@ extern "C" {
 #define MESH_CAP_SIGNED_ROUTES      (1u << 2) /* Reserved */
 #define MESH_CAP_POLICY_EPOCH       (1u << 3) /* Reserved */
 #define MESH_CAP_STREAM_V1          (1u << 4)
+#define MESH_CAP_MULTI_NETWORK_V2   (1u << 5)
+#define MESH_CAP_NETWORK_FRAME_V2   (1u << 6)
+#define MESH_CAP_NETWORK_MEMBERSHIP_V1 (1u << 7)
+#define MESH_CAP_NETWORK_OVERLAP_OS (1u << 8)
+#define MESH_CAP_NETWORK_IPV6       (1u << 9) /* Reserved until IPv6 gate passes */
+#define MESH_CAP_SECURE_RELAY_ENVELOPE (1u << 10) /* Reserved */
 #define MESH_CAP_LOCAL_DEFAULT      (0u)
 
 /* =============================================================================
@@ -74,6 +81,13 @@ typedef enum {
     MESH_ERR_TIMEOUT = -5,
     MESH_ERR_ALREADY_EXISTS = -6,
     MESH_ERR_BUSY = -7,
+    MESH_ERR_UNAUTHORIZED = -8,
+    MESH_ERR_CONFLICT = -9,
+    MESH_ERR_STALE_EPOCH = -10,
+    MESH_ERR_RESOURCE_EXHAUSTED = -11,
+    MESH_ERR_UNKNOWN_COMMIT = -12,
+    MESH_ERR_UNSUPPORTED = -13,
+    MESH_ERR_CLOSED = -14,
 } mesh_error_t;
 
 /* =============================================================================
@@ -140,7 +154,15 @@ typedef struct {
 
     /* Network ID (optional) - for isolated networks */
     const char *network_id;         /* NULL for public mesh */
-    const char *identity_secret_hex;/* Optional 32-byte node private key as 64 hex chars */
+    const uint8_t *identity_private_key; /* Borrowed only during mesh_create() */
+    size_t identity_private_key_size;    /* Must be exactly P2P_KEY_SIZE (32) */
+    /* Provider struct borrowed during create; context until mesh_destroy(). */
+    const p2p_private_key_provider_v3_t *identity_private_key_provider;
+    /* Blocking provider struct borrowed during create; context until destroy. */
+    const p2p_blocking_private_key_provider_v4_t
+        *identity_blocking_private_key_provider;
+    /* Legacy inline dev/test key; mutually exclusive with all modes above. */
+    const char *identity_secret_hex;
 
     /* Direct-path discovery */
     int enable_ice;                 /* Enable ICE candidate signaling */
@@ -164,7 +186,7 @@ typedef struct {
     /* Admission control */
     const char **peer_allow_cidrs;
     int peer_allow_count;
-    const char **peer_allow_node_ids;
+    const char **peer_allow_node_ids; /* Secure-wire trust store; required for multi-node operation */
     int peer_allow_node_id_count;
     unsigned int peer_protocol_major; /* 0 disables protocol-major admission */
     const mesh_packet_policy_rule_t *packet_policy_rules;
@@ -719,6 +741,18 @@ CXX_C_API int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats);
  * @return MESH_OK on success
  */
 CXX_C_API int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info);
+
+/**
+ * Copy the underlying P2P node's atomic, bounded security status snapshot.
+ * No key material, credential, peer identity, address, or per-handshake sample
+ * is exposed. Set status->struct_size = sizeof(*status) before calling.
+ * The read must not race mesh_destroy().
+ *
+ * @return MESH_OK, MESH_ERR_INVALID_ARG, MESH_ERR_BUSY if the security policy
+ *         is not ready, or MESH_ERR_NETWORK for another P2P-layer failure.
+ */
+CXX_C_API int mesh_get_security_status_v3(
+    mesh_network_t *mesh, p2p_node_security_status_v3_t *status);
 
 /**
  * Read a bounded page from the local owner-loop path trace.

@@ -1,21 +1,110 @@
 #include "peer.h"
 #include "node.h"
 #include "../internal.h"
+#include "../security/p2p_cookie.h"
+#include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_stream.h>
+#include <turbo_error.h>
 #include <tlog.h>
 #include <platform.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <time.h>
 
 #define RECV_BUF_INITIAL 4096
+#define P2P_RECV_BUFFER_LIMIT (256U * 1024U)
+#define P2P_HANDSHAKE_BUFFER_LIMIT (16U * 1024U)
+
+enum {
+    P2P_SECURE_READY_SIZE = 136,
+    P2P_APPLICATION_PROTOCOL_VERSION = 2,
+};
+
+static const uint8_t P2P_SECURE_READY_MAGIC[4] = {'R', 'D', 'Y', '2'};
+static const uint8_t P2P_SECURE_PROLOGUE_DOMAIN[] =
+    "TurboP2P secure wire v2";
+static const uint8_t P2P_SECURE_SESSION_DOMAIN[] =
+    "turbo-p2p-session-v2";
 
 static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip);
 static void p2p_peer_handle_stream_disconnect(p2p_peer_t *peer, int destroy_peer);
 static void p2p_peer_finalize(p2p_peer_t *peer);
 static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer);
-static void p2p_peer_capture_remote_public_key(p2p_peer_t *peer);
 static void p2p_peer_reset_security_state(p2p_peer_t *peer);
+static int p2p_peer_process_security(p2p_peer_t *peer, size_t *consumed);
+
+static uint64_t peer_next_handshake_generation(uint64_t generation) {
+    generation++;
+    return generation == 0 ? 1 : generation;
+}
+
+static int peer_security_latency_stage(
+    uint8_t security_stage, p2p_security_latency_stage_t *latency_stage) {
+    if (!latency_stage) {
+        return 0;
+    }
+    switch (security_stage) {
+        case P2P_SECURITY_STAGE_COOKIE:
+            *latency_stage = P2P_SECURITY_LATENCY_COOKIE;
+            return 1;
+        case P2P_SECURITY_STAGE_PREFACE:
+            *latency_stage = P2P_SECURITY_LATENCY_PREFACE;
+            return 1;
+        case P2P_SECURITY_STAGE_NOISE:
+            *latency_stage = P2P_SECURITY_LATENCY_NOISE;
+            return 1;
+        case P2P_SECURITY_STAGE_READY:
+            *latency_stage = P2P_SECURITY_LATENCY_READY;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void peer_security_transition(p2p_peer_t *peer,
+                                     p2p_security_stage_t next_stage) {
+    p2p_security_latency_stage_t latency_stage;
+    uint64_t now_ms;
+
+    if (!peer || !peer->node || peer->security_stage == next_stage) {
+        return;
+    }
+    now_ms = turbo_hrtime() / 1000000U;
+    if (peer_security_latency_stage(peer->security_stage, &latency_stage)) {
+        p2p_node_record_handshake_latency(
+            peer->node,
+            peer->security_initiator ? P2P_SECURITY_ROLE_INITIATOR
+                                     : P2P_SECURITY_ROLE_RESPONDER,
+            latency_stage, peer->security_stage_started_ms, now_ms);
+    }
+    peer->security_stage = (uint8_t)next_stage;
+    peer->security_stage_started_ms =
+        peer_security_latency_stage(next_stage, &latency_stage) ? now_ms : 0;
+}
+
+static int peer_session_admit_wire_bytes(const p2p_peer_t *peer,
+                                         uint64_t used_bytes,
+                                         size_t wire_bytes) {
+    uint64_t now_ms;
+    uint64_t age_limit;
+    uint64_t byte_limit;
+
+    if (!peer || !peer->node || peer->session_started_ms == 0) {
+        return P2P_ERR_INVALID_STATE;
+    }
+    now_ms = turbo_hrtime() / 1000000U;
+    age_limit = peer->node->security_config.session_max_age_ms;
+    byte_limit =
+        peer->node->security_config.session_max_bytes_per_direction;
+    if (now_ms < peer->session_started_ms ||
+        now_ms - peer->session_started_ms >= age_limit ||
+        used_bytes > byte_limit ||
+        (uint64_t)wire_bytes > byte_limit - used_bytes) {
+        return P2P_ERR_KEY_EXHAUSTED;
+    }
+    return P2P_OK;
+}
 
 /* =============================================================================
  * Peer State String
@@ -98,7 +187,7 @@ static void p2p_peer_finalize(p2p_peer_t *peer) {
 
     /* Clean up crypto state */
     if (peer->handshake) {
-        p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
+        p2p_noise_handshake_destroy(peer->handshake);
         free(peer->handshake);
         peer->handshake = NULL;
     }
@@ -177,9 +266,13 @@ void p2p_peer_release(p2p_peer_t *peer) {
 
 int p2p_peer_connect(p2p_peer_t *peer) {
     uint64_t now_ms = 0;
+    int capacity_ret;
 
     if (!peer || !peer->node) {
         return P2P_ERR_INVALID_ARG;
+    }
+    if (peer->private_key_operation) {
+        return P2P_ERR_INVALID_STATE;
     }
 
     if (p2p_peer_connect_is_suppressed(peer)) {
@@ -199,11 +292,24 @@ int p2p_peer_connect(p2p_peer_t *peer) {
 
     p2p_peer_reset_security_state(peer);
 
+    capacity_ret =
+        p2p_node_reserve_transport_send_capacity(peer->node, peer);
+    if (capacity_ret != P2P_OK) {
+        return capacity_ret;
+    }
+
     turbo_stream_t *stream = turbo_stream_create(peer->node->ctx,
                                                  peer_stream_kind_from_ip(peer->ip));
     if (!stream) {
         TLOG_ERROR("[P2P] peer_connect: failed to create stream");
+        p2p_node_release_transport_send_capacity(peer->node, peer);
         return P2P_ERR_NO_MEM;
+    }
+    if (turbo_stream_set_send_hwm(
+            stream, peer->node->security_config.send_hwm_bytes) != 0) {
+        turbo_stream_destroy(stream);
+        p2p_node_release_transport_send_capacity(peer->node, peer);
+        return P2P_ERR_INVALID_STATE;
     }
     turbo_stream_set_user_data(stream, peer);
 
@@ -211,6 +317,7 @@ int p2p_peer_connect(p2p_peer_t *peer) {
     peer->conn = p2p_connection_create_outbound(stream);
     if (!peer->conn) {
         turbo_stream_destroy(stream);
+        p2p_node_release_transport_send_capacity(peer->node, peer);
         return P2P_ERR_NO_MEM;
     }
 
@@ -219,6 +326,7 @@ int p2p_peer_connect(p2p_peer_t *peer) {
         TLOG_DEBUG("[P2P] peer_connect: connect to {}:{} failed", peer->ip, peer->port);
         p2p_connection_destroy(peer->conn);
         peer->conn = NULL;
+        p2p_node_release_transport_send_capacity(peer->node, peer);
         return P2P_ERR_NETWORK;
     }
 
@@ -258,34 +366,58 @@ static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
     return blocked;
 }
 
-static void p2p_peer_capture_remote_public_key(p2p_peer_t *peer) {
-    if (!peer || !peer->handshake || !peer->handshake->has_remote_static_public) {
-        return;
-    }
-
-    memcpy(peer->remote_public_key,
-           peer->handshake->remote_static_public,
-           sizeof(peer->remote_public_key));
-    peer->remote_public_key_ready = 1;
-}
-
 static void p2p_peer_reset_security_state(p2p_peer_t *peer) {
     if (!peer) {
         return;
     }
 
+    if (peer->private_key_operation) {
+        peer->deferred_security_reset = 1;
+        p2p_private_key_executor_cancel_peer(peer);
+        return;
+    }
+
     if (peer->handshake) {
-        p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
+        p2p_noise_handshake_destroy(peer->handshake);
         free(peer->handshake);
         peer->handshake = NULL;
     }
     p2p_crypto_session_destroy(&peer->crypto);
     memset(peer->remote_public_key, 0, sizeof(peer->remote_public_key));
     peer->remote_public_key_ready = 0;
+    p2p_crypto_wipe(peer->remote_credential,
+                    sizeof(peer->remote_credential));
+    peer->remote_credential_len = 0;
+    p2p_crypto_wipe(&peer->authenticated_identity,
+                    sizeof(peer->authenticated_identity));
+    p2p_crypto_wipe(peer->channel_binding,
+                    sizeof(peer->channel_binding));
+    memset(peer->local_preface, 0, sizeof(peer->local_preface));
+    memset(peer->remote_preface, 0, sizeof(peer->remote_preface));
+    p2p_crypto_wipe(peer->cookie_binding, sizeof(peer->cookie_binding));
+    peer->security_stage = P2P_SECURITY_STAGE_NONE;
+    peer->security_stage_started_ms = 0;
+    peer->noise_step = 0;
+    peer->security_initiator = 0;
+    peer->ready_sent = 0;
+    peer->ready_received = 0;
+    peer->security_deadline_ms = 0;
+    peer->session_started_ms = 0;
+    peer->sent_bytes = 0;
+    peer->received_bytes = 0;
+    peer->deferred_security_reset = 0;
+    peer->handshake_generation =
+        peer_next_handshake_generation(peer->handshake_generation);
 }
 
 void p2p_peer_disconnect(p2p_peer_t *peer) {
-    if (!peer || !peer->conn) return;
+    if (!peer) return;
+    if (!peer->conn) {
+        if (peer->node) {
+            p2p_node_release_transport_send_capacity(peer->node, peer);
+        }
+        return;
+    }
 
     peer->state = P2P_PEER_STATE_CLOSING;
 
@@ -296,6 +428,9 @@ void p2p_peer_disconnect(p2p_peer_t *peer) {
     
     if (conn) {
         p2p_connection_destroy(conn);
+    }
+    if (peer->node) {
+        p2p_node_release_transport_send_capacity(peer->node, peer);
     }
 
     peer->state = P2P_PEER_STATE_DISCONNECTED;
@@ -308,8 +443,13 @@ void p2p_peer_disconnect(p2p_peer_t *peer) {
  * ============================================================================= */
 
 static int peer_send_raw(p2p_peer_t *peer, const uint8_t *data, size_t len) {
+    int result;
+
     if (!peer || !peer->conn) return P2P_ERR_NETWORK;
-    return (p2p_connection_send(peer->conn, data, len) == 0) ? P2P_OK : P2P_ERR_NETWORK;
+    result = p2p_connection_send(peer->conn, data, len);
+    if (result == 0) return P2P_OK;
+    return result == TURBO_ENOBUFS ? P2P_ERR_RESOURCE_EXHAUSTED
+                                  : P2P_ERR_NETWORK;
 }
 
 int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
@@ -317,8 +457,9 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    if (peer->state != P2P_PEER_STATE_CONNECTED &&
-        peer->state != P2P_PEER_STATE_HANDSHAKING) {
+    if (peer->state != P2P_PEER_STATE_CONNECTED ||
+        peer->security_stage != P2P_SECURITY_STAGE_ESTABLISHED ||
+        !p2p_crypto_session_is_ready(&peer->crypto)) {
         TLOG_DEBUG("[P2P] peer_send: peer not connected (state={})",
                  p2p_peer_state_str(peer->state));
         return P2P_ERR_NETWORK;
@@ -333,49 +474,79 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
         return ret;
     }
 
-    /* Encrypt if crypto session is ready (skip for handshake messages) */
-    if (p2p_crypto_session_is_ready(&peer->crypto) &&
-        msg->header.type != P2P_MSG_NOISE_HANDSHAKE) {
+    /* Application frames exist only inside an established Noise session. */
+    if (p2p_crypto_session_is_ready(&peer->crypto)) {
 
-        /* Allocate buffer for ciphertext: nonce counter + tag + encrypted frame. */
-        size_t ct_len = frame_len + 8 + P2P_TAG_SIZE;
-        uint8_t *ct_buf = (uint8_t *)malloc(ct_len + 4);  /* +4 for length prefix */
+        size_t ct_len;
+        uint8_t *ct_buf;
+
+        if (frame_len > P2P_NOISE_MAX_PLAINTEXT_SIZE) {
+            free(frame_buf);
+            return P2P_ERR_PROTOCOL;
+        }
+        ct_len = frame_len + P2P_NOISE_TAG_SIZE;
+        ret = peer_session_admit_wire_bytes(peer, peer->sent_bytes,
+                                            ct_len + 2U);
+        if (ret != P2P_OK) {
+            free(frame_buf);
+            p2p_node_record_security_failure(peer->node,
+                                             peer->security_stage, ret);
+            p2p_peer_disconnect(peer);
+            return ret;
+        }
+        ct_buf = (uint8_t *)malloc(ct_len + 2);
         if (!ct_buf) {
             free(frame_buf);
             return P2P_ERR_NO_MEM;
         }
 
-        /* Prepend encrypted frame length (little-endian) */
-        ct_buf[0] = (uint8_t)(ct_len & 0xFF);
-        ct_buf[1] = (uint8_t)((ct_len >> 8) & 0xFF);
-        ct_buf[2] = (uint8_t)((ct_len >> 16) & 0xFF);
-        ct_buf[3] = (uint8_t)((ct_len >> 24) & 0xFF);
+        ct_buf[0] = (uint8_t)((ct_len >> 8) & 0xFF);
+        ct_buf[1] = (uint8_t)(ct_len & 0xFF);
 
         size_t encrypted_len = 0;
         ret = p2p_crypto_encrypt(&peer->crypto, frame_buf, frame_len,
-                                  ct_buf + 4, &encrypted_len);
+                                  ct_buf + 2, &encrypted_len);
         free(frame_buf);
 
         if (ret != P2P_OK) {
             free(ct_buf);
             TLOG_ERROR("[P2P] peer_send: encryption failed");
+            p2p_node_record_security_failure(peer->node,
+                                             peer->security_stage, ret);
+            p2p_peer_disconnect(peer);
             return ret;
         }
 
-        ret = peer_send_raw(peer, ct_buf, encrypted_len + 4);
+        ret = peer_send_raw(peer, ct_buf, encrypted_len + 2);
         free(ct_buf);
+        if (ret != P2P_OK) {
+            /* CipherState advanced before the transport admitted the frame.
+             * Continuing or retrying would permanently desynchronize nonces. */
+            p2p_node_record_security_failure(peer->node,
+                                             peer->security_stage, ret);
+            p2p_peer_disconnect(peer);
+            return ret;
+        }
+        peer->sent_bytes += (uint64_t)encrypted_len + 2U;
         return ret;
     }
 
-    /* Send unencrypted */
-    ret = peer_send_raw(peer, frame_buf, frame_len);
     free(frame_buf);
-    return ret;
+    return P2P_ERR_INVALID_STATE;
 }
 
 int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
+    size_t receive_limit;
+
     if (!peer || !data || len == 0) {
         return P2P_ERR_INVALID_ARG;
+    }
+
+    receive_limit = peer->security_stage == P2P_SECURITY_STAGE_ESTABLISHED
+                        ? P2P_RECV_BUFFER_LIMIT
+                        : P2P_HANDSHAKE_BUFFER_LIMIT;
+    if (peer->recv_len > receive_limit || len > receive_limit - peer->recv_len) {
+        return P2P_ERR_PROTOCOL;
     }
 
     /* Append to receive buffer */
@@ -383,6 +554,9 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
         size_t new_cap = peer->recv_cap * 2;
         while (new_cap < peer->recv_len + len) {
             new_cap *= 2;
+        }
+        if (new_cap > receive_limit) {
+            new_cap = receive_limit;
         }
         uint8_t *new_buf = (uint8_t *)realloc(peer->recv_buf, new_cap);
         if (!new_buf) {
@@ -399,35 +573,62 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
 
     /* Try to parse complete messages */
     while (peer->recv_len > 0) {
+        size_t consumed = 0;
+        int ret = P2P_OK;
+
+        if (peer->private_key_operation) {
+            break;
+        }
+
+        if (peer->security_stage != P2P_SECURITY_STAGE_ESTABLISHED) {
+            ret = p2p_peer_process_security(peer, &consumed);
+            if (ret == P2P_ERR_INVALID_ARG) {
+                break;
+            }
+            if (ret != P2P_OK || consumed == 0 ||
+                consumed > peer->recv_len) {
+                return ret == P2P_OK ? P2P_ERR_PROTOCOL : ret;
+            }
+            peer->recv_len -= consumed;
+            if (peer->recv_len > 0) {
+                memmove(peer->recv_buf, peer->recv_buf + consumed,
+                        peer->recv_len);
+            }
+            if (peer->private_key_operation) {
+                break;
+            }
+            continue;
+        }
+
         p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
         if (!msg) return P2P_ERR_NO_MEM;
-        
-        size_t consumed = 0;
-
-        int ret = P2P_OK;
         uint8_t *plain_buf = NULL;
         size_t plain_len = 0;
 
         if (p2p_crypto_session_is_ready(&peer->crypto)) {
             size_t encrypted_len = 0;
 
-            if (peer->recv_len < 4) {
+            if (peer->recv_len < 2) {
                 free(msg);
                 break;
             }
 
-            encrypted_len = (size_t)peer->recv_buf[0] |
-                            ((size_t)peer->recv_buf[1] << 8) |
-                            ((size_t)peer->recv_buf[2] << 16) |
-                            ((size_t)peer->recv_buf[3] << 24);
-            if (encrypted_len < 8 + P2P_TAG_SIZE ||
-                encrypted_len > sizeof(((p2p_message_t *)0)->payload.raw) + sizeof(p2p_msg_header_t) + 8 + P2P_TAG_SIZE) {
+            encrypted_len = ((size_t)peer->recv_buf[0] << 8) |
+                            (size_t)peer->recv_buf[1];
+            if (encrypted_len < P2P_NOISE_TAG_SIZE ||
+                encrypted_len > P2P_NOISE_MAX_FRAME_SIZE) {
                 free(msg);
                 return P2P_ERR_PROTOCOL;
             }
-            if (peer->recv_len < 4 + encrypted_len) {
+            if (peer->recv_len < 2 + encrypted_len) {
                 free(msg);
                 break;
+            }
+            ret = peer_session_admit_wire_bytes(peer, peer->received_bytes,
+                                                encrypted_len + 2U);
+            if (ret != P2P_OK) {
+                free(msg);
+                return ret;
             }
 
             plain_buf = (uint8_t *)malloc(encrypted_len);
@@ -436,15 +637,17 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
                 return P2P_ERR_NO_MEM;
             }
             ret = p2p_crypto_decrypt(&peer->crypto,
-                                     peer->recv_buf + 4,
+                                     peer->recv_buf + 2,
                                      encrypted_len,
                                      plain_buf,
+                                     encrypted_len,
                                      &plain_len);
             if (ret != P2P_OK) {
                 free(plain_buf);
                 free(msg);
                 return ret;
             }
+            peer->received_bytes += (uint64_t)encrypted_len + 2U;
 
             ret = p2p_message_deserialize(plain_buf, plain_len, msg, &consumed);
             if (ret == P2P_OK && consumed != plain_len) {
@@ -452,10 +655,10 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
             }
             free(plain_buf);
             plain_buf = NULL;
-            consumed = 4 + encrypted_len;
+            consumed = 2 + encrypted_len;
         } else {
-            ret = p2p_message_deserialize(peer->recv_buf, peer->recv_len,
-                                          msg, &consumed);
+            free(msg);
+            return P2P_ERR_INVALID_STATE;
         }
         if (ret == P2P_ERR_INVALID_ARG) {
             /* Need more data */
@@ -521,203 +724,513 @@ int p2p_peer_id_cmp(const p2p_peer_t *a, const p2p_peer_t *b) {
  * Noise Protocol Handshake
  * ============================================================================= */
 
-/* Send a handshake message */
-static int peer_send_handshake(p2p_peer_t *peer, uint8_t step, const uint8_t *data, size_t len) {
-    p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
-    if (!msg) return P2P_ERR_NO_MEM;
+static void p2p_write_be16(uint8_t output[2], uint16_t value) {
+    output[0] = (uint8_t)(value >> 8);
+    output[1] = (uint8_t)value;
+}
 
-    p2p_message_init(msg, P2P_MSG_NOISE_HANDSHAKE);
-    msg->payload.noise_handshake.step = step;
-    msg->payload.noise_handshake.data_len = (uint8_t)len;
-    if (len > 0 && len <= sizeof(msg->payload.noise_handshake.data)) {
-        memcpy(msg->payload.noise_handshake.data, data, len);
+static uint16_t p2p_read_be16(const uint8_t input[2]) {
+    return (uint16_t)(((uint16_t)input[0] << 8) | input[1]);
+}
+
+static int peer_bytes_are_zero(const uint8_t *bytes, size_t length) {
+    uint8_t combined = 0;
+
+    for (size_t index = 0; index < length; ++index) {
+        combined |= bytes[index];
     }
-    msg->header.payload_len =
-        (uint16_t)(offsetof(p2p_noise_handshake_payload_t, data) + len);
-    int ret = p2p_peer_send(peer, msg);
-    free(msg);
+    return combined == 0;
+}
+
+static int peer_constant_time_equal(const uint8_t *left,
+                                    const uint8_t *right,
+                                    size_t length) {
+    uint8_t difference = 0;
+
+    for (size_t index = 0; index < length; ++index) {
+        difference |= (uint8_t)(left[index] ^ right[index]);
+    }
+    return difference == 0;
+}
+
+static int peer_send_security_frame(p2p_peer_t *peer, const uint8_t *data,
+                                    size_t len) {
+    uint8_t *frame;
+    int ret;
+
+    if (!peer || !data || len == 0 || len > UINT16_MAX) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    frame = (uint8_t *)malloc(len + 2);
+    if (!frame) {
+        return P2P_ERR_NO_MEM;
+    }
+    p2p_write_be16(frame, (uint16_t)len);
+    memcpy(frame + 2, data, len);
+    ret = peer_send_raw(peer, frame, len + 2);
+    p2p_crypto_wipe(frame, len + 2);
+    free(frame);
     return ret;
 }
 
-/* Start Noise XX handshake as initiator */
-int p2p_peer_start_handshake(p2p_peer_t *peer) {
-    if (!peer || !peer->node) return P2P_ERR_INVALID_ARG;
+static int peer_send_ready(p2p_peer_t *peer) {
+    uint8_t plain[P2P_SECURE_READY_SIZE] = {0};
+    uint8_t session_input[sizeof(P2P_SECURE_SESSION_DOMAIN) - 1 +
+                          P2P_SECURITY_ID_SIZE];
+    uint8_t encrypted[P2P_SECURE_READY_SIZE + P2P_NOISE_TAG_SIZE];
+    uint8_t session_id[P2P_SECURITY_ID_SIZE];
+    size_t encrypted_len = 0;
+    int ret;
 
-    /* Check if encryption is enabled */
-    if (!peer->node->encryption_enabled) {
-        TLOG_DEBUG("[P2P] handshake: encryption disabled, skipping");
-        return P2P_OK;
+    memcpy(session_input, P2P_SECURE_SESSION_DOMAIN,
+           sizeof(P2P_SECURE_SESSION_DOMAIN) - 1);
+    memcpy(session_input + sizeof(P2P_SECURE_SESSION_DOMAIN) - 1,
+           peer->channel_binding, P2P_SECURITY_ID_SIZE);
+    ret = p2p_noise_backend_blake2s(session_input, sizeof(session_input),
+                                    session_id);
+    if (ret != P2P_OK) {
+        goto cleanup;
+    }
+    memcpy(plain, P2P_SECURE_READY_MAGIC, sizeof(P2P_SECURE_READY_MAGIC));
+    p2p_write_be16(plain + 4, P2P_SECURE_WIRE_VERSION_V2);
+    p2p_write_be16(plain + 6, P2P_APPLICATION_PROTOCOL_VERSION);
+    memcpy(plain + 8, peer->node->local_authenticated_identity.principal_id,
+           P2P_SECURITY_ID_SIZE);
+    memcpy(plain + 40, peer->node->local_authenticated_identity.routing_id,
+           P2P_SECURITY_ID_SIZE);
+    memcpy(plain + 72,
+           peer->node->local_authenticated_identity.credential_digest,
+           P2P_SECURITY_ID_SIZE);
+    memcpy(plain + 104, session_id, P2P_SECURITY_ID_SIZE);
+    ret = p2p_crypto_encrypt(&peer->crypto, plain, sizeof(plain), encrypted,
+                             &encrypted_len);
+    if (ret == P2P_OK) {
+        ret = peer_send_security_frame(peer, encrypted, encrypted_len);
+    }
+    if (ret == P2P_OK) {
+        peer->ready_sent = 1;
+        peer->sent_bytes += (uint64_t)encrypted_len + 2U;
     }
 
-    /* Allocate handshake state */
-    peer->handshake = (p2p_noise_handshake_t *)calloc(1, sizeof(p2p_noise_handshake_t));
+cleanup:
+    p2p_crypto_wipe(plain, sizeof(plain));
+    p2p_crypto_wipe(encrypted, sizeof(encrypted));
+    p2p_crypto_wipe(session_input, sizeof(session_input));
+    p2p_crypto_wipe(session_id, sizeof(session_id));
+    return ret;
+}
+
+static int peer_finish_noise(p2p_peer_t *peer) {
+    p2p_authenticated_identity_v2_t identity = {0};
+    uint64_t now_ms = (uint64_t)time(NULL) * 1000U;
+    int ret;
+
+    if (!peer || !peer->handshake || !p2p_noise_is_complete(peer->handshake)) {
+        return P2P_ERR_INVALID_STATE;
+    }
+    ret = p2p_noise_split(peer->handshake, &peer->crypto);
+    if (ret != P2P_OK) {
+        return ret;
+    }
+    memcpy(peer->remote_public_key,
+           peer->handshake->remote_static_public, P2P_KEY_SIZE);
+    memcpy(peer->channel_binding, peer->handshake->handshake_hash,
+           P2P_SECURITY_ID_SIZE);
+    peer->remote_public_key_ready = 1;
+
+    ret = peer->node->security_config.identity_provider.verify_remote_credential(
+        peer->node->security_config.identity_provider.context,
+        peer->remote_public_key, peer->channel_binding,
+        peer->remote_credential, peer->remote_credential_len, now_ms,
+        &identity);
+    if (ret != P2P_OK ||
+        peer_bytes_are_zero(identity.principal_id,
+                            sizeof(identity.principal_id)) ||
+        peer_bytes_are_zero(identity.routing_id,
+                            sizeof(identity.routing_id)) ||
+        peer_bytes_are_zero(identity.credential_digest,
+                            sizeof(identity.credential_digest))) {
+        p2p_crypto_wipe(&identity, sizeof(identity));
+        return P2P_ERR_UNTRUSTED_IDENTITY;
+    }
+    peer->authenticated_identity = identity;
+    memcpy(peer->id, identity.routing_id, P2P_HASH_SIZE);
+    p2p_crypto_wipe(&identity, sizeof(identity));
+
+    p2p_noise_handshake_destroy(peer->handshake);
+    free(peer->handshake);
+    peer->handshake = NULL;
+    peer_security_transition(peer, P2P_SECURITY_STAGE_READY);
+    peer->security_deadline_ms = turbo_hrtime() / 1000000U +
+                                 peer->node->security_config.ready_timeout_ms;
+    return peer_send_ready(peer);
+}
+
+static int peer_handle_noise_frame(p2p_peer_t *peer, const uint8_t *frame,
+                                   size_t frame_len) {
+    uint8_t reply[P2P_SECURITY_HANDSHAKE_FRAME_MAX];
+    size_t reply_len = 0;
+    size_t credential_len = 0;
+    int ret;
+
+    if (!peer || !peer->node || !peer->handshake ||
+        peer->private_key_operation) {
+        return P2P_ERR_INVALID_STATE;
+    }
+
+    if (!peer->security_initiator && peer->noise_step == 0) {
+        ret = p2p_noise_read_message_with_payload(
+            peer->handshake, frame, frame_len, peer->remote_credential,
+            peer->node->security_config.credential_limit, &credential_len);
+        if (ret != P2P_OK || credential_len != 0) {
+            return ret == P2P_OK ? P2P_ERR_PROTOCOL : ret;
+        }
+        if (peer->node->crypto.identity.uses_blocking_private_key_provider) {
+            turbo_stream_t *stream = peer->conn
+                                         ? (turbo_stream_t *)peer->conn->ops.handle
+                                         : NULL;
+            if (!stream) {
+                return P2P_ERR_NETWORK;
+            }
+            turbo_stream_recv_stop(stream);
+            return p2p_private_key_executor_submit(
+                peer, peer->node->local_credential,
+                peer->node->local_credential_len, 2, 0);
+        }
+        ret = p2p_noise_write_message_with_payload(
+            peer->handshake, peer->node->local_credential,
+            peer->node->local_credential_len, reply, &reply_len,
+            peer->node->security_config.handshake_frame_limit);
+        if (ret == P2P_OK) {
+            ret = peer_send_security_frame(peer, reply, reply_len);
+        }
+        peer->noise_step = 2;
+        return ret;
+    }
+
+    if (peer->security_initiator && peer->noise_step == 1) {
+        ret = p2p_noise_read_message_with_payload(
+            peer->handshake, frame, frame_len, peer->remote_credential,
+            peer->node->security_config.credential_limit, &credential_len);
+        if (ret != P2P_OK) {
+            return ret;
+        }
+        peer->remote_credential_len = credential_len;
+        if (peer->node->crypto.identity.uses_blocking_private_key_provider) {
+            turbo_stream_t *stream = peer->conn
+                                         ? (turbo_stream_t *)peer->conn->ops.handle
+                                         : NULL;
+            if (!stream) {
+                return P2P_ERR_NETWORK;
+            }
+            turbo_stream_recv_stop(stream);
+            return p2p_private_key_executor_submit(
+                peer, peer->node->local_credential,
+                peer->node->local_credential_len, 3, 1);
+        }
+        ret = p2p_noise_write_message_with_payload(
+            peer->handshake, peer->node->local_credential,
+            peer->node->local_credential_len, reply, &reply_len,
+            peer->node->security_config.handshake_frame_limit);
+        if (ret == P2P_OK) {
+            ret = peer_send_security_frame(peer, reply, reply_len);
+        }
+        return ret == P2P_OK ? peer_finish_noise(peer) : ret;
+    }
+
+    if (!peer->security_initiator && peer->noise_step == 2) {
+        ret = p2p_noise_read_message_with_payload(
+            peer->handshake, frame, frame_len, peer->remote_credential,
+            peer->node->security_config.credential_limit, &credential_len);
+        if (ret != P2P_OK) {
+            return ret;
+        }
+        peer->remote_credential_len = credential_len;
+        return peer_finish_noise(peer);
+    }
+    return P2P_ERR_PROTOCOL;
+}
+
+void p2p_peer_complete_private_key_operation(
+    p2p_private_key_operation_t *operation, int was_current) {
+    p2p_peer_t *peer;
+    turbo_stream_t *stream = NULL;
+    int valid;
+    int ret;
+
+    if (!operation || !operation->peer) {
+        return;
+    }
+    peer = operation->peer;
+    if (!was_current ||
+        operation->handshake_generation != peer->handshake_generation ||
+        operation->handshake != peer->handshake) {
+        /* This completion belongs to an earlier handshake generation.  It
+         * must not reset, advance, or transmit from the peer's current
+         * security state. */
+        return;
+    }
+    valid = !peer->destroying && peer->conn && peer->handshake &&
+            peer->state == P2P_PEER_STATE_HANDSHAKING &&
+            peer->security_stage == P2P_SECURITY_STAGE_NOISE &&
+            !p2p_private_key_executor_is_closing(operation->executor);
+    if (!valid) {
+        p2p_peer_reset_security_state(peer);
+        return;
+    }
+
+    ret = operation->result;
+    if (ret == P2P_OK) {
+        ret = peer_send_security_frame(peer, operation->output,
+                                       operation->output_len);
+    }
+    if (ret == P2P_OK) {
+        peer->noise_step = operation->next_noise_step;
+        if (operation->finish_noise) {
+            ret = peer_finish_noise(peer);
+        }
+    }
+    if (ret != P2P_OK) {
+        p2p_node_record_security_failure(peer->node, peer->security_stage,
+                                         ret);
+        p2p_peer_disconnect(peer);
+        return;
+    }
+
+    if (peer->conn && !peer->private_key_operation) {
+        stream = (turbo_stream_t *)peer->conn->ops.handle;
+    }
+    if (stream && turbo_stream_recv_start(stream, p2p_peer_stream_recv) != 0) {
+        p2p_node_record_security_failure(peer->node, peer->security_stage,
+                                         P2P_ERR_NETWORK);
+        p2p_peer_disconnect(peer);
+    }
+}
+
+static int peer_begin_noise(p2p_peer_t *peer) {
+    uint8_t prologue[sizeof(P2P_SECURE_PROLOGUE_DOMAIN) - 1 +
+                     P2P_SECURE_PREFACE_SIZE * 2 + P2P_COOKIE_BINDING_SIZE];
+    uint8_t message[P2P_SECURITY_HANDSHAKE_FRAME_MAX];
+    size_t message_len = 0;
+    size_t offset = 0;
+    int ret;
+
+    memcpy(prologue + offset, P2P_SECURE_PROLOGUE_DOMAIN,
+           sizeof(P2P_SECURE_PROLOGUE_DOMAIN) - 1);
+    offset += sizeof(P2P_SECURE_PROLOGUE_DOMAIN) - 1;
+    memcpy(prologue + offset,
+           peer->security_initiator ? peer->local_preface
+                                    : peer->remote_preface,
+           P2P_SECURE_PREFACE_SIZE);
+    offset += P2P_SECURE_PREFACE_SIZE;
+    memcpy(prologue + offset,
+           peer->security_initiator ? peer->remote_preface
+                                    : peer->local_preface,
+           P2P_SECURE_PREFACE_SIZE);
+    offset += P2P_SECURE_PREFACE_SIZE;
+    memcpy(prologue + offset, peer->cookie_binding,
+           P2P_COOKIE_BINDING_SIZE);
+
+    peer->handshake = (p2p_noise_handshake_t *)calloc(1, sizeof(*peer->handshake));
     if (!peer->handshake) {
         return P2P_ERR_NO_MEM;
     }
-
-    /* Initialize as initiator */
-    int ret = p2p_noise_init_initiator(peer->handshake,
-                                        &peer->node->crypto.identity,
-                                        NULL);  /* No pre-known remote key */
+    ret = p2p_noise_init_v2(peer->handshake, &peer->node->crypto.identity,
+                            peer->security_initiator, prologue,
+                            sizeof(prologue));
+    p2p_crypto_wipe(prologue, sizeof(prologue));
     if (ret != P2P_OK) {
-        free(peer->handshake);
-        peer->handshake = NULL;
         return ret;
     }
-
-    /* Create message 1: -> e */
-    uint8_t msg_buf[P2P_HANDSHAKE_MAX];
-    size_t msg_len = 0;
-
-    ret = p2p_noise_write_message(peer->handshake, msg_buf, &msg_len, sizeof(msg_buf));
-    if (ret != P2P_OK) {
-        free(peer->handshake);
-        peer->handshake = NULL;
-        return ret;
+    peer_security_transition(peer, P2P_SECURITY_STAGE_NOISE);
+    if (!peer->security_initiator) {
+        peer->noise_step = 0;
+        return P2P_OK;
     }
-
-    TLOG_DEBUG("[P2P] handshake: initiator sending step 1 ({} bytes)", msg_len);
-
-    return peer_send_handshake(peer, 1, msg_buf, msg_len);
+    ret = p2p_noise_write_message(peer->handshake, message, &message_len,
+                                  peer->node->security_config.handshake_frame_limit);
+    if (ret == P2P_OK) {
+        ret = peer_send_security_frame(peer, message, message_len);
+    }
+    p2p_crypto_wipe(message, sizeof(message));
+    peer->noise_step = 1;
+    return ret;
 }
 
-/* Handle incoming handshake message */
-int p2p_peer_handle_handshake(p2p_peer_t *peer, const p2p_message_t *msg) {
-    if (!peer || !msg || !peer->node) return P2P_ERR_INVALID_ARG;
-
-    uint8_t step = msg->payload.noise_handshake.step;
-    const uint8_t *data = msg->payload.noise_handshake.data;
-    size_t data_len = msg->payload.noise_handshake.data_len;
-
-    TLOG_DEBUG("[P2P] handshake: received step {} ({} bytes) from {}:{}",
-              step, data_len, peer->ip, peer->port);
-
-    /* Responder receiving step 1 (no handshake state yet) */
-    if (step == 1 && !peer->handshake) {
-        if (!peer->node->encryption_enabled) {
-            TLOG_DEBUG("[P2P] handshake: encryption disabled, ignoring");
-            return P2P_OK;
-        }
-
-        /* Initialize as responder */
-        peer->handshake = (p2p_noise_handshake_t *)calloc(1, sizeof(p2p_noise_handshake_t));
-        if (!peer->handshake) {
-            return P2P_ERR_NO_MEM;
-        }
-
-        int ret = p2p_noise_init_responder(peer->handshake, &peer->node->crypto.identity);
-        if (ret != P2P_OK) {
-            free(peer->handshake);
-            peer->handshake = NULL;
-            return ret;
-        }
-
-        /* Process message 1: -> e */
-        ret = p2p_noise_read_message(peer->handshake, data, data_len);
-        if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] handshake: failed to process step 1");
-            free(peer->handshake);
-            peer->handshake = NULL;
-            return ret;
-        }
-
-        /* Create message 2: <- e, ee, s, es */
-        uint8_t reply_buf[P2P_HANDSHAKE_MAX];
-        size_t reply_len = 0;
-
-        ret = p2p_noise_write_message(peer->handshake, reply_buf, &reply_len, sizeof(reply_buf));
-        if (ret != P2P_OK) {
-            free(peer->handshake);
-            peer->handshake = NULL;
-            return ret;
-        }
-
-        TLOG_DEBUG("[P2P] handshake: responder sending step 2 ({} bytes)", reply_len);
-        return peer_send_handshake(peer, 2, reply_buf, reply_len);
+int p2p_peer_start_handshake(p2p_peer_t *peer) {
+    if (!peer || !peer->node || !peer->conn) {
+        return P2P_ERR_INVALID_ARG;
     }
+    if (!peer->node->security_configured) {
+        return P2P_ERR_AUTH_REQUIRED;
+    }
+    p2p_peer_reset_security_state(peer);
+    peer->security_initiator = peer->conn->type == P2P_CONN_OUTBOUND;
+    if (!peer->security_initiator) {
+        return P2P_ERR_INVALID_STATE;
+    }
+    peer_security_transition(peer, P2P_SECURITY_STAGE_COOKIE);
+    peer->state = P2P_PEER_STATE_HANDSHAKING;
+    peer->security_deadline_ms = turbo_hrtime() / 1000000U +
+                                 peer->node->security_config.handshake_timeout_ms;
+    p2p_secure_preface_build(peer->node->security_config.network_id_hash,
+                             peer->local_preface);
+    return peer_send_raw(peer, peer->local_preface,
+                         P2P_SECURE_PREFACE_SIZE);
+}
 
-    /* Initiator receiving step 2 */
-    if (step == 2 && peer->handshake && peer->handshake->is_initiator) {
-        /* Process message 2: <- e, ee, s, es */
-        int ret = p2p_noise_read_message(peer->handshake, data, data_len);
+int p2p_peer_start_inbound_handshake_after_cookie(
+    p2p_peer_t *peer,
+    const uint8_t initiator_preface[P2P_SECURE_PREFACE_SIZE],
+    const uint8_t cookie_binding[P2P_COOKIE_BINDING_SIZE]) {
+    int ret;
+
+    if (!peer || !peer->node || !peer->conn || !initiator_preface ||
+        !cookie_binding || !peer->node->security_configured ||
+        peer->conn->type != P2P_CONN_INBOUND) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    p2p_peer_reset_security_state(peer);
+    peer->security_initiator = 0;
+    peer->state = P2P_PEER_STATE_HANDSHAKING;
+    peer->security_deadline_ms = turbo_hrtime() / 1000000U +
+                                 peer->node->security_config.handshake_timeout_ms;
+    memcpy(peer->remote_preface, initiator_preface,
+           P2P_SECURE_PREFACE_SIZE);
+    memcpy(peer->cookie_binding, cookie_binding, P2P_COOKIE_BINDING_SIZE);
+    p2p_secure_preface_build(peer->node->security_config.network_id_hash,
+                             peer->local_preface);
+    ret = peer_send_raw(peer, peer->local_preface,
+                        P2P_SECURE_PREFACE_SIZE);
+    return ret == P2P_OK ? peer_begin_noise(peer) : ret;
+}
+
+static int peer_process_ready_frame(p2p_peer_t *peer, const uint8_t *frame,
+                                    size_t frame_len) {
+    uint8_t plain[P2P_SECURE_READY_SIZE + P2P_NOISE_TAG_SIZE];
+    uint8_t session_input[sizeof(P2P_SECURE_SESSION_DOMAIN) - 1 +
+                          P2P_SECURITY_ID_SIZE];
+    uint8_t expected_session_id[P2P_SECURITY_ID_SIZE];
+    size_t plain_len = 0;
+    int ret;
+
+    if (frame_len != P2P_SECURE_READY_SIZE + P2P_NOISE_TAG_SIZE) {
+        return P2P_ERR_PROTOCOL;
+    }
+    ret = p2p_crypto_decrypt(&peer->crypto, frame, frame_len, plain,
+                             sizeof(plain), &plain_len);
+    if (ret != P2P_OK || plain_len != P2P_SECURE_READY_SIZE) {
+        return ret == P2P_OK ? P2P_ERR_PROTOCOL : ret;
+    }
+    memcpy(session_input, P2P_SECURE_SESSION_DOMAIN,
+           sizeof(P2P_SECURE_SESSION_DOMAIN) - 1);
+    memcpy(session_input + sizeof(P2P_SECURE_SESSION_DOMAIN) - 1,
+           peer->channel_binding, P2P_SECURITY_ID_SIZE);
+    ret = p2p_noise_backend_blake2s(session_input, sizeof(session_input),
+                                    expected_session_id);
+    if (ret == P2P_OK &&
+        (memcmp(plain, P2P_SECURE_READY_MAGIC, 4) != 0 ||
+         p2p_read_be16(plain + 4) != P2P_SECURE_WIRE_VERSION_V2 ||
+         p2p_read_be16(plain + 6) != P2P_APPLICATION_PROTOCOL_VERSION ||
+         !peer_constant_time_equal(
+             plain + 8, peer->authenticated_identity.principal_id,
+             P2P_SECURITY_ID_SIZE) ||
+         !peer_constant_time_equal(
+             plain + 40, peer->authenticated_identity.routing_id,
+             P2P_SECURITY_ID_SIZE) ||
+         !peer_constant_time_equal(
+             plain + 72, peer->authenticated_identity.credential_digest,
+             P2P_SECURITY_ID_SIZE) ||
+         !peer_constant_time_equal(plain + 104, expected_session_id,
+                                   P2P_SECURITY_ID_SIZE))) {
+        ret = P2P_ERR_UNTRUSTED_IDENTITY;
+    }
+    p2p_crypto_wipe(plain, sizeof(plain));
+    p2p_crypto_wipe(session_input, sizeof(session_input));
+    p2p_crypto_wipe(expected_session_id, sizeof(expected_session_id));
+    if (ret != P2P_OK) {
+        return ret;
+    }
+    peer->ready_received = 1;
+    peer->received_bytes += (uint64_t)frame_len + 2U;
+    peer_security_transition(peer, P2P_SECURITY_STAGE_ESTABLISHED);
+    peer->security_deadline_ms = 0;
+    peer->session_started_ms = turbo_hrtime() / 1000000U;
+    p2p_node_on_peer_authenticated(peer->node, peer);
+    return P2P_OK;
+}
+
+static int p2p_peer_process_security(p2p_peer_t *peer, size_t *consumed) {
+    size_t frame_len;
+    int ret;
+
+    if (!peer || !consumed) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    *consumed = 0;
+    if (peer->security_stage == P2P_SECURITY_STAGE_COOKIE) {
+        uint8_t response[P2P_COOKIE_PACKET_SIZE];
+
+        if (peer->recv_len < P2P_COOKIE_PACKET_SIZE) {
+            return P2P_ERR_INVALID_ARG;
+        }
+        ret = p2p_cookie_build_response(peer->recv_buf, response,
+                                        peer->cookie_binding);
         if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] handshake: failed to process step 2");
             return ret;
         }
-
-        /* Create message 3: -> s, se */
-        uint8_t reply_buf[P2P_HANDSHAKE_MAX];
-        size_t reply_len = 0;
-
-        ret = p2p_noise_write_message(peer->handshake, reply_buf, &reply_len, sizeof(reply_buf));
+        ret = peer_send_raw(peer, response, sizeof(response));
+        p2p_crypto_wipe(response, sizeof(response));
         if (ret != P2P_OK) {
             return ret;
         }
-
-        TLOG_DEBUG("[P2P] handshake: initiator sending step 3 ({} bytes)", reply_len);
-
-        ret = peer_send_handshake(peer, 3, reply_buf, reply_len);
-        if (ret != P2P_OK) {
-            return ret;
-        }
-
-        /* Handshake complete - derive session keys */
-        if (p2p_noise_is_complete(peer->handshake)) {
-            ret = p2p_noise_split(peer->handshake, &peer->crypto);
-            if (ret != P2P_OK) {
-                TLOG_ERROR("[P2P] handshake: key derivation failed");
-                return ret;
-            }
-
-            TLOG_INFO("[P2P] handshake: initiator complete with {}:{}", peer->ip, peer->port);
-
-            /* Clean up handshake state */
-            p2p_peer_capture_remote_public_key(peer);
-            p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
-            free(peer->handshake);
-            peer->handshake = NULL;
-
-            /* Handover to node for identification and authorization */
-            p2p_node_on_peer_authenticated(peer->node, peer);
-        }
-
+        peer_security_transition(peer, P2P_SECURITY_STAGE_PREFACE);
+        *consumed = P2P_COOKIE_PACKET_SIZE;
         return P2P_OK;
     }
-
-    /* Responder receiving step 3 */
-    if (step == 3 && peer->handshake && !peer->handshake->is_initiator) {
-        /* Process message 3: -> s, se */
-        int ret = p2p_noise_read_message(peer->handshake, data, data_len);
+    if (peer->security_stage == P2P_SECURITY_STAGE_PREFACE) {
+        if (peer->recv_len < P2P_SECURE_PREFACE_SIZE) {
+            return P2P_ERR_INVALID_ARG;
+        }
+        memcpy(peer->remote_preface, peer->recv_buf,
+               P2P_SECURE_PREFACE_SIZE);
+        if (p2p_secure_preface_validate(
+                peer->node->security_config.network_id_hash,
+                peer->remote_preface) != P2P_OK) {
+            return P2P_ERR_PROTOCOL;
+        }
+        ret = peer_begin_noise(peer);
         if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] handshake: failed to process step 3");
             return ret;
         }
-
-        /* Handshake complete - derive session keys */
-        if (p2p_noise_is_complete(peer->handshake)) {
-            ret = p2p_noise_split(peer->handshake, &peer->crypto);
-            if (ret != P2P_OK) {
-                TLOG_ERROR("[P2P] handshake: key derivation failed");
-                return ret;
-            }
-
-            TLOG_INFO("[P2P] handshake: responder complete with {}:{}", peer->ip, peer->port);
-
-            /* Clean up handshake state */
-            p2p_peer_capture_remote_public_key(peer);
-            p2p_crypto_wipe(peer->handshake, sizeof(*peer->handshake));
-            free(peer->handshake);
-            peer->handshake = NULL;
-
-            /* Handover to node for identification and authorization */
-            p2p_node_on_peer_authenticated(peer->node, peer);
-        }
-
+        *consumed = P2P_SECURE_PREFACE_SIZE;
         return P2P_OK;
     }
-
-    TLOG_WARN("[P2P] handshake: unexpected step {}", step);
-    return P2P_ERR_INVALID_ARG;
+    if (peer->security_stage != P2P_SECURITY_STAGE_NOISE &&
+        peer->security_stage != P2P_SECURITY_STAGE_READY) {
+        return P2P_ERR_INVALID_STATE;
+    }
+    if (peer->recv_len < 2) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    frame_len = p2p_read_be16(peer->recv_buf);
+    if (frame_len == 0 ||
+        (peer->security_stage == P2P_SECURITY_STAGE_NOISE &&
+         frame_len > peer->node->security_config.handshake_frame_limit) ||
+        (peer->security_stage == P2P_SECURITY_STAGE_READY &&
+         frame_len != P2P_SECURE_READY_SIZE + P2P_NOISE_TAG_SIZE)) {
+        return P2P_ERR_PROTOCOL;
+    }
+    if (peer->recv_len < frame_len + 2) {
+        return P2P_ERR_INVALID_ARG;
+    }
+    ret = peer->security_stage == P2P_SECURITY_STAGE_NOISE
+              ? peer_handle_noise_frame(peer, peer->recv_buf + 2, frame_len)
+              : peer_process_ready_frame(peer, peer->recv_buf + 2, frame_len);
+    if (ret == P2P_OK) {
+        *consumed = frame_len + 2;
+    }
+    return ret;
 }
 
 static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip) {
@@ -780,7 +1293,7 @@ void p2p_peer_stream_connect(void *handle, int status, void *arg) {
 
     TLOG_DEBUG("[P2P] peer connected: {}:{}", peer->ip, peer->port);
     turbo_mutex_lock(&node->mutex);
-    peer->is_connected = 1;
+    peer->is_connected = 0;
     peer->reconnect_after_ms = 0;
     peer->state = P2P_PEER_STATE_HANDSHAKING;
     peer->connect_time = turbo_hrtime();
@@ -799,6 +1312,7 @@ void p2p_peer_stream_connect(void *handle, int status, void *arg) {
 int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx) {
     turbo_stream_t *stream = (turbo_stream_t *)handle;
     p2p_peer_t *peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
+    int ret;
     (void)peer_ctx;
 
     if (!peer) {
@@ -815,7 +1329,12 @@ int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx)
         return 0;
     }
 
-    if (p2p_peer_on_data(peer, slice->data, slice->length) != P2P_OK) {
+    ret = p2p_peer_on_data(peer, slice->data, slice->length);
+    if (ret != P2P_OK) {
+        p2p_node_record_security_failure(peer->node, peer->security_stage,
+                                         ret);
+        turbo_stream_set_user_data(stream, NULL);
+        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
         p2p_peer_release(peer);
         return 1;
     }

@@ -2,6 +2,7 @@
 #include <turbo_mesh.h>
 #include <p2p.h>
 #include "mesh_path_optimizer.h"
+#include "mesh_test_security.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -383,6 +384,7 @@ static void test_ice_signaling_two_nodes(void) {
     cfg1.virtual_ip = "10.42.9.11";
     cfg1.virtual_prefix = 16;
     cfg1.listen_port = 20891;
+    check(mesh_test_security_configure(&cfg1, 0));
     cfg1.on_packet_received = on_packet_received_counting;
     cfg1.user_data = &node1_packets;
 
@@ -391,6 +393,7 @@ static void test_ice_signaling_two_nodes(void) {
     cfg2.virtual_ip = "10.42.9.12";
     cfg2.virtual_prefix = 16;
     cfg2.listen_port = 20892;
+    check(mesh_test_security_configure(&cfg2, 1));
     cfg2.bootstrap_peers = bootstrap_peers;
     cfg2.bootstrap_count = 1;
 
@@ -577,6 +580,7 @@ static void test_routed_ice_fails_closed_without_end_to_end_identity(void) {
     leader_cfg.virtual_ip = "10.42.8.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20801;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
     leader_started = (mesh_start(leader) == MESH_OK);
@@ -589,6 +593,7 @@ static void test_routed_ice_fails_closed_without_end_to_end_identity(void) {
     node2_cfg.virtual_ip = "10.42.8.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20802;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.enable_ice = 1;
@@ -602,6 +607,7 @@ static void test_routed_ice_fails_closed_without_end_to_end_identity(void) {
     node3_cfg.virtual_ip = "10.42.8.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20803;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.enable_ice = 1;
@@ -744,6 +750,7 @@ static void test_direct_path_preferred_over_relay(void) {
     leader_cfg.virtual_ip = "10.42.7.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20701;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.advertise_ip = "127.0.0.1";
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -757,6 +764,7 @@ static void test_direct_path_preferred_over_relay(void) {
     node2_cfg.virtual_ip = "10.42.7.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20702;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -768,6 +776,7 @@ static void test_direct_path_preferred_over_relay(void) {
     node3_cfg.virtual_ip = "10.42.7.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20703;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.advertise_ip = "127.0.0.1";
@@ -964,6 +973,7 @@ static void test_pinned_route_overrides_direct_path(void) {
     leader_cfg.virtual_ip = "10.42.11.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20711;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.advertise_ip = "127.0.0.1";
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -977,6 +987,7 @@ static void test_pinned_route_overrides_direct_path(void) {
     node2_cfg.virtual_ip = "10.42.11.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20712;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.route_rules = node2_rules;
@@ -990,6 +1001,7 @@ static void test_pinned_route_overrides_direct_path(void) {
     node3_cfg.virtual_ip = "10.42.11.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20713;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.advertise_ip = "127.0.0.1";
@@ -1198,6 +1210,7 @@ static void test_non_mesh_pinned_route_uses_local_egress_role(void) {
     router_cfg.virtual_ip = "10.42.12.1";
     router_cfg.virtual_prefix = 16;
     router_cfg.listen_port = 20781;
+    check(mesh_test_security_configure(&router_cfg, 0));
     router_cfg.local_egress_cidrs = router_egress;
     router_cfg.local_egress_count = 1;
     router_cfg.local_egress_allow_cidrs = router_egress_allow;
@@ -1216,6 +1229,7 @@ static void test_non_mesh_pinned_route_uses_local_egress_role(void) {
     client_cfg.virtual_ip = "10.42.12.2";
     client_cfg.virtual_prefix = 16;
     client_cfg.listen_port = 20782;
+    check(mesh_test_security_configure(&client_cfg, 1));
     client_cfg.bootstrap_peers = bootstrap_peers;
     client_cfg.bootstrap_count = 1;
     client_cfg.route_rules = client_rules;
@@ -1328,6 +1342,7 @@ static void test_peer_admission_allowlist(void) {
     leader_cfg.virtual_ip = "10.42.14.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20721;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
     leader_cfg.peer_allow_count = 1;
     leader = mesh_create(&leader_cfg);
@@ -1350,6 +1365,7 @@ static void test_peer_admission_allowlist(void) {
     node2_cfg.virtual_ip = "10.42.14.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20722;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1361,6 +1377,7 @@ static void test_peer_admission_allowlist(void) {
     node3_cfg.virtual_ip = "10.42.14.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20723;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3 = mesh_create(&node3_cfg);
@@ -1464,6 +1481,7 @@ static void test_peer_admission_blocks_learned_routes(void) {
     leader_cfg.virtual_ip = "10.42.15.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20731;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.peer_allow_cidrs = leader_allow_cidrs;
     leader_cfg.peer_allow_count = 1;
     leader = mesh_create(&leader_cfg);
@@ -1478,6 +1496,7 @@ static void test_peer_admission_blocks_learned_routes(void) {
     node2_cfg.virtual_ip = "10.42.15.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20732;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = node2_bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1492,6 +1511,7 @@ static void test_peer_admission_blocks_learned_routes(void) {
     node3_cfg.virtual_ip = "10.42.15.3";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20733;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = node3_bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3 = mesh_create(&node3_cfg);
@@ -1588,6 +1608,7 @@ static void test_peer_admission_rejects_duplicate_virtual_ip(void) {
     leader_cfg.virtual_ip = "10.42.16.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20741;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
     leader_started = (mesh_start(leader) == MESH_OK);
@@ -1600,6 +1621,7 @@ static void test_peer_admission_rejects_duplicate_virtual_ip(void) {
     node2_cfg.virtual_ip = "10.42.16.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20742;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1631,6 +1653,7 @@ static void test_peer_admission_rejects_duplicate_virtual_ip(void) {
     node3_cfg.virtual_ip = "10.42.16.2";
     node3_cfg.virtual_prefix = 16;
     node3_cfg.listen_port = 20743;
+    check(mesh_test_security_configure(&node3_cfg, 2));
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3 = mesh_create(&node3_cfg);
@@ -1694,6 +1717,8 @@ static void test_peer_admission_identity_allowlist(void) {
     char leader_id[65] = {0};
     char node2_id[65] = {0};
     const char *leader_allow_node_ids[1] = {node2_id};
+    const char *node2_allow_node_ids[1] = {leader_id};
+    const char *node3_allow_node_ids[1] = {leader_id};
     mesh_network_t *leader = NULL;
     mesh_network_t *node2 = NULL;
     mesh_network_t *node3 = NULL;
@@ -1744,6 +1769,8 @@ static void test_peer_admission_identity_allowlist(void) {
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.identity_secret_hex = node2_secret;
+    node2_cfg.peer_allow_node_ids = node2_allow_node_ids;
+    node2_cfg.peer_allow_node_id_count = 1;
     node2 = mesh_create(&node2_cfg);
     check_not_null(node2);
     node2_started = (mesh_start(node2) == MESH_OK);
@@ -1756,6 +1783,8 @@ static void test_peer_admission_identity_allowlist(void) {
     node3_cfg.bootstrap_peers = bootstrap_peers;
     node3_cfg.bootstrap_count = 1;
     node3_cfg.identity_secret_hex = node3_secret;
+    node3_cfg.peer_allow_node_ids = node3_allow_node_ids;
+    node3_cfg.peer_allow_node_id_count = 1;
     node3 = mesh_create(&node3_cfg);
     check_not_null(node3);
     node3_started = (mesh_start(node3) == MESH_OK);
@@ -1836,6 +1865,7 @@ static void test_peer_admission_protocol_major(void) {
     leader_cfg.virtual_ip = "10.42.19.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 20761;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.peer_protocol_major = MESH_PROTOCOL_MAJOR + 1;
     leader = mesh_create(&leader_cfg);
     check_not_null(leader);
@@ -1853,6 +1883,7 @@ static void test_peer_admission_protocol_major(void) {
     node2_cfg.virtual_ip = "10.42.19.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 20762;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);
@@ -1970,6 +2001,7 @@ static void test_packet_policy_filters_by_direction_and_port(void) {
     leader_cfg.virtual_ip = "10.42.21.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 21731;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.packet_policy_rules = leader_policy;
     leader_cfg.packet_policy_rule_count = 1;
     leader_cfg.on_packet_received = on_packet_received_counting;
@@ -1999,6 +2031,7 @@ static void test_packet_policy_filters_by_direction_and_port(void) {
     node2_cfg.virtual_ip = "10.42.21.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 21732;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2_cfg.packet_policy_rules = node2_policy;
@@ -2069,6 +2102,7 @@ static void test_packet_policy_empty_configuration_remains_permissive(void) {
     leader_cfg.virtual_ip = "10.42.22.1";
     leader_cfg.virtual_prefix = 16;
     leader_cfg.listen_port = 21741;
+    check(mesh_test_security_configure(&leader_cfg, 0));
     leader_cfg.on_packet_received = on_packet_received_counting;
     leader_cfg.user_data = &leader_counter;
     leader = mesh_create(&leader_cfg);
@@ -2085,6 +2119,7 @@ static void test_packet_policy_empty_configuration_remains_permissive(void) {
     node2_cfg.virtual_ip = "10.42.22.2";
     node2_cfg.virtual_prefix = 16;
     node2_cfg.listen_port = 21742;
+    check(mesh_test_security_configure(&node2_cfg, 1));
     node2_cfg.bootstrap_peers = bootstrap_peers;
     node2_cfg.bootstrap_count = 1;
     node2 = mesh_create(&node2_cfg);

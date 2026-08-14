@@ -178,6 +178,19 @@ static void test_atomically_persists_terminal_result(void) {
   check_int_eq(mesh_mgmt_execution_store_commit_result_v1(
                    &store, &result, &entry),
                MESH_MGMT_EXECUTION_STORE_INVALID_ARG);
+  check_int_eq(mesh_mgmt_execution_store_forget_terminal_v1(
+                   &store, command_id),
+               MESH_MGMT_EXECUTION_STORE_OK);
+  check_int_eq(mesh_mgmt_execution_store_get_v1(
+                   &store, command_id, &entry),
+               MESH_MGMT_EXECUTION_STORE_NOT_FOUND);
+  mesh_mgmt_execution_store_close_v1(&store);
+  check_int_eq(mesh_mgmt_execution_store_open_v1(
+                   &store, path, 2u, NULL),
+               MESH_MGMT_EXECUTION_STORE_OK);
+  check_int_eq(mesh_mgmt_execution_store_get_v1(
+                   &store, command_id, &entry),
+               MESH_MGMT_EXECUTION_STORE_NOT_FOUND);
   mesh_mgmt_execution_store_close_v1(&store);
   cleanup_store_files(path);
   free(path);

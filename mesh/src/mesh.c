@@ -7,9 +7,11 @@
 #include "mesh_flow_runtime.h"
 #include "mesh_internal_flow_policy.h"
 #include "mesh_mgmt_mesh_bridge.h"
+#include "mesh_multi_network_internal.h"
 #include "mesh_path_optimizer.h"
 #include <fmt.h>
 #include <p2p.h>
+#include <turbo_crypto.h>
 #include <turbo_coro.h>
 #include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
@@ -183,6 +185,11 @@ typedef struct {
 } mesh_packet_policy_entry_t;
 
 typedef struct mesh_network_s {
+    /* Multi-network V2: non-NULL fabric only on the shared legacy underlay;
+     * non-NULL state only on lightweight logical Network handles. */
+    mesh_fabric_t *multi_network_fabric;
+    void *multi_network_state;
+
     /* Configuration */
     char virtual_ip[16];
     char node_id[65];
@@ -294,6 +301,8 @@ static void mesh_send_routes_to_peer(mesh_network_t *mesh, mesh_peer_t *target);
 static void mesh_broadcast_routes(mesh_network_t *mesh);
 static void mesh_connect_bootstrap_peers(mesh_network_t *mesh, int is_retry);
 static int mesh_create_p2p_node(mesh_network_t *mesh);
+static int mesh_configure_p2p_security(mesh_network_t *mesh,
+                                       const mesh_config_t *config);
 static int mesh_register_virtual_ip(mesh_network_t *mesh);
 static int mesh_ensure_virtual_ip_registered(mesh_network_t *mesh);
 static void mesh_peer_destroy(mesh_peer_t *peer);
@@ -532,37 +541,39 @@ static int mesh_update_node_id_from_p2p(mesh_network_t *mesh) {
 }
 
 static int mesh_p2p_peer_id_matches(p2p_peer_t *p2p_peer, const char *node_id) {
-    uint8_t peer_id[P2P_KEY_SIZE];
+    p2p_peer_security_info_v2_t security_info = {0};
     char peer_id_hex[65] = {0};
-    int ret = 0;
 
     if (!p2p_peer || !node_id || node_id[0] == '\0') {
-        return 1;
-    }
-
-    ret = p2p_peer_get_public_key(p2p_peer, peer_id);
-    if (ret == P2P_ERR_NOT_FOUND) {
-        return 1;
-    }
-    if (ret != P2P_OK) {
         return 0;
     }
 
-    mesh_bytes_to_hex(peer_id, sizeof(peer_id), peer_id_hex, sizeof(peer_id_hex));
+    security_info.struct_size = sizeof(security_info);
+    if (p2p_peer_get_security_info_v2(p2p_peer, &security_info) != P2P_OK ||
+        !security_info.authenticated) {
+        return 0;
+    }
+
+    mesh_bytes_to_hex(security_info.remote_noise_static,
+                      sizeof(security_info.remote_noise_static), peer_id_hex,
+                      sizeof(peer_id_hex));
     return strcmp(peer_id_hex, node_id) == 0;
 }
 
 static int mesh_p2p_peer_identity_is_verified(p2p_peer_t *p2p_peer,
                                               const char *node_id) {
-    uint8_t peer_id[P2P_KEY_SIZE];
+    p2p_peer_security_info_v2_t security_info = {0};
     char peer_id_hex[65] = {0};
 
+    security_info.struct_size = sizeof(security_info);
     if (!p2p_peer || !mesh_node_id_is_valid(node_id) ||
-        p2p_peer_get_public_key(p2p_peer, peer_id) != P2P_OK) {
+        p2p_peer_get_security_info_v2(p2p_peer, &security_info) != P2P_OK ||
+        !security_info.authenticated) {
         return 0;
     }
 
-    mesh_bytes_to_hex(peer_id, sizeof(peer_id), peer_id_hex,
+    mesh_bytes_to_hex(security_info.remote_noise_static,
+                      sizeof(security_info.remote_noise_static), peer_id_hex,
                       sizeof(peer_id_hex));
     return strcmp(peer_id_hex, node_id) == 0;
 }
@@ -575,6 +586,11 @@ static uint32_t mesh_local_capabilities(const mesh_network_t *mesh) {
     }
     if (mesh && mesh->stream_enabled) {
         capabilities |= MESH_CAP_STREAM_V1;
+    }
+    if (mesh && mesh->multi_network_fabric) {
+        capabilities |= MESH_CAP_MULTI_NETWORK_V2 |
+                        MESH_CAP_NETWORK_FRAME_V2 |
+                        MESH_CAP_NETWORK_MEMBERSHIP_V1;
     }
     return capabilities;
 }
@@ -1284,6 +1300,53 @@ static int mesh_create_p2p_node(mesh_network_t *mesh) {
     p2p_set_peer_callbacks(mesh->p2p_node, mesh_on_p2p_peer_connected,
                            mesh_on_p2p_peer_disconnected, mesh);
     return MESH_OK;
+}
+
+static int mesh_configure_p2p_security(mesh_network_t *mesh,
+                                       const mesh_config_t *config) {
+    uint8_t network_id_hash[P2P_SECURITY_ID_SIZE];
+    uint8_t *trusted_keys = NULL;
+    size_t trusted_count;
+    size_t index;
+    int result = MESH_ERR_INVALID_ARG;
+
+    if (!mesh || !mesh->p2p_node || !config || config->peer_allow_node_id_count < 0 ||
+        (config->peer_allow_node_id_count > 0 && !config->peer_allow_node_ids)) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    trusted_count = (size_t)config->peer_allow_node_id_count + 1u;
+    if (trusted_count > SIZE_MAX / P2P_KEY_SIZE) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    trusted_keys = (uint8_t *)calloc(trusted_count, P2P_KEY_SIZE);
+    if (!trusted_keys) {
+        return MESH_ERR_NO_MEMORY;
+    }
+    if (turbo_crypto_sha256(mesh->network_id, strlen(mesh->network_id),
+                            network_id_hash) != TURBO_CRYPTO_OK ||
+        p2p_node_get_public_key(mesh->p2p_node, trusted_keys) != P2P_OK) {
+        result = MESH_ERR_NETWORK;
+        goto cleanup;
+    }
+    for (index = 0; index < (size_t)config->peer_allow_node_id_count; ++index) {
+        if (!mesh_hex_to_bytes(config->peer_allow_node_ids[index],
+                               trusted_keys + (index + 1u) * P2P_KEY_SIZE,
+                               P2P_KEY_SIZE)) {
+            result = MESH_ERR_INVALID_ARG;
+            goto cleanup;
+        }
+    }
+    result = p2p_node_configure_pinned_security_v2(
+                 mesh->p2p_node, network_id_hash, trusted_keys,
+                 trusted_count) == P2P_OK
+                 ? MESH_OK
+                 : MESH_ERR_NETWORK;
+
+cleanup:
+    memset(network_id_hash, 0, sizeof(network_id_hash));
+    memset(trusted_keys, 0, trusted_count * P2P_KEY_SIZE);
+    free(trusted_keys);
+    return result;
 }
 
 static int mesh_register_virtual_ip(mesh_network_t *mesh) {
@@ -3441,8 +3504,16 @@ static void mesh_on_p2p_peer_disconnected(p2p_peer_t *p2p_peer, void *user_data)
         mesh_peer_t *next = peer->next;
 
         if (peer->p2p_peer == p2p_peer) {
+            if (mesh->multi_network_fabric && peer->peer_id[0] != '\0') {
+                uint8_t authenticated_node_id[MESH_NETWORK_IDENTITY_SIZE];
+                if (mesh_hex_to_bytes(peer->peer_id, authenticated_node_id,
+                                      sizeof(authenticated_node_id))) {
+                    mesh_multi_network_peer_closed_v2(
+                        mesh->multi_network_fabric, authenticated_node_id);
+                }
+            }
             peer->transport_authenticated = 0;
-            peer->negotiated_capabilities &= ~MESH_CAP_STREAM_V1;
+            peer->negotiated_capabilities = 0u;
             if (peer->announced && mesh->on_peer_disconnected) {
                 mesh->on_peer_disconnected(peer, mesh->user_data);
             }
@@ -3772,6 +3843,27 @@ static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
         }
     }
 
+    /* The binary V2 discriminant is never eligible for legacy raw-IPv4
+     * fallback. This keeps malformed or capability-mismatched frames from
+     * being interpreted as packets in the default Network. */
+    if (len >= 4u && memcmp(data, "TMN2", 4u) == 0) {
+        uint8_t authenticated_node_id[MESH_NETWORK_IDENTITY_SIZE];
+        peer = mesh_find_peer_by_p2p(mesh, p2p_peer);
+        if (!mesh->multi_network_fabric || !peer || !peer->announced ||
+            !mesh_peer_has_capability(
+                peer, MESH_CAP_MULTI_NETWORK_V2 |
+                          MESH_CAP_NETWORK_FRAME_V2 |
+                          MESH_CAP_NETWORK_MEMBERSHIP_V1) ||
+            !mesh_hex_to_bytes(peer->peer_id, authenticated_node_id,
+                               sizeof(authenticated_node_id))) {
+            return;
+        }
+        (void)mesh_multi_network_offer_message_v2(
+            mesh->multi_network_fabric, authenticated_node_id,
+            (const uint8_t *)data, len);
+        return;
+    }
+
     const char *msg = (const char *)data;
 
     /* Check if this is a MESH_HELLO message */
@@ -3897,6 +3989,18 @@ static void mesh_on_p2p_message(p2p_node_t *node, p2p_peer_t *p2p_peer,
             notify_connected = 1;
         }
         mesh_peer_refresh_negotiated_capabilities(peer);
+        if (mesh->multi_network_fabric &&
+            mesh_peer_has_capability(
+                peer, MESH_CAP_MULTI_NETWORK_V2 |
+                          MESH_CAP_NETWORK_FRAME_V2 |
+                          MESH_CAP_NETWORK_MEMBERSHIP_V1)) {
+            uint8_t authenticated_node_id[MESH_NETWORK_IDENTITY_SIZE];
+            if (mesh_hex_to_bytes(peer->peer_id, authenticated_node_id,
+                                  sizeof(authenticated_node_id))) {
+                mesh_multi_network_peer_ready_v2(
+                    mesh->multi_network_fabric, authenticated_node_id);
+            }
+        }
         if (notify_connected && mesh->on_peer_connected) {
             mesh->on_peer_connected(peer, mesh->user_data);
         }
@@ -4213,8 +4317,23 @@ void mesh_config_init(mesh_config_t *config) {
 
 mesh_network_t *mesh_create(const mesh_config_t *config) {
     mesh_ice_config_t ice_config;
+    int identity_source_count;
 
-    if (!config || !config->virtual_ip ||
+    if (!config) {
+        return NULL;
+    }
+    identity_source_count = (config->identity_private_key != NULL) +
+                            (config->identity_private_key_provider != NULL) +
+                            (config->identity_blocking_private_key_provider !=
+                             NULL) +
+                            (config->identity_secret_hex != NULL);
+
+    if (!config->virtual_ip ||
+        ((config->identity_private_key == NULL) !=
+         (config->identity_private_key_size == 0u)) ||
+        (config->identity_private_key != NULL &&
+         config->identity_private_key_size != P2P_KEY_SIZE) ||
+        identity_source_count > 1 ||
         !mesh_config_array_is_valid(config->bootstrap_peers, config->bootstrap_count) ||
         !mesh_config_array_is_valid(config->ice_stun_servers, config->ice_stun_count) ||
         !mesh_config_array_is_valid(config->route_rules, config->route_rule_count) ||
@@ -4520,17 +4639,42 @@ mesh_network_t *mesh_create(const mesh_config_t *config) {
         mesh_destroy(mesh);
         return NULL;
     }
-    if (config->identity_secret_hex) {
+    if (config->identity_private_key_provider) {
+        if (p2p_node_set_private_key_provider_v3(
+                mesh->p2p_node,
+                config->identity_private_key_provider) != P2P_OK) {
+            mesh_destroy(mesh);
+            return NULL;
+        }
+    } else if (config->identity_blocking_private_key_provider) {
+        if (p2p_node_set_blocking_private_key_provider_v4(
+                mesh->p2p_node,
+                config->identity_blocking_private_key_provider) != P2P_OK) {
+            mesh_destroy(mesh);
+            return NULL;
+        }
+    } else if (config->identity_private_key) {
+        if (p2p_node_set_private_key(mesh->p2p_node,
+                                     config->identity_private_key) != P2P_OK) {
+            mesh_destroy(mesh);
+            return NULL;
+        }
+    } else if (config->identity_secret_hex) {
         uint8_t identity_secret[P2P_KEY_SIZE];
 
         if (!mesh_hex_to_bytes(config->identity_secret_hex,
                                identity_secret,
                                sizeof(identity_secret)) ||
             p2p_node_set_private_key(mesh->p2p_node, identity_secret) != P2P_OK) {
+            turbo_crypto_wipe(identity_secret, sizeof(identity_secret));
             mesh_destroy(mesh);
             return NULL;
         }
-        memset(identity_secret, 0, sizeof(identity_secret));
+        turbo_crypto_wipe(identity_secret, sizeof(identity_secret));
+    }
+    if (mesh_configure_p2p_security(mesh, config) != MESH_OK) {
+        mesh_destroy(mesh);
+        return NULL;
     }
     if (!mesh_update_node_id_from_p2p(mesh)) {
         mesh_destroy(mesh);
@@ -4546,6 +4690,10 @@ mesh_network_t *mesh_create(const mesh_config_t *config) {
 
 void mesh_destroy(mesh_network_t *mesh) {
     if (!mesh) return;
+    if (mesh->multi_network_state) {
+        TLOG_ERROR("Logical Network handles must be detached with mesh_fabric_detach_network_v2");
+        return;
+    }
 
     (void)mesh_ice_disable(mesh);
 
@@ -5394,6 +5542,26 @@ int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats) {
     return MESH_OK;
 }
 
+int mesh_get_security_status_v3(
+    mesh_network_t *mesh, p2p_node_security_status_v3_t *status) {
+    int result;
+
+    if (!mesh || !status || status->struct_size != sizeof(*status)) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    result = p2p_node_get_security_status_v3(mesh->p2p_node, status);
+    if (result == P2P_OK) {
+        return MESH_OK;
+    }
+    if (result == P2P_ERR_INVALID_ARG) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    if (result == P2P_ERR_INVALID_STATE) {
+        return MESH_ERR_BUSY;
+    }
+    return MESH_ERR_NETWORK;
+}
+
 int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info) {
     mesh_peer_t *peer = NULL;
     mesh_route_t *route = NULL;
@@ -5639,6 +5807,123 @@ void mesh_reset_stats(mesh_network_t *mesh) {
 }
 
 /* =============================================================================
+ * Multi-network V2 underlay adapter
+ * ============================================================================= */
+
+int mesh_internal_bind_fabric_v2(mesh_network_t *underlay,
+                                 mesh_fabric_t *fabric) {
+    mesh_peer_t *peer;
+    if (!underlay || !fabric || underlay->multi_network_state ||
+        underlay->multi_network_fabric) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    underlay->multi_network_fabric = fabric;
+    for (peer = underlay->peers; peer; peer = peer->next) {
+        mesh_peer_refresh_negotiated_capabilities(peer);
+        if (peer->p2p_peer) {
+            mesh_send_hello(underlay, peer->p2p_peer);
+        }
+    }
+    return MESH_OK;
+}
+
+void mesh_internal_unbind_fabric_v2(mesh_network_t *underlay,
+                                    mesh_fabric_t *fabric) {
+    mesh_peer_t *peer;
+    if (!underlay || underlay->multi_network_fabric != fabric) {
+        return;
+    }
+    underlay->multi_network_fabric = NULL;
+    for (peer = underlay->peers; peer; peer = peer->next) {
+        mesh_peer_refresh_negotiated_capabilities(peer);
+    }
+}
+
+mesh_network_t *mesh_internal_network_handle_create_v2(void *state) {
+    mesh_network_t *network;
+    if (!state) {
+        return NULL;
+    }
+    network = (mesh_network_t *)calloc(1, sizeof(*network));
+    if (network) {
+        network->multi_network_state = state;
+    }
+    return network;
+}
+
+void *mesh_internal_network_handle_state_v2(mesh_network_t *network) {
+    return network ? network->multi_network_state : NULL;
+}
+
+void mesh_internal_network_handle_destroy_v2(mesh_network_t *network) {
+    if (!network || !network->multi_network_state) {
+        return;
+    }
+    network->multi_network_state = NULL;
+    free(network);
+}
+
+int mesh_internal_send_to_node_v2(
+    mesh_network_t *underlay,
+    const uint8_t node_id[MESH_NETWORK_IDENTITY_SIZE],
+    const uint8_t *frame, size_t frame_len) {
+    mesh_peer_t *peer;
+    char node_id_hex[65];
+    if (!underlay || !node_id || !frame || frame_len == 0u ||
+        frame_len > MESH_NETWORK_FRAME_MAX) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    mesh_bytes_to_hex(node_id, MESH_NETWORK_IDENTITY_SIZE, node_id_hex,
+                      sizeof(node_id_hex));
+    for (peer = underlay->peers; peer; peer = peer->next) {
+        if (!peer->announced || !peer->is_connected || !peer->p2p_peer ||
+            strcmp(peer->peer_id, node_id_hex) != 0) {
+            continue;
+        }
+        if (!mesh_peer_has_capability(
+                peer, MESH_CAP_MULTI_NETWORK_V2 |
+                          MESH_CAP_NETWORK_FRAME_V2 |
+                          MESH_CAP_NETWORK_MEMBERSHIP_V1)) {
+            return MESH_ERR_UNSUPPORTED;
+        }
+        /* V2 Network framing is carried only by the authenticated P2P/Noise
+         * channel. The legacy ICE datagram fast path has no equivalent
+         * Network/identity channel binding and is therefore not eligible. */
+        return p2p_send_message(underlay->p2p_node, peer->p2p_peer,
+                                P2P_MSG_CUSTOM, frame, frame_len) == P2P_OK
+                   ? MESH_OK
+                   : MESH_ERR_NETWORK;
+    }
+    return MESH_ERR_NOT_FOUND;
+}
+
+int mesh_internal_visit_v2_peers(
+    mesh_network_t *underlay, mesh_internal_peer_visit_v2_fn visitor,
+    void *user_data) {
+    mesh_peer_t *peer;
+    int visited = 0;
+    if (!underlay || !visitor) {
+        return MESH_ERR_INVALID_ARG;
+    }
+    for (peer = underlay->peers; peer; peer = peer->next) {
+        uint8_t node_id[MESH_NETWORK_IDENTITY_SIZE];
+        if (!peer->announced || !peer->is_connected ||
+            !mesh_peer_has_capability(
+                peer, MESH_CAP_MULTI_NETWORK_V2 |
+                          MESH_CAP_NETWORK_FRAME_V2 |
+                          MESH_CAP_NETWORK_MEMBERSHIP_V1) ||
+            !mesh_hex_to_bytes(peer->peer_id, node_id, sizeof(node_id))) {
+            continue;
+        }
+        visited++;
+        if (!visitor(node_id, user_data)) {
+            break;
+        }
+    }
+    return visited;
+}
+
+/* =============================================================================
  * Utility API
  * ============================================================================= */
 
@@ -5652,6 +5937,13 @@ CXX_C_API const char *mesh_error_string(mesh_error_t error) {
         case MESH_ERR_TIMEOUT: return "Timeout";
         case MESH_ERR_ALREADY_EXISTS: return "Already exists";
         case MESH_ERR_BUSY: return "Resource busy";
+        case MESH_ERR_UNAUTHORIZED: return "Unauthorized";
+        case MESH_ERR_CONFLICT: return "Conflict";
+        case MESH_ERR_STALE_EPOCH: return "Stale epoch";
+        case MESH_ERR_RESOURCE_EXHAUSTED: return "Resource exhausted";
+        case MESH_ERR_UNKNOWN_COMMIT: return "Unknown commit";
+        case MESH_ERR_UNSUPPORTED: return "Unsupported";
+        case MESH_ERR_CLOSED: return "Closed";
         default: return "Unknown error";
     }
 }

@@ -44,7 +44,17 @@ double vivaldi_estimate_rtt(const vivaldi_coord_t *a, const vivaldi_coord_t *b) 
  * ============================================================================= */
 
 void vivaldi_update(vivaldi_coord_t *local, const vivaldi_coord_t *remote, double rtt_ms) {
-    if (!local || !remote || rtt_ms <= 0) return;
+    double confidence_sum;
+
+    if (!local || !remote || !isfinite(rtt_ms) || rtt_ms <= 0 ||
+        !isfinite(local->error) || !isfinite(remote->error) ||
+        local->error < 0.0 || remote->error < 0.0) {
+        return;
+    }
+    confidence_sum = local->error + remote->error;
+    if (!isfinite(confidence_sum) || confidence_sum <= 0.0) {
+        return;
+    }
 
     /* Calculate current estimated RTT */
     double estimated = vivaldi_distance(local, remote);
@@ -57,7 +67,7 @@ void vivaldi_update(vivaldi_coord_t *local, const vivaldi_coord_t *remote, doubl
     if (relative_error > 1.0) relative_error = 1.0;
 
     /* Weight based on both nodes' confidence */
-    double weight = local->error / (local->error + remote->error);
+    double weight = local->error / confidence_sum;
 
     /* Update error estimate (exponential moving average) */
     local->error = relative_error * VIVALDI_CE * weight +

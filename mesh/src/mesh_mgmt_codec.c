@@ -26,6 +26,7 @@ static int mesh_mgmt_kind_is_known(uint8_t kind) {
         case MESH_MGMT_KIND_AUDIT_ANCHOR:
         case MESH_MGMT_KIND_STREAM_TICKET_REQUEST:
         case MESH_MGMT_KIND_STREAM_TICKET_ISSUED:
+        case MESH_MGMT_KIND_CONTROL_FRAME:
         case MESH_MGMT_KIND_ERROR:
             return 1;
         default:

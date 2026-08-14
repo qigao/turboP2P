@@ -29,6 +29,14 @@ typedef int (*mesh_mgmt_execution_verify_grant_v1_fn)(
 
 typedef uint64_t (*mesh_mgmt_execution_clock_v1_fn)(void *context);
 
+typedef mesh_mgmt_execution_runner_result_t
+(*mesh_mgmt_execution_orchestrator_runner_v1_fn)(
+    void *context, const mesh_mgmt_execution_runner_v1_t *runner,
+    const mesh_mgmt_execution_request_v1_t *request,
+    const mesh_mgmt_execution_effective_policy_v1_t *effective_policy,
+    uint64_t now_ms, const mesh_mgmt_execution_runner_io_v1_t *io,
+    mesh_mgmt_execution_runner_output_v1_t *out);
+
 typedef struct {
   mesh_mgmt_execution_store_v1_t *store;
   mesh_mgmt_execution_runner_v1_t *runner;
@@ -39,6 +47,9 @@ typedef struct {
   void *verify_grant_context;
   mesh_mgmt_execution_clock_v1_fn clock_now_ms;
   void *clock_context;
+  /** Optional isolated runner boundary; NULL preserves in-process behavior. */
+  mesh_mgmt_execution_orchestrator_runner_v1_fn execute_runner;
+  void *execute_runner_context;
 } mesh_mgmt_execution_orchestrator_config_v1_t;
 
 /**
@@ -56,6 +67,8 @@ typedef struct {
   void *verify_grant_context;
   mesh_mgmt_execution_clock_v1_fn clock_now_ms;
   void *clock_context;
+  mesh_mgmt_execution_orchestrator_runner_v1_fn execute_runner;
+  void *execute_runner_context;
   uint8_t initialized;
 } mesh_mgmt_execution_orchestrator_v1_t;
 

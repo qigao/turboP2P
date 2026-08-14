@@ -34,10 +34,22 @@ typedef void (*mesh_mgmt_execution_worker_completion_v1_fn)(
     size_t result_payload_size,
     const mesh_mgmt_execution_result_v1_t *result);
 
+typedef mesh_mgmt_execution_service_result_t
+(*mesh_mgmt_execution_worker_execute_v1_fn)(
+    void *context, mesh_mgmt_execution_service_v1_t *service,
+    const mesh_mgmt_execution_shadow_command_v1_t *command,
+    const mesh_mgmt_execution_authorization_input_v1_t *authorization,
+    const mesh_mgmt_execution_runner_io_v1_t *runner_io, uint8_t *output,
+    size_t output_capacity, size_t *out_size,
+    mesh_mgmt_execution_result_v1_t *out_result);
+
 typedef struct mesh_mgmt_execution_worker_config_v1 {
   mesh_mgmt_execution_service_v1_t *service;
   size_t queue_capacity;
   const mesh_mgmt_execution_runner_io_v1_t *runner_io;
+  /** Optional execution boundary; production uses an isolated process. */
+  mesh_mgmt_execution_worker_execute_v1_fn execute;
+  void *execute_context;
   mesh_mgmt_execution_worker_completion_v1_fn completion;
   void *completion_context;
 } mesh_mgmt_execution_worker_config_v1_t;
@@ -58,6 +70,8 @@ typedef struct mesh_mgmt_execution_worker_v1 {
   mesh_mgmt_execution_runner_io_v1_t runner_io;
   mesh_mgmt_execution_worker_completion_v1_fn completion;
   void *completion_context;
+  mesh_mgmt_execution_worker_execute_v1_fn execute;
+  void *execute_context;
   uint8_t has_runner_io;
   uint8_t initialized;
 } mesh_mgmt_execution_worker_v1_t;

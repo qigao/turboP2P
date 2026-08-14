@@ -43,7 +43,7 @@ static void test_codec_round_trips_canonical_frame(void) {
     check_size_eq(output_len, MESH_MGMT_PREFIX_SIZE + sizeof(VALID_HEADER) +
                                   sizeof(VALID_PAYLOAD) +
                                   MESH_MGMT_SIGNATURE_SIZE);
-    check_mem_eq(output, "TMGM\x01\x00\x01\x00\x00\x0b\x00\x00\x00\x07",
+    check_mem_eq(output, "TMGM\x01\x01\x01\x00\x00\x0b\x00\x00\x00\x07",
                  MESH_MGMT_PREFIX_SIZE);
     check_mem_eq(output + MESH_MGMT_PREFIX_SIZE, VALID_HEADER,
                  sizeof(VALID_HEADER));
