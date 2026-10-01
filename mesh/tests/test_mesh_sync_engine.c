@@ -2,7 +2,7 @@
 
 #include "mesh_sync_engine.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,14 +31,14 @@ static int build_manifest(const uint8_t *bytes, size_t len, uint8_t **out_bytes,
   size_t chunk_count = (len + TEST_BLOCK - 1u) / TEST_BLOCK;
   m3_chunk_cid_v1_t *chunks;
   m3_object_manifest_v2_t manifest;
-  turbo_crypto_sha256_ctx_t object_ctx;
+  salts_crypto_sha256_ctx_t object_ctx;
   uint8_t object_digest[M3_CHUNK_CID_DIGEST_SIZE];
   int result = -1;
 
   chunks = (m3_chunk_cid_v1_t *)calloc(chunk_count, sizeof(*chunks));
   if (!chunks)
     return -1;
-  if (turbo_crypto_sha256_init(&object_ctx) != TURBO_CRYPTO_OK)
+  if (salts_crypto_sha256_init(&object_ctx) != SALTS_CRYPTO_OK)
     goto cleanup;
   for (size_t i = 0u; i < chunk_count; i++) {
     size_t offset = i * TEST_BLOCK;
@@ -46,16 +46,16 @@ static int build_manifest(const uint8_t *bytes, size_t len, uint8_t **out_bytes,
 
     if (take > TEST_BLOCK)
       take = TEST_BLOCK;
-    if (turbo_crypto_sha256(bytes + offset, take, chunks[i].digest) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&object_ctx, chunks[i].digest,
-                                   sizeof(chunks[i].digest)) != TURBO_CRYPTO_OK) {
+    if (salts_crypto_sha256(bytes + offset, take, chunks[i].digest) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&object_ctx, chunks[i].digest,
+                                   sizeof(chunks[i].digest)) != SALTS_CRYPTO_OK) {
       goto cleanup;
     }
     chunks[i].hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     chunks[i].size = take;
   }
-  if (turbo_crypto_sha256_final(&object_ctx, object_digest) != TURBO_CRYPTO_OK)
+  if (salts_crypto_sha256_final(&object_ctx, object_digest) != SALTS_CRYPTO_OK)
     goto cleanup;
 
   memset(&manifest, 0, sizeof(manifest));

@@ -2,7 +2,8 @@
 
 #include "mesh_mgmt_crypto.h"
 
-#include <platform.h>
+#include <salts/random.h>
+#include <salts/clock.h>
 
 #include <string.h>
 
@@ -17,12 +18,12 @@ static int bytes_are_zero(const uint8_t *bytes, size_t length) {
 
 static mesh_mgmt_agent_router_slot_v1_t *slot_at(mesh_mgmt_agent_router_v1_t *router,
                                                  size_t index) {
-  return (mesh_mgmt_agent_router_slot_v1_t *)turbo_vec_at(&router->slots, index);
+  return (mesh_mgmt_agent_router_slot_v1_t *)vec_at(&router->slots, index);
 }
 
 static const mesh_mgmt_agent_router_slot_v1_t *
 slot_at_const(const mesh_mgmt_agent_router_v1_t *router, size_t index) {
-  return (const mesh_mgmt_agent_router_slot_v1_t *)turbo_vec_at_const(&router->slots, index);
+  return (const mesh_mgmt_agent_router_slot_v1_t *)vec_at_const(&router->slots, index);
 }
 
 static mesh_mgmt_agent_router_slot_v1_t *find_slot(mesh_mgmt_agent_router_v1_t *router,
@@ -81,12 +82,12 @@ static mesh_mgmt_agent_router_slot_v1_t *find_free_slot(mesh_mgmt_agent_router_v
 static uint64_t router_now_ms(const mesh_mgmt_agent_router_v1_t *router) {
   return router->signer_template->now_ms
              ? router->signer_template->now_ms(router->signer_template->callback_context)
-             : turbo_realtime_ms();
+             : salts_realtime_ms();
 }
 
 static int router_random(mesh_mgmt_agent_router_v1_t *router, uint8_t *output, size_t output_len) {
   return router->random_bytes ? router->random_bytes(router->random_context, output, output_len)
-                              : turbo_secure_random(output, output_len);
+                              : salts_secure_random(output, output_len);
 }
 
 static mesh_mgmt_agent_router_result_t next_connection_id(mesh_mgmt_agent_router_v1_t *router,
@@ -416,14 +417,15 @@ mesh_mgmt_agent_router_init_v1(mesh_mgmt_agent_router_v1_t *router,
     mesh_mgmt_crypto_wipe(router, sizeof(*router));
     return result;
   }
-  if (turbo_vec_init(&router->slots, sizeof(mesh_mgmt_agent_router_slot_v1_t)) != TURBO_OK ||
-      turbo_vec_reserve(&router->slots, router->max_peers) != TURBO_OK ||
-      turbo_vec_resize(&router->slots, router->max_peers) != TURBO_OK) {
-    turbo_vec_destroy(&router->slots);
+  if (vec_init_bytes(&router->slots, sizeof(mesh_mgmt_agent_router_slot_v1_t),
+                     _Alignof(mesh_mgmt_agent_router_slot_v1_t), router->max_peers) != STL_OK ||
+      vec_reserve(&router->slots, router->max_peers) != STL_OK ||
+      vec_resize(&router->slots, router->max_peers) != STL_OK) {
+    vec_destroy(&router->slots);
     mesh_mgmt_crypto_wipe(router, sizeof(*router));
     return MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED;
   }
-  memset(turbo_vec_data(&router->slots), 0,
+  memset(vec_data(&router->slots), 0,
          router->max_peers * sizeof(mesh_mgmt_agent_router_slot_v1_t));
   router->state = MESH_MGMT_AGENT_ROUTER_READY;
   router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
@@ -497,9 +499,9 @@ void mesh_mgmt_agent_router_destroy_v1(mesh_mgmt_agent_router_v1_t *router) {
       mesh_mgmt_agent_router_stop_v1(router) != MESH_MGMT_AGENT_ROUTER_OK)
     return;
   if (router->slots.data) {
-    bytes = turbo_vec_size(&router->slots) * sizeof(mesh_mgmt_agent_router_slot_v1_t);
-    mesh_mgmt_crypto_wipe(turbo_vec_data(&router->slots), bytes);
-    turbo_vec_destroy(&router->slots);
+    bytes = vec_size(&router->slots) * sizeof(mesh_mgmt_agent_router_slot_v1_t);
+    mesh_mgmt_crypto_wipe(vec_data(&router->slots), bytes);
+    vec_destroy(&router->slots);
   }
   mesh_mgmt_crypto_wipe(router, sizeof(*router));
 }

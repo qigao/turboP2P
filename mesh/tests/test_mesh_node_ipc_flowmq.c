@@ -8,7 +8,7 @@
 #include "tinytest.h"
 
 #include <p2p.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <turbo_thread.h>
 
 #include <stdio.h>
@@ -1537,8 +1537,8 @@ static void test_network_control_service_applies_and_drains_network(void) {
                p2p_public_key_from_private_key(node_private, node_public));
   bytes_to_hex_32(node_public, node_public_hex);
   allowed_nodes[0] = node_public_hex;
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(network_id, strlen(network_id), mesh_id));
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(network_id, strlen(network_id), mesh_id));
   memset(&issuer, 0, sizeof(issuer));
   memset(issuer.key_id, 0x61, sizeof(issuer.key_id));
   memcpy(issuer.public_key, TEST_NETWORK_ISSUER_PUBLIC_KEY,
@@ -1626,8 +1626,8 @@ static void test_network_control_service_applies_and_drains_network(void) {
          sizeof(request.operation.resource_id));
   request.document = intent.wire;
   request.document_size = intent.wire_size;
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(request.document, request.document_size,
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(request.document, request.document_size,
                                    request.operation.desired_digest));
   check_int_eq(descriptor->ops.try_start(descriptor->context, &request),
                MESH_CONTROL_OK);
@@ -1679,8 +1679,8 @@ static void test_network_control_service_applies_and_drains_network(void) {
          sizeof(request.operation.resource_id));
   request.document = second_intent.wire;
   request.document_size = second_intent.wire_size;
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(request.document, request.document_size,
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(request.document, request.document_size,
                                    request.operation.desired_digest));
   check_int_eq(descriptor->ops.try_start(descriptor->context, &request),
                MESH_CONTROL_OK);
@@ -1792,8 +1792,8 @@ static void test_meshd_network_control_owns_one_compatible_underlay(void) {
            "issuer.pub");
 
   memset(&config, 0, sizeof(config));
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(network_id, strlen(network_id),
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(network_id, strlen(network_id),
                                    config.mesh_id));
   bytes_to_hex_32(config.mesh_id, hex);
   snprintf(node_config.network_control_mesh_id_hex,

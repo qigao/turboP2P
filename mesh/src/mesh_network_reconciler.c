@@ -1,5 +1,6 @@
 #include "mesh_network_reconciler.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <stdlib.h>
@@ -43,8 +44,8 @@ mesh_control_result_t mesh_network_resource_id_v1(
   memcpy(input + sizeof(domain) - 1u, mesh_id, MESH_CONTROL_DIGEST_SIZE);
   memcpy(input + sizeof(domain) - 1u + MESH_CONTROL_DIGEST_SIZE,
          network_uid, MESH_CONTROL_ID_SIZE);
-  if (turbo_crypto_sha256(input, sizeof(input), out_resource_id) !=
-      TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256(input, sizeof(input), out_resource_id) !=
+      SALTS_CRYPTO_OK) {
     memset(input, 0, sizeof(input));
     return MESH_CONTROL_INVALID_STATE;
   }
@@ -149,8 +150,8 @@ mesh_control_result_t mesh_network_reconciler_submit_v1(
     uint64_t applied_generation = 0u;
     size_t route_index;
     if (!document || document_size == 0u || drain_timeout_ms != 0u ||
-        turbo_crypto_sha256(document, document_size, document_digest) !=
-            TURBO_CRYPTO_OK ||
+        salts_crypto_sha256(document, document_size, document_digest) !=
+            SALTS_CRYPTO_OK ||
         mesh_control_network_document_decode_v1(document, document_size,
                                                 &decoded) != MESH_CONTROL_OK ||
         !resource_id_matches(&decoded, resource_id) ||

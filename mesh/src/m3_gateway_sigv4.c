@@ -1,5 +1,6 @@
 #include "m3_gateway_sigv4.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <ctype.h>
@@ -597,8 +598,8 @@ static m3_sigv4_result_t m3_sigv4_verify_core(const m3_sigv4_verify_context_t *c
       return M3_SIGV4_MALFORMED_AUTH;
     }
   }
-  if (turbo_crypto_sha256(canonical_request, strlen(canonical_request), canonical_digest) !=
-      TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256(canonical_request, strlen(canonical_request), canonical_digest) !=
+      SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(canonical_digest, sizeof(canonical_digest), canonical_digest_hex);
@@ -689,9 +690,9 @@ m3_sigv4_result_t m3_sigv4_sign_request_v1(
                payload_hash);
   if (n < 0 || (size_t)n >= sizeof(canonical_request))
     return M3_SIGV4_MALFORMED_AUTH;
-  if (turbo_crypto_sha256((const uint8_t *)canonical_request,
+  if (salts_crypto_sha256((const uint8_t *)canonical_request,
                           strlen(canonical_request), canonical_digest) !=
-      TURBO_CRYPTO_OK) {
+      SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(canonical_digest, sizeof(canonical_digest), canonical_digest_hex);

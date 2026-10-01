@@ -2,7 +2,7 @@
 #define MESH_CONTROL_OUTBOX_H
 
 #include "mesh_control_primitives.h"
-#include "turbo_deque.h"
+#include "cstl/deque.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -42,7 +42,7 @@ typedef struct {
  * of this outbox. The type is intentionally not thread-safe.
  */
 typedef struct {
-  turbo_deque_t entries;
+  deque_t entries;
   mesh_control_outbox_config_v1_t config;
   size_t retained_bytes;
   uint64_t published;

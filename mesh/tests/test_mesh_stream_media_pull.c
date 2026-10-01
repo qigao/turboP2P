@@ -2,7 +2,7 @@
 
 #include "mesh_stream_media_pull.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,20 +25,20 @@ static void fill_data(void) {
 
 static void build_manifest(m3_object_manifest_v2_t *manifest,
                            m3_chunk_cid_v1_t *chunks) {
-  turbo_crypto_sha256_ctx_t ctx;
+  salts_crypto_sha256_ctx_t ctx;
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
 
-  (void)turbo_crypto_sha256_init(&ctx);
+  (void)salts_crypto_sha256_init(&ctx);
   memset(manifest, 0, sizeof(*manifest));
   memset(chunks, 0, TEST_BLOCKS * sizeof(*chunks));
   for (size_t i = 0u; i < TEST_BLOCKS; i++) {
-    (void)turbo_crypto_sha256(g_data + i * TEST_BLOCK, TEST_BLOCK, chunks[i].digest);
-    (void)turbo_crypto_sha256_update(&ctx, chunks[i].digest,
+    (void)salts_crypto_sha256(g_data + i * TEST_BLOCK, TEST_BLOCK, chunks[i].digest);
+    (void)salts_crypto_sha256_update(&ctx, chunks[i].digest,
                                      sizeof(chunks[i].digest));
     chunks[i].hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     chunks[i].size = TEST_BLOCK;
   }
-  (void)turbo_crypto_sha256_final(&ctx, digest);
+  (void)salts_crypto_sha256_final(&ctx, digest);
   manifest->version = M3_OBJECT_MANIFEST_VERSION_2;
   manifest->object_cid.hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
   manifest->object_cid.size = TEST_OBJECT_SIZE;
@@ -98,7 +98,7 @@ static void run_pull(mesh_stream_media_pull_v1_t *pull, uint8_t *out,
 
   do {
     rc = mesh_stream_media_pull_pump_v1(pull, out, cap, out_len);
-    check_int_eq(MESH_STREAM_MEDIA_PULL_OK, rc);
+    check_equal(MESH_STREAM_MEDIA_PULL_OK, rc);
   } while (!mesh_stream_media_pull_complete(pull));
 }
 
@@ -119,22 +119,22 @@ static void test_full_object_pull(void) {
   make_config(&config, &peer);
 
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_uint_eq(mesh_stream_media_pull_window_len(&pull), 0u);
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(mesh_stream_media_pull_window_len(&pull), 0u);
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 0u, TEST_OBJECT_SIZE));
-  check_uint_eq(mesh_stream_media_pull_window_len(&pull), TEST_OBJECT_SIZE);
+  check_equal(mesh_stream_media_pull_window_len(&pull), TEST_OBJECT_SIZE);
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, TEST_OBJECT_SIZE);
-  check_mem_eq(out, g_data, TEST_OBJECT_SIZE);
-  check_size_eq(peer.fetched_count, TEST_BLOCKS);
+  check_equal(out_len, TEST_OBJECT_SIZE);
+  check_equal(out, g_data, TEST_OBJECT_SIZE);
+  check_equal(peer.fetched_count, TEST_BLOCKS);
   check_true(mesh_stream_media_pull_complete(&pull));
   /* Idempotent pump after completion. */
   out_len = 0u;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_pump_v1(&pull, out, sizeof(out), &out_len));
-  check_size_eq(out_len, TEST_OBJECT_SIZE);
+  check_equal(out_len, TEST_OBJECT_SIZE);
 
   mesh_stream_media_pull_destroy_v1(&pull);
 }
@@ -159,27 +159,27 @@ static void test_segment_aligned_range(void) {
   make_config(&config, &peer);
 
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
   /* Segment 1: object bytes [3072, 6144). */
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_resolve_v1(&pull, 3u * TEST_BLOCK,
                                                  3u * TEST_BLOCK, &first,
                                                  &count, &win_off, &win_len));
-  check_size_eq(first, 3u);
-  check_size_eq(count, 3u);
-  check_uint_eq(win_off, 0u);
-  check_uint_eq(win_len, 3u * TEST_BLOCK);
+  check_equal(first, 3u);
+  check_equal(count, 3u);
+  check_equal(win_off, 0u);
+  check_equal(win_len, 3u * TEST_BLOCK);
 
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 3u * TEST_BLOCK,
                                                3u * TEST_BLOCK));
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, 3u * TEST_BLOCK);
-  check_mem_eq(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
-  check_size_eq(peer.fetched_count, 3u); /* only the segment's chunks */
-  check_size_eq(peer.fetched_indices[0], 3u);
-  check_size_eq(peer.fetched_indices[2], 5u);
+  check_equal(out_len, 3u * TEST_BLOCK);
+  check_equal(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
+  check_equal(peer.fetched_count, 3u); /* only the segment's chunks */
+  check_equal(peer.fetched_indices[0], 3u);
+  check_equal(peer.fetched_indices[2], 5u);
 
   mesh_stream_media_pull_destroy_v1(&pull);
 }
@@ -200,16 +200,16 @@ static void test_mid_chunk_range(void) {
   make_config(&config, &peer);
 
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
   /* Mid-chunk start: [100, 2100) spans chunks 0..2 with a 100-byte offset. */
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 100u, 2000u));
-  check_uint_eq(mesh_stream_media_pull_window_len(&pull), 2000u);
+  check_equal(mesh_stream_media_pull_window_len(&pull), 2000u);
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, 2000u);
-  check_mem_eq(out, g_data + 100u, 2000u);
-  check_size_eq(peer.fetched_count, 3u); /* chunks 0,1,2 */
+  check_equal(out_len, 2000u);
+  check_equal(out, g_data + 100u, 2000u);
+  check_equal(peer.fetched_count, 3u); /* chunks 0,1,2 */
 
   mesh_stream_media_pull_destroy_v1(&pull);
 }
@@ -230,22 +230,22 @@ static void test_clamped_and_out_of_range(void) {
   make_config(&config, &peer);
 
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
 
   /* Past-the-end length clamps to the object tail. */
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 7000u, 100000u));
-  check_uint_eq(mesh_stream_media_pull_window_len(&pull), 1192u);
+  check_equal(mesh_stream_media_pull_window_len(&pull), 1192u);
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, 1192u);
-  check_mem_eq(out, g_data + 7000u, 1192u);
-  check_size_eq(peer.fetched_count, 2u); /* chunks 6,7 */
+  check_equal(out_len, 1192u);
+  check_equal(out, g_data + 7000u, 1192u);
+  check_equal(peer.fetched_count, 2u); /* chunks 6,7 */
 
   /* Start at/after the object end -> HTTP 416. */
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OUT_OF_RANGE,
+  check_equal(MESH_STREAM_MEDIA_PULL_OUT_OF_RANGE,
                mesh_stream_media_pull_start_v1(&pull, TEST_OBJECT_SIZE, 100u));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OUT_OF_RANGE,
+  check_equal(MESH_STREAM_MEDIA_PULL_OUT_OF_RANGE,
                mesh_stream_media_pull_start_v1(&pull, TEST_OBJECT_SIZE + 100u, 10u));
 
   mesh_stream_media_pull_destroy_v1(&pull);
@@ -268,11 +268,11 @@ static void test_integrity_and_pending(void) {
   peer.pending_index = SIZE_MAX;
   make_config(&config, &peer);
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 0u, TEST_OBJECT_SIZE));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INTEGRITY,
+  check_equal(MESH_STREAM_MEDIA_PULL_INTEGRITY,
                mesh_stream_media_pull_pump_v1(&pull, out, sizeof(out), &out_len));
   check_true(!mesh_stream_media_pull_complete(&pull));
   mesh_stream_media_pull_destroy_v1(&pull);
@@ -283,16 +283,16 @@ static void test_integrity_and_pending(void) {
   peer.pending_index = 1u;
   make_config(&config, &peer);
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 0u, TEST_OBJECT_SIZE));
   out_len = 0u;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_AGAIN,
+  check_equal(MESH_STREAM_MEDIA_PULL_AGAIN,
                mesh_stream_media_pull_pump_v1(&pull, out, sizeof(out), &out_len));
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, TEST_OBJECT_SIZE);
-  check_mem_eq(out, g_data, TEST_OBJECT_SIZE);
+  check_equal(out_len, TEST_OBJECT_SIZE);
+  check_equal(out, g_data, TEST_OBJECT_SIZE);
 
   mesh_stream_media_pull_destroy_v1(&pull);
 }
@@ -313,41 +313,41 @@ static void test_invalid_args(void) {
   make_config(&config, &peer);
 
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_init_v1(NULL, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_init_v1(&pull, NULL, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_init_v1(&pull, &manifest, NULL));
   config.max_chunk_bytes = 0u;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
   make_config(&config, &peer);
   config.max_chunk_bytes = TEST_BLOCK / 2u; /* smaller than a chunk */
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
   make_config(&config, &peer);
 
   /* Start without init. */
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_start_v1(&pull, 0u, 100u));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_pump_v1(&pull, out, sizeof(out), &out_len));
-  check_uint_eq(mesh_stream_media_pull_window_len(&pull), 0u);
+  check_equal(mesh_stream_media_pull_window_len(&pull), 0u);
   check_true(!mesh_stream_media_pull_complete(&pull));
 
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_start_v1(&pull, 0u, 0u));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 0u, 100u));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_pump_v1(&pull, NULL, sizeof(out), &out_len));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_pump_v1(&pull, out, sizeof(out), NULL));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_pump_v1(&pull, out, 50u, &out_len));
   mesh_stream_media_pull_destroy_v1(&pull);
   mesh_stream_media_pull_destroy_v1(NULL);

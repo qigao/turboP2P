@@ -39,7 +39,7 @@ file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h*)
 
 # Build as shared library (DLL on Windows)
 add_library(p2p SHARED ${SOURCE_FILES} ${HEADER_FILES}
- )
+)
 add_library(TurboP2P::P2P ALIAS p2p)
 # Define SHARED_CXX when building as shared library (for DLL export/import)
 target_compile_definitions(p2p PRIVATE SHARED_CXX)
@@ -53,6 +53,7 @@ target_link_libraries(
   p2p
   PUBLIC TurboUtils::Core TurboNet::CoroNet TurboParser::Parser
   PRIVATE OpenSSL::Crypto TurboNet::Crypto TurboP2P::NoiseProtocol roaring uthash)
+target_link_libraries(p2p PRIVATE Salts::Crypto)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)
 else()

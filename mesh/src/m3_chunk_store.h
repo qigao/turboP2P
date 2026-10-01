@@ -1,6 +1,7 @@
 #ifndef M3_CHUNK_STORE_H
 #define M3_CHUNK_STORE_H
 
+#include "m3_chunk_cid.h"
 #include <turbo_fs.h>
 
 #include <stddef.h>
@@ -10,8 +11,6 @@
 extern "C" {
 #endif
 
-#define M3_CHUNK_CID_DIGEST_SIZE 32u
-#define M3_CHUNK_STORE_HASH_ALGORITHM_SHA256 1u
 
 typedef enum {
   M3_CHUNK_STORE_OK = 0,
@@ -26,11 +25,6 @@ typedef enum {
   M3_CHUNK_STORE_ABORTED = -9,
 } m3_chunk_store_result_t;
 
-typedef struct {
-  uint8_t hash_algorithm;
-  uint64_t size;
-  uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
-} m3_chunk_cid_v1_t;
 
 typedef struct {
   char root[TURBO_FS_MAX_PATH];

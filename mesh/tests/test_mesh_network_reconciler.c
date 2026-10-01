@@ -3,7 +3,7 @@
 
 #include <p2p.h>
 #include <tinytest.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <string.h>
 #include <time.h>
@@ -151,8 +151,8 @@ static void test_reconciles_fenced_network_lifecycle(void) {
                p2p_public_key_from_private_key(node_private, node_public));
   test_hex(node_public, node_public_hex);
   allowed_nodes[0] = node_public_hex;
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(network_id, strlen(network_id), mesh_id));
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(network_id, strlen(network_id), mesh_id));
   memset(&issuer, 0, sizeof(issuer));
   memset(issuer.key_id, 0x61, sizeof(issuer.key_id));
   memcpy(issuer.public_key, TEST_ISSUER_PUBLIC_KEY,
@@ -188,8 +188,8 @@ static void test_reconciles_fenced_network_lifecycle(void) {
          sizeof(ipc_command.resource_id));
   ipc_command.document = generation_one.wire;
   ipc_command.document_size = generation_one.wire_size;
-  check_int_eq(TURBO_CRYPTO_OK,
-               turbo_crypto_sha256(ipc_command.document,
+  check_int_eq(SALTS_CRYPTO_OK,
+               salts_crypto_sha256(ipc_command.document,
                                    ipc_command.document_size,
                                    ipc_command.document_digest));
   check_int_eq(MESH_CONTROL_OK, mesh_node_ipc_network_execute_v1(

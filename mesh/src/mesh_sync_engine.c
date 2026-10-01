@@ -1,6 +1,6 @@
 #include "mesh_sync_engine.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -411,7 +411,7 @@ mesh_sync_result_t mesh_sync_engine_pump_v1(mesh_sync_engine_v1_t *engine) {
     }
     if (len != cid->size)
       return MESH_SYNC_INTEGRITY;
-    if (turbo_crypto_sha256(engine->scratch, len, digest) != TURBO_CRYPTO_OK)
+    if (salts_crypto_sha256(engine->scratch, len, digest) != SALTS_CRYPTO_OK)
       return MESH_SYNC_INTEGRITY;
     if (memcmp(digest, cid->digest, sizeof(digest)) != 0)
       return MESH_SYNC_INTEGRITY;

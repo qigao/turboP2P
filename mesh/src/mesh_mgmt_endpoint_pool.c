@@ -2,8 +2,8 @@
 
 #include "mesh_mgmt_crypto.h"
 
-#include <platform.h>
-#include <turbo_error.h>
+#include <salts/random.h>
+#include <salts/clock.h>
 
 #include <string.h>
 
@@ -31,12 +31,12 @@ static int endpoint_host_is_valid(const char *host) {
 }
 
 static mesh_mgmt_endpoint_entry_v1_t *entry_at(mesh_mgmt_endpoint_pool_v1_t *pool, size_t index) {
-  return (mesh_mgmt_endpoint_entry_v1_t *)turbo_vec_at(&pool->entries, index);
+  return (mesh_mgmt_endpoint_entry_v1_t *)vec_at(&pool->entries, index);
 }
 
 static const mesh_mgmt_endpoint_entry_v1_t *entry_at_const(const mesh_mgmt_endpoint_pool_v1_t *pool,
                                                            size_t index) {
-  return (const mesh_mgmt_endpoint_entry_v1_t *)turbo_vec_at_const(&pool->entries, index);
+  return (const mesh_mgmt_endpoint_entry_v1_t *)vec_at_const(&pool->entries, index);
 }
 
 static mesh_mgmt_endpoint_entry_v1_t *
@@ -91,7 +91,7 @@ static int records_are_equal(const mesh_mgmt_endpoint_record_v1_t *left,
 
 static int pool_random(mesh_mgmt_endpoint_pool_v1_t *pool, uint8_t *output, size_t output_len) {
   return pool->random_bytes ? pool->random_bytes(pool->callback_context, output, output_len)
-                            : turbo_secure_random(output, output_len);
+                            : salts_secure_random(output, output_len);
 }
 
 static int pool_connect(mesh_mgmt_endpoint_pool_v1_t *pool,
@@ -217,14 +217,15 @@ mesh_mgmt_endpoint_pool_init_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
   pool->connect_peer = config->connect_peer;
   pool->random_bytes = config->random_bytes;
   pool->callback_context = config->callback_context;
-  if (turbo_vec_init(&pool->entries, sizeof(mesh_mgmt_endpoint_entry_v1_t)) != TURBO_OK ||
-      turbo_vec_reserve(&pool->entries, pool->capacity) != TURBO_OK ||
-      turbo_vec_resize(&pool->entries, pool->capacity) != TURBO_OK) {
-    turbo_vec_destroy(&pool->entries);
+  if (vec_init_bytes(&pool->entries, sizeof(mesh_mgmt_endpoint_entry_v1_t),
+                     _Alignof(mesh_mgmt_endpoint_entry_v1_t), pool->capacity) != STL_OK ||
+      vec_reserve(&pool->entries, pool->capacity) != STL_OK ||
+      vec_resize(&pool->entries, pool->capacity) != STL_OK) {
+    vec_destroy(&pool->entries);
     memset(pool, 0, sizeof(*pool));
     return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
   }
-  memset(turbo_vec_data(&pool->entries), 0, pool->capacity * sizeof(mesh_mgmt_endpoint_entry_v1_t));
+  memset(vec_data(&pool->entries), 0, pool->capacity * sizeof(mesh_mgmt_endpoint_entry_v1_t));
   pool->initialized = 1u;
   pool->last_error = MESH_MGMT_ENDPOINT_POOL_OK;
   return MESH_MGMT_ENDPOINT_POOL_OK;
@@ -234,9 +235,9 @@ void mesh_mgmt_endpoint_pool_destroy_v1(mesh_mgmt_endpoint_pool_v1_t *pool) {
   if (!pool || pool->in_api)
     return;
   if (pool->entries.data) {
-    mesh_mgmt_crypto_wipe(turbo_vec_data(&pool->entries),
-                          turbo_vec_size(&pool->entries) * sizeof(mesh_mgmt_endpoint_entry_v1_t));
-    turbo_vec_destroy(&pool->entries);
+    mesh_mgmt_crypto_wipe(vec_data(&pool->entries),
+                          vec_size(&pool->entries) * sizeof(mesh_mgmt_endpoint_entry_v1_t));
+    vec_destroy(&pool->entries);
   }
   memset(pool, 0, sizeof(*pool));
 }

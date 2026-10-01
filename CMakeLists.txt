@@ -40,6 +40,9 @@ enable_testing()
 include(CMakeOptions.cmake)
 include(Sanitizers)
 
+include(SaltsDependencies)
+
+# CoroNet and aggregate parser/HTTP providers remain until phases 2 and 3.
 find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
 find_package(TurboParser CONFIG REQUIRED PATHS "${TURBOPARSER_ROOT}")
 find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
@@ -140,3 +143,10 @@ install(
   FILE TurboP2PTargets.cmake
   NAMESPACE TurboP2P::
   DESTINATION "lib/cmake/TurboP2P")
+
+if(BUILD_TESTS)
+  add_executable(test_salts_sha256 tests/salts_foundation/test_salts_sha256.c)
+  set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
+  target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
+  add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
+endif()

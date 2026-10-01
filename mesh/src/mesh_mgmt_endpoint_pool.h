@@ -2,7 +2,7 @@
 #define TURBO_P2P_MESH_MGMT_ENDPOINT_POOL_H
 
 #include <p2p.h>
-#include <turbo_vec.h>
+#include <cstl/vec.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -83,7 +83,7 @@ typedef struct {
 
 typedef struct {
   p2p_node_t *node;
-  turbo_vec_t entries;
+  vec_t entries;
   size_t capacity;
   size_t count;
   uint64_t retry_base_ms;

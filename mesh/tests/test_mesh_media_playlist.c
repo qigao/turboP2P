@@ -2,7 +2,7 @@
 
 #include "mesh_media_playlist.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,20 +26,20 @@ static void fill_data(void) {
 
 static void build_manifest(m3_object_manifest_v2_t *manifest,
                            m3_chunk_cid_v1_t *chunks) {
-  turbo_crypto_sha256_ctx_t ctx;
+  salts_crypto_sha256_ctx_t ctx;
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
 
-  (void)turbo_crypto_sha256_init(&ctx);
+  (void)salts_crypto_sha256_init(&ctx);
   memset(manifest, 0, sizeof(*manifest));
   memset(chunks, 0, TEST_BLOCKS * sizeof(*chunks));
   for (size_t i = 0u; i < TEST_BLOCKS; i++) {
-    (void)turbo_crypto_sha256(g_data + i * TEST_BLOCK, TEST_BLOCK, chunks[i].digest);
-    (void)turbo_crypto_sha256_update(&ctx, chunks[i].digest,
+    (void)salts_crypto_sha256(g_data + i * TEST_BLOCK, TEST_BLOCK, chunks[i].digest);
+    (void)salts_crypto_sha256_update(&ctx, chunks[i].digest,
                                      sizeof(chunks[i].digest));
     chunks[i].hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     chunks[i].size = TEST_BLOCK;
   }
-  (void)turbo_crypto_sha256_final(&ctx, digest);
+  (void)salts_crypto_sha256_final(&ctx, digest);
   manifest->version = M3_OBJECT_MANIFEST_VERSION_2;
   manifest->object_cid.hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
   manifest->object_cid.size = TEST_OBJECT_SIZE;
@@ -51,9 +51,9 @@ static void build_manifest(m3_object_manifest_v2_t *manifest,
 static void build_index(mesh_media_index_v1_t *index,
                         const m3_object_manifest_v2_t *manifest) {
   memset(index, 0, sizeof(*index));
-  check_int_eq(MESH_MEDIA_INDEX_OK,
+  check_equal(MESH_MEDIA_INDEX_OK,
                mesh_media_index_build_v1(index, manifest, 3u * TEST_BLOCK));
-  check_size_eq(index->segment_count, 3u);
+  check_equal(index->segment_count, 3u);
 }
 
 /* Extract the (index, offset, len) tuples from a media playlist. */
@@ -93,11 +93,11 @@ static void test_media_playlist(void) {
   build_manifest(&manifest, chunks);
   build_index(&index, &manifest);
 
-  check_int_eq(MESH_MEDIA_PLAYLIST_OK,
+  check_equal(MESH_MEDIA_PLAYLIST_OK,
                mesh_media_playlist_media_v1(&manifest, &index, 3000u, playlist,
                                             sizeof(playlist), &playlist_len));
   check_true(playlist_len > 0u);
-  check_str_eq(playlist, "#EXTM3U\n"
+  check_equal(playlist, "#EXTM3U\n"
                          "#EXT-X-VERSION:3\n"
                          "#EXT-X-TARGETDURATION:3\n"
                          "#EXT-X-MEDIA-SEQUENCE:0\n"
@@ -113,18 +113,18 @@ static void test_media_playlist(void) {
 
   /* Round-trip: the byteranges match the index segments exactly. */
   count = parse_media_playlist(playlist, offsets, lens);
-  check_size_eq(count, index.segment_count);
+  check_equal(count, index.segment_count);
   for (size_t s = 0u; s < count; s++) {
-    check_uint_eq(offsets[s], index.segments[s].byte_offset);
-    check_uint_eq(lens[s], index.segments[s].byte_len);
+    check_equal(offsets[s], index.segments[s].byte_offset);
+    check_equal(lens[s], index.segments[s].byte_len);
   }
 
-  check_int_eq(MESH_MEDIA_PLAYLIST_OK,
+  check_equal(MESH_MEDIA_PLAYLIST_OK,
                mesh_media_playlist_segment_uri_v1(0u, uri, sizeof(uri)));
-  check_str_eq(uri, "seg-0");
-  check_int_eq(MESH_MEDIA_PLAYLIST_OK,
+  check_equal(uri, "seg-0");
+  check_equal(MESH_MEDIA_PLAYLIST_OK,
                mesh_media_playlist_segment_uri_v1(2u, uri, sizeof(uri)));
-  check_str_eq(uri, "seg-2");
+  check_equal(uri, "seg-2");
 
   mesh_media_index_destroy_v1(&index);
 }
@@ -145,7 +145,7 @@ static void test_master_playlist(void) {
   snprintf(ladder[3].id, sizeof(ladder[3].id), "p1080");
   ladder[3].bandwidth_bps = 5000000u;
 
-  check_int_eq(MESH_MEDIA_PLAYLIST_OK,
+  check_equal(MESH_MEDIA_PLAYLIST_OK,
                mesh_media_playlist_master_v1(ladder, 4u, playlist,
                                              sizeof(playlist), &playlist_len));
   check_true(strstr(playlist, "#EXTM3U\n") != NULL);
@@ -153,9 +153,9 @@ static void test_master_playlist(void) {
   check_true(strstr(playlist, "#EXT-X-STREAM-INF:BANDWIDTH=5000000\nrend-p1080.m3u8\n") != NULL);
 
   /* ABR picks a rendition that the master playlist lists. */
-  check_int_eq(MESH_MEDIA_INDEX_OK,
+  check_equal(MESH_MEDIA_INDEX_OK,
                mesh_media_abr_select_v1(ladder, 4u, 3000000u, &picked));
-  check_size_eq(picked, 2u);
+  check_equal(picked, 2u);
   {
     char expected[64];
 
@@ -167,7 +167,7 @@ static void test_master_playlist(void) {
   {
     mesh_media_abr_rendition_v1_t bad[1] = {{0}};
 
-    check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+    check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                  mesh_media_playlist_master_v1(bad, 1u, playlist,
                                                sizeof(playlist), &playlist_len));
   }
@@ -187,36 +187,36 @@ static void test_invalid_args(void) {
   snprintf(ladder[0].id, sizeof(ladder[0].id), "p1");
   ladder[0].bandwidth_bps = 1000000u;
 
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_media_v1(NULL, &index, 3000u, out,
                                             sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_media_v1(&manifest, NULL, 3000u, out,
                                             sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_media_v1(&manifest, &index, 0u, out,
                                             sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_media_v1(&manifest, &index, 3000u, NULL,
                                             sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_media_v1(&manifest, &index, 3000u, out,
                                             sizeof(out), NULL));
 
   /* A too-small buffer fails fast. */
-  check_int_eq(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
+  check_equal(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
                mesh_media_playlist_media_v1(&manifest, &index, 3000u, out, 16u,
                                             &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
+  check_equal(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
                mesh_media_playlist_master_v1(ladder, 1u, out, 4u, &out_len));
 
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_master_v1(NULL, 1u, out, sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_master_v1(ladder, 0u, out, sizeof(out), &out_len));
-  check_int_eq(MESH_MEDIA_PLAYLIST_INVALID_ARG,
+  check_equal(MESH_MEDIA_PLAYLIST_INVALID_ARG,
                mesh_media_playlist_segment_uri_v1(0u, NULL, 8u));
-  check_int_eq(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
+  check_equal(MESH_MEDIA_PLAYLIST_RESOURCE_EXHAUSTED,
                mesh_media_playlist_segment_uri_v1(0u, out, 3u));
 
   mesh_media_index_destroy_v1(&index);

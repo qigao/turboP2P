@@ -1,0 +1,109 @@
+name: Set up Salts SDKs
+description: Restore the current Salts and SaltsUtils native SDKs from GitHub Packages and prepare the TurboP2P foundation toolchain.
+runs:
+  using: composite
+  steps:
+    - name: Set up .NET for GitHub Packages
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Configure shared vcpkg binary cache
+      uses: qigao/vcpkg-cache/.github/actions/setup-vcpkg-cache@master
+      with:
+        mode: read
+
+
+    - name: Restore re2c from the shared published cache
+      uses: qigao/vcpkg-cache/.github/actions/setup-re2c-tools@master
+
+    - name: Verify canonical vcpkg binary cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        test -n "${VCPKG_ROOT:-}"
+        test -n "${QIGAO_VCPKG_TOOLCHAIN_FILE:-}"
+        test -f "$QIGAO_VCPKG_TOOLCHAIN_FILE"
+        case "${VCPKG_BINARY_SOURCES:-}" in
+          *nugetconfig*) ;;
+          *) echo "shared vcpkg NuGet cache is not configured" >&2; exit 1 ;;
+        esac
+        test "${VCPKG_NUGET_REPOSITORY:-}" = "https://github.com/qigao/vcpkg-cache"
+
+    - name: Restore Salts SDK graph
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        packages="$RUNNER_TEMP/qigao-native-sdk"
+        config="$RUNNER_TEMP/NuGet.Config"
+        project="$RUNNER_TEMP/qigao-native-sdk.csproj"
+
+        cat > "$config" <<'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <configuration>
+          <packageSources><clear /></packageSources>
+        </configuration>
+        EOF
+
+        dotnet nuget add source https://nuget.pkg.github.com/qigao/index.json \
+          --name github --username qigao --password "$GITHUB_TOKEN" \
+          --store-password-in-clear-text --configfile "$config"
+
+        cat > "$project" <<'EOF'
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>net8.0</TargetFramework>
+            <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+          </PropertyGroup>
+          <ItemGroup>
+            <PackageReference Include="Salts.Native" Version="*" />
+            <PackageReference Include="SaltsUtils.Native" Version="*" />
+          </ItemGroup>
+        </Project>
+        EOF
+
+        dotnet restore "$project" --packages "$packages" --configfile "$config" --no-cache --force-evaluate
+
+        sdk_root() {
+          local package="$1"
+          local rid="$2"
+          local roots=()
+          local root
+          while IFS= read -r root; do
+            roots+=("$root")
+          done < <(
+            find "$packages/$package" -mindepth 3 -maxdepth 3 -type d \
+              -path "*/sdk/$rid" -print
+          )
+          if [ "${#roots[@]}" -ne 1 ]; then
+            printf 'expected exactly one restored %s SDK for %s, found %s\n' \
+              "$package" "$rid" "${#roots[@]}" >&2
+            return 1
+          fi
+          printf '%s' "${roots[0]}"
+        }
+        salts_root="$(sdk_root salts.native linux-x64)"
+        salts_utils_root="$(sdk_root saltsutils.native linux-x64)"
+        test -f "$salts_root/lib/cmake/Salts/SaltsConfig.cmake"
+        test -f "$salts_root/include/cmeta/function.h"
+        test -f "$salts_utils_root/lib/cmake/SaltsUtils/SaltsUtilsConfig.cmake"
+        test -f "$salts_utils_root/lib/cmake/SaltsUtils/SaltsUtilsTargets.cmake"
+        test -f "$salts_utils_root/include/salts/crypto.h"
+
+        {
+          echo "SALTS_ROOT=$salts_root"
+          echo "SALTS_UTILS_ROOT=$salts_utils_root"
+          echo "LD_LIBRARY_PATH=$salts_utils_root/lib:$salts_utils_root/bin:$salts_root/lib"
+        } >> "$GITHUB_ENV"
+
+    - name: Prepare TurboP2P foundation toolchain
+      shell: bash
+      run: |
+        set -euxo pipefail
+        sudo apt-get update
+        sudo apt-get install -y ninja-build pkg-config libssl-dev
+        test -x "$VCPKG_ROOT/vcpkg"
+        test -n "${RE2C_ROOT:-}"
+        "$RE2C_ROOT/bin/re2c" --version

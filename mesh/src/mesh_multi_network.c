@@ -2,7 +2,7 @@
 #include "mesh_multi_network_internal.h"
 #include "mesh_mgmt_crypto.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <limits.h>
 #include <stdio.h>
@@ -346,13 +346,13 @@ int mesh_network_default_uid_v2(const char *network_id,
     if (!out_uid || effective_id[0] == '\0') {
         return MESH_ERR_INVALID_ARG;
     }
-    if (turbo_crypto_sha256(effective_id, strlen(effective_id), mesh_id) !=
-        TURBO_CRYPTO_OK) {
+    if (salts_crypto_sha256(effective_id, strlen(effective_id), mesh_id) !=
+        SALTS_CRYPTO_OK) {
         goto cleanup;
     }
     memcpy(input, domain, sizeof(domain) - 1u);
     memcpy(input + sizeof(domain) - 1u, mesh_id, sizeof(mesh_id));
-    if (turbo_crypto_sha256(input, sizeof(input), digest) != TURBO_CRYPTO_OK) {
+    if (salts_crypto_sha256(input, sizeof(input), digest) != SALTS_CRYPTO_OK) {
         goto cleanup;
     }
     memcpy(out_uid->bytes, digest, sizeof(out_uid->bytes));
@@ -371,8 +371,8 @@ int mesh_network_public_key_digest_v1(
     if (!public_key || !out_digest) {
         return MESH_ERR_INVALID_ARG;
     }
-    return turbo_crypto_sha256(public_key, MESH_NETWORK_IDENTITY_SIZE,
-                               out_digest) == TURBO_CRYPTO_OK
+    return salts_crypto_sha256(public_key, MESH_NETWORK_IDENTITY_SIZE,
+                               out_digest) == SALTS_CRYPTO_OK
                ? MESH_OK
                : MESH_ERR_NETWORK;
 }
@@ -1030,8 +1030,8 @@ int mesh_fabric_create_v2(const mesh_fabric_config_v2_t *config,
     network_id = config->underlay.network_id
                      ? config->underlay.network_id
                      : "default";
-    if (turbo_crypto_sha256(network_id, strlen(network_id), fabric->mesh_id) !=
-            TURBO_CRYPTO_OK ||
+    if (salts_crypto_sha256(network_id, strlen(network_id), fabric->mesh_id) !=
+            SALTS_CRYPTO_OK ||
         mesh_internal_bind_fabric_v2(fabric->underlay, fabric) != MESH_OK) {
         mesh_fabric_destroy_v2(fabric);
         return MESH_ERR_NETWORK;

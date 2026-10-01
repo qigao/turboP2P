@@ -1,6 +1,6 @@
 #include "mesh_stream_multisource.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -120,7 +120,7 @@ static int verify_block(const mesh_stream_multisource_t *ms, uint64_t seq,
 
   if (len > ms->block_size)
     return 0;
-  if (turbo_crypto_sha256(bytes, len, digest) != TURBO_CRYPTO_OK)
+  if (salts_crypto_sha256(bytes, len, digest) != SALTS_CRYPTO_OK)
     return 0;
   return memcmp(digest, ms->block_digests + seq * MESH_STREAM_DATA_HASH_SIZE,
                 MESH_STREAM_DATA_HASH_SIZE) == 0;
