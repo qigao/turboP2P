@@ -1,6 +1,6 @@
 #include "m3_gateway_datapane.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -284,7 +284,7 @@ m3_gateway_datapane_result_t m3_gateway_datapane_put_object_v1(
   m3_chunk_cid_v1_t *chunks = NULL;
   m3_object_manifest_placement_v1_t *placements = NULL;
   m3_object_manifest_v2_t manifest;
-  turbo_crypto_sha256_ctx_t object_ctx;
+  salts_crypto_sha256_ctx_t object_ctx;
   uint8_t object_digest[M3_CHUNK_CID_DIGEST_SIZE];
   size_t chunk_count;
   size_t write_target;
@@ -324,7 +324,7 @@ m3_gateway_datapane_result_t m3_gateway_datapane_put_object_v1(
       goto cleanup;
     }
   }
-  if (turbo_crypto_sha256_init(&object_ctx) != TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256_init(&object_ctx) != SALTS_CRYPTO_OK) {
     result = M3_GATEWAY_DATAPANE_CRYPTO_FAILED;
     goto cleanup;
   }
@@ -347,14 +347,14 @@ m3_gateway_datapane_result_t m3_gateway_datapane_put_object_v1(
     if (result != M3_GATEWAY_DATAPANE_OK)
       goto cleanup;
     placement_count += chunk_placements;
-    if (turbo_crypto_sha256_update(&object_ctx, chunks[i].digest,
+    if (salts_crypto_sha256_update(&object_ctx, chunks[i].digest,
                                    sizeof(chunks[i].digest)) !=
-        TURBO_CRYPTO_OK) {
+        SALTS_CRYPTO_OK) {
       result = M3_GATEWAY_DATAPANE_CRYPTO_FAILED;
       goto cleanup;
     }
   }
-  if (turbo_crypto_sha256_final(&object_ctx, object_digest) != TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256_final(&object_ctx, object_digest) != SALTS_CRYPTO_OK) {
     result = M3_GATEWAY_DATAPANE_CRYPTO_FAILED;
     goto cleanup;
   }
