@@ -213,18 +213,18 @@ P2P_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filep
                   uint64_t size, int is_local) {
     if (!cache || !key || !filepath) return -1;
 
-    TLOG_DEBUG("[CACHE] p2p_cache_put called: key={}, filepath={}", key, filepath);
+    TLOG_DEBUGF("[CACHE] p2p_cache_put called: key={}, filepath={}", key, filepath);
 
     /* 检查文件是否存�?*/
     uint64_t file_size = size;
     if (file_size == 0) {
         file_size = get_file_size(filepath);
         if (file_size == 0) {
-            TLOG_DEBUG("[CACHE] File not found: {}", filepath);
+            TLOG_DEBUGF("[CACHE] File not found: {}", filepath);
             return -1;
         }
     }
-    TLOG_DEBUG("[CACHE] File size: {} bytes", (unsigned long long)file_size);
+    TLOG_DEBUGF("[CACHE] File size: {} bytes", (unsigned long long)file_size);
 
     /* 确保有空�?*/
     make_space(cache, file_size);
@@ -252,7 +252,7 @@ P2P_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filep
         cache->current_size += file_size;
         cache->dirty = 1;
 
-        TLOG_DEBUG("[CACHE] Entry added successfully: entry_count={}, current_size={}, dirty={}",
+        TLOG_DEBUGF("[CACHE] Entry added successfully: entry_count={}, current_size={}, dirty={}",
                cache->entry_count, (unsigned long long)cache->current_size, cache->dirty);
 
         return 0;
@@ -344,7 +344,7 @@ P2P_API void p2p_cache_impl_clear(p2p_cache_t *cache) {
 P2P_API int p2p_cache_impl_save(p2p_cache_t *cache) {
     if (!cache) return -1;
 
-    TLOG_DEBUG("[CACHE] Save called, dirty={}, entry_count={}", cache->dirty, cache->entry_count);
+    TLOG_DEBUGF("[CACHE] Save called, dirty={}, entry_count={}", cache->dirty, cache->entry_count);
 
     if (!cache->dirty) {
         TLOG_DEBUG("[CACHE] Skipping save (not dirty)");
@@ -384,13 +384,13 @@ P2P_API int p2p_cache_impl_save(p2p_cache_t *cache) {
 P2P_API int p2p_cache_impl_load(p2p_cache_t *cache) {
     if (!cache) return -1;
 
-    TLOG_DEBUG("[CACHE] Loading cache from: {}", cache->cache_dir);
+    TLOG_DEBUGF("[CACHE] Loading cache from: {}", cache->cache_dir);
 
     char index_path[MAX_PATH_LEN];
     snprintf(index_path, sizeof(index_path), "%s/%s",
              cache->cache_dir, CACHE_INDEX_FILE);
 
-    TLOG_DEBUG("[CACHE] Index file path: {}", index_path);
+    TLOG_DEBUGF("[CACHE] Index file path: {}", index_path);
 
     FILE *f = fopen(index_path, "rb");
     if (!f) {
@@ -421,12 +421,12 @@ P2P_API int p2p_cache_impl_load(p2p_cache_t *cache) {
                    &e->access_count,
                    &e->is_local) == 6) {
             e->last_access = (time_t)last_access_ll;
-            TLOG_DEBUG("[CACHE] Loaded entry: key={}, path={}, size={}",
+            TLOG_DEBUGF("[CACHE] Loaded entry: key={}, path={}, size={}",
                    e->key, e->filepath, (unsigned long long)e->size);
             loaded++;
             cache->current_size += e->size;
         } else {
-            TLOG_DEBUG("[CACHE] Failed to parse line: {}", line);
+            TLOG_DEBUGF("[CACHE] Failed to parse line: {}", line);
         }
     }
 
@@ -434,7 +434,7 @@ P2P_API int p2p_cache_impl_load(p2p_cache_t *cache) {
     cache->entry_count = loaded;
     cache->dirty = 0;  /* 从磁盘加载后是干净?*/
 
-    TLOG_DEBUG("[CACHE] Loaded {} entries, current_size={}",
+    TLOG_DEBUGF("[CACHE] Loaded {} entries, current_size={}",
            loaded, (unsigned long long)cache->current_size);
 
     return 0;
