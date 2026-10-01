@@ -101,7 +101,7 @@ add_library(meshctl_product STATIC
 target_include_directories(meshctl_product PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(meshctl_product PUBLIC
-  Salts::CmdParser Salts::JsonParser Salts::UriParser Salts::Selector TurboHttp::TurboHttp
+  Salts::CmdParser Salts::JsonParser Salts::UriParser Salts::Selector CHttp::Client
   Salts::Core)
 set_property(TARGET meshctl_product PROPERTY FOLDER "mesh/internal")
 
@@ -111,7 +111,7 @@ add_library(mesh_product_controller_iris STATIC
 target_include_directories(mesh_product_controller_iris PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(mesh_product_controller_iris PUBLIC
-  mesh_control_primitives TurboHttp::Iris Salts::JsonParser
+  mesh_control_primitives CHttp::Server Salts::JsonParser
   Salts::Selector Salts::Core
   PRIVATE OpenSSL::Crypto)
 set_property(TARGET mesh_product_controller_iris PROPERTY FOLDER "mesh/internal")
@@ -182,7 +182,7 @@ add_library(mesh_control_controller_iris STATIC
 target_include_directories(mesh_control_controller_iris PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_controller_iris PUBLIC
-  mesh_control_controller_session TurboHttp::Iris TurboNet::CoroNet
+  mesh_control_controller_session CHttp::Server TurboNet::CoroNet
   Salts::Core)
 set_property(TARGET mesh_control_controller_iris PROPERTY FOLDER "mesh/internal")
 
@@ -213,7 +213,7 @@ target_include_directories(mesh_control_agent_http_client PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_agent_http_client PUBLIC
   mesh_control_agent_sync mesh_control_controller_iris
-  TurboHttp::TurboHttp TurboNet::CoroNet)
+  CHttp::Client TurboNet::CoroNet)
 set_property(TARGET mesh_control_agent_http_client PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_channel STATIC
@@ -351,7 +351,7 @@ add_library(mesh_control_iris STATIC
 target_include_directories(mesh_control_iris PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_iris
-  PUBLIC mesh_control_channel mesh_control_mmp TurboHttp::Iris)
+  PUBLIC mesh_control_channel mesh_control_mmp CHttp::Server)
 set_property(TARGET mesh_control_iris PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_state STATIC
@@ -447,7 +447,7 @@ target_include_directories(mesh_control_agent PUBLIC
 target_link_libraries(mesh_control_agent PUBLIC
   mesh_control_iris mesh_control_owner mesh_control_policy
   mesh_control_reconciler mesh_network_reconciler mesh_control_status mesh_control_wal_worker
-  TurboNet::CoroNet TurboHttp::Iris)
+  TurboNet::CoroNet CHttp::Server)
 set_property(TARGET mesh_control_agent PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_agent_service STATIC
@@ -476,7 +476,7 @@ target_include_directories(mesh_control_controller_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_controller_runtime PUBLIC
   mesh_control_controller_identity mesh_control_controller_iris
-  mesh_certificate_lifecycle TurboHttp::Iris TurboNet::CoroNet
+  mesh_certificate_lifecycle CHttp::Server TurboNet::CoroNet
   Salts::Core)
 set_property(TARGET mesh_control_controller_runtime
   PROPERTY FOLDER "mesh/internal")
@@ -547,7 +547,7 @@ target_include_directories(m3_gateway PUBLIC
 target_link_libraries(m3_gateway PUBLIC
   m3_gateway_sigv4 m3_namespace_local_store m3_object_manifest
   m3_gateway_datapane m3_repair mesh_media_playlist mesh_release
-  TurboNet::Crypto TurboHttp::Iris)
+  TurboNet::Crypto CHttp::Server)
 set_property(TARGET m3_gateway PROPERTY FOLDER "mesh/internal")
 
 # Owner-loop bridge from a content CID to the P2P swarm and immutable local
