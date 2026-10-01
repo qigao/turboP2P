@@ -1,6 +1,7 @@
 #include "mesh_node_control_flowmq_network_provider.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <string.h>
 
@@ -69,10 +70,10 @@ static mesh_control_result_t provider_try_start(
          sizeof(command.resource_id));
   if (command.action == MESH_CONTROL_DESIRED_APPLY) {
     if (!request->document || request->document_size == 0u ||
-        turbo_crypto_sha256(request->document, request->document_size,
-                            digest) != TURBO_CRYPTO_OK ||
-        turbo_crypto_verify(digest, request->operation.desired_digest,
-                            sizeof(digest)) != TURBO_CRYPTO_OK) {
+        salts_crypto_sha256(request->document, request->document_size,
+                            digest) != SALTS_CRYPTO_OK ||
+        CRYPTO_memcmp(digest, request->operation.desired_digest,
+                            sizeof(digest)) != 0) {
       memset(digest, 0, sizeof(digest));
       return MESH_CONTROL_CONFLICT;
     }
@@ -116,9 +117,9 @@ static mesh_control_result_t provider_try_peek_completion(
         &provider->runtime, operation_id, &provider->active_result);
     if (result != MESH_CONTROL_OK)
       return result;
-    if (turbo_crypto_verify(operation_id,
+    if (CRYPTO_memcmp(operation_id,
                             provider->active_operation.operation_id,
-                            sizeof(operation_id)) != TURBO_CRYPTO_OK)
+                            sizeof(operation_id)) != 0)
       return MESH_CONTROL_CONFLICT;
     provider->result_ready = 1u;
   }
@@ -139,9 +140,9 @@ static mesh_control_result_t provider_ack_completion(
   mesh_control_result_t result;
   if (!provider || provider->initialized == 0u || !operation_id ||
       !provider->active || !provider->result_ready ||
-      turbo_crypto_verify(operation_id,
+      CRYPTO_memcmp(operation_id,
                           provider->active_operation.operation_id,
-                          MESH_CONTROL_ID_SIZE) != TURBO_CRYPTO_OK)
+                          MESH_CONTROL_ID_SIZE) != 0)
     return MESH_CONTROL_INVALID_ARG;
   result = mesh_node_control_client_runtime_ack_result_v1(
       &provider->runtime, operation_id);
