@@ -17,7 +17,7 @@
 #include <CoroNet/turbo_coro_context.h>
 #include <iris/iris.h>
 #include <turbo_fs.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,7 +87,7 @@ static DWORD WINAPI gateway_mesh_pump_loop(LPVOID arg) {
   gateway_mesh_pump_ctx_t *ctx = (gateway_mesh_pump_ctx_t *)arg;
   while (InterlockedCompareExchange(&ctx->running, 0, 0) != 0) {
     coro_context_run(p2p_get_loop(ctx->node), TURBO_RUN_NOWAIT);
-    turbo_sleep_ms(2);
+    salts_sleep_ms(2);
   }
   return 0;
 }
