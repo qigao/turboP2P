@@ -1,7 +1,7 @@
 #ifndef M3_CHUNK_STORE_H
 #define M3_CHUNK_STORE_H
 
-#include <turbo_fs.h>
+#include <salts_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -33,11 +33,11 @@ typedef struct {
 } m3_chunk_cid_v1_t;
 
 typedef struct {
-  char root[TURBO_FS_MAX_PATH];
-  char chunks_path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH];
-  char lock_path[TURBO_FS_MAX_PATH];
-  turbo_file_t lock_file;
+  char root[SALTS_FS_MAX_PATH];
+  char chunks_path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH];
+  char lock_path[SALTS_FS_MAX_PATH];
+  salts_file_t lock_file;
   uint64_t max_chunk_bytes;
   uint8_t open;
 } m3_chunk_store_v1_t;

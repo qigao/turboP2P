@@ -40,6 +40,7 @@
 #include <stddef.h>
 #include <platform.h>
 #include <p2p.h>
+#include "turbo_mesh_export.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -404,13 +405,13 @@ typedef struct {
  * @param config Network configuration
  * @return Mesh handle or NULL on error
  */
-CXX_C_API mesh_network_t *mesh_create(const mesh_config_t *config);
+MESH_API mesh_network_t *mesh_create(const mesh_config_t *config);
 
 /**
  * Destroy mesh network
  * @param mesh Mesh handle
  */
-CXX_C_API void mesh_destroy(mesh_network_t *mesh);
+MESH_API void mesh_destroy(mesh_network_t *mesh);
 
 /**
  * Start mesh network
@@ -418,14 +419,14 @@ CXX_C_API void mesh_destroy(mesh_network_t *mesh);
  * @param mesh Mesh handle
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_start(mesh_network_t *mesh);
+MESH_API int mesh_start(mesh_network_t *mesh);
 
 /**
  * Stop mesh network
  * Disconnects all peers.
  * @param mesh Mesh handle
  */
-CXX_C_API void mesh_stop(mesh_network_t *mesh);
+MESH_API void mesh_stop(mesh_network_t *mesh);
 
 /* =============================================================================
  * ICE Runtime API
@@ -450,7 +451,7 @@ CXX_C_API void mesh_stop(mesh_network_t *mesh);
  * @param config ICE configuration copied by this call
  * @return MESH_OK, MESH_ERR_INVALID_ARG, MESH_ERR_NO_MEMORY, or MESH_ERR_BUSY
  */
-CXX_C_API int mesh_ice_setup(mesh_network_t *mesh, const mesh_ice_config_t *config);
+MESH_API int mesh_ice_setup(mesh_network_t *mesh, const mesh_ice_config_t *config);
 
 /**
  * Enable ICE and create its runtime resources.
@@ -461,7 +462,7 @@ CXX_C_API int mesh_ice_setup(mesh_network_t *mesh, const mesh_ice_config_t *conf
  * @param mesh Mesh handle
  * @return MESH_OK, MESH_ERR_INVALID_ARG, MESH_ERR_NO_MEMORY, or MESH_ERR_BUSY
  */
-CXX_C_API int mesh_ice_enable(mesh_network_t *mesh);
+MESH_API int mesh_ice_enable(mesh_network_t *mesh);
 
 /**
  * Disable ICE and release all ICE agents and coroutine resources.
@@ -472,7 +473,7 @@ CXX_C_API int mesh_ice_enable(mesh_network_t *mesh);
  * @param mesh Mesh handle
  * @return MESH_OK or MESH_ERR_INVALID_ARG
  */
-CXX_C_API int mesh_ice_disable(mesh_network_t *mesh);
+MESH_API int mesh_ice_disable(mesh_network_t *mesh);
 
 /**
  * Enable authenticated Stream V1 admission and advertise its capability.
@@ -484,7 +485,7 @@ CXX_C_API int mesh_ice_disable(mesh_network_t *mesh);
  * @param mesh Mesh handle
  * @return MESH_OK or MESH_ERR_INVALID_ARG
  */
-CXX_C_API int mesh_stream_admission_enable(mesh_network_t *mesh);
+MESH_API int mesh_stream_admission_enable(mesh_network_t *mesh);
 
 /**
  * Disable Stream V1 admission and revoke it from every current peer.
@@ -495,7 +496,7 @@ CXX_C_API int mesh_stream_admission_enable(mesh_network_t *mesh);
  * @param mesh Mesh handle
  * @return MESH_OK or MESH_ERR_INVALID_ARG
  */
-CXX_C_API int mesh_stream_admission_disable(mesh_network_t *mesh);
+MESH_API int mesh_stream_admission_disable(mesh_network_t *mesh);
 
 /* =============================================================================
  * Packet Routing API
@@ -509,7 +510,7 @@ CXX_C_API int mesh_stream_admission_disable(mesh_network_t *mesh);
  * @param len Packet length
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t len);
+MESH_API int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t len);
 
 /**
  * Process events (non-blocking)
@@ -517,7 +518,7 @@ CXX_C_API int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t
  * @param timeout_ms Timeout in milliseconds
  * @return Number of events processed
  */
-CXX_C_API int mesh_poll(mesh_network_t *mesh, int timeout_ms);
+MESH_API int mesh_poll(mesh_network_t *mesh, int timeout_ms);
 
 /* =============================================================================
  * Peer Management API
@@ -528,7 +529,7 @@ CXX_C_API int mesh_poll(mesh_network_t *mesh, int timeout_ms);
  * @param mesh Mesh handle
  * @return Peer count
  */
-CXX_C_API int mesh_get_peer_count(mesh_network_t *mesh);
+MESH_API int mesh_get_peer_count(mesh_network_t *mesh);
 
 /**
  * Get peer information by index
@@ -537,14 +538,14 @@ CXX_C_API int mesh_get_peer_count(mesh_network_t *mesh);
  * @param info Output peer info
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_peer_info(mesh_network_t *mesh, int index, mesh_peer_info_t *info);
+MESH_API int mesh_get_peer_info(mesh_network_t *mesh, int index, mesh_peer_info_t *info);
 
 /**
  * Get number of learned routes
  * @param mesh Mesh handle
  * @return Route count
  */
-CXX_C_API int mesh_get_route_count(mesh_network_t *mesh);
+MESH_API int mesh_get_route_count(mesh_network_t *mesh);
 
 /**
  * Get route information by index
@@ -553,14 +554,14 @@ CXX_C_API int mesh_get_route_count(mesh_network_t *mesh);
  * @param info Output route info
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_route_info(mesh_network_t *mesh, int index, mesh_route_info_t *info);
+MESH_API int mesh_get_route_info(mesh_network_t *mesh, int index, mesh_route_info_t *info);
 
 /**
  * Get number of configured route rules
  * @param mesh Mesh handle
  * @return Route rule count
  */
-CXX_C_API int mesh_get_route_rule_count(mesh_network_t *mesh);
+MESH_API int mesh_get_route_rule_count(mesh_network_t *mesh);
 
 /**
  * Get configured route rule information by index
@@ -569,27 +570,27 @@ CXX_C_API int mesh_get_route_rule_count(mesh_network_t *mesh);
  * @param info Output route rule info
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_route_rule_info(mesh_network_t *mesh, int index, mesh_route_rule_info_t *info);
+MESH_API int mesh_get_route_rule_info(mesh_network_t *mesh, int index, mesh_route_rule_info_t *info);
 
 /**
  * Get number of configured local egress CIDRs
  */
-CXX_C_API int mesh_get_local_egress_count(mesh_network_t *mesh);
+MESH_API int mesh_get_local_egress_count(mesh_network_t *mesh);
 
 /**
  * Get configured local egress CIDR information by index
  */
-CXX_C_API int mesh_get_local_egress_info(mesh_network_t *mesh, int index, mesh_local_egress_info_t *info);
+MESH_API int mesh_get_local_egress_info(mesh_network_t *mesh, int index, mesh_local_egress_info_t *info);
 
 /**
  * Get number of source virtual CIDRs allowed to use local egress
  */
-CXX_C_API int mesh_get_local_egress_allow_count(mesh_network_t *mesh);
+MESH_API int mesh_get_local_egress_allow_count(mesh_network_t *mesh);
 
 /**
  * Get configured local egress source allowlist entry by index
  */
-CXX_C_API int mesh_get_local_egress_allow_info(mesh_network_t *mesh, int index,
+MESH_API int mesh_get_local_egress_allow_info(mesh_network_t *mesh, int index,
                                                mesh_local_egress_allow_info_t *info);
 
 /**
@@ -597,7 +598,7 @@ CXX_C_API int mesh_get_local_egress_allow_info(mesh_network_t *mesh, int index,
  * @param mesh Mesh handle
  * @return Number of allowlist entries
  */
-CXX_C_API int mesh_get_peer_allow_count(mesh_network_t *mesh);
+MESH_API int mesh_get_peer_allow_count(mesh_network_t *mesh);
 
 /**
  * Get peer admission allowlist entry by index
@@ -606,14 +607,14 @@ CXX_C_API int mesh_get_peer_allow_count(mesh_network_t *mesh);
  * @param info Output allowlist information
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_peer_allow_info(mesh_network_t *mesh, int index, mesh_peer_allow_info_t *info);
+MESH_API int mesh_get_peer_allow_info(mesh_network_t *mesh, int index, mesh_peer_allow_info_t *info);
 
 /**
  * Get configured peer admission node-id allowlist size
  * @param mesh Mesh handle
  * @return Number of configured node-id allowlist entries
  */
-CXX_C_API int mesh_get_peer_allow_node_id_count(mesh_network_t *mesh);
+MESH_API int mesh_get_peer_allow_node_id_count(mesh_network_t *mesh);
 
 /**
  * Get peer admission node-id allowlist entry by index
@@ -622,7 +623,7 @@ CXX_C_API int mesh_get_peer_allow_node_id_count(mesh_network_t *mesh);
  * @param info Output allowlist information
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_peer_allow_node_info(mesh_network_t *mesh, int index,
+MESH_API int mesh_get_peer_allow_node_info(mesh_network_t *mesh, int index,
                                             mesh_peer_allow_node_info_t *info);
 
 /**
@@ -630,35 +631,35 @@ CXX_C_API int mesh_get_peer_allow_node_info(mesh_network_t *mesh, int index,
  * @param mesh Mesh handle
  * @return Required peer protocol major, or 0 when disabled
  */
-CXX_C_API unsigned int mesh_get_peer_protocol_major(mesh_network_t *mesh);
+MESH_API unsigned int mesh_get_peer_protocol_major(mesh_network_t *mesh);
 
 /**
  * Get configured packet policy rule count
  */
-CXX_C_API int mesh_get_packet_policy_count(mesh_network_t *mesh);
+MESH_API int mesh_get_packet_policy_count(mesh_network_t *mesh);
 
 /**
  * Get configured packet policy rule by index
  */
-CXX_C_API int mesh_get_packet_policy_info(mesh_network_t *mesh, int index,
+MESH_API int mesh_get_packet_policy_info(mesh_network_t *mesh, int index,
                                           mesh_packet_policy_info_t *info);
 
 /**
  * Get number of configured local MagicDNS static records
  */
-CXX_C_API int mesh_get_magic_dns_count(mesh_network_t *mesh);
+MESH_API int mesh_get_magic_dns_count(mesh_network_t *mesh);
 
 /**
  * Get configured MagicDNS static record by index
  */
-CXX_C_API int mesh_get_magic_dns_info(mesh_network_t *mesh, int index,
+MESH_API int mesh_get_magic_dns_info(mesh_network_t *mesh, int index,
                                       mesh_magic_dns_info_t *info);
 
 /**
  * Resolve a local MagicDNS name into a mesh virtual IP.
  * Accepts short names and names under magic_dns_domain.
  */
-CXX_C_API int mesh_resolve_magic_dns(mesh_network_t *mesh,
+MESH_API int mesh_resolve_magic_dns(mesh_network_t *mesh,
                                      const char *name,
                                      char *virtual_ip,
                                      size_t virtual_ip_len);
@@ -666,7 +667,7 @@ CXX_C_API int mesh_resolve_magic_dns(mesh_network_t *mesh,
 /**
  * Reverse resolve a mesh virtual IP into a MagicDNS FQDN when configured.
  */
-CXX_C_API int mesh_reverse_magic_dns(mesh_network_t *mesh,
+MESH_API int mesh_reverse_magic_dns(mesh_network_t *mesh,
                                      const char *virtual_ip,
                                      char *name,
                                      size_t name_len);
@@ -678,7 +679,7 @@ CXX_C_API int mesh_reverse_magic_dns(mesh_network_t *mesh,
  * @param buf_len Output buffer length; must be at least 65
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_node_id(mesh_network_t *mesh, char *buf, size_t buf_len);
+MESH_API int mesh_get_node_id(mesh_network_t *mesh, char *buf, size_t buf_len);
 
 /**
  * Get peer information from a peer handle
@@ -686,7 +687,7 @@ CXX_C_API int mesh_get_node_id(mesh_network_t *mesh, char *buf, size_t buf_len);
  * @param info Output peer info
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *info);
+MESH_API int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *info);
 
 /**
  * Check whether a direct peer passed authenticated Stream V1 admission.
@@ -696,7 +697,7 @@ CXX_C_API int mesh_get_peer_handle_info(mesh_peer_t *peer, mesh_peer_info_t *inf
  * @param peer Direct peer handle
  * @return Non-zero when a stream transport may be attached
  */
-CXX_C_API int mesh_peer_stream_ready(const mesh_peer_t *peer);
+MESH_API int mesh_peer_stream_ready(const mesh_peer_t *peer);
 
 /**
  * Find peer by virtual IP
@@ -704,7 +705,7 @@ CXX_C_API int mesh_peer_stream_ready(const mesh_peer_t *peer);
  * @param virtual_ip Virtual IP address
  * @return Peer handle or NULL if not found
  */
-CXX_C_API mesh_peer_t *mesh_find_peer(mesh_network_t *mesh, const char *virtual_ip);
+MESH_API mesh_peer_t *mesh_find_peer(mesh_network_t *mesh, const char *virtual_ip);
 
 /**
  * Connect to peer by virtual IP
@@ -713,14 +714,14 @@ CXX_C_API mesh_peer_t *mesh_find_peer(mesh_network_t *mesh, const char *virtual_
  * @param virtual_ip Target virtual IP
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_connect_peer(mesh_network_t *mesh, const char *virtual_ip);
+MESH_API int mesh_connect_peer(mesh_network_t *mesh, const char *virtual_ip);
 
 /**
  * Disconnect peer
  * @param mesh Mesh handle
  * @param peer Peer handle
  */
-CXX_C_API void mesh_disconnect_peer(mesh_network_t *mesh, mesh_peer_t *peer);
+MESH_API void mesh_disconnect_peer(mesh_network_t *mesh, mesh_peer_t *peer);
 
 /* =============================================================================
  * Statistics API
@@ -732,7 +733,7 @@ CXX_C_API void mesh_disconnect_peer(mesh_network_t *mesh, mesh_peer_t *peer);
  * @param stats Output statistics
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats);
+MESH_API int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats);
 
 /**
  * Get mesh diagnostics and reconnect/path-state counters
@@ -740,7 +741,7 @@ CXX_C_API int mesh_get_stats(mesh_network_t *mesh, mesh_stats_t *stats);
  * @param info Output diagnostics
  * @return MESH_OK on success
  */
-CXX_C_API int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info);
+MESH_API int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info);
 
 /**
  * Copy the underlying P2P node's atomic, bounded security status snapshot.
@@ -751,7 +752,7 @@ CXX_C_API int mesh_get_diag_info(mesh_network_t *mesh, mesh_diag_info_t *info);
  * @return MESH_OK, MESH_ERR_INVALID_ARG, MESH_ERR_BUSY if the security policy
  *         is not ready, or MESH_ERR_NETWORK for another P2P-layer failure.
  */
-CXX_C_API int mesh_get_security_status_v3(
+MESH_API int mesh_get_security_status_v3(
     mesh_network_t *mesh, p2p_node_security_status_v3_t *status);
 
 /**
@@ -760,7 +761,7 @@ CXX_C_API int mesh_get_security_status_v3(
  * from oldest to newest and contain no packet payload or key material.
  * Call from the mesh event-loop thread or while the runtime is stopped.
  */
-CXX_C_API int mesh_get_path_trace_v1(mesh_network_t *mesh,
+MESH_API int mesh_get_path_trace_v1(mesh_network_t *mesh,
                                     uint64_t after_sequence,
                                     mesh_path_trace_record_v1_t *records,
                                     size_t record_capacity,
@@ -770,7 +771,7 @@ CXX_C_API int mesh_get_path_trace_v1(mesh_network_t *mesh,
  * Read a value already present in the local mesh DHT cache.
  * This is a non-blocking cached read intended for diagnostics.
  */
-CXX_C_API int mesh_get_cached_dht_value(mesh_network_t *mesh,
+MESH_API int mesh_get_cached_dht_value(mesh_network_t *mesh,
                                         const char *key,
                                         void *buf,
                                         size_t *buf_len);
@@ -779,7 +780,7 @@ CXX_C_API int mesh_get_cached_dht_value(mesh_network_t *mesh,
  * Reset statistics
  * @param mesh Mesh handle
  */
-CXX_C_API void mesh_reset_stats(mesh_network_t *mesh);
+MESH_API void mesh_reset_stats(mesh_network_t *mesh);
 
 /* =============================================================================
  * Utility API
@@ -790,26 +791,26 @@ CXX_C_API void mesh_reset_stats(mesh_network_t *mesh);
  * @param error Error code
  * @return Human-readable error string
  */
-CXX_C_API const char *mesh_error_string(mesh_error_t error);
+MESH_API const char *mesh_error_string(mesh_error_t error);
 
 /**
  * Get mesh version
  * @return Version string
  */
-CXX_C_API const char *mesh_version(void);
+MESH_API const char *mesh_version(void);
 
 /**
  * Convert path mode to a stable string
  * @param mode Path mode value
  * @return Stable string representation
  */
-CXX_C_API const char *mesh_path_mode_string(mesh_path_mode_t mode);
+MESH_API const char *mesh_path_mode_string(mesh_path_mode_t mode);
 
 /**
  * Initialize default configuration
  * @param config Configuration to initialize
  */
-CXX_C_API void mesh_config_init(mesh_config_t *config);
+MESH_API void mesh_config_init(mesh_config_t *config);
 
 #ifdef __cplusplus
 }

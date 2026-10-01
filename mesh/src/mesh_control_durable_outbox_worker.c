@@ -84,14 +84,14 @@ static void durable_outbox_worker_run(void *argument) {
   }
   (void)mesh_control_durable_outbox_get_stats_v1(&worker->outbox, &stats);
 
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   worker->completion = completion;
   worker->cached_stats = stats;
   worker->completed++;
   if (persistence_failed(completion.store_result))
     worker->persistence_failures++;
   worker->completion_ready = 1u;
-  turbo_mutex_unlock(&worker->mutex);
+  salts_mutex_unlock(&worker->mutex);
 }
 
 mesh_control_durable_outbox_worker_result_t
@@ -99,7 +99,7 @@ mesh_control_durable_outbox_worker_init_v1(
     mesh_control_durable_outbox_worker_v1_t *worker,
     const mesh_control_durable_outbox_config_v1_t *config,
     size_t *out_recovered_claims) {
-  turbo_threadpool_config_t pool_config;
+  salts_threadpool_config_t pool_config;
   mesh_control_durable_outbox_result_t result;
   if (!worker || worker->initialized || !config)
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_ARG;
@@ -113,12 +113,12 @@ mesh_control_durable_outbox_worker_init_v1(
   }
   (void)mesh_control_durable_outbox_get_stats_v1(&worker->outbox,
                                                   &worker->cached_stats);
-  turbo_mutex_init(&worker->mutex);
+  salts_mutex_init(&worker->mutex);
   worker->mutex_initialized = 1u;
   memset(&pool_config, 0, sizeof(pool_config));
   pool_config.num_threads = 1u;
   pool_config.queue_capacity = DURABLE_OUTBOX_WORKER_QUEUE_CAPACITY;
-  worker->pool = turbo_threadpool_create_with_config(&pool_config);
+  worker->pool = salts_threadpool_create_with_config(&pool_config);
   if (!worker->pool) {
     mesh_control_durable_outbox_worker_destroy_v1(worker);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_RESOURCE_EXHAUSTED;
@@ -134,38 +134,38 @@ static mesh_control_durable_outbox_worker_result_t reserve_request(
     uint64_t request_token) {
   if (!worker || !worker->initialized || !worker->pool || request_token == 0u)
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_ARG;
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   if (!worker->accepting) {
-    turbo_mutex_unlock(&worker->mutex);
+    salts_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_STATE;
   }
   if (worker->busy || worker->completion_ready) {
     worker->rejected_full++;
-    turbo_mutex_unlock(&worker->mutex);
+    salts_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_FULL;
   }
   worker->operation = operation;
   worker->request_token = request_token;
   worker->busy = 1u;
-  turbo_mutex_unlock(&worker->mutex);
+  salts_mutex_unlock(&worker->mutex);
   return MESH_CONTROL_DURABLE_OUTBOX_WORKER_OK;
 }
 
 static mesh_control_durable_outbox_worker_result_t start_reserved(
     mesh_control_durable_outbox_worker_v1_t *worker) {
-  if (turbo_threadpool_try_submit(worker->pool, durable_outbox_worker_run,
+  if (salts_threadpool_try_submit(worker->pool, durable_outbox_worker_run,
                                   worker) == 0) {
-    turbo_mutex_lock(&worker->mutex);
+    salts_mutex_lock(&worker->mutex);
     worker->submitted++;
-    turbo_mutex_unlock(&worker->mutex);
+    salts_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_OK;
   }
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   worker->busy = 0u;
   worker->operation = 0;
   worker->request_token = 0u;
-  turbo_mutex_unlock(&worker->mutex);
-  return turbo_threadpool_is_accepting(worker->pool)
+  salts_mutex_unlock(&worker->mutex);
+  return salts_threadpool_is_accepting(worker->pool)
              ? MESH_CONTROL_DURABLE_OUTBOX_WORKER_FULL
              : MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_STATE;
 }
@@ -325,15 +325,15 @@ mesh_control_durable_outbox_worker_try_take_v1(
     uint8_t *payload, size_t payload_capacity, size_t *out_payload_size) {
   if (!worker || !worker->initialized || !out_completion || !out_payload_size)
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_ARG;
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   if (!worker->completion_ready) {
-    turbo_mutex_unlock(&worker->mutex);
+    salts_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_EMPTY;
   }
   *out_payload_size = worker->completion_payload_size;
   if (worker->completion_payload_size > payload_capacity ||
       (worker->completion_payload_size > 0u && !payload)) {
-    turbo_mutex_unlock(&worker->mutex);
+    salts_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_RESOURCE_EXHAUSTED;
   }
   *out_completion = worker->completion;
@@ -354,7 +354,7 @@ mesh_control_durable_outbox_worker_try_take_v1(
   worker->request_token = 0u;
   worker->busy = 0u;
   worker->completion_ready = 0u;
-  turbo_mutex_unlock(&worker->mutex);
+  salts_mutex_unlock(&worker->mutex);
   return MESH_CONTROL_DURABLE_OUTBOX_WORKER_OK;
 }
 
@@ -363,11 +363,11 @@ mesh_control_durable_outbox_worker_shutdown_v1(
     mesh_control_durable_outbox_worker_v1_t *worker) {
   if (!worker || !worker->initialized || !worker->pool)
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_ARG;
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   worker->accepting = 0u;
-  turbo_mutex_unlock(&worker->mutex);
-  turbo_threadpool_shutdown(worker->pool);
-  turbo_threadpool_wait(worker->pool);
+  salts_mutex_unlock(&worker->mutex);
+  salts_threadpool_shutdown(worker->pool);
+  salts_threadpool_wait(worker->pool);
   return MESH_CONTROL_DURABLE_OUTBOX_WORKER_OK;
 }
 
@@ -378,7 +378,7 @@ mesh_control_durable_outbox_worker_get_stats_v1(
   if (!worker || !worker->initialized || !out_stats)
     return MESH_CONTROL_DURABLE_OUTBOX_WORKER_INVALID_ARG;
   memset(out_stats, 0, sizeof(*out_stats));
-  turbo_mutex_lock(&worker->mutex);
+  salts_mutex_lock(&worker->mutex);
   out_stats->outbox = worker->cached_stats;
   out_stats->submitted = worker->submitted;
   out_stats->completed = worker->completed;
@@ -387,7 +387,7 @@ mesh_control_durable_outbox_worker_get_stats_v1(
   out_stats->accepting = worker->accepting;
   out_stats->busy = worker->busy;
   out_stats->completion_ready = worker->completion_ready;
-  turbo_mutex_unlock(&worker->mutex);
+  salts_mutex_unlock(&worker->mutex);
   return MESH_CONTROL_DURABLE_OUTBOX_WORKER_OK;
 }
 
@@ -396,12 +396,12 @@ void mesh_control_durable_outbox_worker_destroy_v1(
   if (!worker)
     return;
   if (worker->pool) {
-    turbo_threadpool_shutdown(worker->pool);
-    turbo_threadpool_wait(worker->pool);
-    turbo_threadpool_destroy(worker->pool);
+    salts_threadpool_shutdown(worker->pool);
+    salts_threadpool_wait(worker->pool);
+    salts_threadpool_destroy(worker->pool);
   }
   mesh_control_durable_outbox_close_v1(&worker->outbox);
   if (worker->mutex_initialized)
-    turbo_mutex_destroy(&worker->mutex);
+    salts_mutex_destroy(&worker->mutex);
   OPENSSL_cleanse(worker, sizeof(*worker));
 }

@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include <turbo_selector.h>
+#include <salts_selector.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,7 +16,7 @@ enum {
   MESHCTL_PRODUCT_ID_CAPACITY = 129,
   MESHCTL_PRODUCT_SUBJECT_CAPACITY = 257,
   MESHCTL_PRODUCT_SELECTOR_CAPACITY =
-      TURBO_SELECTOR_MAX_CANONICAL_BYTES_V1 + 1,
+      SALTS_SELECTOR_MAX_CANONICAL_BYTES_V1 + 1,
   MESHCTL_PRODUCT_PATH_CAPACITY = 512,
   MESHCTL_PRODUCT_ROUTE_CAPACITY = 1024,
   MESHCTL_PRODUCT_DIAGNOSTIC_CAPACITY = 4096,

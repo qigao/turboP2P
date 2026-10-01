@@ -6,7 +6,6 @@
 #include "../internal.h"
 #include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
-#include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
 
 /* =============================================================================
@@ -22,25 +21,15 @@ void p2p_cleanup_callbacks(p2p_node_t *node) {
     node->on_message = NULL;
 }
 
-void p2p_cleanup_timers(p2p_node_t *node) {
-    if (!node) return;
-    
-    if (node->gossip_timer) {
-        turbo_timer_stop(node->gossip_timer);
-        turbo_timer_destroy(node->gossip_timer);
-        node->gossip_timer = NULL;
-    }
-}
-
 void p2p_cleanup_peers(p2p_node_t *node) {
     if (!node || !node->peers_table) return;
     
     /* Detach table from node first to prevent re-entry from callbacks */
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_peer_entry_t *table = node->peers_table;
     node->peers_table = NULL;
     node->peer_count = 0;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     
     p2p_peer_entry_t *curr, *tmp;
     HASH_ITER(hh, table, curr, tmp) {
@@ -55,23 +44,40 @@ void p2p_cleanup_peers(p2p_node_t *node) {
 }
 
 void p2p_cleanup_server(p2p_node_t *node) {
-    if (!node || !node->server) return;
-    
+    if (!node || !node->listener_initialized) return;
     p2p_node_stop_server(node);
 }
 
-void p2p_cleanup_context(p2p_node_t *node) {
-    int max_drain = 500;
+static void p2p_cleanup_network_stop(p2p_node_t *node) {
+    int status;
+    if (!node || !node->network_initialized) return;
 
-    if (!node || !node->ctx) return;
-
-    coro_context_stop(node->ctx);
-    while (max_drain-- > 0 && coro_context_alive(node->ctx)) {
-        coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
-        turbo_sleep_ms(1);
+    /*
+     * p2p_destroy() has no error return, so it must not free peer state while
+     * CNet can still publish callbacks. Stop is explicitly retryable after a
+     * timeout; a following SALTS_EALREADY proves the owner is fully quiesced.
+     */
+    for (;;) {
+        status = cnet_client_stop(&node->network, 5000u);
+        if (status == SALTS_EALREADY) break;
+        if (status == SALTS_EBUSY) {
+            salts_sleep_ms(1u);
+            continue;
+        }
+        /* A concrete callback/transport error may accompany a fully stopped
+         * owner. Re-enter once to distinguish that state from a retryable
+         * partial drain. */
+        if (status != SALTS_ETIMEDOUT) {
+            const int confirm = cnet_client_stop(&node->network, 5000u);
+            if (confirm == SALTS_EALREADY) break;
+        }
     }
-    coro_context_destroy(node->ctx);
-    node->ctx = NULL;
+}
+
+static void p2p_cleanup_network_destroy(p2p_node_t *node) {
+    if (!node || !node->network_initialized) return;
+    if (cnet_client_destroy(&node->network) == SALTS_OK)
+        node->network_initialized = 0;
 }
 
 void p2p_cleanup_topics(p2p_node_t *node) {
@@ -191,12 +197,12 @@ void p2p_destroy_clean(p2p_node_t *node) {
     if (!node) return;
     
     p2p_cleanup_callbacks(node);
-    p2p_cleanup_timers(node);
     p2p_cleanup_server(node);
     p2p_node_cleanup_cookie_gates(node);
     if (node->private_key_executor) {
         p2p_private_key_executor_shutdown(node->private_key_executor);
     }
+    p2p_cleanup_network_stop(node);
     p2p_cleanup_peers(node);
     p2p_cleanup_topics(node);
     p2p_cleanup_files(node);
@@ -205,7 +211,6 @@ void p2p_destroy_clean(p2p_node_t *node) {
     p2p_cleanup_lookup(node);
     p2p_cleanup_connect_suppressions(node);
     p2p_cleanup_dht(node);
-    p2p_cleanup_context(node);
 
     p2p_private_key_executor_destroy(node->private_key_executor);
     node->private_key_executor = NULL;
@@ -227,7 +232,8 @@ void p2p_destroy_clean(p2p_node_t *node) {
                     sizeof(node->cookie_master_secret));
     p2p_crypto_wipe(node->cookie_gates, sizeof(node->cookie_gates));
     p2p_crypto_wipe(&node->security_config, sizeof(node->security_config));
-    
-    turbo_mutex_destroy(&node->mutex);
+
+    p2p_cleanup_network_destroy(node);
+    salts_mutex_destroy(&node->mutex);
     free(node);
 }

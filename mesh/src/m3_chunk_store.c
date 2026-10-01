@@ -42,37 +42,37 @@ static void bytes_to_hex(const uint8_t *bytes, size_t size, char *output) {
 }
 
 static m3_chunk_store_result_t ensure_directory(const char *path) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
 
   if (!path)
     return M3_CHUNK_STORE_INVALID_ARG;
-  if (turbo_fs_lstat(path, &stat) == 0) {
+  if (salts_fs_lstat(path, &stat) == 0) {
     return stat.is_directory && !stat.is_symlink ? M3_CHUNK_STORE_OK
                                                   : M3_CHUNK_STORE_CORRUPT;
   }
-  if (turbo_fs_mkdir(path, M3_CHUNK_STORE_DIRECTORY_MODE) == 0)
+  if (salts_fs_mkdir(path, M3_CHUNK_STORE_DIRECTORY_MODE) == 0)
     return M3_CHUNK_STORE_OK;
 
   /* A concurrent creator is acceptable only when it published a real dir. */
-  if (turbo_fs_lstat(path, &stat) == 0 && stat.is_directory &&
+  if (salts_fs_lstat(path, &stat) == 0 && stat.is_directory &&
       !stat.is_symlink)
     return M3_CHUNK_STORE_OK;
   return M3_CHUNK_STORE_IO;
 }
 
-static m3_chunk_store_result_t join_path(char output[TURBO_FS_MAX_PATH],
+static m3_chunk_store_result_t join_path(char output[SALTS_FS_MAX_PATH],
                                          const char *base,
                                          const char *component) {
   if (!output || !base || !component ||
-      turbo_fs_path_join(output, TURBO_FS_MAX_PATH, base, component) != 0)
+      salts_fs_path_join(output, SALTS_FS_MAX_PATH, base, component) != 0)
     return M3_CHUNK_STORE_INVALID_ARG;
   return M3_CHUNK_STORE_OK;
 }
 
 static m3_chunk_store_result_t build_chunk_path(
     const m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *cid,
-    char shard_path[TURBO_FS_MAX_PATH],
-    char chunk_path[TURBO_FS_MAX_PATH]) {
+    char shard_path[SALTS_FS_MAX_PATH],
+    char chunk_path[SALTS_FS_MAX_PATH]) {
   char digest_hex[M3_CHUNK_CID_DIGEST_SIZE * 2u + 1u];
   char shard[3];
   char filename[M3_CHUNK_CID_DIGEST_SIZE * 2u + 7u];
@@ -94,13 +94,13 @@ static m3_chunk_store_result_t build_chunk_path(
   return M3_CHUNK_STORE_OK;
 }
 
-static m3_chunk_store_result_t write_all(turbo_file_t file,
+static m3_chunk_store_result_t write_all(salts_file_t file,
                                           const uint8_t *bytes, size_t size) {
   size_t written = 0u;
 
   while (written < size) {
     int result =
-        turbo_fs_write(file, (const char *)bytes + written, size - written);
+        salts_fs_write(file, (const char *)bytes + written, size - written);
     if (result <= 0)
       return M3_CHUNK_STORE_IO;
     written += (size_t)result;
@@ -126,8 +126,8 @@ static m3_chunk_store_result_t hash_bytes(
 static m3_chunk_store_result_t read_verify_range(
     const char *path, const m3_chunk_cid_v1_t *cid, uint64_t offset,
     size_t length, uint8_t *buffer, size_t *out_read) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   EVP_MD_CTX *hash = NULL;
   uint8_t block[M3_CHUNK_STORE_IO_BLOCK];
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
@@ -141,13 +141,13 @@ static m3_chunk_store_result_t read_verify_range(
     return M3_CHUNK_STORE_INVALID_ARG;
   *out_read = 0u;
 
-  if (turbo_fs_lstat(path, &stat) != 0)
+  if (salts_fs_lstat(path, &stat) != 0)
     return M3_CHUNK_STORE_NOT_FOUND;
   if (!stat.is_file || stat.is_symlink || stat.size != cid->size)
     return M3_CHUNK_STORE_CORRUPT;
 
-  file = turbo_fs_open(path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = salts_fs_open(path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     return M3_CHUNK_STORE_IO;
   hash = EVP_MD_CTX_new();
   if (!hash) {
@@ -159,7 +159,7 @@ static m3_chunk_store_result_t read_verify_range(
     goto cleanup;
   }
 
-  while ((read_size = turbo_fs_read(file, (char *)block, sizeof(block))) > 0) {
+  while ((read_size = salts_fs_read(file, (char *)block, sizeof(block))) > 0) {
     uint64_t block_end = position + (uint64_t)read_size;
     uint64_t range_end = offset + (uint64_t)length;
 
@@ -196,7 +196,7 @@ static m3_chunk_store_result_t read_verify_range(
 
 cleanup:
   EVP_MD_CTX_free(hash);
-  if (file != TURBO_INVALID_FILE && turbo_fs_close(file) != 0 &&
+  if (file != SALTS_INVALID_FILE && salts_fs_close(file) != 0 &&
       result == M3_CHUNK_STORE_OK) {
     *out_read = 0u;
     result = M3_CHUNK_STORE_IO;
@@ -223,15 +223,15 @@ m3_chunk_store_result_t m3_chunk_cid_calculate_v1(
 
 m3_chunk_store_result_t m3_chunk_store_open_v1(
     m3_chunk_store_v1_t *store, const char *root, uint64_t max_chunk_bytes) {
-  char layout_path[TURBO_FS_MAX_PATH];
+  char layout_path[SALTS_FS_MAX_PATH];
   m3_chunk_store_result_t result;
 
   if (!store || !root || root[0] == '\0' || max_chunk_bytes == 0u ||
-      !turbo_fs_path_is_absolute(root) || strlen(root) >= sizeof(store->root))
+      !salts_fs_path_is_absolute(root) || strlen(root) >= sizeof(store->root))
     return M3_CHUNK_STORE_INVALID_ARG;
 
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   memcpy(store->root, root, strlen(root) + 1u);
   store->max_chunk_bytes = max_chunk_bytes;
 
@@ -261,14 +261,14 @@ m3_chunk_store_result_t m3_chunk_store_open_v1(
     goto failed;
 
   store->lock_file =
-      turbo_fs_open(store->lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT,
+      salts_fs_open(store->lock_path, SALTS_FS_O_RDWR | SALTS_FS_O_CREAT,
                     M3_CHUNK_STORE_FILE_MODE);
-  if (store->lock_file == TURBO_INVALID_FILE) {
+  if (store->lock_file == SALTS_INVALID_FILE) {
     result = M3_CHUNK_STORE_IO;
     goto failed;
   }
-  if (turbo_fs_lock(store->lock_file,
-                    TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK, 0, 1u) !=
+  if (salts_fs_lock(store->lock_file,
+                    SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK, 0, 1u) !=
       0) {
     result = M3_CHUNK_STORE_LOCKED;
     goto failed;
@@ -278,38 +278,38 @@ m3_chunk_store_result_t m3_chunk_store_open_v1(
   return M3_CHUNK_STORE_OK;
 
 failed:
-  if (store->lock_file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(store->lock_file);
+  if (store->lock_file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(store->lock_file);
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   return result;
 }
 
 void m3_chunk_store_close_v1(m3_chunk_store_v1_t *store) {
   if (!store)
     return;
-  if (store->open && store->lock_file != TURBO_INVALID_FILE) {
-    (void)turbo_fs_unlock(store->lock_file, 0, 1u);
-    (void)turbo_fs_close(store->lock_file);
+  if (store->open && store->lock_file != SALTS_INVALID_FILE) {
+    (void)salts_fs_unlock(store->lock_file, 0, 1u);
+    (void)salts_fs_close(store->lock_file);
   }
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
 }
 
 m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
     m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *expected_cid,
     const uint8_t *bytes, size_t size, uint8_t *out_created) {
   m3_chunk_cid_v1_t actual_cid;
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   uint8_t random_bytes[M3_CHUNK_STORE_TEMP_RANDOM_SIZE];
   char random_hex[M3_CHUNK_STORE_TEMP_RANDOM_SIZE * 2u + 1u];
   char digest_hex[M3_CHUNK_CID_DIGEST_SIZE * 2u + 1u];
-  char shard_path[TURBO_FS_MAX_PATH];
-  char chunk_path[TURBO_FS_MAX_PATH];
+  char shard_path[SALTS_FS_MAX_PATH];
+  char chunk_path[SALTS_FS_MAX_PATH];
   char temp_name[M3_CHUNK_CID_DIGEST_SIZE * 2u +
                  M3_CHUNK_STORE_TEMP_RANDOM_SIZE * 2u + 7u];
-  char temp_path[TURBO_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH];
   size_t verified = 0u;
   m3_chunk_store_result_t result;
 
@@ -330,7 +330,7 @@ m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
   result = build_chunk_path(store, expected_cid, shard_path, chunk_path);
   if (result != M3_CHUNK_STORE_OK)
     return result;
-  if (turbo_fs_lstat(chunk_path, &stat) == 0) {
+  if (salts_fs_lstat(chunk_path, &stat) == 0) {
     return read_verify_range(chunk_path, expected_cid, 0u, 0u, NULL,
                              &verified);
   }
@@ -347,22 +347,22 @@ m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
       join_path(temp_path, store->temp_path, temp_name) != M3_CHUNK_STORE_OK)
     return M3_CHUNK_STORE_INVALID_ARG;
 
-  file = turbo_fs_open(temp_path,
-                       TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+  file = salts_fs_open(temp_path,
+                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
                        M3_CHUNK_STORE_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
+  if (file == SALTS_INVALID_FILE)
     return M3_CHUNK_STORE_IO;
   result = write_all(file, bytes, size);
   if (result != M3_CHUNK_STORE_OK)
     goto cleanup;
-  if (turbo_fs_fsync(file) != 0 || turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (salts_fs_fsync(file) != 0 || salts_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = M3_CHUNK_STORE_IO;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
+  file = SALTS_INVALID_FILE;
 
-  if (turbo_fs_rename(temp_path, chunk_path) != 0) {
+  if (salts_fs_rename(temp_path, chunk_path) != 0) {
     result = read_verify_range(chunk_path, expected_cid, 0u, 0u, NULL,
                                &verified);
     if (result == M3_CHUNK_STORE_OK)
@@ -379,21 +379,21 @@ m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
   return M3_CHUNK_STORE_OK;
 
 existing:
-  (void)turbo_fs_unlink(temp_path);
+  (void)salts_fs_unlink(temp_path);
   return M3_CHUNK_STORE_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
-  (void)turbo_fs_unlink(temp_path);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
+  (void)salts_fs_unlink(temp_path);
   return result;
 }
 
 m3_chunk_store_result_t m3_chunk_store_read_range_v1(
     const m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *cid,
     uint64_t offset, size_t length, uint8_t *buffer, size_t *out_read) {
-  char shard_path[TURBO_FS_MAX_PATH];
-  char chunk_path[TURBO_FS_MAX_PATH];
+  char shard_path[SALTS_FS_MAX_PATH];
+  char chunk_path[SALTS_FS_MAX_PATH];
   m3_chunk_store_result_t result;
 
   if (out_read)
@@ -420,7 +420,7 @@ static int hex_value(char ch) {
 }
 
 static m3_chunk_store_result_t parse_chunk_name(
-    const char *shard, const char *name, turbo_fs_stat_t *stat,
+    const char *shard, const char *name, salts_fs_stat_t *stat,
     m3_chunk_cid_v1_t *out_cid) {
   char digest_hex[M3_CHUNK_CID_DIGEST_SIZE * 2u + 1u];
   size_t name_len;
@@ -449,18 +449,18 @@ static m3_chunk_store_result_t parse_chunk_name(
 }
 
 static m3_chunk_store_result_t entry_is_directory(
-    const char *path, turbo_fs_dirent_type_t type, int *out_is_dir) {
-  turbo_fs_stat_t stat;
+    const char *path, salts_fs_dirent_type_t type, int *out_is_dir) {
+  salts_fs_stat_t stat;
 
-  if (type == TURBO_FS_DIRENT_DIRECTORY) {
+  if (type == SALTS_FS_DIRENT_DIRECTORY) {
     *out_is_dir = 1;
     return M3_CHUNK_STORE_OK;
   }
-  if (type == TURBO_FS_DIRENT_FILE) {
+  if (type == SALTS_FS_DIRENT_FILE) {
     *out_is_dir = 0;
     return M3_CHUNK_STORE_OK;
   }
-  if (turbo_fs_lstat(path, &stat) != 0)
+  if (salts_fs_lstat(path, &stat) != 0)
     return M3_CHUNK_STORE_IO;
   *out_is_dir = stat.is_directory && !stat.is_symlink;
   return M3_CHUNK_STORE_OK;
@@ -469,18 +469,18 @@ static m3_chunk_store_result_t entry_is_directory(
 m3_chunk_store_result_t m3_chunk_store_enumerate_v1(
     const m3_chunk_store_v1_t *store, m3_chunk_store_enumerate_cb callback,
     void *user_data) {
-  turbo_fs_dir_t *root = NULL;
-  turbo_fs_dirent_t root_entry;
+  salts_fs_dir_t *root = NULL;
+  salts_fs_dirent_t root_entry;
   m3_chunk_store_result_t result = M3_CHUNK_STORE_OK;
 
   if (!store || !store->open || !callback)
     return M3_CHUNK_STORE_INVALID_ARG;
-  if (turbo_fs_opendir(store->chunks_path, &root) != 0)
+  if (salts_fs_opendir(store->chunks_path, &root) != 0)
     return M3_CHUNK_STORE_IO;
-  while (turbo_fs_readdir(root, &root_entry) > 0) {
-    char shard_path[TURBO_FS_MAX_PATH];
-    turbo_fs_dir_t *shard = NULL;
-    turbo_fs_dirent_t entry;
+  while (salts_fs_readdir(root, &root_entry) > 0) {
+    char shard_path[SALTS_FS_MAX_PATH];
+    salts_fs_dir_t *shard = NULL;
+    salts_fs_dirent_t entry;
     int is_dir = 0;
 
     if (strlen(root_entry.name) != 2u)
@@ -492,13 +492,13 @@ m3_chunk_store_result_t m3_chunk_store_enumerate_v1(
         !is_dir) {
       continue;
     }
-    if (turbo_fs_opendir(shard_path, &shard) != 0) {
+    if (salts_fs_opendir(shard_path, &shard) != 0) {
       result = M3_CHUNK_STORE_IO;
       break;
     }
-    while (turbo_fs_readdir(shard, &entry) > 0) {
-      char chunk_path[TURBO_FS_MAX_PATH];
-      turbo_fs_stat_t stat;
+    while (salts_fs_readdir(shard, &entry) > 0) {
+      char chunk_path[SALTS_FS_MAX_PATH];
+      salts_fs_stat_t stat;
       m3_chunk_cid_v1_t cid;
       int is_file = 0;
 
@@ -510,7 +510,7 @@ m3_chunk_store_result_t m3_chunk_store_enumerate_v1(
               M3_CHUNK_STORE_OK ||
           is_file)
         continue;
-      if (turbo_fs_lstat(chunk_path, &stat) != 0 || !stat.is_file ||
+      if (salts_fs_lstat(chunk_path, &stat) != 0 || !stat.is_file ||
           stat.is_symlink) {
         result = M3_CHUNK_STORE_CORRUPT;
         break;
@@ -525,19 +525,19 @@ m3_chunk_store_result_t m3_chunk_store_enumerate_v1(
         break;
       }
     }
-    turbo_fs_closedir(shard);
+    salts_fs_closedir(shard);
     if (result != M3_CHUNK_STORE_OK)
       break;
   }
-  turbo_fs_closedir(root);
+  salts_fs_closedir(root);
   return result;
 }
 
 m3_chunk_store_result_t m3_chunk_store_delete_v1(
     m3_chunk_store_v1_t *store, const m3_chunk_cid_v1_t *cid) {
-  char shard_path[TURBO_FS_MAX_PATH];
-  char chunk_path[TURBO_FS_MAX_PATH];
-  turbo_fs_stat_t stat;
+  char shard_path[SALTS_FS_MAX_PATH];
+  char chunk_path[SALTS_FS_MAX_PATH];
+  salts_fs_stat_t stat;
   m3_chunk_store_result_t result;
 
   if (!store || !store->open || !cid_is_valid(cid))
@@ -545,12 +545,12 @@ m3_chunk_store_result_t m3_chunk_store_delete_v1(
   result = build_chunk_path(store, cid, shard_path, chunk_path);
   if (result != M3_CHUNK_STORE_OK)
     return result;
-  if (turbo_fs_lstat(chunk_path, &stat) != 0)
+  if (salts_fs_lstat(chunk_path, &stat) != 0)
     return M3_CHUNK_STORE_NOT_FOUND;
   if (!stat.is_file || stat.is_symlink || stat.size != cid->size)
     return M3_CHUNK_STORE_CORRUPT;
-  if (turbo_fs_unlink(chunk_path) != 0)
+  if (salts_fs_unlink(chunk_path) != 0)
     return M3_CHUNK_STORE_IO;
-  (void)turbo_fs_rmdir(shard_path);
+  (void)salts_fs_rmdir(shard_path);
   return M3_CHUNK_STORE_OK;
 }

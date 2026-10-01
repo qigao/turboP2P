@@ -96,8 +96,8 @@ static int calculate_hmac(
 }
 
 static int config_valid(const mesh_control_durable_outbox_config_v1_t *config) {
-  return config && config->path && turbo_fs_path_is_absolute(config->path) &&
-         strlen(config->path) < TURBO_FS_MAX_PATH - 6u &&
+  return config && config->path && salts_fs_path_is_absolute(config->path) &&
+         strlen(config->path) < SALTS_FS_MAX_PATH - 6u &&
          config->entry_capacity > 0u &&
          config->entry_capacity <= MESH_CONTROL_DURABLE_OUTBOX_MAX_ENTRIES_V1 &&
          config->session_capacity > 0u &&
@@ -178,12 +178,12 @@ static int session_matches(
          memcmp(session->session_id, session_id, MESH_CONTROL_ID_SIZE) == 0;
 }
 
-static mesh_control_durable_outbox_result_t write_all(turbo_file_t file,
+static mesh_control_durable_outbox_result_t write_all(salts_file_t file,
                                                        const uint8_t *bytes,
                                                        size_t size) {
   size_t offset = 0u;
   while (offset < size) {
-    int written = turbo_fs_write(file, (const char *)bytes + offset, size - offset);
+    int written = salts_fs_write(file, (const char *)bytes + offset, size - offset);
     if (written <= 0)
       return MESH_CONTROL_DURABLE_OUTBOX_IO;
     offset += (size_t)written;
@@ -196,7 +196,7 @@ static mesh_control_durable_outbox_result_t persist_snapshot(
   uint8_t authenticator[DURABLE_OUTBOX_AUTH_SIZE];
   uint8_t *bytes = NULL;
   uint8_t *cursor;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_file_t file = SALTS_INVALID_FILE;
   size_t payload_bytes = 0u;
   size_t record_count = 0u;
   size_t session_count = 0u;
@@ -292,21 +292,21 @@ static mesh_control_durable_outbox_result_t persist_snapshot(
   }
   memcpy(bytes + size - DURABLE_OUTBOX_AUTH_SIZE, authenticator,
          DURABLE_OUTBOX_AUTH_SIZE);
-  file = turbo_fs_open(outbox->temp_path,
-                       TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+  file = salts_fs_open(outbox->temp_path,
+                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
                        DURABLE_OUTBOX_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
+  if (file == SALTS_INVALID_FILE)
     goto cleanup;
   result = write_all(file, bytes, size);
   if (result != MESH_CONTROL_DURABLE_OUTBOX_OK)
     goto cleanup;
-  if (turbo_fs_fsync(file) != 0 || turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (salts_fs_fsync(file) != 0 || salts_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = MESH_CONTROL_DURABLE_OUTBOX_IO;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
-  if (turbo_fs_rename(outbox->temp_path, outbox->path) != 0) {
+  file = SALTS_INVALID_FILE;
+  if (salts_fs_rename(outbox->temp_path, outbox->path) != 0) {
     result = MESH_CONTROL_DURABLE_OUTBOX_IO;
     goto cleanup;
   }
@@ -314,10 +314,10 @@ static mesh_control_durable_outbox_result_t persist_snapshot(
 
 cleanup:
   OPENSSL_cleanse(authenticator, sizeof(authenticator));
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   if (result != MESH_CONTROL_DURABLE_OUTBOX_OK) {
-    (void)turbo_fs_unlink(outbox->temp_path);
+    (void)salts_fs_unlink(outbox->temp_path);
     outbox->faulted = 1u;
   }
   if (bytes) {
@@ -331,36 +331,36 @@ static mesh_control_durable_outbox_result_t read_file(const char *path,
                                                        size_t max_size,
                                                        uint8_t **out_bytes,
                                                        size_t *out_size) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   size_t offset = 0u;
-  if (turbo_fs_stat(path, &stat) != 0 || !stat.is_file ||
+  if (salts_fs_stat(path, &stat) != 0 || !stat.is_file ||
       stat.size < DURABLE_OUTBOX_HEADER_SIZE + DURABLE_OUTBOX_AUTH_SIZE ||
       stat.size > max_size || stat.size > SIZE_MAX)
     return MESH_CONTROL_DURABLE_OUTBOX_CORRUPT;
   bytes = (uint8_t *)malloc((size_t)stat.size);
   if (!bytes)
     return MESH_CONTROL_DURABLE_OUTBOX_RESOURCE_EXHAUSTED;
-  file = turbo_fs_open(path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = salts_fs_open(path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     goto io_failed;
   while (offset < (size_t)stat.size) {
-    int amount = turbo_fs_read(file, (char *)bytes + offset,
+    int amount = salts_fs_read(file, (char *)bytes + offset,
                                (size_t)stat.size - offset);
     if (amount <= 0)
       goto io_failed;
     offset += (size_t)amount;
   }
-  if (turbo_fs_close(file) != 0)
+  if (salts_fs_close(file) != 0)
     goto io_failed_closed;
   *out_bytes = bytes;
   *out_size = offset;
   return MESH_CONTROL_DURABLE_OUTBOX_OK;
 
 io_failed:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
 io_failed_closed:
   free(bytes);
   return MESH_CONTROL_DURABLE_OUTBOX_IO;
@@ -569,7 +569,7 @@ mesh_control_durable_outbox_result_t mesh_control_durable_outbox_open_v1(
   if (!outbox || !config_valid(config))
     return result;
   memset(outbox, 0, sizeof(*outbox));
-  outbox->lock_file = TURBO_INVALID_FILE;
+  outbox->lock_file = SALTS_INVALID_FILE;
   outbox->config = *config;
   memcpy(outbox->path, config->path, strlen(config->path) + 1u);
   outbox->config.path = outbox->path;
@@ -587,21 +587,21 @@ mesh_control_durable_outbox_result_t mesh_control_durable_outbox_open_v1(
     result = MESH_CONTROL_DURABLE_OUTBOX_RESOURCE_EXHAUSTED;
     goto failed;
   }
-  outbox->lock_file = turbo_fs_open(outbox->lock_path,
-                                    TURBO_FS_O_RDWR | TURBO_FS_O_CREAT,
+  outbox->lock_file = salts_fs_open(outbox->lock_path,
+                                    SALTS_FS_O_RDWR | SALTS_FS_O_CREAT,
                                     DURABLE_OUTBOX_FILE_MODE);
-  if (outbox->lock_file == TURBO_INVALID_FILE) {
+  if (outbox->lock_file == SALTS_INVALID_FILE) {
     result = MESH_CONTROL_DURABLE_OUTBOX_IO;
     goto failed;
   }
-  if (turbo_fs_lock(outbox->lock_file,
-                    TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK,
+  if (salts_fs_lock(outbox->lock_file,
+                    SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK,
                     0u, 1u) != 0) {
     result = MESH_CONTROL_DURABLE_OUTBOX_LOCKED;
     goto failed;
   }
   outbox->open = 1u;
-  if (turbo_fs_access(outbox->path, TURBO_FS_ACCESS_EXISTS) == 0) {
+  if (salts_fs_access(outbox->path, SALTS_FS_ACCESS_EXISTS) == 0) {
     result = load_snapshot(outbox);
     if (result != MESH_CONTROL_DURABLE_OUTBOX_OK)
       goto failed;
@@ -647,14 +647,14 @@ failed:
 void mesh_control_durable_outbox_close_v1(mesh_control_durable_outbox_v1_t *outbox) {
   if (!outbox)
     return;
-  if (outbox->lock_file != TURBO_INVALID_FILE) {
+  if (outbox->lock_file != SALTS_INVALID_FILE) {
     if (outbox->open)
-      (void)turbo_fs_unlock(outbox->lock_file, 0u, 1u);
-    (void)turbo_fs_close(outbox->lock_file);
+      (void)salts_fs_unlock(outbox->lock_file, 0u, 1u);
+    (void)salts_fs_close(outbox->lock_file);
   }
   free_entries(outbox);
   OPENSSL_cleanse(outbox, sizeof(*outbox));
-  outbox->lock_file = TURBO_INVALID_FILE;
+  outbox->lock_file = SALTS_INVALID_FILE;
 }
 
 static int message_equal(const mesh_control_durable_outbox_entry_v1_t *entry,

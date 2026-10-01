@@ -60,14 +60,14 @@ static replace_snapshot_result_t replace_snapshot(const char *old_path,
              ? REPLACE_SNAPSHOT_DURABLE
              : REPLACE_SNAPSHOT_FAILED;
 #else
-  char directory[TURBO_FS_MAX_PATH];
+  char directory[SALTS_FS_MAX_PATH];
   int directory_file;
   int open_flags = O_RDONLY;
   int sync_result;
 
-  if (turbo_fs_rename(old_path, new_path) != 0)
+  if (salts_fs_rename(old_path, new_path) != 0)
     return REPLACE_SNAPSHOT_FAILED;
-  if (turbo_fs_path_dirname(new_path, directory, sizeof(directory)) != 0)
+  if (salts_fs_path_dirname(new_path, directory, sizeof(directory)) != 0)
     return REPLACE_SNAPSHOT_COMMIT_UNCERTAIN;
 #ifdef O_DIRECTORY
   open_flags |= O_DIRECTORY;
@@ -150,14 +150,14 @@ static m3_chunk_replay_store_result_t calculate_digest(
   return M3_CHUNK_REPLAY_STORE_OK;
 }
 
-static m3_chunk_replay_store_result_t write_all(turbo_file_t file,
+static m3_chunk_replay_store_result_t write_all(salts_file_t file,
                                                  const uint8_t *bytes,
                                                  size_t size) {
   size_t offset = 0u;
 
   while (offset < size) {
     int written =
-        turbo_fs_write(file, (const char *)bytes + offset, size - offset);
+        salts_fs_write(file, (const char *)bytes + offset, size - offset);
     if (written <= 0)
       return M3_CHUNK_REPLAY_STORE_IO;
     offset += (size_t)written;
@@ -230,7 +230,7 @@ static m3_chunk_replay_store_result_t encode_snapshot(
 
 static m3_chunk_replay_store_result_t persist_snapshot(
     m3_chunk_replay_store_v1_t *store, int *out_commit_uncertain) {
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   size_t size = 0u;
   uint64_t next_generation;
@@ -246,26 +246,26 @@ static m3_chunk_replay_store_result_t persist_snapshot(
   if (result != M3_CHUNK_REPLAY_STORE_OK)
     return result;
 
-  file = turbo_fs_open(store->temp_path,
-                       TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+  file = salts_fs_open(store->temp_path,
+                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
                        REPLAY_STORE_FILE_MODE);
-  if (file == TURBO_INVALID_FILE) {
+  if (file == SALTS_INVALID_FILE) {
     result = M3_CHUNK_REPLAY_STORE_IO;
     goto cleanup;
   }
   result = write_all(file, bytes, size);
   if (result != M3_CHUNK_REPLAY_STORE_OK)
     goto cleanup;
-  if (turbo_fs_fsync(file) != 0) {
+  if (salts_fs_fsync(file) != 0) {
     result = M3_CHUNK_REPLAY_STORE_IO;
     goto cleanup;
   }
-  if (turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (salts_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = M3_CHUNK_REPLAY_STORE_IO;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
+  file = SALTS_INVALID_FILE;
   replace_result = replace_snapshot(store->temp_path, store->path);
   if (replace_result == REPLACE_SNAPSHOT_FAILED) {
     result = M3_CHUNK_REPLAY_STORE_IO;
@@ -281,57 +281,57 @@ static m3_chunk_replay_store_result_t persist_snapshot(
   result = M3_CHUNK_REPLAY_STORE_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   if (result != M3_CHUNK_REPLAY_STORE_OK)
-    (void)turbo_fs_unlink(store->temp_path);
+    (void)salts_fs_unlink(store->temp_path);
   free(bytes);
   return result;
 }
 
 static m3_chunk_replay_store_result_t read_exact_file(
     const char *path, size_t expected_size, uint8_t **out_bytes) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   size_t offset = 0u;
 
   if (!path || expected_size == 0u || !out_bytes)
     return M3_CHUNK_REPLAY_STORE_INVALID_ARG;
   *out_bytes = NULL;
-  if (turbo_fs_lstat(path, &stat) != 0)
+  if (salts_fs_lstat(path, &stat) != 0)
     return M3_CHUNK_REPLAY_STORE_NOT_FOUND;
   if (!stat.is_file || stat.is_symlink || stat.size != expected_size)
     return M3_CHUNK_REPLAY_STORE_CORRUPT;
   bytes = (uint8_t *)malloc(expected_size);
   if (!bytes)
     return M3_CHUNK_REPLAY_STORE_RESOURCE_EXHAUSTED;
-  file = turbo_fs_open(path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = salts_fs_open(path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     goto failed;
   while (offset < expected_size) {
     int read_size =
-        turbo_fs_read(file, (char *)bytes + offset, expected_size - offset);
+        salts_fs_read(file, (char *)bytes + offset, expected_size - offset);
     if (read_size <= 0)
       goto failed;
     offset += (size_t)read_size;
   }
   {
     uint8_t trailing;
-    if (turbo_fs_read(file, (char *)&trailing, 1u) != 0)
+    if (salts_fs_read(file, (char *)&trailing, 1u) != 0)
       goto failed;
-    if (turbo_fs_close(file) != 0) {
-      file = TURBO_INVALID_FILE;
+    if (salts_fs_close(file) != 0) {
+      file = SALTS_INVALID_FILE;
       goto failed;
     }
-    file = TURBO_INVALID_FILE;
+    file = SALTS_INVALID_FILE;
   }
   *out_bytes = bytes;
   return M3_CHUNK_REPLAY_STORE_OK;
 
 failed:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   free(bytes);
   return M3_CHUNK_REPLAY_STORE_IO;
 }
@@ -470,7 +470,7 @@ m3_chunk_replay_store_result_t m3_chunk_replay_store_open_v1(
     m3_chunk_replay_store_v1_t *store, const char *path, size_t capacity,
     uint64_t max_ttl_ms, uint64_t now_ms,
     size_t *out_recovered_in_progress) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
   uint8_t *bytes = NULL;
   size_t expired = 0u;
   size_t expected_size;
@@ -479,13 +479,13 @@ m3_chunk_replay_store_result_t m3_chunk_replay_store_open_v1(
 
   if (out_recovered_in_progress)
     *out_recovered_in_progress = 0u;
-  if (!store || store->open || !path || !turbo_fs_path_is_absolute(path) ||
+  if (!store || store->open || !path || !salts_fs_path_is_absolute(path) ||
       capacity == 0u || capacity > M3_CHUNK_REPLAY_MAX_ENTRIES ||
-      max_ttl_ms == 0u || strlen(path) >= TURBO_FS_MAX_PATH) {
+      max_ttl_ms == 0u || strlen(path) >= SALTS_FS_MAX_PATH) {
     return M3_CHUNK_REPLAY_STORE_INVALID_ARG;
   }
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   result = map_replay_result(m3_chunk_replay_journal_init_v1(
       &store->journal, capacity, max_ttl_ms));
   if (result != M3_CHUNK_REPLAY_STORE_OK)
@@ -506,21 +506,21 @@ m3_chunk_replay_store_result_t m3_chunk_replay_store_open_v1(
     goto failed;
   }
   store->lock_file =
-      turbo_fs_open(store->lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT,
+      salts_fs_open(store->lock_path, SALTS_FS_O_RDWR | SALTS_FS_O_CREAT,
                     REPLAY_STORE_FILE_MODE);
-  if (store->lock_file == TURBO_INVALID_FILE) {
+  if (store->lock_file == SALTS_INVALID_FILE) {
     result = M3_CHUNK_REPLAY_STORE_IO;
     goto failed;
   }
-  if (turbo_fs_lock(store->lock_file,
-                    TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK, 0, 1u) !=
+  if (salts_fs_lock(store->lock_file,
+                    SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK, 0, 1u) !=
       0) {
     result = M3_CHUNK_REPLAY_STORE_LOCKED;
     goto failed;
   }
   store->open = 1u;
   expected_size = snapshot_size(capacity);
-  if (turbo_fs_lstat(store->path, &stat) == 0) {
+  if (salts_fs_lstat(store->path, &stat) == 0) {
     result = read_exact_file(store->path, expected_size, &bytes);
     if (result != M3_CHUNK_REPLAY_STORE_OK)
       goto failed;
@@ -546,14 +546,14 @@ m3_chunk_replay_store_result_t m3_chunk_replay_store_open_v1(
 
 failed:
   free(bytes);
-  if (store->lock_file != TURBO_INVALID_FILE) {
+  if (store->lock_file != SALTS_INVALID_FILE) {
     if (store->open)
-      (void)turbo_fs_unlock(store->lock_file, 0, 1u);
-    (void)turbo_fs_close(store->lock_file);
+      (void)salts_fs_unlock(store->lock_file, 0, 1u);
+    (void)salts_fs_close(store->lock_file);
   }
   m3_chunk_replay_journal_destroy_v1(&store->journal);
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   return result;
 }
 
@@ -561,13 +561,13 @@ void m3_chunk_replay_store_close_v1(
     m3_chunk_replay_store_v1_t *store) {
   if (!store)
     return;
-  if (store->open && store->lock_file != TURBO_INVALID_FILE) {
-    (void)turbo_fs_unlock(store->lock_file, 0, 1u);
-    (void)turbo_fs_close(store->lock_file);
+  if (store->open && store->lock_file != SALTS_INVALID_FILE) {
+    (void)salts_fs_unlock(store->lock_file, 0, 1u);
+    (void)salts_fs_close(store->lock_file);
   }
   m3_chunk_replay_journal_destroy_v1(&store->journal);
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
 }
 
 m3_chunk_replay_store_result_t m3_chunk_replay_store_begin_v1(

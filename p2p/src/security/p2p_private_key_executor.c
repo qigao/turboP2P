@@ -3,9 +3,10 @@
 #include "../core/peer.h"
 #include "../internal.h"
 
-#include <CoroNet/turbo_coro_context.h>
 #include <platform.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
+#include <salts/clock.h>
+#include <salts/thread_pool.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -74,14 +75,14 @@ static void executor_finish_on_owner(
         return;
     }
 
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     if (operation->result == P2P_OK && now_ms > operation->deadline_ms) {
         operation->result = P2P_ERR_TIMEOUT;
         p2p_crypto_wipe(operation->output, sizeof(operation->output));
         operation->output_len = 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (peer->private_key_operation == operation) {
         peer->private_key_operation = NULL;
         was_current = 1;
@@ -95,24 +96,10 @@ static void executor_finish_on_owner(
                              memory_order_acquire) != 0) {
         executor->cancelled++;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     p2p_peer_complete_private_key_operation(operation, was_current);
     p2p_peer_release(peer);
-    operation_release(operation);
-}
-
-static void executor_completion_post(void *arg1, void *arg2) {
-    p2p_private_key_operation_t *operation =
-        (p2p_private_key_operation_t *)arg1;
-    int expected = 0;
-    (void)arg2;
-
-    if (operation && atomic_compare_exchange_strong_explicit(
-                         &operation->owner_claimed, &expected, 1,
-                         memory_order_acq_rel, memory_order_acquire)) {
-        executor_finish_on_owner(operation);
-    }
     operation_release(operation);
 }
 
@@ -122,7 +109,6 @@ static void executor_run_operation(void *argument) {
     p2p_private_key_executor_t *executor;
     p2p_private_key_cancel_v4_t cancel;
     uint64_t now_ms;
-    int post_result;
 
     if (!operation || !operation->executor || !operation->peer) {
         return;
@@ -132,7 +118,7 @@ static void executor_run_operation(void *argument) {
     cancel.is_cancelled = operation_is_cancelled;
     cancel.context = operation;
 
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     if (p2p_private_key_executor_is_closing(executor) ||
         operation_is_cancelled(operation)) {
         operation->result = P2P_ERR_INVALID_STATE;
@@ -146,7 +132,7 @@ static void executor_run_operation(void *argument) {
             sizeof(operation->output));
     }
 
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     if (operation_is_cancelled(operation) ||
         p2p_private_key_executor_is_closing(executor)) {
         operation->result = P2P_ERR_INVALID_STATE;
@@ -159,34 +145,15 @@ static void executor_run_operation(void *argument) {
     }
     p2p_crypto_wipe(operation->payload, sizeof(operation->payload));
     operation->payload_len = 0;
-    /* Publish a completion only after reserving the post callback's
-     * reference.  The owner-side fallback pump may observe completed as soon
-     * as it is released and is then allowed to drop the list reference. */
-    atomic_fetch_add_explicit(&operation->references, 1,
-                              memory_order_relaxed);
+    /* Worker threads only publish completion and wake the CNet owner.
+     * cnet_client_wake() is the sole CNet progress-control operation that may
+     * be called concurrently from a non-owner thread.  The owner poll path
+     * drains completed private-key work before running further protocol work. */
     atomic_store_explicit(&operation->completed, 1, memory_order_release);
-    do {
-        post_result = coro_post(operation->node->ctx,
-                                executor_completion_post,
-                                operation, NULL);
-        if (post_result == 0 ||
-            p2p_private_key_executor_is_closing(executor) ||
-            operation_is_cancelled(operation)) {
-            break;
-        }
-        now_ms = turbo_hrtime() / 1000000U;
-        if (now_ms >= operation->deadline_ms) {
-            break;
-        }
-        turbo_sleep_ms(1);
-    } while (1);
-    if (post_result != 0) {
-        turbo_mutex_lock(&operation->node->mutex);
+    if (cnet_client_wake(&operation->node->network) != SALTS_OK) {
+        salts_mutex_lock(&operation->node->mutex);
         executor->completion_post_failures++;
-        turbo_mutex_unlock(&operation->node->mutex);
-        /* Keep the completion reference until the last operation/node access.
-         * The owner fallback pump may concurrently drop the list reference. */
-        operation_release(operation);
+        salts_mutex_unlock(&operation->node->mutex);
     }
 }
 
@@ -194,7 +161,7 @@ p2p_private_key_executor_t *p2p_private_key_executor_create(
     p2p_node_t *node,
     const p2p_blocking_private_key_provider_v4_t *provider) {
     p2p_private_key_executor_t *executor;
-    turbo_threadpool_config_t config;
+    salts_threadpool_config_t config;
     uint16_t workers;
     uint16_t capacity;
     uint32_t timeout_ms;
@@ -224,7 +191,7 @@ p2p_private_key_executor_t *p2p_private_key_executor_create(
     }
     config.num_threads = workers;
     config.queue_capacity = capacity;
-    executor->pool = turbo_threadpool_create_with_config(&config);
+    executor->pool = salts_threadpool_create_with_config(&config);
     if (!executor->pool) {
         free(executor);
         return NULL;
@@ -281,18 +248,18 @@ int p2p_private_key_executor_submit(
         memcpy(operation->payload, payload, payload_len);
     }
     operation->payload_len = payload_len;
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     operation->deadline_ms = now_ms + executor->operation_timeout_ms;
     if (operation->deadline_ms < now_ms) {
         operation->deadline_ms = UINT64_MAX;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (atomic_load_explicit(&executor->closing, memory_order_acquire) != 0 ||
         executor->active_operations >= executor->capacity ||
         peer->private_key_operation || !p2p_peer_hold_locked(peer)) {
         executor->rejected++;
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         operation_release(operation);
         return P2P_ERR_RESOURCE_EXHAUSTED;
     }
@@ -306,18 +273,18 @@ int p2p_private_key_executor_submit(
     executor->active_operations++;
     executor->submitted++;
     peer->private_key_operation = operation;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
-    if (turbo_threadpool_try_submit(executor->pool,
+    if (salts_threadpool_try_submit(executor->pool,
                                     executor_run_operation,
                                     operation) != 0) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         if (peer->private_key_operation == operation) {
             peer->private_key_operation = NULL;
         }
         executor_remove_operation_locked(executor, operation);
         executor->rejected++;
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_release(peer);
         operation_release(operation);
         return P2P_ERR_RESOURCE_EXHAUSTED;
@@ -334,7 +301,7 @@ void p2p_private_key_executor_cancel_peer(p2p_peer_t *peer) {
     if (!peer || !peer->node) {
         return;
     }
-    turbo_mutex_lock(&peer->node->mutex);
+    salts_mutex_lock(&peer->node->mutex);
     operation = peer->private_key_operation;
     executor = peer->node->private_key_executor;
     if (operation) {
@@ -345,7 +312,7 @@ void p2p_private_key_executor_cancel_peer(p2p_peer_t *peer) {
         request_cancel = executor->provider.request_cancel;
         provider_context = executor->provider.context;
     }
-    turbo_mutex_unlock(&peer->node->mutex);
+    salts_mutex_unlock(&peer->node->mutex);
     if (request_cancel) {
         request_cancel(provider_context);
     }
@@ -362,7 +329,7 @@ void p2p_private_key_executor_pump(p2p_node_t *node) {
     executor = node->private_key_executor;
     for (;;) {
         operation = NULL;
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         for (operation = executor->operations; operation;
              operation = operation->next) {
             if (atomic_load_explicit(&operation->completed,
@@ -376,7 +343,7 @@ void p2p_private_key_executor_pump(p2p_node_t *node) {
                 break;
             }
         }
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         if (!operation) {
             break;
         }
@@ -398,7 +365,7 @@ void p2p_private_key_executor_shutdown(
                                  memory_order_acq_rel) != 0) {
         return;
     }
-    turbo_mutex_lock(&executor->node->mutex);
+    salts_mutex_lock(&executor->node->mutex);
     for (operation = executor->operations; operation;
          operation = operation->next) {
         atomic_store_explicit(&operation->cancel_requested, 1,
@@ -407,14 +374,14 @@ void p2p_private_key_executor_shutdown(
     request_cancel = executor->provider.request_cancel;
     provider_context = executor->provider.context;
     has_operations = executor->operations != NULL;
-    turbo_mutex_unlock(&executor->node->mutex);
+    salts_mutex_unlock(&executor->node->mutex);
     if (has_operations && request_cancel) {
         request_cancel(provider_context);
     }
-    turbo_threadpool_shutdown(executor->pool);
-    turbo_threadpool_wait(executor->pool);
+    salts_threadpool_shutdown(executor->pool);
+    salts_threadpool_wait(executor->pool);
     p2p_private_key_executor_pump(executor->node);
-    turbo_threadpool_destroy(executor->pool);
+    salts_threadpool_destroy(executor->pool);
     executor->pool = NULL;
 }
 

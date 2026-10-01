@@ -6,7 +6,8 @@
 #include "protocol/internal.h"
 #include "p2p_noise_c_platform.h"
 
-#include <turbo_crypto.h>
+#include <salts/random.h>
+#include <openssl/evp.h>
 
 #include <string.h>
 
@@ -18,6 +19,52 @@ typedef struct {
     void *provider_context;
     int provider_error;
 } p2p_noise_curve25519_state_t;
+
+static int p2p_noise_x25519_public(uint8_t public_key[32],
+                                  const uint8_t private_key[32]) {
+    EVP_PKEY *key = NULL;
+    size_t public_size = 32u;
+    int ok = 0;
+    if (!public_key || !private_key) return 0;
+    key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, private_key, 32u);
+    if (key &&
+        EVP_PKEY_get_raw_public_key(key, public_key, &public_size) == 1 &&
+        public_size == 32u) {
+        ok = 1;
+    }
+    EVP_PKEY_free(key);
+    if (!ok) noise_clean(public_key, 32u);
+    return ok;
+}
+
+static int p2p_noise_x25519_shared(uint8_t shared_key[32],
+                                  const uint8_t private_key[32],
+                                  const uint8_t public_key[32]) {
+    EVP_PKEY *private_handle = NULL;
+    EVP_PKEY *public_handle = NULL;
+    EVP_PKEY_CTX *context = NULL;
+    size_t shared_size = 32u;
+    int ok = 0;
+    if (!shared_key || !private_key || !public_key) return 0;
+    private_handle =
+        EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, private_key, 32u);
+    public_handle =
+        EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL, public_key, 32u);
+    if (private_handle && public_handle) {
+        context = EVP_PKEY_CTX_new(private_handle, NULL);
+    }
+    if (context && EVP_PKEY_derive_init(context) == 1 &&
+        EVP_PKEY_derive_set_peer(context, public_handle) == 1 &&
+        EVP_PKEY_derive(context, shared_key, &shared_size) == 1 &&
+        shared_size == 32u) {
+        ok = 1;
+    }
+    EVP_PKEY_CTX_free(context);
+    EVP_PKEY_free(public_handle);
+    EVP_PKEY_free(private_handle);
+    if (!ok) noise_clean(shared_key, 32u);
+    return ok;
+}
 
 static void curve25519_clear_provider(
     p2p_noise_curve25519_state_t *curve) {
@@ -44,14 +91,13 @@ static int curve25519_generate(NoiseDHState *state,
 
     curve25519_clear_provider(curve);
 
-    if (turbo_crypto_random(curve->private_key, sizeof(curve->private_key)) !=
-        TURBO_CRYPTO_OK) {
+    if (salts_platform_secure_random(curve->private_key,
+                                     sizeof(curve->private_key)) != 0) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
         return NOISE_ERROR_SYSTEM;
     }
-    if (turbo_crypto_x25519_public_key(curve->public_key,
-                                      curve->private_key) != TURBO_CRYPTO_OK ||
+    if (!p2p_noise_x25519_public(curve->public_key, curve->private_key) ||
         bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
@@ -69,8 +115,7 @@ static int curve25519_set_keypair(NoiseDHState *state,
     int result = NOISE_ERROR_NONE;
 
     curve25519_clear_provider(curve);
-    if (turbo_crypto_x25519_public_key(derived, private_key) !=
-            TURBO_CRYPTO_OK ||
+    if (!p2p_noise_x25519_public(derived, private_key) ||
         !noise_is_equal(derived, public_key, sizeof(derived))) {
         result = NOISE_ERROR_INVALID_PUBLIC_KEY;
     } else {
@@ -88,8 +133,7 @@ static int curve25519_set_private(NoiseDHState *state,
 
     curve25519_clear_provider(curve);
     memcpy(curve->private_key, private_key, sizeof(curve->private_key));
-    if (turbo_crypto_x25519_public_key(curve->public_key,
-                                      curve->private_key) != TURBO_CRYPTO_OK ||
+    if (!p2p_noise_x25519_public(curve->public_key, curve->private_key) ||
         bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
@@ -138,9 +182,9 @@ static int curve25519_calculate(const NoiseDHState *private_key_state,
             noise_clean(shared_key, 32);
             return NOISE_ERROR_SYSTEM;
         }
-    } else if (turbo_crypto_x25519(shared_key, private_key_state->private_key,
-                                  public_key_state->public_key) !=
-               TURBO_CRYPTO_OK) {
+    } else if (!p2p_noise_x25519_shared(shared_key,
+                                         private_key_state->private_key,
+                                         public_key_state->public_key)) {
         noise_clean(shared_key, 32);
         return NOISE_ERROR_INVALID_PUBLIC_KEY;
     }

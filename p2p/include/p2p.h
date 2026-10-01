@@ -4,12 +4,11 @@
 #include <stddef.h>
 #include "platform.h"
 #include "p2p_types.h"
+#include "p2p_export.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct coro_context_s coro_context_t;
 
 /* Opaque handles - forward declarations only */
 typedef struct p2p_node_s p2p_node_t;
@@ -128,7 +127,7 @@ typedef struct {
  * p2p_destroy() returns. get_public_key is called while configuring the node.
  * calculate_x25519 is called once during configuration with the standard
  * X25519 basepoint to verify that the provider owns the advertised public key,
- * then synchronously on the CoroNet owner thread during each Noise handshake.
+ * then synchronously on the CNet owner thread during each Noise handshake.
  * It therefore must be non-blocking, bounded-time, and must not call back into
  * the node. Both callbacks receive borrowed buffers and
  * must not retain them. calculate_x25519 must either return P2P_OK with exactly
@@ -163,7 +162,7 @@ typedef struct {
 } p2p_private_key_cancel_v4_t;
 
 /**
- * Blocking opaque X25519 provider executed outside the CoroNet owner loop.
+ * Blocking opaque X25519 provider executed outside the CNet owner lane.
  *
  * The node copies this structure. context remains borrowed until p2p_destroy()
  * returns. get_public_key runs synchronously during configuration, before the
@@ -205,7 +204,7 @@ typedef struct {
     uint32_t ready_timeout_ms;
     uint16_t handshake_frame_limit;
     uint16_t credential_limit;
-    /** Per-stream CoroNet queued-send hard limit; zero selects 1 MiB. */
+    /** Per-peer transport send-budget reservation; zero selects 1 MiB. */
     size_t send_hwm_bytes;
     /** Sum of admitted transport HWM reservations; zero selects 64 MiB. */
     size_t node_send_budget_bytes;
@@ -330,28 +329,32 @@ typedef struct {
  * @param port Port to bind
  * @return Handle or NULL
  */
-CXX_C_API p2p_node_t *p2p_create(const char *ip, int port);
+P2P_API p2p_node_t *p2p_create(const char *ip, int port);
 
 /**
  * Destroy node
  */
-CXX_C_API void p2p_destroy(p2p_node_t *node);
+P2P_API void p2p_destroy(p2p_node_t *node);
 
 /**
  * Start the node (blocking event loop)
  */
-CXX_C_API int p2p_start(p2p_node_t *node);
+P2P_API int p2p_start(p2p_node_t *node);
 
 /**
- * Start server and gossip (non-blocking)
- * Use this with p2p_get_loop() + coro_context_run() for custom event loop integration
+ * Start server and gossip without entering a blocking progress loop.
+ * Call p2p_poll() from the owning thread to advance network work.
  */
-CXX_C_API int p2p_start_nonblocking(p2p_node_t *node);
+P2P_API int p2p_start_nonblocking(p2p_node_t *node);
 
 /**
- * Get the CoroNet context for integration
+ * Advance bounded P2P/CNet work on the owning thread.
+ * A zero timeout performs one non-blocking progress pass.
  */
-CXX_C_API coro_context_t *p2p_get_loop(p2p_node_t *node);
+P2P_API int p2p_poll(p2p_node_t *node, uint32_t timeout_ms);
+
+/** Request termination of the node's blocking/progress loop. */
+P2P_API void p2p_stop(p2p_node_t *node);
 
 /**
  * Copy this node's stable P2P id.
@@ -359,7 +362,7 @@ CXX_C_API coro_context_t *p2p_get_loop(p2p_node_t *node);
  * @param id_out Output buffer of P2P_HASH_SIZE bytes
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]);
+P2P_API int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]);
 
 /**
  * Copy this node's static public key.
@@ -367,7 +370,7 @@ CXX_C_API int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]);
  * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_node_get_public_key(p2p_node_t *node,
+P2P_API int p2p_node_get_public_key(p2p_node_t *node,
                                       uint8_t public_key_out[P2P_KEY_SIZE]);
 
 /**
@@ -377,7 +380,7 @@ CXX_C_API int p2p_node_get_public_key(p2p_node_t *node,
  * @param secret_key 32-byte private key material
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_node_set_private_key(p2p_node_t *node,
+P2P_API int p2p_node_set_private_key(p2p_node_t *node,
                                        const uint8_t secret_key[P2P_KEY_SIZE]);
 
 /**
@@ -393,7 +396,7 @@ CXX_C_API int p2p_node_set_private_key(p2p_node_t *node,
  * @return P2P_OK, P2P_ERR_INVALID_ARG, P2P_ERR_INVALID_STATE, or a normalized
  *         provider error.
  */
-CXX_C_API int p2p_node_set_private_key_provider_v3(
+P2P_API int p2p_node_set_private_key_provider_v3(
     p2p_node_t *node, const p2p_private_key_provider_v3_t *provider);
 
 /**
@@ -410,7 +413,7 @@ CXX_C_API int p2p_node_set_private_key_provider_v3(
  * @return P2P_OK, P2P_ERR_INVALID_ARG, P2P_ERR_INVALID_STATE,
  *         P2P_ERR_NO_MEM, or a normalized provider error.
  */
-CXX_C_API int p2p_node_set_blocking_private_key_provider_v4(
+P2P_API int p2p_node_set_blocking_private_key_provider_v4(
     p2p_node_t *node,
     const p2p_blocking_private_key_provider_v4_t *provider);
 
@@ -435,7 +438,7 @@ CXX_C_API int p2p_node_set_blocking_private_key_provider_v4(
  * Example: use p2p_node_configure_pinned_security_v2() for an explicit static
  * key allowlist; use this function for certificate-backed Mesh identities.
  */
-CXX_C_API int p2p_node_configure_security_v2(
+P2P_API int p2p_node_configure_security_v2(
     p2p_node_t *node, const p2p_security_config_v2_t *config);
 
 /**
@@ -451,7 +454,7 @@ CXX_C_API int p2p_node_configure_security_v2(
  * @return P2P_OK, P2P_ERR_INVALID_ARG, P2P_ERR_INVALID_STATE,
  *         P2P_ERR_NO_MEM, or a cryptographic/provider error.
  */
-CXX_C_API int p2p_node_configure_pinned_security_v2(
+P2P_API int p2p_node_configure_pinned_security_v2(
     p2p_node_t *node,
     const uint8_t network_id_hash[P2P_SECURITY_ID_SIZE],
     const uint8_t *trusted_public_keys,
@@ -459,14 +462,14 @@ CXX_C_API int p2p_node_configure_pinned_security_v2(
 
 /**
  * Replace the built-in pinned provider's remote allowlist and immediately
- * revalidate established sessions. This must run on the CoroNet owner thread.
+ * revalidate established sessions. This must run on the CNet owner thread.
  * The node copies up to 256 contiguous keys before changing the trust
  * snapshot. A zero count with a NULL key pointer revokes every remote key.
  * Allocation or validation failure before the swap leaves the old snapshot
  * unchanged; revalidation failure after the swap disconnects all established
  * security sessions.
  */
-CXX_C_API int p2p_node_update_pinned_trust_v2(
+P2P_API int p2p_node_update_pinned_trust_v2(
     p2p_node_t *node,
     const uint8_t *trusted_public_keys,
     size_t trusted_key_count,
@@ -483,7 +486,7 @@ CXX_C_API int p2p_node_update_pinned_trust_v2(
  * @return P2P_OK, P2P_ERR_INVALID_ARG, or P2P_ERR_INVALID_STATE before the
  *         security policy has been configured.
  */
-CXX_C_API int p2p_node_get_security_status_v2(
+P2P_API int p2p_node_get_security_status_v2(
     p2p_node_t *node, p2p_node_security_status_v2_t *status);
 
 /**
@@ -492,16 +495,16 @@ CXX_C_API int p2p_node_get_security_status_v2(
  * @return P2P_OK, P2P_ERR_INVALID_ARG, or P2P_ERR_INVALID_STATE when security
  *         has not been configured.
  */
-CXX_C_API int p2p_node_get_security_status_v3(
+P2P_API int p2p_node_get_security_status_v3(
     p2p_node_t *node, p2p_node_security_status_v3_t *status);
 
 /** Return a point-in-time snapshot of the blocking private-key executor. */
-CXX_C_API int p2p_node_get_private_key_executor_status_v4(
+P2P_API int p2p_node_get_private_key_executor_status_v4(
     p2p_node_t *node, p2p_private_key_executor_status_v4_t *status);
 
 /**
  * Revalidate every established peer against the identity provider's current
- * trust snapshot. This must run on the node's CoroNet owner thread and must not
+ * trust snapshot. This must run on the node's CNet owner thread and must not
  * race p2p_destroy(). Provider callbacks run without the node mutex. A rejected
  * credential or an identity result different from the READY-bound identity
  * disconnects that session; identity changes require a fresh Noise handshake.
@@ -511,7 +514,7 @@ CXX_C_API int p2p_node_get_private_key_executor_status_v4(
  * with sessions that were not revalidated.
  * Set result->struct_size = sizeof(*result) before calling.
  */
-CXX_C_API int p2p_node_revalidate_security_v2(
+P2P_API int p2p_node_revalidate_security_v2(
     p2p_node_t *node, p2p_security_revalidation_result_v2_t *result);
 
 /**
@@ -519,7 +522,7 @@ CXX_C_API int p2p_node_revalidate_security_v2(
  * @param secret_key_out Output buffer of P2P_KEY_SIZE bytes
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_generate_private_key(uint8_t secret_key_out[P2P_KEY_SIZE]);
+P2P_API int p2p_generate_private_key(uint8_t secret_key_out[P2P_KEY_SIZE]);
 
 /**
  * Derive the static public key for a 32-byte private key.
@@ -527,14 +530,14 @@ CXX_C_API int p2p_generate_private_key(uint8_t secret_key_out[P2P_KEY_SIZE]);
  * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_public_key_from_private_key(
+P2P_API int p2p_public_key_from_private_key(
     const uint8_t secret_key[P2P_KEY_SIZE],
     uint8_t public_key_out[P2P_KEY_SIZE]);
 
 /**
  * Connect to bootstrap peer
  */
-CXX_C_API int p2p_connect(p2p_node_t *node, const char *ip, int port);
+P2P_API int p2p_connect(p2p_node_t *node, const char *ip, int port);
 
 /* =============================================================================
  * Message Callbacks
@@ -554,7 +557,7 @@ typedef void (*p2p_on_message_fn)(p2p_node_t *node, p2p_peer_t *peer,
 /**
  * Set message handler
  */
-CXX_C_API void p2p_set_message_handler(p2p_node_t *node, p2p_on_message_fn fn, void *user_data);
+P2P_API void p2p_set_message_handler(p2p_node_t *node, p2p_on_message_fn fn, void *user_data);
 
 /**
  * Set peer connection callbacks
@@ -563,7 +566,7 @@ CXX_C_API void p2p_set_message_handler(p2p_node_t *node, p2p_on_message_fn fn, v
  * @param on_disconnected Callback when peer disconnects (can be NULL)
  * @param user_data User data passed to callbacks
  */
-CXX_C_API void p2p_set_peer_callbacks(p2p_node_t *node,
+P2P_API void p2p_set_peer_callbacks(p2p_node_t *node,
                              void (*on_connected)(p2p_peer_t *peer, void *user_data),
                              void (*on_disconnected)(p2p_peer_t *peer, void *user_data),
                              void *user_data);
@@ -575,7 +578,7 @@ CXX_C_API void p2p_set_peer_callbacks(p2p_node_t *node,
  * @param port_out Pointer to store port
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_peer_get_address(p2p_peer_t *peer, char *ip_out, int *port_out);
+P2P_API int p2p_peer_get_address(p2p_peer_t *peer, char *ip_out, int *port_out);
 
 /**
  * Copy a peer's advertised P2P id.
@@ -583,7 +586,7 @@ CXX_C_API int p2p_peer_get_address(p2p_peer_t *peer, char *ip_out, int *port_out
  * @param id_out Output buffer of P2P_HASH_SIZE bytes
  * @return P2P_OK on success, P2P_ERR_NOT_FOUND if the peer has not announced an id yet
  */
-CXX_C_API int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]);
+P2P_API int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]);
 
 /**
  * Copy a peer's static public key learned during the handshake.
@@ -591,7 +594,7 @@ CXX_C_API int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]);
  * @param public_key_out Output buffer of P2P_KEY_SIZE bytes
  * @return P2P_OK on success, P2P_ERR_NOT_FOUND if the peer used an old handshake
  */
-CXX_C_API int p2p_peer_get_public_key(p2p_peer_t *peer,
+P2P_API int p2p_peer_get_public_key(p2p_peer_t *peer,
                                       uint8_t public_key_out[P2P_KEY_SIZE]);
 
 /**
@@ -604,29 +607,29 @@ CXX_C_API int p2p_peer_get_public_key(p2p_peer_t *peer,
  * @param info Caller-owned exact-size output structure.
  * @return P2P_OK, P2P_ERR_INVALID_ARG, or P2P_ERR_NOT_FOUND before READY.
  */
-CXX_C_API int p2p_peer_get_security_info_v2(
+P2P_API int p2p_peer_get_security_info_v2(
     p2p_peer_t *peer, p2p_peer_security_info_v2_t *info);
 
 /**
  * Disconnect a peer transport
  */
-CXX_C_API void p2p_disconnect_peer(p2p_peer_t *peer);
+P2P_API void p2p_disconnect_peer(p2p_peer_t *peer);
 
 /**
  * Send message to peer
  */
-CXX_C_API int p2p_send(p2p_node_t *node, p2p_peer_t *peer, const void *data, size_t len);
+P2P_API int p2p_send(p2p_node_t *node, p2p_peer_t *peer, const void *data, size_t len);
 
 /**
  * Send typed message
  */
-CXX_C_API int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
+P2P_API int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
                                const void *payload, size_t len);
 
 /**
  * Broadcast to all peers
  */
-CXX_C_API int p2p_broadcast(p2p_node_t *node, const void *data, size_t len);
+P2P_API int p2p_broadcast(p2p_node_t *node, const void *data, size_t len);
 
 /* =============================================================================
  * File Sharing
@@ -639,7 +642,7 @@ CXX_C_API int p2p_broadcast(p2p_node_t *node, const void *data, size_t len);
  * @param key_out Buffer for hash key (must be 65 bytes for null terminator)
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_put_file(p2p_node_t *node, const char *filepath, char key_out[65]);
+P2P_API int p2p_put_file(p2p_node_t *node, const char *filepath, char key_out[65]);
 
 /**
  * Start downloading a file by hash key and report verified completion.
@@ -654,7 +657,7 @@ CXX_C_API int p2p_put_file(p2p_node_t *node, const char *filepath, char key_out[
  *       contain partial data until complete_cb reports success.
  * @note complete_cb runs on the node event loop. It must not block.
  */
-CXX_C_API int p2p_get_file_async(
+P2P_API int p2p_get_file_async(
     p2p_node_t *node, const char key[65], const char *output_path,
     p2p_transfer_complete_cb complete_cb, void *user_data);
 
@@ -667,7 +670,7 @@ CXX_C_API int p2p_get_file_async(
  *
  * @note Prefer p2p_get_file_async() when the caller needs to consume the file.
  */
-CXX_C_API int p2p_get_file(p2p_node_t *node, const char key[65], const char *output_path);
+P2P_API int p2p_get_file(p2p_node_t *node, const char key[65], const char *output_path);
 
 /* =============================================================================
  * Pub/Sub
@@ -676,17 +679,17 @@ CXX_C_API int p2p_get_file(p2p_node_t *node, const char key[65], const char *out
 /**
  * Subscribe to topic
  */
-CXX_C_API int p2p_subscribe(p2p_node_t *node, const char *topic);
+P2P_API int p2p_subscribe(p2p_node_t *node, const char *topic);
 
 /**
  * Unsubscribe from topic
  */
-CXX_C_API int p2p_unsubscribe(p2p_node_t *node, const char *topic);
+P2P_API int p2p_unsubscribe(p2p_node_t *node, const char *topic);
 
 /**
  * Publish message to topic
  */
-CXX_C_API int p2p_publish(p2p_node_t *node, const char *topic, const void *data, size_t len);
+P2P_API int p2p_publish(p2p_node_t *node, const char *topic, const void *data, size_t len);
 
 /* =============================================================================
  * DHT (Distributed Hash Table)
@@ -700,12 +703,12 @@ CXX_C_API int p2p_publish(p2p_node_t *node, const char *topic, const void *data,
  * @param len Value length
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len);
+P2P_API int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len);
 
 /**
  * Store value locally and replicate only to currently connected peers.
  */
-CXX_C_API int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size_t len);
+P2P_API int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size_t len);
 
 /**
  * Get value from DHT network
@@ -715,17 +718,17 @@ CXX_C_API int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *
  * @param buf_len Buffer length (input/output)
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
+P2P_API int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
 
 /**
  * Get a value already present in the local DHT cache without network waiting.
  */
-CXX_C_API int p2p_dht_get_cached(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
+P2P_API int p2p_dht_get_cached(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
 
 /**
  * Count locally cached DHT entries currently stored on this node.
  */
-CXX_C_API size_t p2p_dht_get_entry_count(p2p_node_t *node);
+P2P_API size_t p2p_dht_get_entry_count(p2p_node_t *node);
 
 /* =============================================================================
  * Peer Information
@@ -767,7 +770,7 @@ typedef struct {
  * @param info Output peer info
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info);
+P2P_API int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info);
 
 /**
  * Snapshot peer address and connection state without IPv4-sized truncation
@@ -775,7 +778,7 @@ CXX_C_API int p2p_peer_get_info(p2p_peer_t *peer, p2p_peer_info_t *info);
  * @param info Output peer info
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
+P2P_API int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
 
 /**
  * Snapshot authenticated ordered-stream RTT measurements for a peer.
@@ -783,14 +786,14 @@ CXX_C_API int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info);
  * @param metrics Output metrics
  * @return P2P_OK on success, P2P_ERR_INVALID_ARG for invalid arguments
  */
-CXX_C_API int p2p_peer_get_stream_metrics(
+P2P_API int p2p_peer_get_stream_metrics(
     p2p_peer_t *peer,
     p2p_peer_stream_metrics_t *metrics);
 
 /**
  * Get peer count
  */
-CXX_C_API int p2p_get_peer_count(p2p_node_t *node);
+P2P_API int p2p_get_peer_count(p2p_node_t *node);
 
 /**
  * Get peer info by index
@@ -799,7 +802,7 @@ CXX_C_API int p2p_get_peer_count(p2p_node_t *node);
  * @param info Output peer info
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_get_peer_info(p2p_node_t *node, int index, p2p_peer_info_t *info);
+P2P_API int p2p_get_peer_info(p2p_node_t *node, int index, p2p_peer_info_t *info);
 
 /**
  * Get extended peer info by index without IPv4-sized truncation
@@ -808,13 +811,13 @@ CXX_C_API int p2p_get_peer_info(p2p_node_t *node, int index, p2p_peer_info_t *in
  * @param info Output peer info
  * @return P2P_OK on success
  */
-CXX_C_API int p2p_get_peer_info_ex(p2p_node_t *node, int index, p2p_peer_info_ex_t *info);
+P2P_API int p2p_get_peer_info_ex(p2p_node_t *node, int index, p2p_peer_info_ex_t *info);
 
 /* =============================================================================
  * Utility
  * ============================================================================= */
 
-CXX_C_API const char *p2p_error_str(int error);
+P2P_API const char *p2p_error_str(int error);
 
 #ifdef __cplusplus
 }

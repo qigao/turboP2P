@@ -1,6 +1,7 @@
 #include "mesh_node_ipc_client.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,7 @@ static int bytes_zero(const uint8_t *bytes, size_t size) {
 static int bytes_equal(const uint8_t *left, const uint8_t *right,
                        size_t size) {
   return left && right &&
-         turbo_crypto_verify(left, right, size) == TURBO_CRYPTO_OK;
+         CRYPTO_memcmp(left, right, size) == 0;
 }
 
 static mesh_node_ipc_client_operation_v1_t *find_operation(

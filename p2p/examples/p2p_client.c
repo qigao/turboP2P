@@ -503,7 +503,7 @@ int main(int argc, char *argv[]) {
             TLOG_INFO("Connected to bootstrap!");
             printf("Connected to bootstrap!\n");
         } else {
-            TLOG_ERROR("Failed to connect: {}", p2p_error_str(ret));
+            TLOG_ERRORF("Failed to connect: {}", p2p_error_str(ret));
             printf("Failed to connect: %s\n", p2p_error_str(ret));
         }
     }

@@ -1,6 +1,6 @@
 #include "m3_namespace_raft_adapter.h"
 
-#include <turbo_error.h>
+#include <salts/error_codes.h>
 
 #include <limits.h>
 #include <stdlib.h>
@@ -59,22 +59,22 @@ static int checked_frame_size(size_t bucket_size, size_t object_key_size,
   if (!out_size || bucket_size == 0u || object_key_size == 0u ||
       bucket_size > UINT16_MAX || object_key_size > UINT16_MAX ||
       manifest_size > UINT16_MAX || bucket_size > SIZE_MAX - size) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   size += bucket_size;
   if (object_key_size > SIZE_MAX - size) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   size += object_key_size;
   if (manifest_size > SIZE_MAX - size) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   size += manifest_size;
   if (size > TR_RAFT_MAX_ENTRY_BYTES) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   *out_size = size;
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 int m3_namespace_raft_command_encode_v1(
@@ -84,7 +84,7 @@ int m3_namespace_raft_command_encode_v1(
   uint8_t *cursor;
 
   if (!out_size) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   *out_size = 0u;
   if (!command || !output || !command->bucket || !command->object_key ||
@@ -96,12 +96,12 @@ int m3_namespace_raft_command_encode_v1(
        (!command->manifest_bytes || command->manifest_size == 0u)) ||
       (command->type == M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
        (command->manifest_bytes || command->manifest_size != 0u))) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   if (checked_frame_size(command->bucket_size, command->object_key_size,
-                         command->manifest_size, &size) != TURBO_OK ||
+                         command->manifest_size, &size) != SALTS_OK ||
       output_capacity < size) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
 
   memcpy(output, COMMAND_MAGIC, sizeof(COMMAND_MAGIC));
@@ -124,7 +124,7 @@ int m3_namespace_raft_command_encode_v1(
     memcpy(cursor, command->manifest_bytes, command->manifest_size);
   }
   *out_size = size;
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 int m3_namespace_raft_command_decode_v1(
@@ -137,7 +137,7 @@ int m3_namespace_raft_command_decode_v1(
       size > TR_RAFT_MAX_ENTRY_BYTES ||
       memcmp(bytes, COMMAND_MAGIC, sizeof(COMMAND_MAGIC)) != 0 ||
       bytes[COMMAND_VERSION_OFFSET] != M3_NAMESPACE_RAFT_COMMAND_VERSION) {
-    return TURBO_EPROTO;
+    return SALTS_EPROTO;
   }
   memset(&decoded, 0, sizeof(decoded));
   decoded.type = (m3_namespace_raft_command_type_t)bytes[COMMAND_TYPE_OFFSET];
@@ -153,9 +153,9 @@ int m3_namespace_raft_command_decode_v1(
       (decoded.type == M3_NAMESPACE_RAFT_COMMAND_TOMBSTONE &&
        decoded.manifest_size != 0u) ||
       checked_frame_size(decoded.bucket_size, decoded.object_key_size,
-                         decoded.manifest_size, &expected_size) != TURBO_OK ||
+                         decoded.manifest_size, &expected_size) != SALTS_OK ||
       expected_size != size) {
-    return TURBO_EPROTO;
+    return SALTS_EPROTO;
   }
 
   memcpy(decoded.tenant_id, bytes + COMMAND_TENANT_OFFSET,
@@ -166,22 +166,22 @@ int m3_namespace_raft_command_decode_v1(
                                ? NULL
                                : decoded.object_key + decoded.object_key_size;
   *out_command = decoded;
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 static int map_store_result(m3_namespace_local_result_t result) {
   switch (result) {
   case M3_NAMESPACE_LOCAL_OK:
-    return TURBO_OK;
+    return SALTS_OK;
   case M3_NAMESPACE_LOCAL_INVALID_ARG:
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   case M3_NAMESPACE_LOCAL_RESOURCE_EXHAUSTED:
-    return TURBO_ENOMEM;
+    return SALTS_ENOMEM;
   case M3_NAMESPACE_LOCAL_INVALID_STATE:
   case M3_NAMESPACE_LOCAL_OUT_OF_ORDER:
   case M3_NAMESPACE_LOCAL_CORRUPT:
   default:
-    return TURBO_EPROTO;
+    return SALTS_EPROTO;
   }
 }
 
@@ -192,7 +192,7 @@ static int apply_batch(void *context, const tr_raft_entry_t *entries,
 
   if (!adapter || !adapter->open || !adapter->store || !entries ||
       entry_count == 0u) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   for (size_t i = 0u; i < entry_count; ++i) {
     m3_namespace_raft_command_v1_t command;
@@ -200,7 +200,7 @@ static int apply_batch(void *context, const tr_raft_entry_t *entries,
     int decode_result = m3_namespace_raft_command_decode_v1(
         entries[i].data, entries[i].data_length, &command);
 
-    if (decode_result != TURBO_OK) {
+    if (decode_result != SALTS_OK) {
       return decode_result;
     }
     if (command.type == M3_NAMESPACE_RAFT_COMMAND_PUT) {
@@ -222,7 +222,7 @@ static int apply_batch(void *context, const tr_raft_entry_t *entries,
       return map_store_result(result);
     }
   }
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 int m3_namespace_raft_adapter_create_v1(
@@ -231,29 +231,29 @@ int m3_namespace_raft_adapter_create_v1(
   m3_namespace_raft_adapter_v1_t *adapter;
 
   if (!out_adapter) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   *out_adapter = NULL;
   if (!store || !store->open || max_pending_reads == 0u ||
       max_pending_reads > M3_NAMESPACE_RAFT_MAX_PENDING_READS ||
       max_pending_reads > SIZE_MAX / sizeof(m3_namespace_pending_read_v1_t)) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   adapter = (m3_namespace_raft_adapter_v1_t *)calloc(1u, sizeof(*adapter));
   if (!adapter) {
-    return TURBO_ENOMEM;
+    return SALTS_ENOMEM;
   }
   adapter->pending = (m3_namespace_pending_read_v1_t *)calloc(
       max_pending_reads, sizeof(*adapter->pending));
   if (!adapter->pending) {
     free(adapter);
-    return TURBO_ENOMEM;
+    return SALTS_ENOMEM;
   }
   adapter->store = store;
   adapter->pending_capacity = max_pending_reads;
   adapter->open = 1u;
   *out_adapter = adapter;
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 void m3_namespace_raft_adapter_destroy_v1(
@@ -286,10 +286,10 @@ int m3_namespace_raft_adapter_bind_service_v1(
     m3_namespace_raft_adapter_v1_t *adapter, tr_raft_service_t *service) {
   if (!adapter || !adapter->open || !service ||
       (adapter->service && adapter->service != service)) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   adapter->service = service;
-  return TURBO_OK;
+  return SALTS_OK;
 }
 
 static m3_namespace_pending_read_v1_t *find_pending_by_context(
@@ -366,10 +366,10 @@ static m3_namespace_lookup_result_t lookup_start(
   ++adapter->pending_count;
 
   result = tr_raft_service_read_index(adapter->service, slot->context_id);
-  if (result != TURBO_OK) {
+  if (result != SALTS_OK) {
     memset(slot, 0, sizeof(*slot));
     --adapter->pending_count;
-    return result == TURBO_EINVAL ? M3_NAMESPACE_LOOKUP_INVALID_ARG
+    return result == SALTS_EINVAL ? M3_NAMESPACE_LOOKUP_INVALID_ARG
                                  : M3_NAMESPACE_LOOKUP_UNAVAILABLE;
   }
   return M3_NAMESPACE_LOOKUP_OK;
@@ -420,11 +420,11 @@ int m3_namespace_raft_adapter_poll_v1(
   size_t completed = 0u;
 
   if (!out_completed) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   *out_completed = 0u;
   if (!adapter || !adapter->open || !adapter->service || !adapter->store) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   for (;;) {
     tr_raft_read_state_t read_state;
@@ -437,16 +437,16 @@ int m3_namespace_raft_adapter_poll_v1(
     void *failed_user_data;
     int result = tr_raft_service_take_read_state(adapter->service, &read_state);
 
-    if (result == TURBO_ENOENT) {
+    if (result == SALTS_ENOENT) {
       *out_completed = completed;
-      return TURBO_OK;
+      return SALTS_OK;
     }
-    if (result != TURBO_OK) {
+    if (result != SALTS_OK) {
       return result;
     }
     pending = find_pending_by_context(adapter, read_state.context_id);
     if (!pending) {
-      return TURBO_EPROTO;
+      return SALTS_EPROTO;
     }
 
     memset(&request, 0, sizeof(request));
@@ -470,7 +470,7 @@ int m3_namespace_raft_adapter_poll_v1(
       --adapter->pending_count;
       failed_cb(lookup_result, NULL, failed_user_data);
     } else if (!bridge.called) {
-      return TURBO_EPROTO;
+      return SALTS_EPROTO;
     }
     ++completed;
   }
@@ -487,11 +487,11 @@ int m3_namespace_raft_propose_v1(
 
   if (!adapter || !adapter->open || !adapter->service || command_id == 0u ||
       !out_receipt) {
-    return TURBO_EINVAL;
+    return SALTS_EINVAL;
   }
   result = m3_namespace_raft_command_encode_v1(command, bytes, sizeof(bytes),
                                                &size);
-  if (result != TURBO_OK) {
+  if (result != SALTS_OK) {
     return result;
   }
   proposal.command_id = command_id;

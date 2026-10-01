@@ -6,6 +6,7 @@
 #define P2P_CACHE_MAX_KEY 256
 
 #include "p2p_types.h"
+#include "p2p_export.h"
 #include <time.h>
 #include "platform.h"
 
@@ -54,13 +55,13 @@ typedef struct {
  * @param max_size 最大缓存大小 (MB)
  * @return 0 成功, -1 失败
  */
-CXX_C_API int p2p_cache_impl_init(p2p_cache_t *cache, const char *cache_dir, uint64_t max_size_mb);
+P2P_API int p2p_cache_impl_init(p2p_cache_t *cache, const char *cache_dir, uint64_t max_size_mb);
 
 /**
  * 销毁缓存管理器
  * @param cache 缓存管理器
  */
-CXX_C_API void p2p_cache_impl_destroy(p2p_cache_t *cache);
+P2P_API void p2p_cache_impl_destroy(p2p_cache_t *cache);
 
 /**
  * 获取缓存文件
@@ -70,7 +71,7 @@ CXX_C_API void p2p_cache_impl_destroy(p2p_cache_t *cache);
  * @param max_len 路径缓冲区长度
  * @return 0 找到, -1 未找到
  */
-CXX_C_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath, size_t max_len);
+P2P_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath, size_t max_len);
 
 /**
  * 添加文件到缓存
@@ -81,7 +82,7 @@ CXX_C_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath,
  * @param is_local 是否为本地文件
  * @return 0 成功, -1 失败
  */
-CXX_C_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filepath,
+P2P_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filepath,
                   uint64_t size, int is_local);
 
 /**
@@ -90,7 +91,7 @@ CXX_C_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *fil
  * @param key 文件键
  * @return 0 成功, -1 未找到
  */
-CXX_C_API int p2p_cache_remove(p2p_cache_t *cache, const char *key);
+P2P_API int p2p_cache_remove(p2p_cache_t *cache, const char *key);
 
 /**
  * 检查缓存是否包含文件
@@ -98,7 +99,7 @@ CXX_C_API int p2p_cache_remove(p2p_cache_t *cache, const char *key);
  * @param key 文件键
  * @return 1 存在, 0 不存在
  */
-CXX_C_API int p2p_cache_has(p2p_cache_t *cache, const char *key);
+P2P_API int p2p_cache_has(p2p_cache_t *cache, const char *key);
 
 /**
  * 清理过期缓存条目
@@ -106,34 +107,34 @@ CXX_C_API int p2p_cache_has(p2p_cache_t *cache, const char *key);
  * @param max_age 最大年龄 (秒)
  * @return 清理的条目数
  */
-CXX_C_API int p2p_cache_cleanup(p2p_cache_t *cache, time_t max_age);
+P2P_API int p2p_cache_cleanup(p2p_cache_t *cache, time_t max_age);
 
 /**
  * 获取缓存统计信息
  * @param cache 缓存管理器
  * @param stats 统计信息输出
  */
-CXX_C_API void p2p_cache_impl_get_stats(p2p_cache_t *cache, p2p_cache_stats_t *stats);
+P2P_API void p2p_cache_impl_get_stats(p2p_cache_t *cache, p2p_cache_stats_t *stats);
 
 /**
  * 清空缓存
  * @param cache 缓存管理器
  */
-CXX_C_API void p2p_cache_impl_clear(p2p_cache_t *cache);
+P2P_API void p2p_cache_impl_clear(p2p_cache_t *cache);
 
 /**
  * 保存缓存索引到磁盘
  * @param cache 缓存管理器
  * @return 0 成功, -1 失败
  */
-CXX_C_API int p2p_cache_impl_save(p2p_cache_t *cache);
+P2P_API int p2p_cache_impl_save(p2p_cache_t *cache);
 
 /**
  * 从磁盘加载缓存索引
  * @param cache 缓存管理器
  * @return 0 成功, -1 失败
  */
-CXX_C_API int p2p_cache_impl_load(p2p_cache_t *cache);
+P2P_API int p2p_cache_impl_load(p2p_cache_t *cache);
 
 #ifdef __cplusplus
 }

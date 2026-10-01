@@ -1,6 +1,6 @@
 #include "mesh_stream_media_pull.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +131,7 @@ mesh_stream_media_pull_result_t mesh_stream_media_pull_pump_v1(
       return MESH_STREAM_MEDIA_PULL_AGAIN; /* fetch pending */
     if (len != cid->size)
       return MESH_STREAM_MEDIA_PULL_INTEGRITY;
-    if (turbo_crypto_sha256(pull->scratch, len, digest) != TURBO_CRYPTO_OK)
+    if (salts_crypto_sha256(pull->scratch, len, digest) != SALTS_CRYPTO_OK)
       return MESH_STREAM_MEDIA_PULL_INTEGRITY;
     if (memcmp(digest, cid->digest, sizeof(digest)) != 0)
       return MESH_STREAM_MEDIA_PULL_INTEGRITY;

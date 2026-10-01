@@ -18,7 +18,7 @@
 
 #include <CoroNet/turbo_coro_context.h>
 #include <platform.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 #include <stdio.h>
 #include <time.h>
@@ -236,7 +236,7 @@ static DWORD WINAPI mesh_pump_loop(LPVOID arg) {
   mesh_pump_ctx_t *ctx = (mesh_pump_ctx_t *)arg;
   while (InterlockedCompareExchange(&ctx->running, 0, 0) != 0) {
     coro_context_run(p2p_get_loop(ctx->node), TURBO_RUN_NOWAIT);
-    turbo_sleep_ms(2);
+    salts_sleep_ms(2);
   }
   return 0;
 }
@@ -341,7 +341,7 @@ static int run_mesh_serve(m3_store_node_config_v1_t *config,
   printf("\n");
   fflush(stdout);
   while (!g_mesh_stop)
-    turbo_sleep_ms(100);
+    salts_sleep_ms(100);
   InterlockedExchange(&pump.running, 0);
   WaitForSingleObject(pump.thread, 5000);
   CloseHandle(pump.thread);

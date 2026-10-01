@@ -1,7 +1,8 @@
+#include <salts/clock.h>
 #include "mesh_product_controller_iris.h"
 
-#include <turbo_parser.h>
-#include <turbo_selector.h>
+#include <json_parser.h>
+#include <salts_selector.h>
 #include <platform.h>
 
 #include <openssl/evp.h>
@@ -24,6 +25,19 @@ enum {
 static const char MESH_PRODUCT_CONTROLLER_SHA256_PREFIX[] = "sha256:";
 static const char *const MESH_PRODUCT_SELECTOR_FIELDS_V1[] = {
     "region", "role", "node.id", "node.name", "platform", "arch"};
+
+static int mesh_parse_json_document(const uint8_t *data, size_t size,
+                                    json_value_t **out_document) {
+  if (!data || size == 0u || !out_document) return -1;
+  *out_document = json_parse((const char *)data, size);
+  return *out_document ? 0 : -1;
+}
+
+static void mesh_free_json_document(json_value_t **document) {
+  if (!document || !*document) return;
+  json_free(*document);
+  *document = NULL;
+}
 
 static int identifier_valid(const char *value) {
   size_t index;
@@ -89,7 +103,7 @@ mesh_control_result_t mesh_product_controller_iris_query_v1(
     size_t output_capacity, size_t *out_size) {
   mesh_control_result_t result;
   size_t produced = 0u;
-  turbo_json_doc_t *json = NULL;
+  json_value_t *json = NULL;
   if (out_size) *out_size = 0u;
   if (!adapter || !adapter->initialized ||
       !certificate_digest_valid(peer_certificate_sha256) ||
@@ -130,13 +144,13 @@ mesh_control_result_t mesh_product_controller_iris_query_v1(
     *out_size = produced;
     return result == MESH_CONTROL_OK ? MESH_CONTROL_INVALID_STATE : result;
   }
-  if (turbo_parse_json((const uint8_t *)output, produced, &json) != 0 || !json) {
+  if (mesh_parse_json_document((const uint8_t *)output, produced, &json) != 0 || !json) {
     atomic_fetch_add_explicit(&adapter->rejected_source, 1u,
                               memory_order_relaxed);
     memset(output, 0, produced);
     return MESH_CONTROL_INVALID_STATE;
   }
-  turbo_free_json(&json);
+  mesh_free_json_document(&json);
   *out_size = produced;
   atomic_fetch_add_explicit(&adapter->succeeded, 1u, memory_order_relaxed);
   return MESH_CONTROL_OK;
@@ -148,11 +162,11 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
     const char *subject, uint32_t selector_language_version,
     const char *selector, size_t selector_size, char *output,
     size_t output_capacity, size_t *out_size) {
-  turbo_selector_schema_v1_t schema;
-  turbo_selector_diagnostic_v1_t selector_diagnostic;
-  turbo_selector_program_t *program = NULL;
+  salts_selector_schema_v1_t schema;
+  salts_selector_diagnostic_v1_t selector_diagnostic;
+  salts_selector_program_t *program = NULL;
   mesh_product_placement_plan_v1_t request;
-  turbo_json_doc_t *json = NULL;
+  json_value_t *json = NULL;
   char *canonical = NULL;
   size_t canonical_size = 0u;
   size_t produced = 0u;
@@ -162,9 +176,9 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
   if (!adapter || !adapter->initialized || !adapter->config.plan ||
       !certificate_digest_valid(peer_certificate_sha256) ||
       !identifier_valid(mesh) || !placement_subject_valid(subject) ||
-      selector_language_version != TURBO_SELECTOR_LANGUAGE_VERSION_V1 ||
+      selector_language_version != SALTS_SELECTOR_LANGUAGE_VERSION_V1 ||
       !selector || selector_size == 0u ||
-      selector_size > TURBO_SELECTOR_MAX_SOURCE_BYTES_V1 ||
+      selector_size > SALTS_SELECTOR_MAX_SOURCE_BYTES_V1 ||
       memchr(selector, '\0', selector_size) != NULL || !output ||
       output_capacity == 0u || !out_size)
     return MESH_CONTROL_INVALID_ARG;
@@ -181,26 +195,26 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
   }
   atomic_fetch_add_explicit(&adapter->authorized, 1u, memory_order_relaxed);
   memset(&schema, 0, sizeof(schema));
-  schema.size = TURBO_SELECTOR_SCHEMA_V1_SIZE;
+  schema.size = SALTS_SELECTOR_SCHEMA_V1_SIZE;
   schema.allowed_fields = MESH_PRODUCT_SELECTOR_FIELDS_V1;
   schema.allowed_field_count = sizeof(MESH_PRODUCT_SELECTOR_FIELDS_V1) /
                                sizeof(MESH_PRODUCT_SELECTOR_FIELDS_V1[0]);
   schema.allow_tag_fields = 1;
   memset(&selector_diagnostic, 0, sizeof(selector_diagnostic));
-  selector_diagnostic.size = TURBO_SELECTOR_DIAGNOSTIC_V1_SIZE;
-  selector_result = turbo_selector_compile_v1(
+  selector_diagnostic.size = SALTS_SELECTOR_DIAGNOSTIC_V1_SIZE;
+  selector_result = salts_selector_compile_v1(
       selector, selector_size, &schema, &program, &selector_diagnostic);
-  if (selector_result != TURBO_SELECTOR_OK) {
+  if (selector_result != SALTS_SELECTOR_OK) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
-    return selector_result == TURBO_SELECTOR_RESOURCE_LIMIT
+    return selector_result == SALTS_SELECTOR_RESOURCE_LIMIT
                ? MESH_CONTROL_RESOURCE_EXHAUSTED
                : MESH_CONTROL_INVALID_ARG;
   }
-  selector_result = turbo_selector_program_canonical_v1(
+  selector_result = salts_selector_program_canonical_v1(
       program, NULL, 0u, &canonical_size, &selector_diagnostic);
-  if (selector_result != TURBO_SELECTOR_OK ||
-      canonical_size > TURBO_SELECTOR_MAX_CANONICAL_BYTES_V1) {
+  if (selector_result != SALTS_SELECTOR_OK ||
+      canonical_size > SALTS_SELECTOR_MAX_CANONICAL_BYTES_V1) {
     result = MESH_CONTROL_RESOURCE_EXHAUSTED;
     goto cleanup;
   }
@@ -209,15 +223,15 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
     result = MESH_CONTROL_RESOURCE_EXHAUSTED;
     goto cleanup;
   }
-  selector_result = turbo_selector_program_canonical_v1(
+  selector_result = salts_selector_program_canonical_v1(
       program, canonical, canonical_size + 1u, &canonical_size,
       &selector_diagnostic);
-  if (selector_result != TURBO_SELECTOR_OK) {
+  if (selector_result != SALTS_SELECTOR_OK) {
     result = MESH_CONTROL_INVALID_STATE;
     goto cleanup;
   }
   memset(&request, 0, sizeof(request));
-  request.selector_language_version = TURBO_SELECTOR_LANGUAGE_VERSION_V1;
+  request.selector_language_version = SALTS_SELECTOR_LANGUAGE_VERSION_V1;
   request.subject = subject;
   request.selector = canonical;
   {
@@ -231,8 +245,8 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
   }
   request.selector_program = program;
   request.predicate_count =
-      turbo_selector_program_predicate_count(program);
-  request.deadline_ms = turbo_monotonic_ms();
+      salts_selector_program_predicate_count(program);
+  request.deadline_ms = salts_monotonic_ms();
   if (request.deadline_ms > UINT64_MAX - adapter->config.plan_timeout_ms) {
     result = MESH_CONTROL_INVALID_STATE;
     goto cleanup;
@@ -250,7 +264,7 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
     result = result == MESH_CONTROL_OK ? MESH_CONTROL_INVALID_STATE : result;
     goto cleanup;
   }
-  if (turbo_parse_json((const uint8_t *)output, produced, &json) != 0 || !json) {
+  if (mesh_parse_json_document((const uint8_t *)output, produced, &json) != 0 || !json) {
     atomic_fetch_add_explicit(&adapter->rejected_source, 1u,
                               memory_order_relaxed);
     memset(output, 0, produced);
@@ -262,9 +276,9 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
   result = MESH_CONTROL_OK;
 
 cleanup:
-  turbo_free_json(&json);
+  mesh_free_json_document(&json);
   free(canonical);
-  turbo_selector_program_destroy(program);
+  salts_selector_program_destroy(program);
   return result;
 }
 
@@ -382,8 +396,8 @@ static void network_get_handler(Req *req, Res *res) {
 static int json_number_is_one(const json_value_t *value) {
   const char *text;
   size_t size = 0u;
-  if (!value || turbo_json_type(value) != TURBO_JSON_NUMBER) return 0;
-  text = turbo_json_number_text(value, &size);
+  if (!value || json_type(value) != JSON_NUMBER) return 0;
+  text = json_number_text(value, &size);
   return text && size == 1u && text[0] == '1';
 }
 
@@ -394,9 +408,9 @@ static int json_number_to_u32(const json_value_t *value, uint32_t minimum,
   size_t index;
   uint32_t parsed = 0u;
   if (!value || !out_value || minimum > maximum ||
-      turbo_json_type(value) != TURBO_JSON_NUMBER)
+      json_type(value) != JSON_NUMBER)
     return 0;
-  text = turbo_json_number_text(value, &size);
+  text = json_number_text(value, &size);
   if (!text || size == 0u) return 0;
   for (index = 0u; index < size; ++index) {
     uint32_t digit;
@@ -416,11 +430,11 @@ static int network_json_shape_valid(const json_value_t *root,
   unsigned int seen = 0u;
   size_t index;
   if (!root || !out_drain_timeout_ms ||
-      turbo_json_type(root) != TURBO_JSON_OBJECT)
+      json_type(root) != JSON_OBJECT)
     return 0;
   *out_drain_timeout_ms = 0u;
-  for (index = 0u; index < turbo_json_object_size(root); ++index) {
-    const char *key = turbo_json_object_key(root, index);
+  for (index = 0u; index < json_object_size(root); ++index) {
+    const char *key = json_object_key(root, index);
     unsigned int bit = 0u;
     if (!key) return 0;
     if (strcmp(key, "schema_version") == 0)
@@ -435,20 +449,20 @@ static int network_json_shape_valid(const json_value_t *root,
   }
   if ((seen & 1u) == 0u) return 0;
   if (kind != MESH_PRODUCT_QUERY_NETWORK_DELETE) return 1;
-  return turbo_json_object_size(root) == 2u && seen == 3u &&
+  return json_object_size(root) == 2u && seen == 3u &&
          json_number_to_u32(
-             turbo_json_object_get(root, "drain_timeout_ms"), 1u,
+             json_object_get(root, "drain_timeout_ms"), 1u,
              MESH_PRODUCT_NETWORK_DRAIN_MAX_MS_V1, out_drain_timeout_ms);
 }
 
 static int placement_plan_json_fields_valid(const json_value_t *root) {
   unsigned int seen = 0u;
   size_t index;
-  if (!root || turbo_json_type(root) != TURBO_JSON_OBJECT ||
-      turbo_json_object_size(root) != 4u)
+  if (!root || json_type(root) != JSON_OBJECT ||
+      json_object_size(root) != 4u)
     return 0;
-  for (index = 0u; index < turbo_json_object_size(root); ++index) {
-    const char *key = turbo_json_object_key(root, index);
+  for (index = 0u; index < json_object_size(root); ++index) {
+    const char *key = json_object_key(root, index);
     unsigned int bit;
     if (!key) return 0;
     if (strcmp(key, "schema_version") == 0)
@@ -472,7 +486,7 @@ mesh_control_result_t mesh_product_controller_iris_plan_json_v1(
     const char *peer_certificate_sha256, const char *mesh,
     const char *body, size_t body_size, char *output,
     size_t output_capacity, size_t *out_size) {
-  turbo_json_doc_t *json = NULL;
+  json_value_t *json = NULL;
   json_value_t *schema_version;
   json_value_t *language_version;
   json_value_t *subject_value;
@@ -486,46 +500,46 @@ mesh_control_result_t mesh_product_controller_iris_plan_json_v1(
   if (!adapter || !adapter->initialized || !adapter->config.plan || !body ||
       body_size == 0u || body_size > adapter->config.max_plan_request_bytes ||
       !output || output_capacity == 0u || !out_size ||
-      turbo_parse_json((const uint8_t *)body, body_size, &json) != 0 ||
+      mesh_parse_json_document((const uint8_t *)body, body_size, &json) != 0 ||
       !placement_plan_json_fields_valid((json_value_t *)json)) {
     if (adapter && adapter->initialized)
       atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                                 memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
-  schema_version = turbo_json_object_get((json_value_t *)json,
+  schema_version = json_object_get((json_value_t *)json,
                                          "schema_version");
-  language_version = turbo_json_object_get(
+  language_version = json_object_get(
       (json_value_t *)json, "selector_language_version");
-  subject_value = turbo_json_object_get((json_value_t *)json, "subject");
-  selector_value = turbo_json_object_get((json_value_t *)json, "selector");
+  subject_value = json_object_get((json_value_t *)json, "subject");
+  selector_value = json_object_get((json_value_t *)json, "selector");
   if (!json_number_is_one(schema_version) ||
       !json_number_is_one(language_version) || !subject_value ||
-      turbo_json_type(subject_value) != TURBO_JSON_STRING || !selector_value ||
-      turbo_json_type(selector_value) != TURBO_JSON_STRING) {
+      json_type(subject_value) != JSON_STRING || !selector_value ||
+      json_type(selector_value) != JSON_STRING) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
-  subject = turbo_json_string(subject_value);
-  subject_size = turbo_json_string_len(subject_value);
-  selector = turbo_json_string(selector_value);
-  selector_size = turbo_json_string_len(selector_value);
+  subject = json_string(subject_value);
+  subject_size = json_string_len(subject_value);
+  selector = json_string(selector_value);
+  selector_size = json_string_len(selector_value);
   if (!subject || subject_size == 0u ||
       memchr(subject, '\0', subject_size) != NULL || !selector ||
       selector_size == 0u || memchr(selector, '\0', selector_size) != NULL) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
   result = mesh_product_controller_iris_plan_v1(
       adapter, peer_certificate_sha256, mesh, subject,
-      TURBO_SELECTOR_LANGUAGE_VERSION_V1, selector, selector_size, output,
+      SALTS_SELECTOR_LANGUAGE_VERSION_V1, selector, selector_size, output,
       output_capacity, out_size);
-  turbo_free_json(&json);
+  mesh_free_json_document(&json);
   return result;
 }
 
@@ -535,7 +549,7 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
     mesh_product_query_kind_v1_t kind, const char *network,
     const char *body, size_t body_size, char *output,
     size_t output_capacity, size_t *out_size) {
-  turbo_json_doc_t *json = NULL;
+  json_value_t *json = NULL;
   json_value_t *schema_version;
   mesh_product_network_request_v1_t request;
   mesh_control_result_t result;
@@ -554,26 +568,26 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
       !body || body_size == 0u ||
       body_size > adapter->config.max_network_request_bytes || !output ||
       output_capacity == 0u || !out_size ||
-      turbo_parse_json((const uint8_t *)body, body_size, &json) != 0 ||
-      !json || turbo_json_type((json_value_t *)json) != TURBO_JSON_OBJECT) {
+      mesh_parse_json_document((const uint8_t *)body, body_size, &json) != 0 ||
+      !json || json_type((json_value_t *)json) != JSON_OBJECT) {
     if (adapter && adapter->initialized)
       atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                                 memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
   schema_version =
-      turbo_json_object_get((json_value_t *)json, "schema_version");
+      json_object_get((json_value_t *)json, "schema_version");
   if (!json_number_is_one(schema_version) ||
       !network_json_shape_valid((json_value_t *)json, kind,
                                 &drain_timeout_ms)) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
   if (!atomic_load_explicit(&adapter->accepting, memory_order_acquire)) {
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_CLOSED;
   }
   atomic_fetch_add_explicit(&adapter->received, 1u, memory_order_relaxed);
@@ -582,7 +596,7 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
   if (result != MESH_CONTROL_OK) {
     atomic_fetch_add_explicit(&adapter->rejected_auth, 1u,
                               memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return result;
   }
   atomic_fetch_add_explicit(&adapter->authorized, 1u, memory_order_relaxed);
@@ -592,11 +606,11 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
   request.document = body;
   request.document_size = body_size;
   request.drain_timeout_ms = drain_timeout_ms;
-  request.deadline_ms = turbo_monotonic_ms();
+  request.deadline_ms = salts_monotonic_ms();
   if (request.deadline_ms > UINT64_MAX - adapter->config.network_timeout_ms) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_ARG;
   }
   request.deadline_ms += adapter->config.network_timeout_ms;
@@ -609,20 +623,20 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
                               memory_order_relaxed);
     memset(output, 0, output_capacity);
     *out_size = produced;
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return result == MESH_CONTROL_OK ? MESH_CONTROL_INVALID_STATE : result;
   }
-  turbo_free_json(&json);
+  mesh_free_json_document(&json);
   json = NULL;
-  if (turbo_parse_json((const uint8_t *)output, produced, &json) != 0 ||
+  if (mesh_parse_json_document((const uint8_t *)output, produced, &json) != 0 ||
       !json) {
     atomic_fetch_add_explicit(&adapter->rejected_source, 1u,
                               memory_order_relaxed);
     memset(output, 0, produced);
-    turbo_free_json(&json);
+    mesh_free_json_document(&json);
     return MESH_CONTROL_INVALID_STATE;
   }
-  turbo_free_json(&json);
+  mesh_free_json_document(&json);
   *out_size = produced;
   atomic_fetch_add_explicit(&adapter->succeeded, 1u, memory_order_relaxed);
   return MESH_CONTROL_OK;

@@ -1,6 +1,7 @@
 #include "mesh_node_control_flowmq_provider.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <string.h>
 
@@ -53,12 +54,12 @@ static mesh_control_result_t provider_try_start(
   if (request->operation.resource_kind != MESH_CONTROL_RESOURCE_FUNCTION ||
       (request->operation.action != MESH_CONTROL_DESIRED_APPLY &&
        request->operation.action != MESH_CONTROL_DESIRED_DELETE) ||
-      turbo_crypto_verify(request->operation.resource_id,
+      CRYPTO_memcmp(request->operation.resource_id,
                           request->spec.function_id,
-                          MESH_CONTROL_DIGEST_SIZE) != TURBO_CRYPTO_OK ||
-      turbo_crypto_verify(request->spec.provider_id,
+                          MESH_CONTROL_DIGEST_SIZE) != 0 ||
+      CRYPTO_memcmp(request->spec.provider_id,
                           provider->descriptor.provider_id,
-                          MESH_CONTROL_DIGEST_SIZE) != TURBO_CRYPTO_OK ||
+                          MESH_CONTROL_DIGEST_SIZE) != 0 ||
       (request->operation.action == MESH_CONTROL_DESIRED_APPLY &&
        request->spec.generation != request->operation.desired_epoch) ||
       request->operation.desired_epoch <= provider->applied_epoch)
@@ -79,8 +80,8 @@ static mesh_control_result_t provider_try_start(
         &request->spec, document, sizeof(document), &document_size);
     if (result != MESH_CONTROL_OK)
       return result;
-    if (turbo_crypto_sha256(document, document_size,
-                            command.document_digest) != TURBO_CRYPTO_OK)
+    if (salts_crypto_sha256(document, document_size,
+                            command.document_digest) != SALTS_CRYPTO_OK)
       return MESH_CONTROL_INVALID_STATE;
     command.document = document;
     command.document_size = document_size;
@@ -117,9 +118,9 @@ static mesh_control_result_t provider_try_peek_completion(
         &provider->runtime, operation_id, &provider->active_result);
     if (result != MESH_CONTROL_OK)
       return result;
-    if (turbo_crypto_verify(operation_id,
+    if (CRYPTO_memcmp(operation_id,
                             provider->active_request.operation.operation_id,
-                            sizeof(operation_id)) != TURBO_CRYPTO_OK)
+                            sizeof(operation_id)) != 0)
       return MESH_CONTROL_CONFLICT;
     provider->result_ready = 1u;
   }
@@ -142,9 +143,9 @@ static mesh_control_result_t provider_ack_completion(
   mesh_control_result_t result;
   if (!provider || provider->initialized == 0u || !operation_id ||
       !provider->active || !provider->result_ready ||
-      turbo_crypto_verify(operation_id,
+      CRYPTO_memcmp(operation_id,
                           provider->active_request.operation.operation_id,
-                          MESH_CONTROL_ID_SIZE) != TURBO_CRYPTO_OK)
+                          MESH_CONTROL_ID_SIZE) != 0)
     return MESH_CONTROL_INVALID_ARG;
   result = mesh_node_control_client_runtime_ack_result_v1(
       &provider->runtime, operation_id);

@@ -155,11 +155,11 @@ int p2p_dir_scan(const char *dirpath, p2p_dir_scan_t *scan) {
     name = name ? name + 1 : dirpath;
     strncpy(scan->dir_name, name, sizeof(scan->dir_name) - 1);
 
-    TLOG_INFO("[DirScan] Scanning directory: {}", dirpath);
+    TLOG_INFOF("[DirScan] Scanning directory: {}", dirpath);
 
     int rc = scan_dir_recursive(dirpath, "", scan);
     if (rc == P2P_OK) {
-        TLOG_INFO("[DirScan] Found {} files, total {} bytes",
+        TLOG_INFOF("[DirScan] Found {} files, total {} bytes",
                  scan->file_count, scan->total_size);
     }
 

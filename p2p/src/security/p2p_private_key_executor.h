@@ -9,7 +9,7 @@
 
 typedef struct p2p_node_s p2p_node_t;
 typedef struct p2p_peer_s p2p_peer_t;
-typedef struct turbo_threadpool_s turbo_threadpool_t;
+#include <salts/thread_pool.h>
 
 enum {
     P2P_PRIVATE_KEY_WORKERS_DEFAULT = 1,
@@ -45,7 +45,7 @@ typedef struct p2p_private_key_operation_s {
 } p2p_private_key_operation_t;
 
 struct p2p_private_key_executor_s {
-    turbo_threadpool_t *pool;
+    salts_threadpool_t *pool;
     p2p_node_t *node;
     p2p_blocking_private_key_provider_v4_t provider;
     p2p_private_key_operation_t *operations;

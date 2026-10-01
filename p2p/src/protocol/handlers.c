@@ -204,7 +204,7 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
             }
             break;
         default:
-            TLOG_DEBUG("[P2P] No handler for msg type {}", p2p_message_type_name(type));
+            TLOG_DEBUGF("[P2P] No handler for msg type {}", p2p_message_type_name(type));
             break;
     }
 }
@@ -226,11 +226,11 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (p2p_id_is_zero(msg->payload.ping.node_id) ||
         memcmp(peer->id, msg->payload.ping.node_id,
                P2P_DHT_KEY_SIZE) != 0) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_disconnect(peer);
         return P2P_ERR_UNTRUSTED_IDENTITY;
     }
@@ -250,7 +250,7 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     memcpy(reply_ping.coords, node->coord.coords, sizeof(double) * 4);
     reply_ping.height = node->coord.height;
     reply_ping.error = node->coord.error;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     /* Send PONG reply */
     p2p_message_t *reply = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
@@ -312,12 +312,12 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
-    now_ms = turbo_hrtime() / 1000000U;
-    turbo_mutex_lock(&node->mutex);
+    now_ms = salts_hrtime() / 1000000U;
+    salts_mutex_lock(&node->mutex);
     if (p2p_id_is_zero(msg->payload.ping.node_id) ||
         memcmp(peer->id, msg->payload.ping.node_id,
                P2P_DHT_KEY_SIZE) != 0) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_disconnect(peer);
         return P2P_ERR_UNTRUSTED_IDENTITY;
     }
@@ -335,10 +335,10 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
         vivaldi_update(&node->coord, &remote_coord, (double)rtt_ms);
         p2p_peer_fill_info_ex_locked(peer, &peer_info);
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     if (sample_accepted) {
-        TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)",
+        TLOG_DEBUGF("[P2P] PONG from {}:{} (RTT={} ms)",
                    peer_info.ip, peer_info.port, rtt_ms);
     }
     return P2P_OK;
@@ -366,9 +366,9 @@ int p2p_handle_dht_find_node(p2p_node_t *node, p2p_peer_t *peer, const p2p_messa
     if (!response) return P2P_ERR_NO_MEM;
 
     /* Find closest nodes in our routing table */
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_fill_dht_response_nodes_locked(node, &target, response);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return p2p_send_owned_message(peer, response);
 }
@@ -400,13 +400,13 @@ int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t
     memcpy(key.bytes, msg->payload.dht_store.key, KADEMLIA_ID_BYTES);
 
     /* Store value locally */
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     ret = kademlia_store(node->kad_dht, &key,
                          msg->payload.dht_store.data,
                          msg->payload.dht_store.data_len);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] DHT STORE from {}:{} (len={}) -> {}",
+    TLOG_DEBUGF("[P2P] DHT STORE from {}:{} (len={}) -> {}",
               peer_info.ip, peer_info.port, msg->payload.dht_store.data_len,
               ret == 0 ? "OK" : "ERR");
 
@@ -432,9 +432,9 @@ int p2p_handle_dht_get(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *
     if (!response) return P2P_ERR_NO_MEM;
 
     /* Try to find value locally */
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_fill_dht_get_response_locked(node, &key, response);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return p2p_send_owned_message(peer, response);
 }
@@ -460,11 +460,11 @@ int p2p_handle_dht_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_messag
 
     }
 
-    turbo_mutex_lock(&node->mutex);
-    TLOG_DEBUG("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
+    salts_mutex_lock(&node->mutex);
+    TLOG_DEBUGF("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
               peer_info.ip, peer_info.port, res->node_count);
 
     p2p_import_dht_response_nodes_locked(node, res);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return p2p_dht_lookup_on_response(node, peer, msg);
 }

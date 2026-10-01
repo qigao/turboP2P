@@ -1,3 +1,4 @@
+#include <salts/clock.h>
 #include "mesh_control_controller_iris.h"
 
 #include "platform.h"
@@ -138,7 +139,7 @@ static void sync_handler(Req *req, Res *res) {
     finish_callback(adapter);
     return;
   }
-  started_at_ms = turbo_monotonic_ms();
+  started_at_ms = salts_monotonic_ms();
   protocol_now_ms = adapter->config.now_ms(adapter->config.now_context);
   if (protocol_now_ms == 0u) {
     atomic_fetch_add_explicit(&adapter->rejected_protocol, 1u,
@@ -183,7 +184,7 @@ static void sync_handler(Req *req, Res *res) {
       result = MESH_CONTROL_CLOSED;
       break;
     }
-    if (turbo_monotonic_ms() - started_at_ms >=
+    if (salts_monotonic_ms() - started_at_ms >=
         adapter->config.persistence_timeout_ms) {
       atomic_fetch_add_explicit(&adapter->timed_out, 1u,
                                 memory_order_relaxed);
@@ -302,12 +303,12 @@ static void submit_handler(Req *req, Res *res) {
     finish_callback(adapter);
     return;
   }
-  started_at_ms = turbo_monotonic_ms();
+  started_at_ms = salts_monotonic_ms();
   for (;;) {
     result = mesh_control_controller_session_try_take_submit_v1(
         adapter->config.controller, &completion);
     if (result != MESH_CONTROL_EMPTY) break;
-    if (turbo_monotonic_ms() - started_at_ms >=
+    if (salts_monotonic_ms() - started_at_ms >=
         adapter->config.persistence_timeout_ms) {
       (void)mesh_control_controller_session_abandon_submit_v1(
           adapter->config.controller, request_token);

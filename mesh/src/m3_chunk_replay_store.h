@@ -3,7 +3,7 @@
 
 #include "m3_chunk_replay.h"
 
-#include <turbo_fs.h>
+#include <salts_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -33,10 +33,10 @@ typedef enum {
  */
 typedef struct {
   m3_chunk_replay_journal_v1_t journal;
-  char path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH];
-  char lock_path[TURBO_FS_MAX_PATH];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH];
+  char lock_path[SALTS_FS_MAX_PATH];
+  salts_file_t lock_file;
   uint64_t generation;
   uint8_t open;
 } m3_chunk_replay_store_v1_t;

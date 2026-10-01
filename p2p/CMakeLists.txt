@@ -41,8 +41,7 @@ file(GLOB_RECURSE HEADER_FILES ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h*)
 add_library(p2p SHARED ${SOURCE_FILES} ${HEADER_FILES}
  )
 add_library(TurboP2P::P2P ALIAS p2p)
-# Define SHARED_CXX when building as shared library (for DLL export/import)
-target_compile_definitions(p2p PRIVATE SHARED_CXX)
+target_compile_definitions(p2p PRIVATE P2P_BUILDING_LIBRARY)
 
 target_include_directories(
   p2p
@@ -51,8 +50,9 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(
   p2p
-  PUBLIC TurboUtils::Core TurboNet::CoroNet TurboParser::Parser
-  PRIVATE OpenSSL::Crypto TurboNet::Crypto TurboP2P::NoiseProtocol roaring uthash)
+  PUBLIC Salts::Core Salts::CNet
+  PRIVATE Salts::Platform Salts::Concurrency Salts::Crypto
+          OpenSSL::Crypto TurboP2P::NoiseProtocol roaring uthash)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)
 else()
@@ -65,10 +65,6 @@ set_target_properties(
   PROPERTIES VERSION 1.0.0
              SOVERSION 1
              EXPORT_NAME P2P)
-
-if(WIN32)
-  set_target_properties(p2p PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-endif()
 
 # Install
 install(

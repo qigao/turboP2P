@@ -9,8 +9,7 @@
 #include "../transfer/sha256.h"
 #include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
-#include <CoroNet/turbo_coro_context.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -83,7 +82,7 @@ static void p2p_mark_manual_disconnect_locked(p2p_node_t *node, p2p_peer_t *peer
 
     peer->keep_entry = 0;
     p2p_set_manual_connect_suppression_locked(node, peer->ip, peer->port,
-                                              (turbo_hrtime() / 1000000) +
+                                              (salts_hrtime() / 1000000) +
                                                   P2P_MANUAL_DISCONNECT_SUPPRESS_MS);
     p2p_remove_peer_from_routing_locked(node, peer);
 }
@@ -178,12 +177,12 @@ static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (force_retry) {
         p2p_clear_manual_connect_suppression_locked(node, ip, port);
     }
     peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (peer) {
         return p2p_peer_connect(peer);
     }
@@ -194,23 +193,23 @@ static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
     }
     peer->keep_entry = 1;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     existing_peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
     if (existing_peer) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return p2p_peer_connect(existing_peer);
     }
     p2p_node_add_peer_locked(node, peer);
     added_to_table = 1;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     ret = p2p_peer_connect(peer);
     if (ret != P2P_OK) {
         if (added_to_table) {
-            turbo_mutex_lock(&node->mutex);
+            salts_mutex_lock(&node->mutex);
             p2p_node_remove_peer_by_endpoint_locked(node, ip, port);
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
         }
         p2p_peer_destroy(peer);
         return ret;
@@ -231,12 +230,12 @@ static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (lookup->candidate_count > 0) {
         peers = (p2p_peer_t **)calloc((size_t)lookup->candidate_count, sizeof(*peers));
     }
     if (lookup->candidate_count > 0 && !peers) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return 0;
     }
 
@@ -252,7 +251,7 @@ static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
         }
         peers[count++] = peer;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     for (size_t i = 0; i < count; i++) {
         if (peers[i]) {
@@ -294,9 +293,9 @@ static int p2p_try_get_local_dht_value(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     found = kademlia_find_value(node->kad_dht, key, buf, buf_len);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return (found == 0) ? P2P_OK : P2P_ERR_NOT_FOUND;
 }
@@ -308,9 +307,9 @@ static int p2p_dht_lookup_is_active(p2p_node_t *node, uint32_t request_id) {
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     active = p2p_dht_lookup_find(node, request_id) != NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return active;
 }
@@ -342,10 +341,7 @@ int p2p_start(p2p_node_t *node) {
 
     p2p_gossip_start(node);
 
-    /* Event loop blocking run */
-    coro_context_run(node->ctx, TURBO_RUN_DEFAULT);
-
-    return P2P_OK;
+    return p2p_node_run_internal(node);
 }
 
 int p2p_start_nonblocking(p2p_node_t *node) {
@@ -362,12 +358,17 @@ int p2p_start_nonblocking(p2p_node_t *node) {
     return P2P_OK;
 }
 
-coro_context_t *p2p_get_loop(p2p_node_t *node) {
-    return node ? node->ctx : NULL;
+int p2p_poll(p2p_node_t *node, uint32_t timeout_ms) {
+    if (!node) return P2P_ERR_INVALID_ARG;
+    return p2p_node_poll_internal(node, timeout_ms);
+}
+
+void p2p_stop(p2p_node_t *node) {
+    if (node) p2p_node_stop_internal(node);
 }
 
 static int p2p_node_identity_is_mutable_locked(const p2p_node_t *node) {
-    return !node->server && node->peer_count == 0 &&
+    return !node->listener_initialized && node->peer_count == 0 &&
            !node->security_configured;
 }
 
@@ -436,7 +437,7 @@ static int p2p_blocking_private_key_provider_self_test(
     static const uint8_t x25519_basepoint[P2P_KEY_SIZE] = {9};
     p2p_private_key_cancel_v4_t cancel = {0};
     uint8_t derived_public_key[P2P_KEY_SIZE] = {0};
-    uint64_t now_ms = turbo_hrtime() / 1000000U;
+    uint64_t now_ms = salts_hrtime() / 1000000U;
     uint64_t deadline_ms = now_ms + timeout_ms;
     int ret;
 
@@ -448,7 +449,7 @@ static int p2p_blocking_private_key_provider_self_test(
     ret = provider->calculate_x25519(
         provider->context, x25519_basepoint, deadline_ms, &cancel,
         derived_public_key);
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     if (ret != P2P_OK) {
         ret = p2p_normalize_private_key_provider_error(ret);
     } else if (now_ms > deadline_ms) {
@@ -467,9 +468,9 @@ int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     memcpy(id_out, node->id, P2P_HASH_SIZE);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -479,9 +480,9 @@ int p2p_node_get_public_key(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     memcpy(public_key_out, node->crypto.identity.public_key, P2P_KEY_SIZE);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -494,7 +495,7 @@ int p2p_node_set_private_key(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -504,7 +505,7 @@ int p2p_node_set_private_key(p2p_node_t *node,
             node->private_key_executor = NULL;
         }
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     p2p_private_key_executor_destroy(old_executor);
     return ret;
 }
@@ -520,10 +521,10 @@ int p2p_node_set_private_key_provider_v3(
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     ret = p2p_node_identity_is_mutable_locked(node) ? P2P_OK
                                                      : P2P_ERR_INVALID_STATE;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (ret != P2P_OK) {
         return ret;
     }
@@ -543,7 +544,7 @@ int p2p_node_set_private_key_provider_v3(
         return ret;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -554,7 +555,7 @@ int p2p_node_set_private_key_provider_v3(
             node->private_key_executor = NULL;
         }
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     p2p_crypto_wipe(public_key, sizeof(public_key));
     p2p_private_key_executor_destroy(old_executor);
     return ret;
@@ -591,10 +592,10 @@ int p2p_node_set_blocking_private_key_provider_v4(
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     ret = p2p_node_identity_is_mutable_locked(node) ? P2P_OK
                                                      : P2P_ERR_INVALID_STATE;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (ret != P2P_OK) {
         return ret;
     }
@@ -620,7 +621,7 @@ int p2p_node_set_blocking_private_key_provider_v4(
         return P2P_ERR_NO_MEM;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -632,7 +633,7 @@ int p2p_node_set_blocking_private_key_provider_v4(
             candidate = NULL;
         }
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     p2p_crypto_wipe(public_key, sizeof(public_key));
     p2p_private_key_executor_destroy(candidate);
     p2p_private_key_executor_destroy(old_executor);
@@ -645,30 +646,30 @@ static int p2p_pinned_derive_identity(
     static const uint8_t principal_domain[] =
         "turbo-p2p-static-principal-v2";
     static const uint8_t routing_domain[] = "turbo-p2p-routing-id-v2";
-    turbo_crypto_sha256_ctx_t hash;
+    salts_crypto_sha256_ctx_t hash;
 
     memset(identity, 0, sizeof(*identity));
-    if (turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, principal_domain,
+    if (salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, principal_domain,
                                    sizeof(principal_domain) - 1) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, static_key, P2P_KEY_SIZE) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_final(&hash, identity->principal_id) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, routing_domain,
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, static_key, P2P_KEY_SIZE) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_final(&hash, identity->principal_id) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, routing_domain,
                                    sizeof(routing_domain) - 1) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash,
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash,
                                    node->security_config.network_id_hash,
-                                   P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, identity->principal_id,
-                                   P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_final(&hash, identity->routing_id) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256("", 0, identity->credential_digest) !=
-            TURBO_CRYPTO_OK) {
+                                   P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, identity->principal_id,
+                                   P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_final(&hash, identity->routing_id) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256("", 0, identity->credential_digest) !=
+            SALTS_CRYPTO_OK) {
         p2p_crypto_wipe(&hash, sizeof(hash));
         p2p_crypto_wipe(identity, sizeof(*identity));
         return P2P_ERR_CRYPTO;
@@ -815,7 +816,7 @@ static int p2p_node_configure_security_locked(
              handshake_timeout_ms)) {
         return P2P_ERR_INVALID_ARG;
     }
-    if (node->server || node->peer_count > 0 || node->security_configured) {
+    if (node->listener_initialized || node->peer_count > 0 || node->security_configured) {
         return P2P_ERR_INVALID_STATE;
     }
 
@@ -947,12 +948,12 @@ static void p2p_node_fill_security_status_v2_locked(
 static void p2p_node_fill_private_key_executor_status_v4_locked(
     const p2p_private_key_executor_t *executor,
     p2p_private_key_executor_status_v4_t *status) {
-    turbo_threadpool_stats_t pool_status = {0};
+    salts_threadpool_stats_t pool_status = {0};
 
     memset(status, 0, sizeof(*status));
     status->struct_size = sizeof(*status);
     if (executor->pool) {
-        turbo_threadpool_get_stats(executor->pool, &pool_status);
+        salts_threadpool_get_stats(executor->pool, &pool_status);
     }
     status->workers = executor->workers;
     status->operation_capacity = executor->capacity;
@@ -978,13 +979,13 @@ int p2p_node_get_security_status_v2(
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     p2p_node_fill_security_status_v2_locked(node, status);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -997,9 +998,9 @@ int p2p_node_get_security_status_v3(
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     memset(status, 0, sizeof(*status));
@@ -1032,7 +1033,7 @@ int p2p_node_get_security_status_v3(
                    sizeof(destination->buckets));
         }
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -1043,14 +1044,14 @@ int p2p_node_get_private_key_executor_status_v4(
     if (!node || !status || status->struct_size != sizeof(*status)) {
         return P2P_ERR_INVALID_ARG;
     }
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     executor = node->private_key_executor;
     if (!executor) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     p2p_node_fill_private_key_executor_status_v4_locked(executor, status);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -1063,7 +1064,7 @@ static size_t p2p_node_disconnect_all_security_sessions(
         p2p_peer_entry_t *temporary = NULL;
         p2p_peer_t *peer = NULL;
 
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         HASH_ITER(hh, node->peers_table, entry, temporary) {
             if (entry->peer && !entry->peer->destroying &&
                 entry->peer->is_connected && entry->peer->conn &&
@@ -1074,7 +1075,7 @@ static size_t p2p_node_disconnect_all_security_sessions(
                 break;
             }
         }
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
 
         if (!peer) {
             return disconnected;
@@ -1097,21 +1098,21 @@ int p2p_node_revalidate_security_v2(
     memset((uint8_t *)result + sizeof(result->struct_size), 0,
            sizeof(*result) - sizeof(result->struct_size));
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     peers = p2p_node_snapshot_connected_peers(node, &peer_count);
     if (peer_count > 0 && !peers) {
         result->disconnected_sessions =
             p2p_node_disconnect_all_security_sessions(node);
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         node->security_rejection_counts[
             P2P_SECURITY_REJECTION_REVALIDATION_FAIL_CLOSED]++;
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
@@ -1129,7 +1130,7 @@ int p2p_node_revalidate_security_v2(
         if (!peer) {
             continue;
         }
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         if (!peer->destroying && peer->is_connected && peer->conn &&
             peer->security_stage == P2P_SECURITY_STAGE_ESTABLISHED &&
             peer->remote_public_key_ready &&
@@ -1142,7 +1143,7 @@ int p2p_node_revalidate_security_v2(
             previous_identity = peer->authenticated_identity;
             eligible = 1;
         }
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
 
         if (!eligible) {
             p2p_peer_release(peer);
@@ -1175,14 +1176,14 @@ int p2p_node_revalidate_security_v2(
         p2p_peer_release(peer);
     }
     free(peers);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     node->security_rejection_counts[
         P2P_SECURITY_REJECTION_REVALIDATION_REJECTED] +=
         result->provider_rejections;
     node->security_rejection_counts[
         P2P_SECURITY_REJECTION_REVALIDATION_IDENTITY_CHANGE] +=
         result->identity_changes;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -1193,9 +1194,9 @@ int p2p_node_configure_security_v2(
     if (!node) {
         return P2P_ERR_INVALID_ARG;
     }
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     ret = p2p_node_configure_security_locked(node, config);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -1221,10 +1222,10 @@ int p2p_node_configure_pinned_security_v2(
     memcpy(key_copy, trusted_public_keys,
            trusted_key_count * P2P_KEY_SIZE);
 
-    turbo_mutex_lock(&node->mutex);
-    if (node->server || node->peer_count > 0 || node->security_configured ||
+    salts_mutex_lock(&node->mutex);
+    if (node->listener_initialized || node->peer_count > 0 || node->security_configured ||
         node->pinned_trusted_keys) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_crypto_wipe(key_copy, trusted_key_count * P2P_KEY_SIZE);
         free(key_copy);
         return P2P_ERR_INVALID_STATE;
@@ -1250,7 +1251,7 @@ int p2p_node_configure_pinned_security_v2(
         p2p_crypto_wipe(key_copy, trusted_key_count * P2P_KEY_SIZE);
         free(key_copy);
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -1282,7 +1283,7 @@ int p2p_node_update_pinned_trust_v2(
                trusted_key_count * P2P_KEY_SIZE);
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     pinned_provider =
         node->security_configured &&
         node->security_config.identity_provider.context == node &&
@@ -1296,7 +1297,7 @@ int p2p_node_update_pinned_trust_v2(
         node->pinned_trusted_keys = key_copy;
         node->pinned_trusted_key_count = trusted_key_count;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     if (!pinned_provider) {
         if (key_copy) {
@@ -1402,11 +1403,11 @@ int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len)
     }
 
     kad_id_from_data(key, strlen(key), &kkey);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
 
     /* Store locally first */
     kademlia_store(node->kad_dht, &kkey, data, len);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
 
     /* Professional Kademlia: 
@@ -1445,9 +1446,9 @@ int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size
     }
 
     kad_id_from_data(key, strlen(key), &kkey);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     kademlia_store(node->kad_dht, &kkey, data, len);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
     return P2P_OK;
@@ -1487,18 +1488,18 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
         return ret;
     }
 
-    deadline_ms = (turbo_hrtime() / 1000000) + P2P_DHT_GET_TIMEOUT_MS;
-    while ((turbo_hrtime() / 1000000) < deadline_ms) {
-        coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
-
+    deadline_ms = salts_monotonic_ms() + P2P_DHT_GET_TIMEOUT_MS;
+    while (salts_monotonic_ms() < deadline_ms) {
+        ret = p2p_poll(node, 10u);
+        if (ret != P2P_OK) {
+            return ret;
+        }
         if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
             return P2P_OK;
         }
         if (!p2p_dht_lookup_is_active(node, request_id)) {
             return P2P_ERR_NOT_FOUND;
         }
-
-        turbo_sleep_ms(10);
     }
 
     if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
@@ -1525,9 +1526,9 @@ size_t p2p_dht_get_entry_count(p2p_node_t *node) {
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     count = kademlia_storage_count(node->kad_dht);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return count;
 }
 
@@ -1571,9 +1572,9 @@ void p2p_disconnect_peer(p2p_peer_t *peer) {
     }
 
     node = peer->node;
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_mark_manual_disconnect_locked(node, peer);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     p2p_peer_disconnect(peer);
     p2p_node_on_peer_disconnected(node, peer);
@@ -1771,14 +1772,14 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
     if (!transfer) {
         return P2P_ERR_NO_MEM;
     }
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
     memcpy(transfer->file_id, digest, P2P_HASH_SIZE);
     memcpy(transfer->file_hash, digest, P2P_SHA256_DIGEST_SIZE);
     strncpy(transfer->filepath, output_path, sizeof(transfer->filepath) - 1);
     strncpy(transfer->filename, key, sizeof(transfer->filename) - 1);
     transfer->complete_cb = complete_cb;
     transfer->user_data = user_data;
-    turbo_mutex_unlock(&transfer->mutex);
+    salts_mutex_unlock(&transfer->mutex);
 
     peers = p2p_node_snapshot_connected_peers(node, &peer_count);
     if (peer_count == 0 || !peers) {
@@ -1789,12 +1790,12 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
     request_peer_count = peer_count < P2P_MAX_SOURCES
         ? peer_count
         : P2P_MAX_SOURCES;
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
     transfer->request_peer_count = (uint8_t)request_peer_count;
     for (size_t i = 0; i < request_peer_count; i++) {
         transfer->request_peers[i] = peers[i];
     }
-    turbo_mutex_unlock(&transfer->mutex);
+    salts_mutex_unlock(&transfer->mutex);
 
     request = (p2p_message_t *)calloc(1, sizeof(*request));
     if (!request) {
@@ -1815,12 +1816,12 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
         if (p2p_peer_send(peers[i], request) == P2P_OK) {
             sent_count++;
         } else {
-            turbo_mutex_lock(&transfer->mutex);
+            salts_mutex_lock(&transfer->mutex);
             if (!transfer->request_peer_done[i]) {
                 transfer->request_peer_done[i] = 1;
                 transfer->response_count++;
             }
-            turbo_mutex_unlock(&transfer->mutex);
+            salts_mutex_unlock(&transfer->mutex);
         }
     }
     for (size_t i = 0; i < peer_count; i++) {
@@ -1834,11 +1835,11 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
         return P2P_ERR_NETWORK;
     }
 
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
     complete_no_source =
         transfer->state == P2P_TRANSFER_STATE_PENDING &&
         transfer->response_count == transfer->request_peer_count;
-    turbo_mutex_unlock(&transfer->mutex);
+    salts_mutex_unlock(&transfer->mutex);
     if (complete_no_source) {
         p2p_transfer_complete(transfer, 0, "No peer provides the requested object");
     }
@@ -1926,11 +1927,11 @@ int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info) {
 
     node = peer->node;
     if (node) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
     }
     p2p_peer_fill_info_ex_locked(peer, info);
     if (node) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -1949,9 +1950,9 @@ int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
     metrics->sample_age_ms = UINT32_MAX;
     node = peer->node;
     if (node) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
     }
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
 
     metrics->srtt_ms = peer->avg_rtt_ms > UINT32_MAX
         ? UINT32_MAX
@@ -1972,7 +1973,7 @@ int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
     }
 
     if (node) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -2016,17 +2017,17 @@ int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]) {
 
     node = peer->node;
     if (node) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
     }
     if (p2p_id_is_zero(peer->id)) {
         if (node) {
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
     memcpy(id_out, peer->id, P2P_HASH_SIZE);
     if (node) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -2041,17 +2042,17 @@ int p2p_peer_get_public_key(p2p_peer_t *peer,
 
     node = peer->node;
     if (node) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
     }
     if (!peer->remote_public_key_ready) {
         if (node) {
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
     memcpy(public_key_out, peer->remote_public_key, P2P_KEY_SIZE);
     if (node) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -2066,11 +2067,11 @@ int p2p_peer_get_security_info_v2(
     }
     node = peer->node;
     if (node) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
     }
     if (!peer->ready_received || peer->state != P2P_PEER_STATE_CONNECTED) {
         if (node) {
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
@@ -2090,7 +2091,7 @@ int p2p_peer_get_security_info_v2(
     snapshot.received_bytes = peer->received_bytes;
     *info = snapshot;
     if (node) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }

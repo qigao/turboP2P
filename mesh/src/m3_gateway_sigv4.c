@@ -1,6 +1,10 @@
 #include "m3_gateway_sigv4.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <limits.h>
 
 #include <ctype.h>
 #include <stdio.h>
@@ -21,6 +25,22 @@ static const char M3_SIGV4_TERMINATOR[] = "aws4_request";
 
 static const char HEX_LOWER[] = "0123456789abcdef";
 static const char HEX_UPPER[] = "0123456789ABCDEF";
+
+static int m3_hmac_sha256(const uint8_t *key, size_t key_len,
+                          const void *data, size_t data_len,
+                          uint8_t output[M3_SIGV4_SECRET_KEY_SIZE]) {
+  unsigned int output_len = 0u;
+  if ((!key && key_len != 0u) || (!data && data_len != 0u) || !output ||
+      key_len > INT_MAX)
+    return SALTS_CRYPTO_EINVAL;
+  if (!HMAC(EVP_sha256(), key, (int)key_len,
+            (const unsigned char *)data, data_len, output, &output_len) ||
+      output_len != M3_SIGV4_SECRET_KEY_SIZE) {
+    OPENSSL_cleanse(output, M3_SIGV4_SECRET_KEY_SIZE);
+    return SALTS_CRYPTO_ECRYPTO;
+  }
+  return SALTS_CRYPTO_OK;
+}
 
 static int hex_value(char c) {
   if (c >= '0' && c <= '9')
@@ -597,8 +617,8 @@ static m3_sigv4_result_t m3_sigv4_verify_core(const m3_sigv4_verify_context_t *c
       return M3_SIGV4_MALFORMED_AUTH;
     }
   }
-  if (turbo_crypto_sha256(canonical_request, strlen(canonical_request), canonical_digest) !=
-      TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256(canonical_request, strlen(canonical_request), canonical_digest) !=
+      SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(canonical_digest, sizeof(canonical_digest), canonical_digest_hex);
@@ -622,25 +642,25 @@ static m3_sigv4_result_t m3_sigv4_verify_core(const m3_sigv4_verify_context_t *c
 
     memcpy(buf, "AWS4", 4u);
     memcpy(buf + 4u, cred.secret_key, M3_SIGV4_SECRET_KEY_SIZE);
-    if (turbo_crypto_hmac_sha256(buf, sizeof(buf), ctx->scope_date, 8u, first) != TURBO_CRYPTO_OK) {
+    if (m3_hmac_sha256(buf, sizeof(buf), ctx->scope_date, 8u, first) != SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
-    if (turbo_crypto_hmac_sha256(first, sizeof(first), ctx->scope_region, strlen(ctx->scope_region),
-                                 signing_key) != TURBO_CRYPTO_OK) {
+    if (m3_hmac_sha256(first, sizeof(first), ctx->scope_region, strlen(ctx->scope_region),
+                                 signing_key) != SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
-    if (turbo_crypto_hmac_sha256(signing_key, sizeof(signing_key), ctx->scope_service,
-                                 strlen(ctx->scope_service), signing_key) != TURBO_CRYPTO_OK) {
+    if (m3_hmac_sha256(signing_key, sizeof(signing_key), ctx->scope_service,
+                                 strlen(ctx->scope_service), signing_key) != SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
-    if (turbo_crypto_hmac_sha256(signing_key, sizeof(signing_key), M3_SIGV4_TERMINATOR,
+    if (m3_hmac_sha256(signing_key, sizeof(signing_key), M3_SIGV4_TERMINATOR,
                                  sizeof(M3_SIGV4_TERMINATOR) - 1u,
-                                 signing_key) != TURBO_CRYPTO_OK) {
+                                 signing_key) != SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
   }
-  if (turbo_crypto_hmac_sha256(signing_key, sizeof(signing_key), string_to_sign,
-                               strlen(string_to_sign), signature) != TURBO_CRYPTO_OK) {
+  if (m3_hmac_sha256(signing_key, sizeof(signing_key), string_to_sign,
+                               strlen(string_to_sign), signature) != SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(signature, sizeof(signature), signature_hex);
@@ -648,7 +668,7 @@ static m3_sigv4_result_t m3_sigv4_verify_core(const m3_sigv4_verify_context_t *c
   if (hex_decode(ctx->signature_hex, strlen(ctx->signature_hex), expected, sizeof(expected)) != 0) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
-  if (turbo_crypto_verify(expected, signature, sizeof(expected)) != TURBO_CRYPTO_OK) {
+  if (CRYPTO_memcmp(expected, signature, sizeof(expected)) != 0) {
     return M3_SIGV4_BAD_SIGNATURE;
   }
   return M3_SIGV4_OK;
@@ -689,9 +709,9 @@ m3_sigv4_result_t m3_sigv4_sign_request_v1(
                payload_hash);
   if (n < 0 || (size_t)n >= sizeof(canonical_request))
     return M3_SIGV4_MALFORMED_AUTH;
-  if (turbo_crypto_sha256((const uint8_t *)canonical_request,
+  if (salts_crypto_sha256((const uint8_t *)canonical_request,
                           strlen(canonical_request), canonical_digest) !=
-      TURBO_CRYPTO_OK) {
+      SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(canonical_digest, sizeof(canonical_digest), canonical_digest_hex);
@@ -712,23 +732,23 @@ m3_sigv4_result_t m3_sigv4_sign_request_v1(
 
     memcpy(buf, aws4, 4);
     memcpy(buf + 4, secret_key, 32);
-    if (turbo_crypto_hmac_sha256(buf, sizeof(buf), date, 8u, first) !=
-        TURBO_CRYPTO_OK ||
-        turbo_crypto_hmac_sha256(first, sizeof(first), region, strlen(region),
-                                 signing_key) != TURBO_CRYPTO_OK) {
+    if (m3_hmac_sha256(buf, sizeof(buf), date, 8u, first) !=
+        SALTS_CRYPTO_OK ||
+        m3_hmac_sha256(first, sizeof(first), region, strlen(region),
+                                 signing_key) != SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
-    if (turbo_crypto_hmac_sha256(signing_key, sizeof(signing_key), service,
-                                 strlen(service), first) != TURBO_CRYPTO_OK ||
-        turbo_crypto_hmac_sha256(first, sizeof(first), M3_SIGV4_TERMINATOR,
+    if (m3_hmac_sha256(signing_key, sizeof(signing_key), service,
+                                 strlen(service), first) != SALTS_CRYPTO_OK ||
+        m3_hmac_sha256(first, sizeof(first), M3_SIGV4_TERMINATOR,
                                  strlen(M3_SIGV4_TERMINATOR), signing_key) !=
-            TURBO_CRYPTO_OK) {
+            SALTS_CRYPTO_OK) {
       return M3_SIGV4_MALFORMED_AUTH;
     }
   }
-  if (turbo_crypto_hmac_sha256(signing_key, sizeof(signing_key), string_to_sign,
+  if (m3_hmac_sha256(signing_key, sizeof(signing_key), string_to_sign,
                                strlen(string_to_sign), signature) !=
-      TURBO_CRYPTO_OK) {
+      SALTS_CRYPTO_OK) {
     return M3_SIGV4_MALFORMED_AUTH;
   }
   hex_encode(signature, sizeof(signature), signature_hex);

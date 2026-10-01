@@ -42,7 +42,7 @@ add_executable(mesh_stream_live_hls_main
     mesh_stream_live_hls_main.c)
 target_link_libraries(mesh_stream_live_hls_main
     PRIVATE mesh_stream_live_hls mesh_stream_kcp_adapter mesh_stream_live
-            TurboNet::CoroNet TurboUtils::Core)
+            Salts::CNet Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_hls_main PRIVATE ws2_32)
 endif()
@@ -54,7 +54,7 @@ set_target_properties(mesh_stream_live_hls_main PROPERTIES
 add_executable(mesh_stream_live_source_main
     mesh_stream_live_source_main.c)
 target_link_libraries(mesh_stream_live_source_main
-    PRIVATE mesh_stream_kcp_adapter mesh_stream_live TurboNet::CoroNet TurboUtils::Core)
+    PRIVATE mesh_stream_kcp_adapter mesh_stream_live Salts::CNet Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_source_main PRIVATE ws2_32)
 endif()
@@ -67,7 +67,7 @@ set_target_properties(mesh_stream_live_source_main PROPERTIES
 add_executable(mesh_stream_live_client_main
     mesh_stream_live_client_main.c)
 target_link_libraries(mesh_stream_live_client_main
-    PRIVATE TurboNet::CoroNet TurboHttp::HttpClient TurboUtils::Core)
+    PRIVATE Salts::CNet CHttp::Client Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_client_main PRIVATE ws2_32)
 endif()
@@ -81,7 +81,7 @@ add_executable(mesh_stream_media_main
 target_link_libraries(mesh_stream_media_main
     PRIVATE mesh_stream_media_pull mesh_media_playlist mesh_media_index
             mesh_release m3_object_manifest m3_gateway_sigv4 mesh_mgmt_crypto
-            TurboNet::Crypto TurboNet::CoroNet TurboHttp::HttpClient OpenSSL::Crypto)
+            Salts::Crypto Salts::CNet CHttp::Client OpenSSL::Crypto)
 if(WIN32)
     target_link_libraries(mesh_stream_media_main PRIVATE ws2_32)
 endif()
@@ -102,7 +102,7 @@ set_target_properties(mesh_stream_node_main PROPERTIES
 add_executable(m3_gateway_main
     m3_gateway_main.c)
 target_link_libraries(m3_gateway_main
-    PRIVATE m3_gateway TurboHttp::Iris)
+    PRIVATE m3_gateway CHttp::Server)
 if(WIN32)
     target_link_libraries(m3_gateway_main PRIVATE ws2_32)
 endif()
@@ -120,8 +120,8 @@ target_link_libraries(meshctl
     PRIVATE mesh
     meshctl_product
     TurboP2P::P2P
-    TurboHttp::TurboHttp
-    TurboUtils::Core)
+    CHttp::Client
+    Salts::Core)
 
 target_compile_definitions(meshctl PRIVATE USING_EXAMPLES)
 
@@ -159,7 +159,7 @@ target_compile_definitions(meshd PRIVATE USING_EXAMPLES)
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
     target_sources(meshd PRIVATE meshd_network_control.c)
     target_link_libraries(meshd PRIVATE
-        mesh_node_network_control_service TurboNet::Crypto)
+        mesh_node_network_control_service Salts::Crypto)
     target_compile_definitions(meshd PRIVATE
         TURBOP2P_ENABLE_FLOWMQ_IPC=1)
 endif()
@@ -178,7 +178,7 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:TurboWasm::Runtime> $<TARGET_FILE_DIR:mesh-execution-worker>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:TurboUtils::Core> $<TARGET_FILE_DIR:mesh-execution-worker>)
+                $<TARGET_FILE:Salts::Core> $<TARGET_FILE_DIR:mesh-execution-worker>)
         if(ENABLE_SANITIZER_ADDRESS)
             get_filename_component(mesh_execution_compiler_dir
                 "${CMAKE_C_COMPILER}" DIRECTORY)
@@ -208,16 +208,9 @@ set_target_properties(meshd PROPERTIES
 # certificate reload and optional isolated Native/TurboWASM providers.
 add_executable(mesh-agent
     mesh_agent_main.c)
-# TurboUtils still ships a legacy compatibility turbo_parser.h. Put the
-# dedicated TurboParser package first so the service gets the structured CLI
-# API from the dependency it explicitly links.
-get_target_property(_mesh_agent_turbo_parser_includes
-    TurboParser::Parser INTERFACE_INCLUDE_DIRECTORIES)
-target_include_directories(mesh-agent SYSTEM BEFORE PRIVATE
-    ${_mesh_agent_turbo_parser_includes})
 target_link_libraries(mesh-agent PRIVATE
     mesh_control_agent_runtime meshd_key_file
-    TurboParser::Parser TurboUtils::Core)
+    Salts::CmdParser Salts::Core)
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
     target_link_libraries(mesh-agent PRIVATE
         mesh_node_control_flowmq_network_provider FlowMQ::FlowMQ)
@@ -239,11 +232,9 @@ set_target_properties(mesh-agent PROPERTIES
 # ingress, durable outbox recovery and online session fencing.
 add_executable(mesh-controller
     mesh_controller_main.c)
-target_include_directories(mesh-controller SYSTEM BEFORE PRIVATE
-    ${_mesh_agent_turbo_parser_includes})
 target_link_libraries(mesh-controller PRIVATE
     mesh_control_controller_runtime meshd_key_file
-    TurboParser::Parser TurboUtils::Core)
+    Salts::CmdParser Salts::Core)
 set_target_properties(mesh-controller PROPERTIES
     FOLDER "mesh/examples"
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

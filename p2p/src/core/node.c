@@ -7,8 +7,6 @@
 #include "peer.h"
 #include "../transfer/transfer.h"
 #include "../internal.h"
-#include <CoroNet/turbo_coro_context.h>
-#include <CoroNet/turbo_stream.h>
 #include <tlog.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +17,15 @@
 #include "../security/p2p_private_key_executor.h"
 
 /* Forward declarations */
-void node_maintenance_cb(turbo_timer_t *timer);
-static int node_build_sockaddr(const char *ip, int port, struct sockaddr_storage *addr);
-static int node_sockaddr_to_peer(const struct sockaddr_storage *addr, char *ip,
-                                 size_t ip_size, int *port);
-static void node_server_accept_cb(void *server_handle, void *client_handle, void *peer);
+static native_io_backend_kind node_network_backend(void);
+static cnet_client_config node_network_config(void);
+static int node_accept_ready(p2p_node_t *node);
+static void node_maintenance_run(p2p_node_t *node);
+static void node_cnet_state(void *user, cnet_connection connection,
+                            cnet_connection_state state, const cnet_error *error);
+static void node_cnet_receive(void *user, cnet_connection connection,
+                              const cnet_receive_view *view);
+static void node_cnet_send(void *user, cnet_connection connection, size_t size);
 static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer);
 static int node_ip_is_publishable(const char *ip);
 typedef void (*node_peer_event_cb_t)(struct p2p_peer_s *peer, void *user_data);
@@ -45,12 +47,12 @@ static int node_activate_authenticated_peer_locked(p2p_node_t *node, p2p_peer_t 
                                                    p2p_peer_t **duplicate_peer);
 static p2p_peer_t *node_take_expired_pending_peer_locked(p2p_node_t *node,
                                                          uint64_t now_ms);
-static turbo_stream_t *node_take_expired_cookie_stream_locked(
-    p2p_node_t *node, uint64_t now_ms);
-static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
-                                 void *peer_ctx);
+static int node_take_expired_cookie_connection_locked(
+    p2p_node_t *node, uint64_t now_ms, cnet_connection *out_connection);
+static void node_cookie_gate_receive(p2p_cookie_gate_t *gate,
+                                     const cnet_receive_view *view);
 static p2p_cookie_gate_t *node_cookie_gate_allocate_locked(
-    p2p_node_t *node, turbo_stream_t *stream, const char *source_ip,
+    p2p_node_t *node, cnet_connection connection, const char *source_ip,
     int source_port, uint64_t now_ms);
 static int node_promote_cookie_gate(
     p2p_cookie_gate_t *gate,
@@ -60,28 +62,49 @@ static int node_promote_cookie_gate(
  * Node Lifecycle
  * ============================================================================= */
 
+static native_io_backend_kind node_network_backend(void) {
+#if defined(_WIN32)
+    return NATIVE_IO_BACKEND_IOCP;
+#elif defined(__linux__)
+    return NATIVE_IO_BACKEND_EPOLL;
+#else
+    return NATIVE_IO_BACKEND_KQUEUE;
+#endif
+}
+
+static cnet_client_config node_network_config(void) {
+    cnet_client_config config;
+    memset(&config, 0, sizeof(config));
+    config.backend = node_network_backend();
+    config.connection_capacity = 512u;
+    config.command_capacity = 1024u;
+    config.request_capacity = 1024u;
+    config.completion_batch_capacity = 128u;
+    config.event_capacity = 1024u;
+    config.max_send_bytes = P2P_SECURITY_SEND_HWM_MAX_BYTES;
+    config.receive_buffer_bytes = 256u * 1024u;
+    config.connect_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    config.read_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    config.write_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    return config;
+}
+
 p2p_node_t* p2p_node_create(const char *ip, int port) {
-    if (!ip) return NULL;
+    cnet_client_config network_config;
+    p2p_node_t *node;
+    if (!ip || port < 0 || port > UINT16_MAX) return NULL;
 
-    p2p_node_t *node = (p2p_node_t *)calloc(1, sizeof(p2p_node_t));
+    node = (p2p_node_t *)calloc(1, sizeof(*node));
     if (!node) return NULL;
-
     strncpy(node->ip, ip, sizeof(node->ip) - 1);
     node->port = port;
     vivaldi_init(&node->coord);
 
-    /* Initialize Hash Table for Peers */
-    node->peers_table = NULL;
-    node->peer_count = 0;
-
-    /* Initialize Kademlia DHT */
     node->kad_dht = kademlia_create(ip, (uint16_t)port);
     if (!node->kad_dht) {
         free(node);
         return NULL;
     }
-
-    /* Sync local ID from Kademlia instance */
     memcpy(node->id, node->kad_dht->routing->local_id.bytes, KADEMLIA_ID_BYTES);
     if (p2p_crypto_generate_identity(&node->crypto.identity) != P2P_OK) {
         kademlia_destroy(node->kad_dht);
@@ -89,35 +112,91 @@ p2p_node_t* p2p_node_create(const char *ip, int port) {
         return NULL;
     }
 
-    node->ctx = coro_context_create(NULL);
-    if (!node->ctx) {
+    salts_mutex_init(&node->mutex);
+    network_config = node_network_config();
+    if (cnet_client_init(&node->network, &network_config) != SALTS_OK) {
+        salts_mutex_destroy(&node->mutex);
         kademlia_destroy(node->kad_dht);
+        p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
         free(node);
         return NULL;
     }
+    node->network_initialized = 1;
 
-    /* Initialize node mutex */
-    turbo_mutex_init(&node->mutex);
-
-    node->transfers = (p2p_transfer_manager_t *)calloc(1, sizeof(p2p_transfer_manager_t));
+    node->transfers = (p2p_transfer_manager_t *)calloc(1, sizeof(*node->transfers));
     if (!node->transfers) {
-        turbo_mutex_destroy(&node->mutex);
-        coro_context_destroy(node->ctx);
+        (void)cnet_client_stop(&node->network, 0u);
+        (void)cnet_client_destroy(&node->network);
+        node->network_initialized = 0;
+        salts_mutex_destroy(&node->mutex);
         kademlia_destroy(node->kad_dht);
+        p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
         free(node);
         return NULL;
     }
     p2p_transfer_manager_init(node->transfers);
-
     return node;
 }
 
 void p2p_node_destroy(p2p_node_t *node) {
     if (!node) return;
-    
-    /* Use professional cleanup orchestration from cleanup.c */
-    void p2p_destroy_clean(p2p_node_t *node); /* Forward declaration */
     p2p_destroy_clean(node);
+}
+
+int p2p_node_run_internal(p2p_node_t *node) {
+    int status;
+    if (!node || !node->network_initialized) return P2P_ERR_INVALID_ARG;
+    node->stop_requested = 0;
+    while (!node->stop_requested) {
+        status = p2p_node_poll_internal(node, 50u);
+        if (status != P2P_OK) return status;
+    }
+    return P2P_OK;
+}
+
+int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms) {
+    size_t events = 0u;
+    uint64_t now_ms;
+    int status;
+    if (!node || !node->network_initialized) return P2P_ERR_INVALID_ARG;
+
+    status = node_accept_ready(node);
+    if (status != P2P_OK) return status;
+    status = cnet_client_poll(&node->network, timeout_ms, &events);
+    if (status != SALTS_OK) {
+        if (status == SALTS_ESHUTDOWN && node->stop_requested) return P2P_OK;
+        return P2P_ERR_NETWORK;
+    }
+    /* Private-key workers publish completion from non-owner threads and wake
+     * this CNet poll.  Drain those completions on the owner before processing
+     * further transport/protocol work. */
+    p2p_private_key_executor_pump(node);
+    status = node_accept_ready(node);
+    if (status != P2P_OK) return status;
+
+    now_ms = salts_monotonic_ms();
+    if (node->last_maintenance_ms == 0u ||
+        now_ms - node->last_maintenance_ms >= P2P_GOSSIP_INTERVAL) {
+        node->last_maintenance_ms = now_ms;
+        node_maintenance_run(node);
+    }
+    return P2P_OK;
+}
+
+void p2p_node_stop_internal(p2p_node_t *node) {
+    if (!node) return;
+    node->stop_requested = 1;
+    if (node->network_initialized) (void)cnet_client_wake(&node->network);
+}
+
+cnet_observer p2p_node_transport_observer(p2p_node_t *node) {
+    cnet_observer observer;
+    memset(&observer, 0, sizeof(observer));
+    observer.on_state = node_cnet_state;
+    observer.on_receive = node_cnet_receive;
+    observer.on_send = node_cnet_send;
+    observer.user = node;
+    return observer;
 }
 
 /* =============================================================================
@@ -127,28 +206,28 @@ void p2p_node_destroy(p2p_node_t *node) {
 void p2p_node_add_file(p2p_node_t *node, p2p_file_t *file) {
     if (!node || !file) return;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     file->next_file = node->local_files;
     node->local_files = file;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 }
 
 void p2p_node_remove_file(p2p_node_t *node, const char *key) {
     if (!node || !key) return;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_file_t **curr = &node->local_files;
     while (*curr) {
         if (strcmp((*curr)->hash, key) == 0) {
             p2p_file_t *to_remove = *curr;
             *curr = (*curr)->next_file;
             p2p_file_free(to_remove);
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
             return;
         }
         curr = &(*curr)->next_file;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 }
 
 p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id) {
@@ -158,9 +237,9 @@ p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id) 
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     file = p2p_node_find_local_file_by_id_locked(node, id);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return file;
 }
 
@@ -188,10 +267,10 @@ p2p_file_t *p2p_node_detach_local_files(p2p_node_t *node) {
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     files = node->local_files;
     node->local_files = NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return files;
 }
@@ -203,10 +282,10 @@ p2p_download_t *p2p_node_detach_downloads(p2p_node_t *node) {
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     downloads = node->downloads;
     node->downloads = NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return downloads;
 }
@@ -225,13 +304,13 @@ p2p_peer_t **p2p_node_snapshot_connected_peers(p2p_node_t *node, size_t *count_o
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     capacity = (size_t)peer_table_count(node->peers_table);
     if (capacity > 0) {
         peers = (p2p_peer_t **)calloc(capacity, sizeof(*peers));
     }
     if (capacity > 0 && !peers) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return NULL;
     }
 
@@ -244,7 +323,7 @@ p2p_peer_t **p2p_node_snapshot_connected_peers(p2p_node_t *node, size_t *count_o
         }
         peers[count++] = curr->peer;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     *count_out = count;
     return peers;
@@ -264,13 +343,13 @@ p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *cou
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     capacity = (size_t)peer_table_count(node->peers_table);
     if (capacity > 0) {
         infos = (p2p_peer_info_ex_t *)calloc(capacity, sizeof(*infos));
     }
     if (capacity > 0 && !infos) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return NULL;
     }
 
@@ -283,7 +362,7 @@ p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *cou
         p2p_peer_fill_info_ex_locked(peer, &infos[count]);
         count++;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     *count_out = count;
     return infos;
@@ -419,20 +498,20 @@ int p2p_dht_join_ring(p2p_node_t *node, const char *bootstrap_ip, int bootstrap_
     peer = p2p_peer_create(node, bootstrap_ip, bootstrap_port);
     if (!peer) return P2P_ERR_NO_MEM;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (p2p_node_find_peer_by_endpoint_locked(node, bootstrap_ip, bootstrap_port)) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return P2P_OK;
     }
     p2p_node_add_peer_locked(node, peer);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     ret = p2p_peer_connect(peer);
     if (ret != P2P_OK) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         p2p_node_remove_peer_by_endpoint_locked(node, bootstrap_ip, bootstrap_port);
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return ret;
     }
@@ -440,9 +519,9 @@ int p2p_dht_join_ring(p2p_node_t *node, const char *bootstrap_ip, int bootstrap_
     /* Keep the provisional route ID consistent with other endpoint-derived
      * Kademlia contacts until the authenticated peer ID is learned. */
     p2p_endpoint_to_id(bootstrap_ip, bootstrap_port, &bootstrap_id);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_node_add_route_locked(node, bootstrap_id.bytes, bootstrap_ip, bootstrap_port);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     /* Start iterative lookup for OUR identity to discover our neighborhood */
     (void)p2p_dht_lookup_start(node, node->id, P2P_MSG_DHT_FIND_NODE);
@@ -482,7 +561,7 @@ int p2p_node_reserve_transport_send_capacity(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     reservation = node->security_config.send_hwm_bytes;
     budget = node->security_config.node_send_budget_bytes;
     if (!node->security_configured) {
@@ -502,7 +581,7 @@ int p2p_node_reserve_transport_send_capacity(p2p_node_t *node,
         node->transport_send_reservations++;
         peer->reserved_send_capacity_bytes = reservation;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -515,7 +594,7 @@ void p2p_node_release_transport_send_capacity(p2p_node_t *node,
         return;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     reservation = peer->reserved_send_capacity_bytes;
     if (reservation != 0) {
         if (node->reserved_send_capacity_bytes < reservation ||
@@ -527,7 +606,7 @@ void p2p_node_release_transport_send_capacity(p2p_node_t *node,
             peer->reserved_send_capacity_bytes = 0;
         }
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     if (accounting_invalid) {
         TLOG_ERROR("[P2P] transport send-capacity accounting invariant failed");
@@ -579,9 +658,9 @@ void p2p_node_record_security_failure(p2p_node_t *node,
         reason = P2P_SECURITY_REJECTION_HANDSHAKE_PROTOCOL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     node->security_rejection_counts[reason]++;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 }
 
 static uint64_t node_saturating_add_u64(uint64_t left, uint64_t right) {
@@ -635,10 +714,10 @@ void p2p_node_record_handshake_latency(
     if (!node) {
         return;
     }
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     node_record_handshake_latency_locked(node, role, stage, started_ms,
                                          completed_ms);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 }
 
 void p2p_node_on_peer_disconnected(p2p_node_t *node, p2p_peer_t *peer) {
@@ -648,12 +727,12 @@ void p2p_node_on_peer_disconnected(p2p_node_t *node, p2p_peer_t *peer) {
 
     if (!node || !peer) return;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     node_handle_peer_disconnect_locked(node, peer);
     node_capture_peer_event_locked(node, peer, node->on_peer_disconnected,
                                    node->peer_user_data, &on_peer_disconnected,
                                    &peer_user_data, &hold_peer);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     if (on_peer_disconnected) {
         on_peer_disconnected(peer, peer_user_data);
@@ -673,7 +752,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
 
     if (!node || !peer) return;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     should_publish_endpoint = node_activate_authenticated_peer_locked(node, peer,
                                                                       &stale_peer,
                                                                       &duplicate_peer);
@@ -685,7 +764,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
                                        node->peer_user_data, &on_peer_connected,
                                        &peer_user_data, &hold_peer);
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     if (stale_peer) {
         p2p_peer_destroy(stale_peer);
@@ -714,11 +793,11 @@ static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (!peer->is_connected || peer->state != P2P_PEER_STATE_CONNECTED ||
         !p2p_crypto_session_is_ready(&peer->crypto) ||
         peer->outstanding_ping_ms != 0) {
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
 
@@ -727,22 +806,22 @@ static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
         strncpy(ping.ip, node->ip, sizeof(ping.ip) - 1);
     }
     ping.port = (uint16_t)node->port;
-    ping.timestamp = turbo_hrtime() / 1000000;
+    ping.timestamp = salts_hrtime() / 1000000;
     memcpy(ping.coords, node->coord.coords, sizeof(ping.coords));
     ping.height = node->coord.height;
     ping.error = node->coord.error;
     peer->last_ping_sent_ms = ping.timestamp;
     peer->outstanding_ping_ms = ping.timestamp;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     ret = p2p_send_message(node, peer, P2P_MSG_PING, &ping, sizeof(ping));
     if (ret != P2P_OK) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         if (peer->outstanding_ping_ms == ping.timestamp) {
             peer->outstanding_ping_ms = 0;
             peer->last_ping_sent_ms = 0;
         }
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     return ret;
 }
@@ -934,7 +1013,7 @@ static p2p_peer_t *node_find_connected_peer_by_id_locked(p2p_node_t *node,
     return NULL;
 }
 
-CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
+P2P_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
                                                              const char *ip,
                                                              int port) {
     p2p_peer_entry_t *entry = NULL;
@@ -947,7 +1026,7 @@ CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
     return entry ? entry->peer : NULL;
 }
 
-CXX_C_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer) {
+P2P_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer) {
     if (!node || !peer) {
         return;
     }
@@ -1021,7 +1100,7 @@ node_pending_peer_rejection_locked(p2p_node_t *node,
     return P2P_SECURITY_REJECTION_REASON_COUNT;
 }
 
-CXX_C_API int p2p_node_pending_peer_source_capacity_available_locked(
+P2P_API int p2p_node_pending_peer_source_capacity_available_locked(
     p2p_node_t *node, const char *source_ip) {
     if (!node) {
         return 0;
@@ -1086,7 +1165,7 @@ static void node_source_admission_refill_locked(
     bucket->last_refill_ms = now_ms;
 }
 
-CXX_C_API int p2p_node_source_admission_acquire_locked(
+P2P_API int p2p_node_source_admission_acquire_locked(
     p2p_node_t *node, const char *source_ip, uint64_t now_ms) {
     p2p_source_admission_bucket_t *bucket = NULL;
     p2p_source_admission_bucket_t *reclaim = NULL;
@@ -1152,11 +1231,11 @@ CXX_C_API int p2p_node_source_admission_acquire_locked(
     return P2P_OK;
 }
 
-CXX_C_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node) {
+P2P_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node) {
     return p2p_node_pending_peer_source_capacity_available_locked(node, NULL);
 }
 
-CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
+P2P_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
                                                        const char *ip,
                                                        int port) {
     if (!node || !ip) {
@@ -1166,7 +1245,7 @@ CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
     peer_table_remove(&node->peers_table, ip, port);
 }
 
-CXX_C_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
+P2P_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
     kad_node_t knode;
 
     if (!node || !node->kad_dht || !node->kad_dht->routing || !ip) {
@@ -1177,7 +1256,7 @@ CXX_C_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, co
     kad_routing_add_node(node->kad_dht->routing, &knode);
 }
 
-CXX_C_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
+P2P_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
     kad_id_t route_id;
 
     if (!node || !node->kad_dht || !node->kad_dht->routing) {
@@ -1244,72 +1323,87 @@ void p2p_node_dispatch_message(p2p_node_t *node, p2p_peer_t *peer, p2p_message_t
  * Infrastructure implementation
  * ============================================================================= */
 
-static int node_build_sockaddr(const char *ip, int port, struct sockaddr_storage *addr) {
-    struct sockaddr_in *addr4;
-    struct sockaddr_in6 *addr6;
-
-    if (!ip || !addr) {
-        return -1;
-    }
-
-    memset(addr, 0, sizeof(*addr));
-    addr4 = (struct sockaddr_in *)addr;
-    if (inet_pton(AF_INET, ip, &addr4->sin_addr) == 1) {
-        addr4->sin_family = AF_INET;
-        addr4->sin_port = htons((uint16_t)port);
-        return 0;
-    }
-
-    addr6 = (struct sockaddr_in6 *)addr;
-    if (inet_pton(AF_INET6, ip, &addr6->sin6_addr) == 1) {
-        addr6->sin6_family = AF_INET6;
-        addr6->sin6_port = htons((uint16_t)port);
-        return 0;
-    }
-
-    return -1;
+static int node_connection_equal(cnet_connection left,
+                                 cnet_connection right) {
+    return left.generation != 0u && left.slot == right.slot &&
+           left.generation == right.generation;
 }
 
-static int node_sockaddr_to_peer(const struct sockaddr_storage *addr, char *ip,
-                                 size_t ip_size, int *port) {
-    const void *src = NULL;
-
-    if (!addr || !ip || !port) {
-        return -1;
-    }
-
-    if (addr->ss_family == AF_INET) {
-        const struct sockaddr_in *addr4 = (const struct sockaddr_in *)addr;
-        src = &addr4->sin_addr;
-        *port = ntohs(addr4->sin_port);
-    } else if (addr->ss_family == AF_INET6) {
-        const struct sockaddr_in6 *addr6 = (const struct sockaddr_in6 *)addr;
-        src = &addr6->sin6_addr;
-        *port = ntohs(addr6->sin6_port);
+static int node_stream_peer_to_text(const cnet_stream_peer *peer,
+                                    char *ip, size_t ip_size, int *port) {
+    int family;
+    const void *address;
+    if (!peer || !ip || ip_size == 0u || !port) return -1;
+    if (peer->family == CNET_DATAGRAM_ADDRESS_IPV4) {
+        family = AF_INET;
+        address = peer->address;
+    } else if (peer->family == CNET_DATAGRAM_ADDRESS_IPV6) {
+        family = AF_INET6;
+        address = peer->address;
     } else {
         return -1;
     }
+    if (!inet_ntop(family, address, ip, (socklen_t)ip_size)) return -1;
+    *port = (int)peer->port;
+    return 0;
+}
 
-    return inet_ntop(addr->ss_family, src, ip, (socklen_t)ip_size) ? 0 : -1;
+static p2p_cookie_gate_t *node_find_cookie_gate_locked(
+    p2p_node_t *node, cnet_connection connection) {
+    size_t index;
+    if (!node) return NULL;
+    for (index = 0u; index < node->security_config.cookie_gate_limit; ++index) {
+        p2p_cookie_gate_t *gate = &node->cookie_gates[index];
+        if (gate->state != P2P_COOKIE_GATE_FREE &&
+            node_connection_equal(gate->connection, connection)) {
+            return gate;
+        }
+    }
+    return NULL;
+}
+
+static p2p_peer_t *node_find_peer_by_connection_locked(
+    p2p_node_t *node, cnet_connection connection) {
+    p2p_peer_entry_t *entry;
+    p2p_peer_entry_t *tmp;
+    if (!node) return NULL;
+    HASH_ITER(hh, node->peers_table, entry, tmp) {
+        p2p_peer_t *peer = entry->peer;
+        if (peer && peer->conn &&
+            node_connection_equal(peer->conn->handle, connection)) {
+            return peer;
+        }
+    }
+    return NULL;
+}
+
+static int node_send_cnet_copy(p2p_node_t *node, cnet_connection connection,
+                               const void *data, size_t size) {
+    mem_buffer_t *buffer;
+    int status;
+    if (!node || !node->network_initialized || !data || size == 0u)
+        return SALTS_EINVAL;
+    buffer = mem_get_buffer(mem_global(), size);
+    if (!buffer) return SALTS_ENOMEM;
+    memcpy(mem_buffer_data(buffer), data, size);
+    mem_set_used(buffer, size);
+    status = cnet_send_buffer(&node->network, connection, buffer);
+    mem_buffer_release(buffer);
+    return status;
 }
 
 static p2p_cookie_gate_t *node_cookie_gate_allocate_locked(
-    p2p_node_t *node, turbo_stream_t *stream, const char *source_ip,
+    p2p_node_t *node, cnet_connection connection, const char *source_ip,
     int source_port, uint64_t now_ms) {
     size_t index;
-
-    if (!node || !stream || !source_ip) {
-        return NULL;
-    }
-    for (index = 0; index < node->security_config.cookie_gate_limit; ++index) {
+    if (!node || connection.generation == 0u || !source_ip) return NULL;
+    for (index = 0u; index < node->security_config.cookie_gate_limit; ++index) {
         p2p_cookie_gate_t *gate = &node->cookie_gates[index];
-        if (gate->state != P2P_COOKIE_GATE_FREE) {
-            continue;
-        }
+        if (gate->state != P2P_COOKIE_GATE_FREE) continue;
         memset(gate, 0, sizeof(*gate));
         gate->node = node;
-        gate->stream = stream;
-        strncpy(gate->source_ip, source_ip, sizeof(gate->source_ip) - 1);
+        gate->connection = connection;
+        strncpy(gate->source_ip, source_ip, sizeof(gate->source_ip) - 1u);
         gate->source_port = source_port;
         gate->deadline_ms = now_ms + node->security_config.handshake_timeout_ms;
         gate->stage_started_ms = now_ms;
@@ -1324,35 +1418,29 @@ static void node_cookie_gate_reject(
     p2p_cookie_gate_t *gate,
     p2p_security_rejection_reason_v2_t reason) {
     p2p_node_t *node;
-    turbo_stream_t *stream;
-
-    if (!gate || !gate->node || !gate->stream) {
-        return;
-    }
+    cnet_connection connection;
+    if (!gate || !gate->node ||
+        gate->state == P2P_COOKIE_GATE_FREE) return;
     node = gate->node;
-    stream = (turbo_stream_t *)gate->stream;
-    turbo_stream_set_user_data(stream, NULL);
-    turbo_stream_recv_stop(stream);
-    turbo_mutex_lock(&node->mutex);
-    if (gate->state != P2P_COOKIE_GATE_FREE && gate->stream == stream) {
-        if (reason < P2P_SECURITY_REJECTION_REASON_COUNT) {
+    connection = gate->connection;
+    salts_mutex_lock(&node->mutex);
+    if (gate->state != P2P_COOKIE_GATE_FREE &&
+        node_connection_equal(gate->connection, connection)) {
+        if (reason < P2P_SECURITY_REJECTION_REASON_COUNT)
             node->security_rejection_counts[reason]++;
-        }
         memset(gate, 0, sizeof(*gate));
-        if (node->active_cookie_gates > 0) {
-            node->active_cookie_gates--;
-        }
+        if (node->active_cookie_gates > 0u) node->active_cookie_gates--;
     }
-    turbo_mutex_unlock(&node->mutex);
-    turbo_stream_destroy(stream);
+    salts_mutex_unlock(&node->mutex);
+    (void)cnet_close(&node->network, connection);
 }
 
 static int node_promote_cookie_gate(
     p2p_cookie_gate_t *gate,
     const uint8_t cookie_binding[P2P_COOKIE_BINDING_SIZE]) {
     p2p_node_t *node;
-    turbo_stream_t *stream;
     p2p_peer_t *accepted_peer = NULL;
+    cnet_connection connection;
     uint8_t initiator_preface[P2P_SECURE_PREFACE_SIZE];
     char source_ip[P2P_MAX_IP];
     int source_port;
@@ -1360,68 +1448,50 @@ static int node_promote_cookie_gate(
     int ret = P2P_ERR_INVALID_STATE;
     p2p_security_rejection_reason_v2_t pending_rejection;
 
-    if (!gate || !gate->node || !gate->stream || !cookie_binding) {
+    if (!gate || !gate->node || gate->state != P2P_COOKIE_GATE_WAIT_RESPONSE ||
+        !cookie_binding) {
         return P2P_ERR_INVALID_ARG;
     }
     node = gate->node;
-    stream = (turbo_stream_t *)gate->stream;
-    memcpy(initiator_preface, gate->initiator_preface,
-           sizeof(initiator_preface));
+    connection = gate->connection;
+    memcpy(initiator_preface, gate->initiator_preface, sizeof(initiator_preface));
     memcpy(source_ip, gate->source_ip, sizeof(source_ip));
-    source_ip[sizeof(source_ip) - 1] = '\0';
+    source_ip[sizeof(source_ip) - 1u] = '\0';
     source_port = gate->source_port;
 
-    turbo_stream_set_user_data(stream, NULL);
-    turbo_stream_recv_stop(stream);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (gate->state != P2P_COOKIE_GATE_WAIT_RESPONSE ||
-        gate->stream != stream) {
-        turbo_mutex_unlock(&node->mutex);
+        !node_connection_equal(gate->connection, connection)) {
+        salts_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     node_record_handshake_latency_locked(
         node, P2P_SECURITY_ROLE_RESPONDER, P2P_SECURITY_LATENCY_COOKIE,
-        gate->stage_started_ms, turbo_hrtime() / 1000000U);
+        gate->stage_started_ms, salts_monotonic_ms());
     memset(gate, 0, sizeof(*gate));
-    if (node->active_cookie_gates > 0) {
-        node->active_cookie_gates--;
-    }
+    if (node->active_cookie_gates > 0u) node->active_cookie_gates--;
     node->cookie_verifications_succeeded++;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
-    if (turbo_stream_set_send_hwm(
-            stream, node->security_config.send_hwm_bytes) != 0) {
-        ret = P2P_ERR_INVALID_STATE;
-        goto fail_stream;
-    }
     accepted_peer = p2p_peer_create(node, source_ip, source_port);
     if (!accepted_peer) {
         ret = P2P_ERR_NO_MEM;
-        goto fail_stream;
+        goto fail_connection;
     }
     ret = p2p_node_reserve_transport_send_capacity(node, accepted_peer);
-    if (ret != P2P_OK) {
-        goto fail_peer;
-    }
-    accepted_peer->conn = p2p_connection_create_inbound(stream);
+    if (ret != P2P_OK) goto fail_peer;
+    accepted_peer->conn =
+        p2p_connection_create(P2P_CONN_INBOUND, &node->network, connection);
     if (!accepted_peer->conn) {
         ret = P2P_ERR_NO_MEM;
-        p2p_peer_destroy(accepted_peer);
-        goto fail_stream;
-    }
-    turbo_stream_set_user_data(stream, accepted_peer);
-    if (turbo_stream_recv_start(stream, p2p_peer_stream_recv) != 0) {
-        turbo_stream_set_user_data(stream, NULL);
-        ret = P2P_ERR_NETWORK;
         goto fail_peer;
     }
-
     accepted_peer->state = P2P_PEER_STATE_HANDSHAKING;
     accepted_peer->is_connected = 0;
-    accepted_peer->connect_time = turbo_hrtime();
+    accepted_peer->connect_time = salts_hrtime();
     accepted_peer->last_seen = accepted_peer->connect_time;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     pending_rejection = node_pending_peer_rejection_locked(node, source_ip);
     if (pending_rejection == P2P_SECURITY_REJECTION_REASON_COUNT &&
         !p2p_node_find_peer_by_endpoint_locked(node, source_ip, source_port)) {
@@ -1432,7 +1502,7 @@ static int node_promote_cookie_gate(
     peer_tracked =
         p2p_node_find_peer_by_endpoint_locked(node, source_ip, source_port) ==
         accepted_peer;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (!peer_tracked) {
         ret = P2P_ERR_RESOURCE_EXHAUSTED;
         goto fail_peer;
@@ -1441,42 +1511,31 @@ static int node_promote_cookie_gate(
     ret = p2p_peer_start_inbound_handshake_after_cookie(
         accepted_peer, initiator_preface, cookie_binding);
     p2p_crypto_wipe(initiator_preface, sizeof(initiator_preface));
-    if (ret != P2P_OK) {
-        p2p_node_record_security_failure(node, accepted_peer->security_stage,
-                                         ret);
-        turbo_mutex_lock(&node->mutex);
-        if (p2p_node_find_peer_by_endpoint_locked(
-                node, source_ip, source_port) == accepted_peer) {
-            node_remove_peer_entry_locked(node, accepted_peer);
-        }
-        turbo_mutex_unlock(&node->mutex);
-        p2p_peer_destroy(accepted_peer);
+    if (ret == P2P_OK && accepted_peer->conn &&
+        !accepted_peer->private_key_operation &&
+        cnet_receive(&node->network, connection, 1u) != SALTS_OK) {
+        ret = P2P_ERR_NETWORK;
     }
-    return ret;
+    if (ret == P2P_OK) return P2P_OK;
+
+    p2p_node_record_security_failure(node, accepted_peer->security_stage, ret);
+    salts_mutex_lock(&node->mutex);
+    if (p2p_node_find_peer_by_endpoint_locked(node, source_ip, source_port) ==
+        accepted_peer) {
+        node_remove_peer_entry_locked(node, accepted_peer);
+    }
+    salts_mutex_unlock(&node->mutex);
 
 fail_peer:
     p2p_crypto_wipe(initiator_preface, sizeof(initiator_preface));
-    if (peer_tracked) {
-        turbo_mutex_lock(&node->mutex);
-        if (p2p_node_find_peer_by_endpoint_locked(
-                node, source_ip, source_port) == accepted_peer) {
-            node_remove_peer_entry_locked(node, accepted_peer);
-        }
-        turbo_mutex_unlock(&node->mutex);
-    }
-    p2p_peer_destroy(accepted_peer);
-    return ret;
-
-fail_stream:
-    p2p_crypto_wipe(initiator_preface, sizeof(initiator_preface));
-    turbo_stream_destroy(stream);
+    if (accepted_peer) p2p_peer_destroy(accepted_peer);
+fail_connection:
+    (void)cnet_close(&node->network, connection);
     return ret;
 }
 
-static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
-                                 void *peer_ctx) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    p2p_cookie_gate_t *gate;
+static void node_cookie_gate_receive(p2p_cookie_gate_t *gate,
+                                     const cnet_receive_view *view) {
     p2p_node_t *node;
     size_t target_size;
     uint8_t packet[P2P_COOKIE_PACKET_SIZE];
@@ -1484,25 +1543,17 @@ static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
     uint64_t now_ms;
     int ret;
 
-    (void)peer_ctx;
-    if (!stream) {
-        return 1;
-    }
-    gate = (p2p_cookie_gate_t *)turbo_stream_get_user_data(stream);
-    if (!gate || !gate->node || gate->stream != stream) {
-        return 1;
-    }
+    if (!gate || !gate->node || gate->state == P2P_COOKIE_GATE_FREE) return;
     node = gate->node;
-    if (!slice || !slice->data || slice->length == 0) {
-        node_cookie_gate_reject(gate,
-                                P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
-        return 1;
+    if (!view || view->kind != CNET_MESSAGE_BYTES || !view->data ||
+        view->size == 0u) {
+        node_cookie_gate_reject(gate, P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
+        return;
     }
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_monotonic_ms();
     if (now_ms > gate->deadline_ms) {
-        node_cookie_gate_reject(gate,
-                                P2P_SECURITY_REJECTION_COOKIE_EXPIRED);
-        return 1;
+        node_cookie_gate_reject(gate, P2P_SECURITY_REJECTION_COOKIE_EXPIRED);
+        return;
     }
     target_size = gate->state == P2P_COOKIE_GATE_WAIT_PREFACE
                       ? P2P_SECURE_PREFACE_SIZE
@@ -1510,24 +1561,26 @@ static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
     if ((gate->state != P2P_COOKIE_GATE_WAIT_PREFACE &&
          gate->state != P2P_COOKIE_GATE_WAIT_RESPONSE) ||
         gate->recv_len > target_size ||
-        slice->length > target_size - gate->recv_len) {
-        node_cookie_gate_reject(gate,
-                                P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
-        return 1;
+        view->size > target_size - gate->recv_len) {
+        node_cookie_gate_reject(gate, P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
+        return;
     }
-    memcpy(gate->recv_buffer + gate->recv_len, slice->data, slice->length);
-    gate->recv_len += slice->length;
+    memcpy(gate->recv_buffer + gate->recv_len, view->data, view->size);
+    gate->recv_len += view->size;
     if (gate->recv_len < target_size) {
-        return 0;
+        if (cnet_receive(&node->network, gate->connection, 1u) != SALTS_OK)
+            node_cookie_gate_reject(
+                gate, P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE);
+        return;
     }
 
     if (gate->state == P2P_COOKIE_GATE_WAIT_PREFACE) {
         ret = p2p_secure_preface_validate(
             node->security_config.network_id_hash, gate->recv_buffer);
         if (ret != P2P_OK) {
-            node_cookie_gate_reject(
-                gate, P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
-            return 1;
+            node_cookie_gate_reject(gate,
+                                    P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
+            return;
         }
         memcpy(gate->initiator_preface, gate->recv_buffer,
                P2P_SECURE_PREFACE_SIZE);
@@ -1537,28 +1590,29 @@ static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
             node->security_config.cookie_lifetime_ms,
             node->security_config.cookie_key_rotation_ms, packet);
         if (ret != P2P_OK ||
-            turbo_stream_send(stream, (const char *)packet,
-                              sizeof(packet)) != 0) {
+            node_send_cnet_copy(node, gate->connection, packet,
+                                sizeof(packet)) != SALTS_OK) {
             p2p_crypto_wipe(packet, sizeof(packet));
             node_cookie_gate_reject(
                 gate, ret == P2P_ERR_CRYPTO
                           ? P2P_SECURITY_REJECTION_COOKIE_AUTH
                           : P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE);
-            return 1;
+            return;
         }
         p2p_crypto_wipe(packet, sizeof(packet));
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         node_record_handshake_latency_locked(
             node, P2P_SECURITY_ROLE_RESPONDER,
             P2P_SECURITY_LATENCY_PREFACE, gate->stage_started_ms, now_ms);
-        turbo_mutex_unlock(&node->mutex);
-        gate->recv_len = 0;
+        node->cookie_challenges_issued++;
+        salts_mutex_unlock(&node->mutex);
+        gate->recv_len = 0u;
         gate->stage_started_ms = now_ms;
         gate->state = P2P_COOKIE_GATE_WAIT_RESPONSE;
-        turbo_mutex_lock(&node->mutex);
-        node->cookie_challenges_issued++;
-        turbo_mutex_unlock(&node->mutex);
-        return 0;
+        if (cnet_receive(&node->network, gate->connection, 1u) != SALTS_OK)
+            node_cookie_gate_reject(
+                gate, P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE);
+        return;
     }
 
     ret = p2p_cookie_verify_response(
@@ -1575,242 +1629,249 @@ static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
                       : ret == P2P_ERR_CRYPTO
                             ? P2P_SECURITY_REJECTION_COOKIE_AUTH
                             : P2P_SECURITY_REJECTION_COOKIE_PROTOCOL);
-        return 1;
+        return;
     }
     ret = node_promote_cookie_gate(gate, binding);
     p2p_crypto_wipe(binding, sizeof(binding));
-    return ret == P2P_OK ? 0 : 1;
+    if (ret != P2P_OK) return;
 }
 
-static void node_server_accept_cb(void *server_handle, void *client_handle, void *peer) {
-    turbo_stream_listener_t *listener = (turbo_stream_listener_t *)server_handle;
-    turbo_stream_t *client = (turbo_stream_t *)client_handle;
-    p2p_node_t *node = (p2p_node_t *)turbo_stream_listener_get_user_data(listener);
-    struct sockaddr_storage addr;
-    const struct sockaddr *peer_addr = (const struct sockaddr *)peer;
-    char ip[P2P_MAX_IP];
-    int port = 0;
+static void node_cnet_state(void *user, cnet_connection connection,
+                            cnet_connection_state state,
+                            const cnet_error *error) {
+    p2p_node_t *node = (p2p_node_t *)user;
     p2p_cookie_gate_t *gate = NULL;
-    int admitted = 0;
-    p2p_security_rejection_reason_v2_t pending_rejection;
+    p2p_peer_t *peer = NULL;
+    if (!node) return;
 
-    if (!node || !client) return;
+    salts_mutex_lock(&node->mutex);
+    gate = node_find_cookie_gate_locked(node, connection);
+    if (!gate) {
+        peer = node_find_peer_by_connection_locked(node, connection);
+        if (peer && !p2p_peer_hold_locked(peer)) peer = NULL;
+    }
+    salts_mutex_unlock(&node->mutex);
 
-    if (turbo_stream_set_send_hwm(client, P2P_COOKIE_PACKET_SIZE) != 0) {
-        turbo_stream_destroy(client);
+    if (gate) {
+        if (state == CNET_CONNECTION_CONNECTED) {
+            if (cnet_receive(&node->network, connection, 1u) != SALTS_OK)
+                node_cookie_gate_reject(
+                    gate, P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE);
+        } else if (state == CNET_CONNECTION_FAILED ||
+                   state == CNET_CONNECTION_CLOSED) {
+            salts_mutex_lock(&node->mutex);
+            if (gate->state != P2P_COOKIE_GATE_FREE &&
+                node_connection_equal(gate->connection, connection)) {
+                memset(gate, 0, sizeof(*gate));
+                if (node->active_cookie_gates > 0u) node->active_cookie_gates--;
+            }
+            salts_mutex_unlock(&node->mutex);
+        }
         return;
     }
-
-    memset(&addr, 0, sizeof(addr));
-    if (peer_addr && peer_addr->sa_family == AF_INET) {
-        memcpy(&addr, peer_addr, sizeof(struct sockaddr_in));
-    } else if (peer_addr && peer_addr->sa_family == AF_INET6) {
-        memcpy(&addr, peer_addr, sizeof(struct sockaddr_in6));
-    } else if (turbo_stream_get_peer_addr(client, &addr) != 0) {
-        turbo_stream_destroy(client);
+    if (peer) {
+        p2p_peer_transport_state(peer, connection, state, error);
+        p2p_peer_release(peer);
         return;
     }
+    if (state == CNET_CONNECTION_CONNECTED)
+        (void)cnet_close(&node->network, connection);
+}
 
-    if (node_sockaddr_to_peer(&addr, ip, sizeof(ip), &port) != 0) {
-        turbo_stream_destroy(client);
-        return;
+static void node_cnet_receive(void *user, cnet_connection connection,
+                              const cnet_receive_view *view) {
+    p2p_node_t *node = (p2p_node_t *)user;
+    p2p_cookie_gate_t *gate = NULL;
+    p2p_peer_t *peer = NULL;
+    if (!node) return;
+
+    salts_mutex_lock(&node->mutex);
+    gate = node_find_cookie_gate_locked(node, connection);
+    if (!gate) {
+        peer = node_find_peer_by_connection_locked(node, connection);
+        if (peer && !p2p_peer_hold_locked(peer)) peer = NULL;
     }
+    salts_mutex_unlock(&node->mutex);
 
-    turbo_mutex_lock(&node->mutex);
-    pending_rejection = node_pending_peer_rejection_locked(node, ip);
-    admitted = pending_rejection == P2P_SECURITY_REJECTION_REASON_COUNT;
-    if (!admitted) {
-        node->security_rejection_counts[pending_rejection]++;
-    } else if (p2p_node_source_admission_acquire_locked(
-                   node, ip, turbo_hrtime() / 1000000U) != P2P_OK) {
-        admitted = 0;
+    if (gate) {
+        node_cookie_gate_receive(gate, view);
+    } else if (peer) {
+        p2p_peer_transport_receive(peer, connection, view);
+        p2p_peer_release(peer);
     } else {
-        gate = node_cookie_gate_allocate_locked(
-            node, client, ip, port, turbo_hrtime() / 1000000U);
-        if (!gate) {
-            admitted = 0;
-            node->security_rejection_counts[
-                P2P_SECURITY_REJECTION_COOKIE_GATE_CAPACITY]++;
+        (void)cnet_close(&node->network, connection);
+    }
+}
+
+static void node_cnet_send(void *user, cnet_connection connection, size_t size) {
+    (void)user;
+    (void)connection;
+    (void)size;
+}
+
+static int node_accept_ready(p2p_node_t *node) {
+    cnet_observer observer;
+    if (!node || !node->listener_initialized) return P2P_OK;
+    observer = p2p_node_transport_observer(node);
+    for (;;) {
+        int ready = 0;
+        int status = cnet_listener_wait(&node->listener, 0u, &ready);
+        if (status != SALTS_OK) return P2P_ERR_NETWORK;
+        if (!ready) return P2P_OK;
+        for (;;) {
+            cnet_connection connection = {0};
+            cnet_stream_peer source;
+            char ip[P2P_MAX_IP];
+            int port = 0;
+            p2p_cookie_gate_t *gate = NULL;
+            int admitted = 0;
+            p2p_security_rejection_reason_v2_t pending_rejection;
+            memset(&source, 0, sizeof(source));
+            status = cnet_listener_accept_peer(
+                &node->listener, &node->network, &observer,
+                &connection, &source);
+            if (status == SALTS_ETIMEDOUT) break;
+            if (status == SALTS_ENOBUFS) break;
+            if (status != SALTS_OK) return P2P_ERR_NETWORK;
+            if (node_stream_peer_to_text(&source, ip, sizeof(ip), &port) != 0) {
+                (void)cnet_close(&node->network, connection);
+                continue;
+            }
+
+            salts_mutex_lock(&node->mutex);
+            pending_rejection = node_pending_peer_rejection_locked(node, ip);
+            admitted =
+                pending_rejection == P2P_SECURITY_REJECTION_REASON_COUNT;
+            if (!admitted) {
+                node->security_rejection_counts[pending_rejection]++;
+            } else if (p2p_node_source_admission_acquire_locked(
+                           node, ip, salts_monotonic_ms()) != P2P_OK) {
+                admitted = 0;
+            } else {
+                gate = node_cookie_gate_allocate_locked(
+                    node, connection, ip, port, salts_monotonic_ms());
+                if (!gate) {
+                    admitted = 0;
+                    node->security_rejection_counts[
+                        P2P_SECURITY_REJECTION_COOKIE_GATE_CAPACITY]++;
+                }
+            }
+            salts_mutex_unlock(&node->mutex);
+            if (!admitted) (void)cnet_close(&node->network, connection);
         }
     }
-    turbo_mutex_unlock(&node->mutex);
-    if (!admitted) {
-        turbo_stream_destroy(client);
-        return;
-    }
-    turbo_stream_set_user_data(client, gate);
-    if (turbo_stream_recv_start(client, node_cookie_gate_recv) != 0) {
-        turbo_stream_set_user_data(client, NULL);
-        turbo_mutex_lock(&node->mutex);
-        memset(gate, 0, sizeof(*gate));
-        node->active_cookie_gates--;
-        turbo_mutex_unlock(&node->mutex);
-        turbo_stream_destroy(client);
-    }
 }
 
-CXX_C_API int p2p_node_start_server(p2p_node_t *node) {
-    struct sockaddr_storage addr;
-    turbo_stream_kind_t kind;
-
-    if (!node || node->server) return P2P_ERR_INVALID_ARG;
+P2P_API int p2p_node_start_server(p2p_node_t *node) {
+    cnet_listener_config config;
+    uint16_t bound_port = 0u;
+    int status;
+    if (!node || node->listener_initialized) return P2P_ERR_INVALID_ARG;
     if (!node->security_configured) return P2P_ERR_AUTH_REQUIRED;
 
-    if (node_build_sockaddr(node->ip, node->port, &addr) != 0) {
-        return P2P_ERR_INVALID_ARG;
-    }
-
-    kind = (addr.ss_family == AF_INET6) ? TURBO_STREAM_TCP6 : TURBO_STREAM_TCP4;
-    node->server = turbo_stream_listen(node->ctx, kind,
-                                       (struct sockaddr *)&addr, 128,
-                                       node_server_accept_cb);
-    if (!node->server) {
-        TLOG_ERROR("[P2P] Failed to listen on {}:{}", node->ip, node->port);
-        return P2P_ERR_NETWORK;
-    }
-    turbo_stream_listener_set_user_data(node->server, node);
-
-    TLOG_INFO("[P2P] Node listening on {}:{}", node->ip, node->port);
-
-    /* Start Maintenance Timer (Gossip/Refresh) */
-    node->gossip_timer = turbo_timer_create(p2p_get_loop(node));
-    if (node->gossip_timer) {
-        turbo_timer_set_data(node->gossip_timer, node);
-        turbo_timer_start(node->gossip_timer, node_maintenance_cb, 
-                          P2P_GOSSIP_INTERVAL, P2P_GOSSIP_INTERVAL);
-    }
-
+    memset(&config, 0, sizeof(config));
+    config.backend = node_network_backend();
+    config.host = node->ip;
+    config.port = (uint16_t)node->port;
+    config.backlog = 128u;
+    status = cnet_listener_init(&node->listener, &config);
+    if (status != SALTS_OK) return P2P_ERR_NETWORK;
+    node->listener_initialized = 1;
+    if (cnet_listener_port(&node->listener, &bound_port) == SALTS_OK)
+        node->port = (int)bound_port;
+    node->last_maintenance_ms = salts_monotonic_ms();
+    TLOG_INFOF("[P2P] Node listening on {}:{}", node->ip, node->port);
     return P2P_OK;
 }
 
 void p2p_node_stop_server(p2p_node_t *node) {
     if (!node) return;
-
-    if (node->gossip_timer) {
-        turbo_timer_stop(node->gossip_timer);
-        turbo_timer_destroy(node->gossip_timer);
-        node->gossip_timer = NULL;
-    }
-
-    if (node->server) {
-        turbo_stream_listener_close(node->server);
-        node->server = NULL;
+    if (node->listener_initialized) {
+        (void)cnet_listener_close(&node->listener);
+        (void)cnet_listener_destroy(&node->listener);
+        node->listener_initialized = 0;
     }
     p2p_node_cleanup_cookie_gates(node);
 }
 
 void p2p_node_cleanup_cookie_gates(p2p_node_t *node) {
     size_t index;
-
-    if (!node) {
-        return;
-    }
-    for (index = 0; index < P2P_SECURITY_COOKIE_GATE_LIMIT_MAX; ++index) {
-        turbo_stream_t *stream = NULL;
-
-        turbo_mutex_lock(&node->mutex);
+    if (!node) return;
+    for (index = 0u; index < P2P_SECURITY_COOKIE_GATE_LIMIT_MAX; ++index) {
+        cnet_connection connection = {0};
+        salts_mutex_lock(&node->mutex);
         if (node->cookie_gates[index].state != P2P_COOKIE_GATE_FREE) {
-            stream = (turbo_stream_t *)node->cookie_gates[index].stream;
+            connection = node->cookie_gates[index].connection;
             memset(&node->cookie_gates[index], 0,
                    sizeof(node->cookie_gates[index]));
-            if (node->active_cookie_gates > 0) {
-                node->active_cookie_gates--;
-            }
+            if (node->active_cookie_gates > 0u) node->active_cookie_gates--;
         }
-        turbo_mutex_unlock(&node->mutex);
-        if (stream) {
-            turbo_stream_set_user_data(stream, NULL);
-            turbo_stream_recv_stop(stream);
-            turbo_stream_destroy(stream);
-        }
+        salts_mutex_unlock(&node->mutex);
+        if (connection.generation != 0u)
+            (void)cnet_close(&node->network, connection);
     }
 }
 
 void p2p_gossip_start(p2p_node_t *node) {
     if (!node) return;
-
-    /* Professional Kademlia uses bucket refreshes instead of gossip.
-     * We occasionally lookup our own ID to refresh buckets. */
     p2p_dht_lookup_start(node, node->id, P2P_MSG_DHT_FIND_NODE);
 }
 
-void node_maintenance_cb(turbo_timer_t *timer) {
-    p2p_node_t *node = (p2p_node_t *)turbo_timer_get_data(timer);
+static void node_maintenance_run(p2p_node_t *node) {
     p2p_peer_t *expired_peer = NULL;
     p2p_peer_t **peers = NULL;
-    size_t peer_count = 0;
-    uint64_t now = 0;
+    size_t peer_count = 0u;
+    uint64_t now;
     if (!node) return;
 
     p2p_private_key_executor_pump(node);
-
-    turbo_mutex_lock(&node->mutex);
-    TLOG_DEBUG("[P2P] Periodic maintenance starting");
-    turbo_mutex_unlock(&node->mutex);
-
-    /* 1. DHT Refresh */
     p2p_gossip_start(node);
+    now = salts_monotonic_ms();
 
-    now = turbo_hrtime() / 1000000;
     for (;;) {
-        turbo_stream_t *expired_stream;
-
-        turbo_mutex_lock(&node->mutex);
-        expired_stream =
-            node_take_expired_cookie_stream_locked(node, now);
-        turbo_mutex_unlock(&node->mutex);
-        if (!expired_stream) {
+        cnet_connection expired = {0};
+        salts_mutex_lock(&node->mutex);
+        if (!node_take_expired_cookie_connection_locked(node, now, &expired)) {
+            salts_mutex_unlock(&node->mutex);
             break;
         }
-        turbo_stream_set_user_data(expired_stream, NULL);
-        turbo_stream_recv_stop(expired_stream);
-        turbo_stream_destroy(expired_stream);
+        salts_mutex_unlock(&node->mutex);
+        (void)cnet_close(&node->network, expired);
     }
     for (;;) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         expired_peer = node_take_expired_pending_peer_locked(node, now);
-        turbo_mutex_unlock(&node->mutex);
-
-        if (!expired_peer) {
-            break;
-        }
-
-        TLOG_DEBUG("[P2P] Expiring unauthenticated peer {}:{}",
-                   expired_peer->ip, expired_peer->port);
+        salts_mutex_unlock(&node->mutex);
+        if (!expired_peer) break;
         p2p_peer_destroy(expired_peer);
     }
 
-    /* 2. Probe healthy authenticated streams and prune stale peers. The
-     * snapshot owns temporary holds so socket I/O never runs under node->mutex. */
     peers = p2p_node_snapshot_connected_peers(node, &peer_count);
-    for (size_t i = 0; i < peer_count; i++) {
+    for (size_t i = 0u; i < peer_count; ++i) {
         p2p_peer_t *peer = peers[i];
-        uint64_t last_seen_ms = 0;
-        int stale = 0;
-        int probe_due = 0;
+        uint64_t last_seen_ms;
+        int stale;
+        int probe_due;
         p2p_peer_info_ex_t peer_info = {0};
+        if (!peer) continue;
 
-        if (!peer) {
-            continue;
-        }
-
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         last_seen_ms = peer->last_seen / 1000000U;
         stale = now >= last_seen_ms &&
                 now - last_seen_ms > P2P_PEER_TIMEOUT_MS;
         probe_due = !stale && peer->state == P2P_PEER_STATE_CONNECTED &&
                     p2p_crypto_session_is_ready(&peer->crypto) &&
-                    peer->outstanding_ping_ms == 0 &&
-                    (peer->last_ping_sent_ms == 0 ||
+                    peer->outstanding_ping_ms == 0u &&
+                    (peer->last_ping_sent_ms == 0u ||
                      (now >= peer->last_ping_sent_ms &&
-                      now - peer->last_ping_sent_ms >= P2P_RTT_PROBE_INTERVAL_MS));
-        if (stale) {
-            p2p_peer_fill_info_ex_locked(peer, &peer_info);
-        }
-        turbo_mutex_unlock(&node->mutex);
+                      now - peer->last_ping_sent_ms >=
+                          P2P_RTT_PROBE_INTERVAL_MS));
+        if (stale) p2p_peer_fill_info_ex_locked(peer, &peer_info);
+        salts_mutex_unlock(&node->mutex);
 
         if (stale) {
-            TLOG_INFO("[P2P] Pruning stale peer {}:{}", peer_info.ip, peer_info.port);
+            TLOG_INFOF("[P2P] Pruning stale peer {}:{}",
+                      peer_info.ip, peer_info.port);
             p2p_peer_disconnect(peer);
         } else if (probe_due) {
             (void)node_send_identity_ping(node, peer);
@@ -1820,31 +1881,25 @@ void node_maintenance_cb(turbo_timer_t *timer) {
     free(peers);
 }
 
-static turbo_stream_t *node_take_expired_cookie_stream_locked(
-    p2p_node_t *node, uint64_t now_ms) {
+static int node_take_expired_cookie_connection_locked(
+    p2p_node_t *node, uint64_t now_ms, cnet_connection *out_connection) {
     size_t index;
-
-    if (!node) {
-        return NULL;
-    }
-    for (index = 0; index < node->security_config.cookie_gate_limit; ++index) {
+    if (!node || !out_connection) return 0;
+    memset(out_connection, 0, sizeof(*out_connection));
+    for (index = 0u; index < node->security_config.cookie_gate_limit; ++index) {
         p2p_cookie_gate_t *gate = &node->cookie_gates[index];
-        turbo_stream_t *stream;
-
         if (gate->state == P2P_COOKIE_GATE_FREE ||
             now_ms <= gate->deadline_ms) {
             continue;
         }
-        stream = (turbo_stream_t *)gate->stream;
+        *out_connection = gate->connection;
         memset(gate, 0, sizeof(*gate));
-        if (node->active_cookie_gates > 0) {
-            node->active_cookie_gates--;
-        }
+        if (node->active_cookie_gates > 0u) node->active_cookie_gates--;
         node->security_rejection_counts[
             P2P_SECURITY_REJECTION_COOKIE_EXPIRED]++;
-        return stream;
+        return 1;
     }
-    return NULL;
+    return 0;
 }
 
 static p2p_peer_t *node_take_expired_pending_peer_locked(p2p_node_t *node,
@@ -1943,9 +1998,9 @@ p2p_topic_t *p2p_topic_find(p2p_node_t *node, const char *name) {
 
     if (!node || !name) return NULL;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     topic = node_find_topic_locked(node, name);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return topic;
 }
@@ -1955,9 +2010,9 @@ p2p_topic_t *p2p_topic_find_or_create(p2p_node_t *node, const char *name) {
 
     if (!node || !name) return NULL;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     topic = node_find_or_create_topic_locked(node, name);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return topic;
 }
@@ -1969,9 +2024,9 @@ int p2p_topic_exists(p2p_node_t *node, const char *name) {
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     exists = node_find_topic_locked(node, name) != NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return exists;
 }
@@ -1979,19 +2034,19 @@ int p2p_topic_exists(p2p_node_t *node, const char *name) {
 int p2p_node_remove_topic(p2p_node_t *node, const char *name) {
     if (!node || !name) return P2P_ERR_INVALID_ARG;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_topic_t **curr = &node->topics;
     while (*curr) {
         if (strcmp((*curr)->name, name) == 0) {
             p2p_topic_t *to_remove = *curr;
             *curr = (*curr)->next_topic;
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
             p2p_topic_destroy(to_remove);
             return P2P_OK;
         }
         curr = &(*curr)->next_topic;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return P2P_ERR_NOT_FOUND;
 }
 
@@ -2002,10 +2057,10 @@ p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node) {
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     topics = node->topics;
     node->topics = NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return topics;
 }

@@ -12,18 +12,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <cnet/cnet.h>
 
-#ifndef CXX_C_API
-#ifdef _WIN32
-#ifdef SHARED_CXX
-#define CXX_C_API __declspec(dllexport)
-#else
-#define CXX_C_API __declspec(dllimport)
-#endif
-#else
-#define CXX_C_API
-#endif
-#endif
+#include "../include/p2p_export.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -37,8 +29,8 @@
 #include "uthash.h"
 #include "crypto/p2p_crypto.h"
 #include "dht/kademlia.h"
-#include <turbo_thread.h>
-typedef struct turbo_stream_listener_s turbo_stream_listener_t;
+#include <salts/thread.h>
+#include <salts/thread_pool.h>
 typedef struct p2p_private_key_executor_s p2p_private_key_executor_t;
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
 
@@ -294,7 +286,7 @@ typedef enum {
 
 typedef struct {
   struct p2p_node_s *node;
-  void *stream;
+  cnet_connection connection;
   char source_ip[P2P_MAX_IP];
   int source_port;
   uint64_t deadline_ms;
@@ -304,6 +296,15 @@ typedef struct {
   size_t recv_len;
   uint8_t initiator_preface[44];
 } p2p_cookie_gate_t;
+
+struct p2p_transport_binding_s {
+  struct p2p_node_s *node;
+  cnet_connection connection;
+  p2p_cookie_gate_t *gate;
+  struct p2p_peer_s *peer;
+  uint8_t inbound;
+  uint8_t terminal;
+};
 
 /* Professional Core Modules */
 #include "crypto/p2p_crypto.h"
@@ -426,8 +427,12 @@ struct p2p_node_s {
   char ip[P2P_MAX_IP];
   int port;
   uint8_t id[P2P_DHT_KEY_SIZE];
-  coro_context_t *ctx;
-  turbo_stream_listener_t *server;
+  cnet_client network;
+  cnet_listener listener;
+  int network_initialized;
+  int listener_initialized;
+  int stop_requested;
+  uint64_t last_maintenance_ms;
   p2p_peer_entry_t *peers_table;
   int peer_count;
 
@@ -469,12 +474,11 @@ struct p2p_node_s {
   p2p_topic_t *topics;
   p2p_download_t *downloads;
   p2p_transfer_manager_t *transfers;
-  turbo_timer_t *gossip_timer;
   kademlia_dht_t *kad_dht;
   p2p_dht_lookup_t *dht_lookups;
   p2p_connect_suppression_t *connect_suppressions;
   vivaldi_coord_t coord;
-  turbo_mutex_t mutex;
+  salts_mutex_t mutex;
 };
 
 /* =============================================================================
@@ -496,9 +500,9 @@ void p2p_dht_lookup_finish(p2p_node_t *node, p2p_dht_lookup_t *lookup);
 p2p_dht_lookup_t *p2p_dht_lookup_find(p2p_node_t *node, uint32_t request_id);
 
 /* Lifecycle */
-CXX_C_API p2p_peer_t *p2p_peer_create(p2p_node_t *node, const char *ip, int port);
-CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer);
-CXX_C_API p2p_peer_t* p2p_peer_find(p2p_node_t *node, const char *ip, int port);
+P2P_API p2p_peer_t *p2p_peer_create(p2p_node_t *node, const char *ip, int port);
+P2P_API void p2p_peer_destroy(p2p_peer_t *peer);
+P2P_API p2p_peer_t* p2p_peer_find(p2p_node_t *node, const char *ip, int port);
 int p2p_peer_connect(p2p_peer_t *peer);
 void p2p_peer_disconnect(p2p_peer_t *peer);
 int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len);
@@ -539,10 +543,14 @@ int p2p_node_remove_topic(p2p_node_t *node, const char *name);
 p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node);
 
 /* Infrastructure */
-CXX_C_API int p2p_node_start_server(p2p_node_t *node);
+P2P_API int p2p_node_start_server(p2p_node_t *node);
 void p2p_node_stop_server(p2p_node_t *node);
+int p2p_node_run_internal(p2p_node_t *node);
+int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms);
+void p2p_node_stop_internal(p2p_node_t *node);
+cnet_observer p2p_node_transport_observer(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
-void node_maintenance_cb(turbo_timer_t *timer);
+void p2p_node_maintenance(p2p_node_t *node);
 
 /* Lifecycle and Events */
 void p2p_node_on_peer_connected(p2p_node_t *node, p2p_peer_t *peer);
@@ -570,20 +578,20 @@ p2p_peer_t **p2p_node_snapshot_connected_peers(p2p_node_t *node, size_t *count_o
 p2p_peer_info_t *p2p_node_snapshot_peer_info(p2p_node_t *node, size_t *count_out);
 p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *count_out);
 void p2p_peer_fill_info_ex_locked(const p2p_peer_t *peer, p2p_peer_info_ex_t *info);
-CXX_C_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer);
-CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
-CXX_C_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node);
-CXX_C_API int p2p_node_pending_peer_source_capacity_available_locked(
+P2P_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer);
+P2P_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
+P2P_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node);
+P2P_API int p2p_node_pending_peer_source_capacity_available_locked(
     p2p_node_t *node, const char *source_ip);
-CXX_C_API int p2p_node_source_admission_acquire_locked(
+P2P_API int p2p_node_source_admission_acquire_locked(
     p2p_node_t *node, const char *source_ip, uint64_t now_ms);
-CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
+P2P_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node, const char *ip, int port);
 int p2p_id_is_zero(const uint8_t *id);
 void p2p_endpoint_to_key(char *buf, size_t buf_size, const char *ip, int port);
 void p2p_endpoint_to_id(const char *ip, int port, kad_id_t *id);
 void p2p_init_kad_node(kad_node_t *node, const uint8_t *id, const char *ip, int port);
-CXX_C_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port);
-CXX_C_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port);
+P2P_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port);
+P2P_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port);
 int p2p_file_list_remove(p2p_file_t **list, const uint8_t *id);
 void p2p_file_list_destroy(p2p_file_t *list);
 

@@ -4,7 +4,7 @@
 #include "mesh_control_primitives.h"
 
 #include <iris/iris.h>
-#include <turbo_selector.h>
+#include <salts_selector.h>
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -70,7 +70,7 @@ typedef struct {
   /** SHA-256 of the canonical selector bytes. */
   uint8_t selector_digest[MESH_PRODUCT_SELECTOR_DIGEST_SIZE_V1];
   /** Borrowed immutable program valid only during the plan callback. */
-  const turbo_selector_program_t *selector_program;
+  const salts_selector_program_t *selector_program;
   size_t predicate_count;
   /** Local monotonic deadline. The planner must stop and fail when reached. */
   uint64_t deadline_ms;

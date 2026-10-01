@@ -1,109 +1,59 @@
 /**
- * connection.c - Unified connection abstraction implementation
- * Eliminates dual client/conn state with clean polymorphism
+ * connection.c - typed CNet connection ownership.
  */
-
 #include "connection.h"
-#include <CoroNet/turbo_stream.h>
+
+#include <salts/error_codes.h>
+#include <salts_buffer.h>
 #include <stdlib.h>
+#include <string.h>
 
-/* =============================================================================
- * Outbound Connection Operations
- * ============================================================================= */
-
-static int outbound_send(void *handle, const void *data, size_t len) {
-    return turbo_stream_send((turbo_stream_t *)handle, (const char *)data, len);
-}
-
-static void outbound_close(void *handle) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    if (stream) {
-        turbo_stream_set_user_data(stream, NULL);
-        turbo_stream_close(stream);
-        turbo_stream_destroy(stream);
-    }
-}
-
-/* =============================================================================
- * Inbound Connection Operations
- * ============================================================================= */
-
-static int inbound_send(void *handle, const void *data, size_t len) {
-    return turbo_stream_send((turbo_stream_t *)handle, (const char *)data, len);
-}
-
-static void inbound_close(void *handle) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    if (stream) {
-        turbo_stream_set_user_data(stream, NULL);
-        turbo_stream_close(stream);
-        turbo_stream_destroy(stream);
-    }
-}
-
-/* =============================================================================
- * Connection Lifecycle
- * ============================================================================= */
-
-p2p_connection_t *p2p_connection_create_outbound(void *client_handle) {
-    if (!client_handle) return NULL;
-    
-    p2p_connection_t *conn = (p2p_connection_t *)calloc(1, sizeof(p2p_connection_t));
+p2p_connection_t *p2p_connection_create(p2p_conn_type_t type,
+                                         cnet_client *owner,
+                                         cnet_connection handle) {
+    p2p_connection_t *conn;
+    if (!owner || handle.generation == 0u) return NULL;
+    conn = (p2p_connection_t *)calloc(1, sizeof(*conn));
     if (!conn) return NULL;
-    
-    conn->type = P2P_CONN_OUTBOUND;
-    conn->ops.handle = client_handle;
-    conn->ops.send = outbound_send;
-    conn->ops.close = outbound_close;
+    conn->type = type;
+    conn->owner = owner;
+    conn->handle = handle;
     conn->is_connected = 1;
-    
     return conn;
 }
 
-p2p_connection_t *p2p_connection_create_inbound(void *conn_handle) {
-    if (!conn_handle) return NULL;
+int p2p_connection_send(p2p_connection_t *conn, const void *data, size_t len) {
+    mem_buffer_t *buffer;
+    int status;
+    if (!conn || !conn->owner || !conn->is_connected || conn->close_requested ||
+        !data || len == 0u) {
+        return SALTS_EINVAL;
+    }
+    buffer = mem_get_buffer(mem_global(), len);
+    if (!buffer) return SALTS_ENOMEM;
+    memcpy(mem_buffer_data(buffer), data, len);
+    mem_set_used(buffer, len);
+    status = cnet_send_buffer(conn->owner, conn->handle, buffer);
+    mem_buffer_release(buffer);
+    return status;
+}
 
-    p2p_connection_t *conn = (p2p_connection_t *)calloc(1, sizeof(p2p_connection_t));
-    if (!conn) return NULL;
-    
-    conn->type = P2P_CONN_INBOUND;
-    conn->ops.handle = conn_handle;
-    conn->ops.send = inbound_send;
-    conn->ops.close = inbound_close;
-    conn->is_connected = 1;
-    
-    return conn;
+int p2p_connection_close(p2p_connection_t *conn) {
+    int status;
+    if (!conn || !conn->owner) return SALTS_EINVAL;
+    if (!conn->is_connected || conn->close_requested) return SALTS_EALREADY;
+    status = cnet_close(conn->owner, conn->handle);
+    if (status == SALTS_OK || status == SALTS_EALREADY || status == SALTS_ENOENT) {
+        conn->close_requested = 1;
+        if (status == SALTS_ENOENT) conn->is_connected = 0;
+    }
+    return status;
 }
 
 void p2p_connection_destroy(p2p_connection_t *conn) {
     if (!conn) return;
-    
-    if (conn->is_connected && conn->ops.close) {
-        conn->is_connected = 0;
-        conn->ops.close(conn->ops.handle);
+    if (conn->owner && conn->is_connected && !conn->close_requested) {
+        (void)p2p_connection_close(conn);
     }
-    
     free(conn);
-}
-
-/* =============================================================================
- * Connection Operations
- * ============================================================================= */
-
-int p2p_connection_send(p2p_connection_t *conn, const void *data, size_t len) {
-    if (!conn || !conn->is_connected || !conn->ops.send) {
-        return -1;
-    }
-    
-    return conn->ops.send(conn->ops.handle, data, len);
-}
-
-void p2p_connection_close(p2p_connection_t *conn) {
-    if (!conn || !conn->is_connected) return;
-    
-    if (conn->ops.close) {
-        conn->ops.close(conn->ops.handle);
-    }
-    
-    conn->is_connected = 0;
 }

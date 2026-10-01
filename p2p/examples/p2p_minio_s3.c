@@ -166,7 +166,7 @@ void handle_multipart_control(Req *req, Res *res) {
         upl->next = g_uploads;
         g_uploads = upl;
 
-        TLOG_INFO("Initiated multipart upload: {} (ID: {})", object, upl->upload_id);
+        TLOG_INFOF("Initiated multipart upload: {} (ID: {})", object, upl->upload_id);
 
         json_value_t *j = turbo_json_create_object();
         turbo_json_object_set_string(j, "bucket", bucket);
@@ -209,7 +209,7 @@ void handle_multipart_control(Req *req, Res *res) {
         snprintf(sharded_val, sizeof(sharded_val), "SHARDS:%s", manifest_str);
         p2p_dht_put(g_node, dht_key, sharded_val, strlen(sharded_val) + 1);
 
-        TLOG_INFO("Completed multipart upload: {} (ID: {})", object, upload_id);
+        TLOG_INFOF("Completed multipart upload: {} (ID: {})", object, upload_id);
 
         /* Remove from tracking */
         if (prev) prev->next = upl->next; else g_uploads = upl->next;
@@ -279,7 +279,7 @@ void handle_create_bucket(Req *req, Res *res) {
     new_bucket->next = g_buckets;
     g_buckets = new_bucket;
 
-    TLOG_INFO("Created bucket: {}", name);
+    TLOG_INFOF("Created bucket: {}", name);
     send_xml(res, OK, "");
 }
 
@@ -297,7 +297,7 @@ void handle_delete_bucket(Req *req, Res *res) {
             bucket_t *to_free = *curr;
             *curr = (*curr)->next;
             free(to_free);
-            TLOG_INFO("Deleted bucket: {}", name);
+            TLOG_INFOF("Deleted bucket: {}", name);
             send_xml(res, NO_CONTENT, "");
             return;
         }
@@ -414,7 +414,7 @@ void handle_put_object(Req *req, Res *res) {
         p->next = *curr;
         *curr = p;
 
-        TLOG_INFO("Uploaded part {} for upload {} (Hash: {})", part_num, upload_id, content_hash);
+        TLOG_INFOF("Uploaded part {} for upload {} (Hash: {})", part_num, upload_id, content_hash);
         
         set_header(res, "ETag", content_hash);
         send_xml(res, OK, "");
@@ -426,7 +426,7 @@ void handle_put_object(Req *req, Res *res) {
 
     if (copy_source) {
         /* CopyObject Logic */
-        TLOG_INFO("COPY object: {} -> {}/{}", copy_source, bucket, object);
+        TLOG_INFOF("COPY object: {} -> {}/{}", copy_source, bucket, object);
         
         /* copy_source is usually /bucket/object */
         const char *src_key = copy_source;
@@ -459,7 +459,7 @@ void handle_put_object(Req *req, Res *res) {
         return;
     }
 
-    TLOG_INFO("PUT object: {}/{}", bucket, object);
+    TLOG_INFOF("PUT object: {}/{}", bucket, object);
 
     char temp_path[256];
     snprintf(temp_path, sizeof(temp_path), "tmp_%s_%s.dat", bucket, object);
@@ -506,7 +506,7 @@ void handle_get_object(Req *req, Res *res) {
         return;
     }
 
-    TLOG_INFO("GET object: {}/{} (Range: {})", bucket, object, range_header ? range_header : "Full");
+    TLOG_INFOF("GET object: {}/{} (Range: {})", bucket, object, range_header ? range_header : "Full");
 
     char dht_key[512];
     make_dht_key(bucket, object, dht_key, sizeof(dht_key));
@@ -569,7 +569,7 @@ void handle_get_object(Req *req, Res *res) {
         /* In real S3, we would serve partial content with 206 status */
         /* Iris reply_file doesn't support ranges yet in this demo,
            so we would manually slice the file. */
-        TLOG_INFO("Serving Range: {}-{}", start, end);
+        TLOG_INFOF("Serving Range: {}-{}", start, end);
         /* Slice logic... left as exercise for performance */
     }
 
@@ -610,7 +610,7 @@ void handle_delete_object(Req *req, Res *res) {
     const char *bucket = get_params(req, "bucket");
     const char *object = get_params(req, "object");
 
-    TLOG_INFO("DELETE object: {}/{}", bucket, object);
+    TLOG_INFOF("DELETE object: {}/{}", bucket, object);
 
     char dht_key[512];
     make_dht_key(bucket, object, dht_key, sizeof(dht_key));
@@ -656,7 +656,7 @@ int main(int argc, char **argv) {
 
         tlog_set_default(logger);
     }
-    TLOG_INFO("Starting P2P Node on {}:{}...", ip, port);
+    TLOG_INFOF("Starting P2P Node on {}:{}...", ip, port);
     g_node = p2p_create(ip, port);
     if (!g_node) {
         TLOG_ERROR("Failed to create node");
@@ -707,7 +707,7 @@ int main(int argc, char **argv) {
     /* Connect to a bootstrap peer if provided */
     /* Connect to a bootstrap peer if provided */
     if (argc >= 7) {
-        TLOG_INFO("Connecting to bootstrap {}:{}...", argv[5], atoi(argv[6]));
+        TLOG_INFOF("Connecting to bootstrap {}:{}...", argv[5], atoi(argv[6]));
         p2p_connect(g_node, argv[5], atoi(argv[6]));
     }
 

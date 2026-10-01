@@ -7,7 +7,7 @@
 #define P2P_PEER_H
 
 #include "types.h"
-#include <CoroNet/turbo_callbacks.h>
+#include <cnet/cnet.h>
 #include <stdbool.h>
 
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
@@ -78,8 +78,10 @@ int p2p_peer_id_cmp(const p2p_peer_t *a, const p2p_peer_t *b);
  */
 int p2p_peer_start_handshake(p2p_peer_t *peer);
 
-int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx);
-void p2p_peer_stream_close(void *handle);
-void p2p_peer_stream_connect(void *handle, int status, void *arg);
+void p2p_peer_transport_state(p2p_peer_t *peer, cnet_connection connection,
+                              cnet_connection_state state,
+                              const cnet_error *error);
+void p2p_peer_transport_receive(p2p_peer_t *peer, cnet_connection connection,
+                                const cnet_receive_view *view);
 
 #endif /* P2P_PEER_H */

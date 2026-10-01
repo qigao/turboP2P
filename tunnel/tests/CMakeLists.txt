@@ -27,9 +27,9 @@ foreach(test_source ${TUNNEL_TEST_SOURCES})
                 ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
     target_link_libraries(${test_name}
-        PRIVATE TurboUtils::Core
-                TurboNet::CoroNet
-                TurboUtils::TinyTest)
+        PRIVATE Salts::Core
+                Salts::CNet
+                Salts::TinyTest)
 
     if(WIN32)
         target_link_libraries(${test_name} PRIVATE ws2_32)
