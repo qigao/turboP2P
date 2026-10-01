@@ -29,7 +29,6 @@
 #include "dht/kademlia.h"
 #include <salts/thread.h>
 #include <salts/thread_pool.h>
-typedef struct turbo_stream_listener_s turbo_stream_listener_t;
 typedef struct p2p_private_key_executor_s p2p_private_key_executor_t;
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
 
@@ -285,7 +284,7 @@ typedef enum {
 
 typedef struct {
   struct p2p_node_s *node;
-  void *stream;
+  cnet_connection connection;
   char source_ip[P2P_MAX_IP];
   int source_port;
   uint64_t deadline_ms;
@@ -417,8 +416,12 @@ struct p2p_node_s {
   char ip[P2P_MAX_IP];
   int port;
   uint8_t id[P2P_DHT_KEY_SIZE];
-  coro_context_t *ctx;
-  turbo_stream_listener_t *server;
+  cnet_client network;
+  cnet_listener listener;
+  int network_initialized;
+  int listener_initialized;
+  int stop_requested;
+  uint64_t last_maintenance_ms;
   p2p_peer_entry_t *peers_table;
   int peer_count;
 
@@ -460,7 +463,6 @@ struct p2p_node_s {
   p2p_topic_t *topics;
   p2p_download_t *downloads;
   p2p_transfer_manager_t *transfers;
-  salts_timer_t *gossip_timer;
   kademlia_dht_t *kad_dht;
   p2p_dht_lookup_t *dht_lookups;
   p2p_connect_suppression_t *connect_suppressions;
@@ -535,6 +537,7 @@ void p2p_node_stop_server(p2p_node_t *node);
 int p2p_node_run_internal(p2p_node_t *node);
 int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms);
 void p2p_node_stop_internal(p2p_node_t *node);
+cnet_observer p2p_node_transport_observer(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
 void node_maintenance_cb(salts_timer_t *timer);
 
