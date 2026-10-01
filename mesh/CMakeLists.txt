@@ -241,7 +241,7 @@ target_include_directories(mesh_node_ipc PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_node_ipc
   PUBLIC mesh_control_primitives Salts::Core
-  PRIVATE Salts::Crypto)
+  PRIVATE Salts::Crypto OpenSSL::Crypto)
 set_property(TARGET mesh_node_ipc PROPERTY FOLDER "mesh/internal")
 
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
@@ -280,7 +280,7 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
   target_link_libraries(mesh_node_control_flowmq_provider PUBLIC
     mesh_node_control_client_runtime mesh_control_reconciler
     mesh_control_document
-    PRIVATE Salts::Crypto)
+    PRIVATE Salts::Crypto OpenSSL::Crypto)
   set_property(TARGET mesh_node_control_flowmq_provider PROPERTY FOLDER "mesh/internal")
 
   add_library(mesh_node_control_flowmq_network_provider STATIC
@@ -291,7 +291,7 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mesh_node_control_flowmq_network_provider PUBLIC
     mesh_node_control_client_runtime mesh_control_document
-    PRIVATE Salts::Crypto)
+    PRIVATE Salts::Crypto OpenSSL::Crypto)
   set_property(TARGET mesh_node_control_flowmq_network_provider PROPERTY FOLDER "mesh/internal")
 endif()
 
@@ -320,7 +320,7 @@ target_include_directories(mesh_network_reconciler PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(mesh_network_reconciler PUBLIC
-  mesh_control_document mesh PRIVATE Salts::Crypto)
+  mesh_control_document mesh PRIVATE Salts::Crypto OpenSSL::Crypto)
 set_property(TARGET mesh_network_reconciler PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_node_ipc_network_executor STATIC
@@ -329,7 +329,7 @@ add_library(mesh_node_ipc_network_executor STATIC
 target_include_directories(mesh_node_ipc_network_executor PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_node_ipc_network_executor PUBLIC
-  mesh_node_ipc mesh_network_reconciler PRIVATE Salts::Crypto)
+  mesh_node_ipc mesh_network_reconciler PRIVATE Salts::Crypto OpenSSL::Crypto)
 set_property(TARGET mesh_node_ipc_network_executor PROPERTY FOLDER "mesh/internal")
 
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
@@ -499,7 +499,7 @@ add_library(m3_gateway_sigv4 STATIC
   src/m3_gateway_sigv4.h)
 target_include_directories(m3_gateway_sigv4 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(m3_gateway_sigv4 PUBLIC Salts::Crypto)
+target_link_libraries(m3_gateway_sigv4 PUBLIC Salts::Crypto PRIVATE OpenSSL::Crypto)
 set_property(TARGET m3_gateway_sigv4 PROPERTY FOLDER "mesh/internal")
 
 # Authenticated chunk transport over a p2p node: wire codec, capability
@@ -1376,7 +1376,7 @@ target_include_directories(
 target_link_libraries(mesh
   PUBLIC Salts::Core TurboP2P::P2P
   PRIVATE mesh_mgmt_agent_router mesh_mgmt_crypto mesh_flow_ruleset
-          Salts::Crypto)
+          Salts::Crypto OpenSSL::Crypto)
 
 
 target_link_libraries(mesh PRIVATE  SaltsNet::ICE)
