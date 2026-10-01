@@ -42,7 +42,7 @@ add_executable(mesh_stream_live_hls_main
     mesh_stream_live_hls_main.c)
 target_link_libraries(mesh_stream_live_hls_main
     PRIVATE mesh_stream_live_hls mesh_stream_kcp_adapter mesh_stream_live
-            TurboNet::CoroNet Salts::Core)
+            Salts::CNet Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_hls_main PRIVATE ws2_32)
 endif()
@@ -54,7 +54,7 @@ set_target_properties(mesh_stream_live_hls_main PROPERTIES
 add_executable(mesh_stream_live_source_main
     mesh_stream_live_source_main.c)
 target_link_libraries(mesh_stream_live_source_main
-    PRIVATE mesh_stream_kcp_adapter mesh_stream_live TurboNet::CoroNet Salts::Core)
+    PRIVATE mesh_stream_kcp_adapter mesh_stream_live Salts::CNet Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_source_main PRIVATE ws2_32)
 endif()
@@ -67,7 +67,7 @@ set_target_properties(mesh_stream_live_source_main PROPERTIES
 add_executable(mesh_stream_live_client_main
     mesh_stream_live_client_main.c)
 target_link_libraries(mesh_stream_live_client_main
-    PRIVATE TurboNet::CoroNet CHttp::Client Salts::Core)
+    PRIVATE Salts::CNet CHttp::Client Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_client_main PRIVATE ws2_32)
 endif()
@@ -81,7 +81,7 @@ add_executable(mesh_stream_media_main
 target_link_libraries(mesh_stream_media_main
     PRIVATE mesh_stream_media_pull mesh_media_playlist mesh_media_index
             mesh_release m3_object_manifest m3_gateway_sigv4 mesh_mgmt_crypto
-            TurboNet::Crypto TurboNet::CoroNet CHttp::Client OpenSSL::Crypto)
+            Salts::Crypto Salts::CNet CHttp::Client OpenSSL::Crypto)
 if(WIN32)
     target_link_libraries(mesh_stream_media_main PRIVATE ws2_32)
 endif()
@@ -159,7 +159,7 @@ target_compile_definitions(meshd PRIVATE USING_EXAMPLES)
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
     target_sources(meshd PRIVATE meshd_network_control.c)
     target_link_libraries(meshd PRIVATE
-        mesh_node_network_control_service TurboNet::Crypto)
+        mesh_node_network_control_service Salts::Crypto)
     target_compile_definitions(meshd PRIVATE
         TURBOP2P_ENABLE_FLOWMQ_IPC=1)
 endif()
