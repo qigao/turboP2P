@@ -51,8 +51,8 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(
   p2p
-  PUBLIC Salts::Core TurboNet::CoroNet
-  PRIVATE OpenSSL::Crypto TurboNet::Crypto TurboP2P::NoiseProtocol roaring uthash)
+  PUBLIC Salts::Core Salts::CNet
+  PRIVATE OpenSSL::Crypto Salts::Crypto TurboP2P::NoiseProtocol roaring uthash)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)
 else()
