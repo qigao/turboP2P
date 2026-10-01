@@ -1363,7 +1363,7 @@ add_library(mesh SHARED ${MESH_LIB_SOURCES})
 add_library(TurboP2P::Mesh ALIAS mesh)
 
 # Define export macros for DLL
-target_compile_definitions(mesh PRIVATE SHARED_CXX)
+target_compile_definitions(mesh PRIVATE MESH_BUILDING_LIBRARY)
 
 # Include directories
 target_include_directories(
