@@ -1,7 +1,7 @@
 #include "mesh_stream_data.h"
 
-#include <turbo_crypto.h>
-#include <turbo_thread.h>
+#include <salts/crypto.h>
+#include <salts/clock.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -213,7 +213,7 @@ void mesh_stream_data_destroy(mesh_stream_data_t *stream) {
 
 static int hash_block(const uint8_t *bytes, size_t len,
                       uint8_t digest[MESH_STREAM_DATA_HASH_SIZE]) {
-  return turbo_crypto_sha256(bytes, len, digest) == TURBO_CRYPTO_OK ? 0 : -1;
+  return salts_crypto_sha256(bytes, len, digest) == SALTS_CRYPTO_OK ? 0 : -1;
 }
 
 static int io_send(mesh_stream_data_t *stream, const uint8_t *frame, size_t len) {
@@ -238,7 +238,7 @@ static int send_open(mesh_stream_data_t *stream) {
 static int send_data(mesh_stream_data_t *stream, uint64_t seq, const uint8_t *block,
                      size_t block_len, uint64_t now_ms) {
   if (now_ms == 0u)
-    now_ms = turbo_monotonic_ms();
+    now_ms = salts_monotonic_ms();
   uint8_t frame[MESH_STREAM_DATA_MAX_FRAME];
   uint8_t *payload = frame + LENGTH_PREFIX_SIZE + FRAME_HEADER_SIZE;
   size_t frame_len;
@@ -683,7 +683,7 @@ mesh_stream_data_result_t mesh_stream_data_tick(mesh_stream_data_t *stream, uint
   if (stream->config.resend_timeout_ms == 0u)
     return MESH_STREAM_DATA_OK;
   if (now_ms == 0u)
-    now_ms = turbo_monotonic_ms();
+    now_ms = salts_monotonic_ms();
   for (size_t i = 0u; i < stream->config.window_blocks; i++) {
     msd_slot_t *slot = &stream->send_slots[i];
 

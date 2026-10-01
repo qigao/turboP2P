@@ -2,7 +2,24 @@
 
 include(CMakeFindDependencyMacro)
 
+foreach(_root IN ITEMS SALTS_ROOT SALTS_UTILS_ROOT)
+  if(NOT DEFINED ENV{${_root}} OR NOT IS_DIRECTORY "$ENV{${_root}}")
+    message(FATAL_ERROR "${_root} must name the installed SDK profile")
+  endif()
+endforeach()
+unset(_root)
+unset(Salts_DIR CACHE)
+unset(Salts_DIR)
+unset(SaltsUtils_DIR CACHE)
+unset(SaltsUtils_DIR)
+find_dependency(Salts 1.8.9 CONFIG REQUIRED PATHS "$ENV{SALTS_ROOT}"
+                NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+find_dependency(SaltsUtils 4.1.14 CONFIG REQUIRED PATHS "$ENV{SALTS_UTILS_ROOT}"
+                NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+find_dependency(TurboUtils REQUIRED)
 find_dependency(TurboParser CONFIG REQUIRED)
+find_dependency(TurboNet REQUIRED)
+find_dependency(OpenSSL REQUIRED)
 
 # Find dependencies (add more as needed)
 

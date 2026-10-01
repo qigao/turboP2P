@@ -1,5 +1,6 @@
 #include "mesh_node_ipc_owner.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <stdlib.h>
@@ -194,8 +195,8 @@ static mesh_control_result_t handle_command(
 
   if (mesh_node_ipc_command_decode_v1(envelope->body, envelope->body_size,
                                       &command) != MESH_CONTROL_OK ||
-      turbo_crypto_sha256(envelope->body, envelope->body_size,
-                          binding_digest) != TURBO_CRYPTO_OK) {
+      salts_crypto_sha256(envelope->body, envelope->body_size,
+                          binding_digest) != SALTS_CRYPTO_OK) {
     (void)mesh_node_ipc_channel_consume_v1(owner->inbound);
     return MESH_CONTROL_INVALID_ARG;
   }

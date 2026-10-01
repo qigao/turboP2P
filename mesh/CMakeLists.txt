@@ -55,7 +55,7 @@ target_include_directories(mesh_mgmt_p2p_security PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_p2p_security PUBLIC
   mesh_mgmt_identity TurboP2P::P2P
-  PRIVATE TurboNet::Crypto)
+  PRIVATE TurboNet::Crypto Salts::Crypto)
 set_property(TARGET mesh_mgmt_p2p_security PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_mgmt_session STATIC
@@ -122,7 +122,7 @@ add_library(mesh_control_outbox STATIC
 target_include_directories(mesh_control_outbox PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_outbox
-  PUBLIC mesh_control_primitives TurboUtils::Core)
+  PUBLIC mesh_control_primitives Salts::CSTL PRIVATE Salts::Platform)
 set_property(TARGET mesh_control_outbox PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_durable_outbox STATIC
@@ -241,7 +241,7 @@ target_include_directories(mesh_node_ipc PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_node_ipc
   PUBLIC mesh_control_primitives TurboUtils::Core
-  PRIVATE TurboNet::Crypto)
+  PRIVATE TurboNet::Crypto Salts::Crypto)
 set_property(TARGET mesh_node_ipc PROPERTY FOLDER "mesh/internal")
 
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
@@ -280,7 +280,7 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
   target_link_libraries(mesh_node_control_flowmq_provider PUBLIC
     mesh_node_control_client_runtime mesh_control_reconciler
     mesh_control_document
-    PRIVATE TurboNet::Crypto)
+    PRIVATE TurboNet::Crypto Salts::Crypto)
   set_property(TARGET mesh_node_control_flowmq_provider PROPERTY FOLDER "mesh/internal")
 
   add_library(mesh_node_control_flowmq_network_provider STATIC
@@ -291,7 +291,7 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mesh_node_control_flowmq_network_provider PUBLIC
     mesh_node_control_client_runtime mesh_control_document
-    PRIVATE TurboNet::Crypto)
+    PRIVATE TurboNet::Crypto Salts::Crypto)
   set_property(TARGET mesh_node_control_flowmq_network_provider PROPERTY FOLDER "mesh/internal")
 endif()
 
@@ -320,7 +320,7 @@ target_include_directories(mesh_network_reconciler PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(mesh_network_reconciler PUBLIC
-  mesh_control_document mesh PRIVATE TurboNet::Crypto)
+  mesh_control_document mesh PRIVATE TurboNet::Crypto Salts::Crypto)
 set_property(TARGET mesh_network_reconciler PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_node_ipc_network_executor STATIC
@@ -329,7 +329,7 @@ add_library(mesh_node_ipc_network_executor STATIC
 target_include_directories(mesh_node_ipc_network_executor PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_node_ipc_network_executor PUBLIC
-  mesh_node_ipc mesh_network_reconciler PRIVATE TurboNet::Crypto)
+  mesh_node_ipc mesh_network_reconciler PRIVATE TurboNet::Crypto Salts::Crypto)
 set_property(TARGET mesh_node_ipc_network_executor PROPERTY FOLDER "mesh/internal")
 
 if(TURBOP2P_ENABLE_FLOWMQ_IPC)
@@ -447,7 +447,8 @@ target_include_directories(mesh_control_agent PUBLIC
 target_link_libraries(mesh_control_agent PUBLIC
   mesh_control_iris mesh_control_owner mesh_control_policy
   mesh_control_reconciler mesh_network_reconciler mesh_control_status mesh_control_wal_worker
-  TurboNet::CoroNet TurboHttp::Iris)
+  TurboNet::CoroNet TurboHttp::Iris
+  PRIVATE Salts::Crypto)
 set_property(TARGET mesh_control_agent PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_agent_service STATIC
@@ -499,7 +500,8 @@ add_library(m3_gateway_sigv4 STATIC
   src/m3_gateway_sigv4.h)
 target_include_directories(m3_gateway_sigv4 PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(m3_gateway_sigv4 PUBLIC TurboNet::Crypto)
+target_link_libraries(m3_gateway_sigv4 PUBLIC TurboNet::Crypto
+  PRIVATE Salts::Crypto)
 set_property(TARGET m3_gateway_sigv4 PROPERTY FOLDER "mesh/internal")
 
 # Authenticated chunk transport over a p2p node: wire codec, capability
@@ -524,7 +526,7 @@ target_include_directories(m3_gateway_datapane PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(m3_gateway_datapane
   PUBLIC m3_store_node m3_object_manifest m3_chunk_mesh TurboP2P::P2P
-  PRIVATE TurboNet::Crypto TurboUtils::Core)
+  PRIVATE TurboNet::Crypto TurboUtils::Core Salts::Crypto)
 set_property(TARGET m3_gateway_datapane PROPERTY FOLDER "mesh/internal")
 
 # Placement repair: computes per-chunk replica debt, backfills missing
@@ -547,7 +549,8 @@ target_include_directories(m3_gateway PUBLIC
 target_link_libraries(m3_gateway PUBLIC
   m3_gateway_sigv4 m3_namespace_local_store m3_object_manifest
   m3_gateway_datapane m3_repair mesh_media_playlist mesh_release
-  TurboNet::Crypto TurboHttp::Iris)
+  TurboNet::Crypto TurboHttp::Iris
+  PRIVATE Salts::Crypto)
 set_property(TARGET m3_gateway PROPERTY FOLDER "mesh/internal")
 
 # Owner-loop bridge from a content CID to the P2P swarm and immutable local
@@ -1065,8 +1068,7 @@ target_include_directories(mesh_mgmt_agent_router PUBLIC
 target_link_libraries(mesh_mgmt_agent_router PUBLIC
   mesh_mgmt_p2p_peer
   mesh_mgmt_execution_disabled_responder
-  mesh_mgmt_execution_response_consumer
-  TurboUtils::Core)
+  mesh_mgmt_execution_response_consumer Salts::CSTL PRIVATE Salts::Platform)
 set_property(TARGET mesh_mgmt_agent_router PROPERTY FOLDER "mesh/internal")
 
 # Bounded, identity-keyed management endpoint state. Verified discovery input,
@@ -1077,7 +1079,7 @@ add_library(mesh_mgmt_endpoint_pool STATIC
 target_include_directories(mesh_mgmt_endpoint_pool PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_endpoint_pool PUBLIC
-  mesh_mgmt_crypto TurboP2P::P2P TurboUtils::Core)
+  mesh_mgmt_crypto TurboP2P::P2P Salts::CSTL PRIVATE Salts::Platform)
 set_property(TARGET mesh_mgmt_endpoint_pool PROPERTY FOLDER "mesh/internal")
 
 # Strict canonical codec and direct-trust verification boundary for signed
@@ -1209,8 +1211,7 @@ add_library(mesh_stream_data STATIC
   src/mesh_stream_data.h)
 target_include_directories(mesh_stream_data PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_stream_data
-  PRIVATE TurboNet::Crypto TurboUtils::Core)
+target_link_libraries(mesh_stream_data PRIVATE Salts::Crypto Salts::Platform)
 set_property(TARGET mesh_stream_data PROPERTY FOLDER "mesh/internal")
 
 # Per-source health scoring and bad-source elimination for multi-source pulls.
@@ -1231,7 +1232,7 @@ target_include_directories(mesh_stream_multisource PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_stream_multisource
   PUBLIC mesh_stream_source_selector
-  PRIVATE TurboNet::Crypto)
+  PRIVATE Salts::Crypto)
 set_property(TARGET mesh_stream_multisource PROPERTY FOLDER "mesh/internal")
 
 # Stream service discovery: mesh-stream/mesh-sync dns-name convention and a
@@ -1273,7 +1274,7 @@ target_include_directories(mesh_release PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_release
   PUBLIC m3_object_manifest
-  PRIVATE TurboNet::Crypto TurboUtils::Core)
+  PRIVATE Salts::Crypto)
 set_property(TARGET mesh_release PROPERTY FOLDER "mesh/internal")
 
 # HLS-style playlist generation over the media index: media playlist with
@@ -1296,7 +1297,7 @@ target_include_directories(mesh_stream_media_pull PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_stream_media_pull
   PUBLIC mesh_media_index
-  PRIVATE TurboNet::Crypto TurboUtils::Core)
+  PRIVATE Salts::Crypto)
 set_property(TARGET mesh_stream_media_pull PROPERTY FOLDER "mesh/internal")
 
 # KCP transport binding for mesh_stream_live: live FEC -> turbo_kcp
@@ -1355,7 +1356,7 @@ target_include_directories(mesh_sync_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_sync_engine
   PUBLIC m3_object_manifest
-  PRIVATE TurboNet::Crypto TurboUtils::Core)
+  PRIVATE TurboNet::Crypto TurboUtils::Core Salts::Crypto)
 set_property(TARGET mesh_sync_engine PROPERTY FOLDER "mesh/internal")
 
 # Build as shared library (DLL on Windows)
@@ -1376,7 +1377,7 @@ target_include_directories(
 target_link_libraries(mesh
   PUBLIC TurboUtils::Core TurboP2P::P2P
   PRIVATE mesh_mgmt_agent_router mesh_mgmt_crypto mesh_flow_ruleset
-          TurboNet::Crypto)
+          TurboNet::Crypto Salts::Crypto)
 
 
 target_link_libraries(mesh PRIVATE  TurboNet::Ice)

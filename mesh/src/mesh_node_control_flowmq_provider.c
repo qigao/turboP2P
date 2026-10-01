@@ -1,5 +1,6 @@
 #include "mesh_node_control_flowmq_provider.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <string.h>
@@ -79,8 +80,8 @@ static mesh_control_result_t provider_try_start(
         &request->spec, document, sizeof(document), &document_size);
     if (result != MESH_CONTROL_OK)
       return result;
-    if (turbo_crypto_sha256(document, document_size,
-                            command.document_digest) != TURBO_CRYPTO_OK)
+    if (salts_crypto_sha256(document, document_size,
+                            command.document_digest) != SALTS_CRYPTO_OK)
       return MESH_CONTROL_INVALID_STATE;
     command.document = document;
     command.document_size = document_size;

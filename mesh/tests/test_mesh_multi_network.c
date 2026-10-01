@@ -2,7 +2,7 @@
 
 #include <turbo_mesh_multi_network.h>
 #include <p2p.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <string.h>
 #include <time.h>
@@ -243,8 +243,8 @@ static void mesh_multi_test_shared_underlay_isolates_networks(void) {
     memset(issuer.key_id, 0x61, sizeof(issuer.key_id));
     memcpy(issuer.public_key, CONTROLLER_PUBLIC_KEY,
            sizeof(issuer.public_key));
-    check_int_eq(TURBO_CRYPTO_OK,
-                 turbo_crypto_sha256("multi-test", strlen("multi-test"),
+    check_int_eq(SALTS_CRYPTO_OK,
+                 salts_crypto_sha256("multi-test", strlen("multi-test"),
                                      mesh_id));
     memset(&network_a_uid, 0xa1, sizeof(network_a_uid));
     memset(&network_b_uid, 0xb2, sizeof(network_b_uid));

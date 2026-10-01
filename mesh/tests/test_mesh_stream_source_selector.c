@@ -3,7 +3,7 @@
 #include "mesh_stream_multisource.h"
 #include "mesh_stream_source_selector.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -26,7 +26,7 @@ static void fill_block_data(void) {
   for (size_t b = 0u; b < TEST_BLOCKS; b++) {
     for (size_t i = 0u; i < TEST_BLOCK; i++)
       g_block_data[b][i] = (uint8_t)(b * 31u + i * 7u + (i >> 4u));
-    (void)turbo_crypto_sha256(g_block_data[b], TEST_BLOCK, g_block_digests[b]);
+    (void)salts_crypto_sha256(g_block_data[b], TEST_BLOCK, g_block_digests[b]);
   }
 }
 
@@ -45,62 +45,62 @@ static void test_selector_health_and_pick(void) {
   size_t in_flight[TEST_SOURCES] = {0u, 0u, 0u};
 
   make_ids(ids);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 3u, 4u));
   for (size_t s = 0u; s < TEST_SOURCES; s++) {
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
   }
-  check_size_eq(selector.count, TEST_SOURCES);
+  check_equal(selector.count, TEST_SOURCES);
 
   /* Equal health: prefer_spread picks the first (least in-flight). */
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_pick(&selector, 1, in_flight,
                                                 TEST_SOURCES, &picked));
-  check_size_eq(picked, 0u);
+  check_equal(picked, 0u);
 
   /* A lower smoothed RTT wins when in-flight counts tie. */
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_report_success(&selector, 1u, 10u, 100u));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_report_success(&selector, 2u, 40u, 100u));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_pick(&selector, 1, in_flight,
                                                 TEST_SOURCES, &picked));
-  check_size_eq(picked, 1u); /* source 1 has lower RTT */
+  check_equal(picked, 1u); /* source 1 has lower RTT */
 
   /* prefer_spread favors the source with fewer in-flight requests. */
   in_flight[1] = 5u;
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_pick(&selector, 1, in_flight,
                                                 TEST_SOURCES, &picked));
-  check_size_eq(picked, 2u); /* source 2 has 0 in flight, source 0 has 0 too but RTT */
+  check_equal(picked, 2u); /* source 2 has 0 in flight, source 0 has 0 too but RTT */
 
   /* Failure threshold disables a source. */
   for (int i = 0; i < 3; i++) {
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_report_failure(&selector, 2u, 200u));
   }
-  check_uint_eq(selector.sources[2].enabled, 0u);
+  check_equal(selector.sources[2].enabled, 0u);
   in_flight[1] = 0u;
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_pick(&selector, 1, in_flight,
                                                 TEST_SOURCES, &picked));
   check_true(picked != SIZE_MAX && picked != 2u);
 
   /* Success re-enables and resets failures. */
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_report_success(&selector, 2u, 5u, 300u));
-  check_uint_eq(selector.sources[2].enabled, 1u);
-  check_uint_eq(selector.sources[2].consecutive_failures, 0u);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(selector.sources[2].enabled, 1u);
+  check_equal(selector.sources[2].consecutive_failures, 0u);
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_enable(&selector, 0u));
 
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
                mesh_stream_source_selector_pick(&selector, 1, NULL, 0u, &picked));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
                mesh_stream_source_selector_report_failure(&selector, 99u, 1u));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_INVALID_ARG,
                mesh_stream_source_selector_register(NULL, ids[0]));
 }
 
@@ -223,10 +223,10 @@ static void test_multisource_spreads_and_verifies(void) {
 
   fill_block_data();
   make_ids(ids);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 3u, 4u));
   for (size_t s = 0u; s < TEST_SOURCES; s++)
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
   init_fake_io(&fake, &now_ms);
   memset(&io, 0, sizeof(io));
@@ -241,8 +241,8 @@ static void test_multisource_spreads_and_verifies(void) {
   check_not_null(ms);
   run_pull(ms, &now_ms, out, sizeof(out), &out_len, 0);
   check_true(mesh_stream_multisource_complete(ms));
-  check_size_eq(out_len, sizeof(out));
-  check_mem_eq(out, g_block_data, sizeof(out));
+  check_equal(out_len, sizeof(out));
+  check_equal(out, g_block_data, sizeof(out));
   /* With equal health and prefer_spread, more than one source served blocks. */
   {
     size_t served_sources = 0u;
@@ -268,10 +268,10 @@ static void test_multisource_bad_source_eliminated(void) {
 
   fill_block_data();
   make_ids(ids);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 1u, 4u));
   for (size_t s = 0u; s < 2u; s++)
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
   init_fake_io(&fake, &now_ms);
   memset(&fake.sources[1].corrupt, 1, sizeof(fake.sources[1].corrupt));
@@ -287,9 +287,9 @@ static void test_multisource_bad_source_eliminated(void) {
   check_not_null(ms);
   run_pull(ms, &now_ms, out, sizeof(out), &out_len, 0);
   check_true(mesh_stream_multisource_complete(ms));
-  check_size_eq(out_len, sizeof(out));
-  check_mem_eq(out, g_block_data, sizeof(out));
-  check_uint_eq(selector.sources[1].enabled, 0u); /* bad source disabled */
+  check_equal(out_len, sizeof(out));
+  check_equal(out, g_block_data, sizeof(out));
+  check_equal(selector.sources[1].enabled, 0u); /* bad source disabled */
   check_true(selector.sources[1].total_failures >= 1u);
   check_true(fake.sources[0].served > 0u);
   mesh_stream_multisource_destroy(ms);
@@ -307,10 +307,10 @@ static void test_multisource_timeout_retries(void) {
 
   fill_block_data();
   make_ids(ids);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 1u, 4u));
   for (size_t s = 0u; s < 2u; s++)
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
   init_fake_io(&fake, &now_ms);
   /* Source 1 drops every block: it never completes, so timeouts disable it. */
@@ -327,9 +327,9 @@ static void test_multisource_timeout_retries(void) {
   check_not_null(ms);
   run_pull(ms, &now_ms, out, sizeof(out), &out_len, 0);
   check_true(mesh_stream_multisource_complete(ms));
-  check_size_eq(out_len, sizeof(out));
-  check_mem_eq(out, g_block_data, sizeof(out));
-  check_uint_eq(selector.sources[1].enabled, 0u); /* dropped source disabled */
+  check_equal(out_len, sizeof(out));
+  check_equal(out, g_block_data, sizeof(out));
+  check_equal(selector.sources[1].enabled, 0u); /* dropped source disabled */
   check_true(selector.sources[1].total_failures >= 1u);
   check_true(fake.sources[0].served > 0u);
   mesh_stream_multisource_destroy(ms);
@@ -347,9 +347,9 @@ static void test_multisource_all_bad_fails(void) {
 
   fill_block_data();
   make_ids(ids);
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 2u, 4u));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_register(&selector, ids[0]));
   init_fake_io(&fake, &now_ms);
   memset(&fake.sources[0].corrupt, 1, sizeof(fake.sources[0].corrupt));
@@ -378,7 +378,7 @@ static void test_multisource_invalid_args(void) {
                                             TEST_BLOCKS, TEST_BLOCK, 1u, 1u, 1u));
   check_null(mesh_stream_multisource_create(&selector, &io, NULL, TEST_BLOCKS,
                                             TEST_BLOCK, 1u, 1u, 1u));
-  check_int_eq(MESH_STREAM_MULTISOURCE_INVALID_ARG,
+  check_equal(MESH_STREAM_MULTISOURCE_INVALID_ARG,
                mesh_stream_multisource_recv(NULL, NULL, 0u, NULL));
 }
 

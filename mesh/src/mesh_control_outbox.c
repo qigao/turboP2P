@@ -25,12 +25,14 @@ mesh_control_result_t mesh_control_outbox_init_v1(
   if (!outbox || outbox->initialized || !config_valid(config))
     return MESH_CONTROL_INVALID_ARG;
   memset(outbox, 0, sizeof(*outbox));
-  if (turbo_deque_init(&outbox->entries,
-                       sizeof(mesh_control_outbox_entry_v1_t)) != 0) {
+  if (deque_init_bytes(&outbox->entries,
+                       sizeof(mesh_control_outbox_entry_v1_t),
+                       _Alignof(mesh_control_outbox_entry_v1_t),
+                       config->entry_capacity) != STL_OK) {
     return MESH_CONTROL_RESOURCE_EXHAUSTED;
   }
-  if (turbo_deque_reserve(&outbox->entries, config->entry_capacity) != 0) {
-    turbo_deque_destroy(&outbox->entries);
+  if (deque_reserve(&outbox->entries, config->entry_capacity) != STL_OK) {
+    deque_destroy(&outbox->entries);
     memset(outbox, 0, sizeof(*outbox));
     return MESH_CONTROL_RESOURCE_EXHAUSTED;
   }
@@ -57,7 +59,7 @@ mesh_control_result_t mesh_control_outbox_try_push_v1(
     ++outbox->rejected_closed;
     return MESH_CONTROL_CLOSED;
   }
-  if (turbo_deque_size(&outbox->entries) >= outbox->config.entry_capacity ||
+  if (deque_size(&outbox->entries) >= outbox->config.entry_capacity ||
       payload_size > outbox->config.retained_byte_capacity -
                          outbox->retained_bytes) {
     ++outbox->rejected_full;
@@ -72,7 +74,7 @@ mesh_control_result_t mesh_control_outbox_try_push_v1(
       return MESH_CONTROL_RESOURCE_EXHAUSTED;
     memcpy(entry.payload, payload, payload_size);
   }
-  if (turbo_deque_push_back(&outbox->entries, &entry) != 0) {
+  if (deque_push_back(&outbox->entries, &entry) != STL_OK) {
     free(entry.payload);
     return MESH_CONTROL_RESOURCE_EXHAUSTED;
   }
@@ -90,7 +92,7 @@ mesh_control_result_t mesh_control_outbox_peek_v1(
     return MESH_CONTROL_INVALID_ARG;
   memset(out_view, 0, sizeof(*out_view));
   entry = (const mesh_control_outbox_entry_v1_t *)
-      turbo_deque_front_const(&outbox->entries);
+      deque_front_const(&outbox->entries);
   if (!entry)
     return MESH_CONTROL_EMPTY;
   out_view->envelope = entry->envelope;
@@ -106,7 +108,7 @@ mesh_control_result_t mesh_control_outbox_consume_v1(
   if (!outbox || !outbox->initialized)
     return MESH_CONTROL_INVALID_ARG;
   memset(&entry, 0, sizeof(entry));
-  if (turbo_deque_pop_front(&outbox->entries, &entry) != 0)
+  if (deque_pop_front(&outbox->entries, &entry) != STL_OK)
     return MESH_CONTROL_EMPTY;
   outbox->retained_bytes -= entry.envelope.payload_size;
   free(entry.payload);
@@ -132,7 +134,7 @@ mesh_control_result_t mesh_control_outbox_get_stats_v1(
   out_stats->retained_byte_capacity =
       outbox->config.retained_byte_capacity;
   out_stats->max_payload_size = outbox->config.max_payload_size;
-  out_stats->pending = turbo_deque_size(&outbox->entries);
+  out_stats->pending = deque_size(&outbox->entries);
   out_stats->retained_bytes = outbox->retained_bytes;
   out_stats->accepting = outbox->accepting;
   out_stats->published = outbox->published;
@@ -148,8 +150,8 @@ void mesh_control_outbox_destroy_v1(mesh_control_outbox_v1_t *outbox) {
   if (!outbox || !outbox->initialized)
     return;
   outbox->accepting = 0u;
-  while (turbo_deque_pop_front(&outbox->entries, &entry) == 0)
+  while (deque_pop_front(&outbox->entries, &entry) == STL_OK)
     free(entry.payload);
-  turbo_deque_destroy(&outbox->entries);
+  deque_destroy(&outbox->entries);
   memset(outbox, 0, sizeof(*outbox));
 }

@@ -5,6 +5,19 @@
 #include "platform.h"
 #include "p2p_types.h"
 
+/* The public API owns its export marker; Salts no longer defines CXX_C_API. */
+#ifndef CXX_C_API
+#ifdef _WIN32
+#ifdef SHARED_CXX
+#define CXX_C_API __declspec(dllexport)
+#else
+#define CXX_C_API __declspec(dllimport)
+#endif
+#else
+#define CXX_C_API
+#endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

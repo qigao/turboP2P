@@ -81,7 +81,7 @@ add_executable(mesh_stream_media_main
 target_link_libraries(mesh_stream_media_main
     PRIVATE mesh_stream_media_pull mesh_media_playlist mesh_media_index
             mesh_release m3_object_manifest m3_gateway_sigv4 mesh_mgmt_crypto
-            TurboNet::Crypto TurboNet::CoroNet TurboHttp::HttpClient OpenSSL::Crypto)
+            TurboNet::Crypto TurboNet::CoroNet TurboHttp::HttpClient OpenSSL::Crypto Salts::Crypto)
 if(WIN32)
     target_link_libraries(mesh_stream_media_main PRIVATE ws2_32)
 endif()
@@ -152,7 +152,7 @@ add_executable(meshd
 target_link_libraries(meshd
     PRIVATE mesh tunnel mesh_mgmt_agent_runtime
     mesh_mgmt_execution_rpc_control
-    meshd_key_file TurboP2P::P2P)
+    meshd_key_file TurboP2P::P2P Salts::Crypto)
 
 target_compile_definitions(meshd PRIVATE USING_EXAMPLES)
 

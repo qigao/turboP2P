@@ -488,10 +488,15 @@ foreach(test_source ${MESH_TEST_SOURCES})
         endif()
     endif()
 
+    set(test_framework TurboUtils::TinyTest)
+    if(test_name MATCHES "^test_mesh_(control_outbox|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
+        set(test_framework Salts::TinyTest)
+        # Direct headers must resolve to the same runtime as the selected SDK.
+        target_include_directories(${test_name} BEFORE PRIVATE "$ENV{SALTS_ROOT}/include")
+    endif()
     target_link_libraries(${test_name}
-        PRIVATE mesh
-                TurboUtils::TinyTest
-                ${extra_test_libs})
+        PRIVATE mesh Salts::Crypto ${test_framework} ${extra_test_libs})
+    set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
 
     set(test_runtime_output_directory "${CMAKE_BINARY_DIR}/bin")
     if(test_name STREQUAL "test_mesh_mgmt_execution_runner" OR

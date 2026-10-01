@@ -3,7 +3,7 @@
 #include "mesh_multi_network_internal.h"
 
 #include <flowmq.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <turbo_thread.h>
 
 #include <string.h>
@@ -66,9 +66,9 @@ int meshd_network_control_init(
     }
     memset(expected_mesh_id, 0, sizeof(expected_mesh_id));
     if (!config->underlay->network_id ||
-        turbo_crypto_sha256(config->underlay->network_id,
+        salts_crypto_sha256(config->underlay->network_id,
                             strlen(config->underlay->network_id),
-                            expected_mesh_id) != TURBO_CRYPTO_OK ||
+                            expected_mesh_id) != SALTS_CRYPTO_OK ||
         memcmp(expected_mesh_id, config->mesh_id,
                sizeof(expected_mesh_id)) != 0) {
         memset(expected_mesh_id, 0, sizeof(expected_mesh_id));

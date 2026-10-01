@@ -1,0 +1,33 @@
+name: Salts foundation regression
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: salts-foundation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  foundation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - name: Configure against installed SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/salts-foundation -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+      - name: Build and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build/salts-foundation --parallel 2
+          ctest --test-dir build/salts-foundation --output-on-failure

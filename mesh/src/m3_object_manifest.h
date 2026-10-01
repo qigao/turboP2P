@@ -1,7 +1,7 @@
 #ifndef M3_OBJECT_MANIFEST_H
 #define M3_OBJECT_MANIFEST_H
 
-#include "m3_chunk_store.h"
+#include "m3_chunk_cid.h"
 
 #include <stddef.h>
 #include <stdint.h>

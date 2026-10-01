@@ -36,7 +36,7 @@
 #include <time.h>
 #include "mesh_stream_media_pull.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -135,7 +135,7 @@ static int build_manifest(const uint8_t *data, size_t len, uint64_t block_size,
                           m3_object_manifest_v2_t *out_manifest) {
   size_t chunk_count = (len + (size_t)block_size - 1u) / (size_t)block_size;
   m3_chunk_cid_v1_t *chunks;
-  turbo_crypto_sha256_ctx_t ctx;
+  salts_crypto_sha256_ctx_t ctx;
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
 
   if (chunk_count == 0u)
@@ -143,7 +143,7 @@ static int build_manifest(const uint8_t *data, size_t len, uint64_t block_size,
   chunks = (m3_chunk_cid_v1_t *)calloc(chunk_count, sizeof(*chunks));
   if (!chunks)
     return -1;
-  if (turbo_crypto_sha256_init(&ctx) != TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256_init(&ctx) != SALTS_CRYPTO_OK) {
     free(chunks);
     return -1;
   }
@@ -153,17 +153,17 @@ static int build_manifest(const uint8_t *data, size_t len, uint64_t block_size,
 
     if (take > (size_t)block_size)
       take = (size_t)block_size;
-    if (turbo_crypto_sha256(data + offset, take, chunks[i].digest) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&ctx, chunks[i].digest,
-                                   sizeof(chunks[i].digest)) != TURBO_CRYPTO_OK) {
+    if (salts_crypto_sha256(data + offset, take, chunks[i].digest) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&ctx, chunks[i].digest,
+                                   sizeof(chunks[i].digest)) != SALTS_CRYPTO_OK) {
       free(chunks);
       return -1;
     }
     chunks[i].hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     chunks[i].size = take;
   }
-  if (turbo_crypto_sha256_final(&ctx, digest) != TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256_final(&ctx, digest) != SALTS_CRYPTO_OK) {
     free(chunks);
     return -1;
   }
@@ -538,7 +538,7 @@ static int release_verify_object(const uint8_t *data, size_t len,
 static void sha256_hex(const uint8_t *data, size_t len, char out[65]) {
   uint8_t digest[32];
 
-  turbo_crypto_sha256(data, len, digest);
+  salts_crypto_sha256(data, len, digest);
   bytes_to_hex(digest, sizeof(digest), out);
 }
 

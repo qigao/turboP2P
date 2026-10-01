@@ -10,7 +10,7 @@
 #include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_coro_context.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -645,30 +645,30 @@ static int p2p_pinned_derive_identity(
     static const uint8_t principal_domain[] =
         "turbo-p2p-static-principal-v2";
     static const uint8_t routing_domain[] = "turbo-p2p-routing-id-v2";
-    turbo_crypto_sha256_ctx_t hash;
+    salts_crypto_sha256_ctx_t hash;
 
     memset(identity, 0, sizeof(*identity));
-    if (turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, principal_domain,
+    if (salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, principal_domain,
                                    sizeof(principal_domain) - 1) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, static_key, P2P_KEY_SIZE) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_final(&hash, identity->principal_id) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, routing_domain,
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, static_key, P2P_KEY_SIZE) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_final(&hash, identity->principal_id) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, routing_domain,
                                    sizeof(routing_domain) - 1) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash,
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash,
                                    node->security_config.network_id_hash,
-                                   P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_update(&hash, identity->principal_id,
-                                   P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256_final(&hash, identity->routing_id) !=
-            TURBO_CRYPTO_OK ||
-        turbo_crypto_sha256("", 0, identity->credential_digest) !=
-            TURBO_CRYPTO_OK) {
+                                   P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_update(&hash, identity->principal_id,
+                                   P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+        salts_crypto_sha256_final(&hash, identity->routing_id) !=
+            SALTS_CRYPTO_OK ||
+        salts_crypto_sha256("", 0, identity->credential_digest) !=
+            SALTS_CRYPTO_OK) {
         p2p_crypto_wipe(&hash, sizeof(hash));
         p2p_crypto_wipe(identity, sizeof(*identity));
         return P2P_ERR_CRYPTO;

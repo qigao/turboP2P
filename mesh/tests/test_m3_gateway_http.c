@@ -8,6 +8,7 @@
 #include <iris/iris.h>
 #include <iris/server.h>
 #include <platform.h>
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 #include <turbo_error.h>
 
@@ -43,7 +44,7 @@ static void to_hex(const uint8_t *in, size_t len, char *out) {
 
 static void sha256_hex(const char *data, size_t len, char *out) {
   uint8_t digest[32];
-  turbo_crypto_sha256((const uint8_t *)data, len, digest);
+  salts_crypto_sha256((const uint8_t *)data, len, digest);
   to_hex(digest, sizeof(digest), out);
 }
 
@@ -69,7 +70,7 @@ static void client_sign(const char *method, const char *uri, const char *query,
            "%s\n%s\n%s\nhost:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n"
            "host;x-amz-content-sha256;x-amz-date\n%s",
            method, uri, query ? query : "", host, payload_hash, amzdate, payload_hash);
-  turbo_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
+  salts_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
   to_hex(cr_digest, sizeof(cr_digest), cr_hex);
 
   snprintf(scope, sizeof(scope), "%s/%s/%s/aws4_request", date, region, service);
