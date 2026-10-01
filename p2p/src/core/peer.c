@@ -3,7 +3,6 @@
 #include "../internal.h"
 #include "../security/p2p_cookie.h"
 #include "../security/p2p_private_key_executor.h"
-#include <CoroNet/turbo_stream.h>
 #include <salts/error_codes.h>
 #include <tlog.h>
 #include <platform.h>
@@ -27,8 +26,7 @@ static const uint8_t P2P_SECURE_PROLOGUE_DOMAIN[] =
 static const uint8_t P2P_SECURE_SESSION_DOMAIN[] =
     "turbo-p2p-session-v2";
 
-static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip);
-static void p2p_peer_handle_stream_disconnect(p2p_peer_t *peer, int destroy_peer);
+static void p2p_peer_handle_transport_disconnect(p2p_peer_t *peer, int destroy_peer);
 static void p2p_peer_finalize(p2p_peer_t *peer);
 static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer);
 static void p2p_peer_reset_security_state(p2p_peer_t *peer);
@@ -264,75 +262,74 @@ void p2p_peer_release(p2p_peer_t *peer) {
     }
 }
 
-int p2p_peer_connect(p2p_peer_t *peer) {
-    uint64_t now_ms = 0;
-    int capacity_ret;
-
-    if (!peer || !peer->node) {
+static int peer_build_connection_uri(const p2p_peer_t *peer,
+                                     char *uri, size_t capacity) {
+    int written;
+    if (!peer || !uri || capacity == 0u || peer->port <= 0 ||
+        peer->port > UINT16_MAX) {
         return P2P_ERR_INVALID_ARG;
     }
-    if (peer->private_key_operation) {
-        return P2P_ERR_INVALID_STATE;
+    if (strchr(peer->ip, ':')) {
+        written = snprintf(uri, capacity, "tcp://[%s]:%d", peer->ip, peer->port);
+    } else {
+        written = snprintf(uri, capacity, "tcp://%s:%d", peer->ip, peer->port);
     }
+    return written > 0 && (size_t)written < capacity ? P2P_OK
+                                                     : P2P_ERR_INVALID_ARG;
+}
 
-    if (p2p_peer_connect_is_suppressed(peer)) {
-        return P2P_ERR_NETWORK;
+int p2p_peer_connect(p2p_peer_t *peer) {
+    cnet_connect_options options;
+    cnet_connection handle = {0};
+    cnet_observer observer;
+    char uri[160];
+    uint64_t now_ms;
+    int capacity_ret;
+    int status;
+
+    if (!peer || !peer->node || !peer->node->network_initialized) {
+        return P2P_ERR_INVALID_ARG;
     }
-
+    if (peer->private_key_operation) return P2P_ERR_INVALID_STATE;
+    if (p2p_peer_connect_is_suppressed(peer)) return P2P_ERR_NETWORK;
     if (peer->state == P2P_PEER_STATE_CONNECTING ||
         peer->state == P2P_PEER_STATE_HANDSHAKING ||
         peer->state == P2P_PEER_STATE_CONNECTED) {
         return P2P_OK;
     }
 
-    now_ms = salts_hrtime() / 1000000;
-    if (peer->reconnect_after_ms > now_ms) {
-        return P2P_OK;
-    }
-
+    now_ms = salts_monotonic_ms();
+    if (peer->reconnect_after_ms > now_ms) return P2P_OK;
     p2p_peer_reset_security_state(peer);
 
-    capacity_ret =
-        p2p_node_reserve_transport_send_capacity(peer->node, peer);
-    if (capacity_ret != P2P_OK) {
-        return capacity_ret;
+    capacity_ret = p2p_node_reserve_transport_send_capacity(peer->node, peer);
+    if (capacity_ret != P2P_OK) return capacity_ret;
+    status = peer_build_connection_uri(peer, uri, sizeof(uri));
+    if (status != P2P_OK) {
+        p2p_node_release_transport_send_capacity(peer->node, peer);
+        return status;
     }
 
-    turbo_stream_t *stream = turbo_stream_create(peer->node->ctx,
-                                                 peer_stream_kind_from_ip(peer->ip));
-    if (!stream) {
-        TLOG_ERROR("[P2P] peer_connect: failed to create stream");
+    memset(&options, 0, sizeof(options));
+    observer = p2p_node_transport_observer(peer->node);
+    options.uri = uri;
+    options.observer = observer;
+    status = cnet_connect(&peer->node->network, &options, &handle);
+    if (status != SALTS_OK) {
         p2p_node_release_transport_send_capacity(peer->node, peer);
-        return P2P_ERR_NO_MEM;
+        return status == SALTS_ENOBUFS ? P2P_ERR_RESOURCE_EXHAUSTED
+                                       : P2P_ERR_NETWORK;
     }
-    if (turbo_stream_set_send_hwm(
-            stream, peer->node->security_config.send_hwm_bytes) != 0) {
-        turbo_stream_destroy(stream);
-        p2p_node_release_transport_send_capacity(peer->node, peer);
-        return P2P_ERR_INVALID_STATE;
-    }
-    turbo_stream_set_user_data(stream, peer);
 
-    /* Create unified connection abstraction */
-    peer->conn = p2p_connection_create_outbound(stream);
+    peer->conn = p2p_connection_create(P2P_CONN_OUTBOUND,
+                                       &peer->node->network, handle);
     if (!peer->conn) {
-        turbo_stream_destroy(stream);
+        (void)cnet_close(&peer->node->network, handle);
         p2p_node_release_transport_send_capacity(peer->node, peer);
         return P2P_ERR_NO_MEM;
     }
-
-    if (turbo_stream_connect(stream, peer->ip, (unsigned short)peer->port,
-                             p2p_peer_stream_connect, p2p_peer_stream_close) != 0) {
-        TLOG_DEBUG("[P2P] peer_connect: connect to {}:{} failed", peer->ip, peer->port);
-        p2p_connection_destroy(peer->conn);
-        peer->conn = NULL;
-        p2p_node_release_transport_send_capacity(peer->node, peer);
-        return P2P_ERR_NETWORK;
-    }
-
     peer->state = P2P_PEER_STATE_CONNECTING;
     peer->connect_time = salts_hrtime();
-    TLOG_DEBUG("[P2P] peer_connect: connecting to {}:{}", peer->ip, peer->port);
     return P2P_OK;
 }
 
@@ -886,13 +883,7 @@ static int peer_handle_noise_frame(p2p_peer_t *peer, const uint8_t *frame,
             return ret == P2P_OK ? P2P_ERR_PROTOCOL : ret;
         }
         if (peer->node->crypto.identity.uses_blocking_private_key_provider) {
-            turbo_stream_t *stream = peer->conn
-                                         ? (turbo_stream_t *)peer->conn->ops.handle
-                                         : NULL;
-            if (!stream) {
-                return P2P_ERR_NETWORK;
-            }
-            turbo_stream_recv_stop(stream);
+            if (!peer->conn) return P2P_ERR_NETWORK;
             return p2p_private_key_executor_submit(
                 peer, peer->node->local_credential,
                 peer->node->local_credential_len, 2, 0);
@@ -917,13 +908,7 @@ static int peer_handle_noise_frame(p2p_peer_t *peer, const uint8_t *frame,
         }
         peer->remote_credential_len = credential_len;
         if (peer->node->crypto.identity.uses_blocking_private_key_provider) {
-            turbo_stream_t *stream = peer->conn
-                                         ? (turbo_stream_t *)peer->conn->ops.handle
-                                         : NULL;
-            if (!stream) {
-                return P2P_ERR_NETWORK;
-            }
-            turbo_stream_recv_stop(stream);
+            if (!peer->conn) return P2P_ERR_NETWORK;
             return p2p_private_key_executor_submit(
                 peer, peer->node->local_credential,
                 peer->node->local_credential_len, 3, 1);
@@ -954,7 +939,6 @@ static int peer_handle_noise_frame(p2p_peer_t *peer, const uint8_t *frame,
 void p2p_peer_complete_private_key_operation(
     p2p_private_key_operation_t *operation, int was_current) {
     p2p_peer_t *peer;
-    turbo_stream_t *stream = NULL;
     int valid;
     int ret;
 
@@ -997,10 +981,8 @@ void p2p_peer_complete_private_key_operation(
         return;
     }
 
-    if (peer->conn && !peer->private_key_operation) {
-        stream = (turbo_stream_t *)peer->conn->ops.handle;
-    }
-    if (stream && turbo_stream_recv_start(stream, p2p_peer_stream_recv) != 0) {
+    if (peer->conn && !peer->private_key_operation &&
+        cnet_receive(peer->conn->owner, peer->conn->handle, 1u) != SALTS_OK) {
         p2p_node_record_security_failure(peer->node, peer->security_stage,
                                          P2P_ERR_NETWORK);
         p2p_peer_disconnect(peer);
@@ -1233,126 +1215,96 @@ static int p2p_peer_process_security(p2p_peer_t *peer, size_t *consumed) {
     return ret;
 }
 
-static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip) {
-    struct in6_addr addr6;
-    if (ip && inet_pton(AF_INET6, ip, &addr6) == 1) {
-        return TURBO_STREAM_TCP6;
-    }
-    return TURBO_STREAM_TCP4;
+static int peer_connection_matches(const p2p_peer_t *peer,
+                                   cnet_connection connection) {
+    return peer && peer->conn &&
+           peer->conn->handle.slot == connection.slot &&
+           peer->conn->handle.generation == connection.generation;
 }
 
-static void p2p_peer_handle_stream_disconnect(p2p_peer_t *peer, int destroy_peer) {
-    uint64_t now_ms = 0;
-
-    if (!peer || !peer->node) return;
-
-    p2p_node_t *node = peer->node;
-    if (peer->state == P2P_PEER_STATE_DISCONNECTED) {
-        return;
-    }
-
-    now_ms = salts_hrtime() / 1000000;
-    if (peer->keep_entry && !destroy_peer) {
-        peer->reconnect_after_ms = now_ms + P2P_CONNECT_RETRY_MS;
-    }
-
-    p2p_peer_disconnect(peer);
-
-    p2p_node_on_peer_disconnected(node, peer);
-
-    if (destroy_peer) {
-        p2p_peer_destroy(peer);
-    }
-}
-
-void p2p_peer_stream_connect(void *handle, int status, void *arg) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    p2p_peer_t *peer;
+static void p2p_peer_handle_transport_disconnect(p2p_peer_t *peer,
+                                                  int destroy_peer) {
+    uint64_t now_ms;
     p2p_node_t *node;
-
-    (void)arg;
-    if (!stream) return;
-    peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
     if (!peer || !peer->node) return;
+    node = peer->node;
+    if (peer->state == P2P_PEER_STATE_DISCONNECTED) return;
+    now_ms = salts_monotonic_ms();
+    if (peer->keep_entry && !destroy_peer)
+        peer->reconnect_after_ms = now_ms + P2P_CONNECT_RETRY_MS;
+    p2p_peer_disconnect(peer);
+    p2p_node_on_peer_disconnected(node, peer);
+    if (destroy_peer) p2p_peer_destroy(peer);
+}
+
+void p2p_peer_transport_state(p2p_peer_t *peer, cnet_connection connection,
+                              cnet_connection_state state,
+                              const cnet_error *error) {
+    p2p_node_t *node;
+    int receive_status;
+    if (!peer || !peer->node || !peer_connection_matches(peer, connection))
+        return;
     if (!p2p_peer_hold(peer)) return;
     node = peer->node;
 
-    if (status != 0) {
-        TLOG_DEBUG("[P2P] peer connect failed {}:{} status={}", peer->ip, peer->port, status);
-        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
-        p2p_peer_release(peer);
-        return;
+    if (state == CNET_CONNECTION_CONNECTED) {
+        receive_status = cnet_receive(&node->network, connection, 1u);
+        if (receive_status != SALTS_OK) {
+            p2p_peer_handle_transport_disconnect(peer,
+                                                  peer->keep_entry ? 0 : 1);
+            p2p_peer_release(peer);
+            return;
+        }
+        salts_mutex_lock(&node->mutex);
+        peer->is_connected = 0;
+        peer->reconnect_after_ms = 0;
+        peer->state = P2P_PEER_STATE_HANDSHAKING;
+        peer->connect_time = salts_hrtime();
+        peer->last_seen = peer->connect_time;
+        peer->avg_rtt_ms = 0;
+        peer->rttvar_ms = 0;
+        peer->last_rtt_sample_ms = 0;
+        peer->last_ping_sent_ms = 0;
+        peer->outstanding_ping_ms = 0;
+        peer->rtt_sample_count = 0;
+        salts_mutex_unlock(&node->mutex);
+        p2p_node_on_peer_connected(node, peer);
+    } else if (state == CNET_CONNECTION_FAILED ||
+               state == CNET_CONNECTION_CLOSED) {
+        if (peer->conn) {
+            peer->conn->is_connected = 0;
+            peer->conn->close_requested = 1;
+        }
+        (void)error;
+        p2p_peer_handle_transport_disconnect(peer, peer->keep_entry ? 0 : 1);
     }
-
-    if (turbo_stream_recv_start(stream, p2p_peer_stream_recv) != 0) {
-        TLOG_ERROR("[P2P] failed to start recv for {}:{}", peer->ip, peer->port);
-        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
-        p2p_peer_release(peer);
-        return;
-    }
-
-    TLOG_DEBUG("[P2P] peer connected: {}:{}", peer->ip, peer->port);
-    salts_mutex_lock(&node->mutex);
-    peer->is_connected = 0;
-    peer->reconnect_after_ms = 0;
-    peer->state = P2P_PEER_STATE_HANDSHAKING;
-    peer->connect_time = salts_hrtime();
-    peer->last_seen = peer->connect_time;
-    peer->avg_rtt_ms = 0;
-    peer->rttvar_ms = 0;
-    peer->last_rtt_sample_ms = 0;
-    peer->last_ping_sent_ms = 0;
-    peer->outstanding_ping_ms = 0;
-    peer->rtt_sample_count = 0;
-    salts_mutex_unlock(&node->mutex);
-    p2p_node_on_peer_connected(node, peer);
     p2p_peer_release(peer);
 }
 
-int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    p2p_peer_t *peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
+void p2p_peer_transport_receive(p2p_peer_t *peer, cnet_connection connection,
+                                const cnet_receive_view *view) {
     int ret;
-    (void)peer_ctx;
-
-    if (!peer) {
-        return 0;
+    if (!peer || !peer_connection_matches(peer, connection) ||
+        !p2p_peer_hold(peer)) {
+        return;
     }
-    if (!p2p_peer_hold(peer)) {
-        return 0;
-    }
-
-    if (!slice || !slice->data || slice->length == 0) {
-        turbo_stream_set_user_data(stream, NULL);
-        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+    if (!view || view->kind != CNET_MESSAGE_BYTES || !view->data ||
+        view->size == 0u) {
+        p2p_peer_handle_transport_disconnect(peer, peer->keep_entry ? 0 : 1);
         p2p_peer_release(peer);
-        return 0;
+        return;
     }
-
-    ret = p2p_peer_on_data(peer, slice->data, slice->length);
+    ret = p2p_peer_on_data(peer, view->data, view->size);
     if (ret != P2P_OK) {
-        p2p_node_record_security_failure(peer->node, peer->security_stage,
-                                         ret);
-        turbo_stream_set_user_data(stream, NULL);
-        p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+        p2p_node_record_security_failure(peer->node, peer->security_stage, ret);
+        p2p_peer_handle_transport_disconnect(peer, peer->keep_entry ? 0 : 1);
         p2p_peer_release(peer);
-        return 1;
+        return;
     }
-
-    p2p_peer_release(peer);
-    return 0;
-}
-
-void p2p_peer_stream_close(void *handle) {
-    turbo_stream_t *stream = (turbo_stream_t *)handle;
-    p2p_peer_t *peer;
-
-    if (!stream) return;
-    peer = (p2p_peer_t *)turbo_stream_get_user_data(stream);
-    if (!peer) return;
-    if (!p2p_peer_hold(peer)) return;
-
-    turbo_stream_set_user_data(stream, NULL);
-    p2p_peer_handle_stream_disconnect(peer, peer->keep_entry ? 0 : 1);
+    if (peer->conn && !peer->private_key_operation &&
+        peer->state != P2P_PEER_STATE_CLOSING &&
+        cnet_receive(peer->conn->owner, peer->conn->handle, 1u) != SALTS_OK) {
+        p2p_peer_handle_transport_disconnect(peer, peer->keep_entry ? 0 : 1);
+    }
     p2p_peer_release(peer);
 }
