@@ -1,6 +1,7 @@
 #include "mesh_network_reconciler.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -43,8 +44,8 @@ mesh_control_result_t mesh_network_resource_id_v1(
   memcpy(input + sizeof(domain) - 1u, mesh_id, MESH_CONTROL_DIGEST_SIZE);
   memcpy(input + sizeof(domain) - 1u + MESH_CONTROL_DIGEST_SIZE,
          network_uid, MESH_CONTROL_ID_SIZE);
-  if (turbo_crypto_sha256(input, sizeof(input), out_resource_id) !=
-      TURBO_CRYPTO_OK) {
+  if (salts_crypto_sha256(input, sizeof(input), out_resource_id) !=
+      SALTS_CRYPTO_OK) {
     memset(input, 0, sizeof(input));
     return MESH_CONTROL_INVALID_STATE;
   }
@@ -59,8 +60,7 @@ static int resource_id_matches(
   int matches = 0;
   if (mesh_network_resource_id_v1(document->mesh_id, document->network_uid,
                                   expected) == MESH_CONTROL_OK)
-    matches = turbo_crypto_verify(expected, resource_id, sizeof(expected)) ==
-              TURBO_CRYPTO_OK;
+    matches = CRYPTO_memcmp(expected, resource_id, sizeof(expected)) == 0;
   memset(expected, 0, sizeof(expected));
   return matches;
 }
@@ -69,8 +69,8 @@ static size_t find_record(const mesh_network_reconciler_v1_t *reconciler,
                           const uint8_t resource_id[32]) {
   size_t index;
   for (index = 0u; index < reconciler->count; ++index) {
-    if (turbo_crypto_verify(reconciler->records[index].resource_id,
-                            resource_id, 32u) == TURBO_CRYPTO_OK)
+    if (CRYPTO_memcmp(reconciler->records[index].resource_id,
+                            resource_id, 32u) == 0)
       return index;
   }
   return SIZE_MAX;
@@ -149,8 +149,8 @@ mesh_control_result_t mesh_network_reconciler_submit_v1(
     uint64_t applied_generation = 0u;
     size_t route_index;
     if (!document || document_size == 0u || drain_timeout_ms != 0u ||
-        turbo_crypto_sha256(document, document_size, document_digest) !=
-            TURBO_CRYPTO_OK ||
+        salts_crypto_sha256(document, document_size, document_digest) !=
+            SALTS_CRYPTO_OK ||
         mesh_control_network_document_decode_v1(document, document_size,
                                                 &decoded) != MESH_CONTROL_OK ||
         !resource_id_matches(&decoded, resource_id) ||
