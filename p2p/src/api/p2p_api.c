@@ -9,7 +9,6 @@
 #include "../transfer/sha256.h"
 #include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
-#include <CoroNet/turbo_coro_context.h>
 #include <salts/crypto.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,10 +341,7 @@ int p2p_start(p2p_node_t *node) {
 
     p2p_gossip_start(node);
 
-    /* Event loop blocking run */
-    coro_context_run(node->ctx, TURBO_RUN_DEFAULT);
-
-    return P2P_OK;
+    return p2p_node_run_internal(node);
 }
 
 int p2p_start_nonblocking(p2p_node_t *node) {
@@ -362,8 +358,13 @@ int p2p_start_nonblocking(p2p_node_t *node) {
     return P2P_OK;
 }
 
-coro_context_t *p2p_get_loop(p2p_node_t *node) {
-    return node ? node->ctx : NULL;
+int p2p_poll(p2p_node_t *node, uint32_t timeout_ms) {
+    if (!node) return P2P_ERR_INVALID_ARG;
+    return p2p_node_poll_internal(node, timeout_ms);
+}
+
+void p2p_stop(p2p_node_t *node) {
+    if (node) p2p_node_stop_internal(node);
 }
 
 static int p2p_node_identity_is_mutable_locked(const p2p_node_t *node) {
