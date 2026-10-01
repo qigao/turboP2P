@@ -1,8 +1,5 @@
 /**
- * connection.h - P2P ownership wrapper for one CNet connection.
- *
- * CNet remains the sole transport runtime. This structure carries only
- * P2P metadata plus a generation-checked CNet handle.
+ * connection.h - typed CNet connection ownership for one P2P peer.
  */
 #ifndef P2P_CONNECTION_H
 #define P2P_CONNECTION_H
@@ -19,14 +16,15 @@ typedef enum {
 
 struct p2p_connection_s {
     p2p_conn_type_t type;
-    cnet_client *client;
+    cnet_client *owner;
     cnet_connection handle;
+    int is_connected;
     int close_requested;
 };
 
-p2p_connection_t *p2p_connection_create(cnet_client *client,
-                                        cnet_connection handle,
-                                        p2p_conn_type_t type);
+p2p_connection_t *p2p_connection_create(p2p_conn_type_t type,
+                                         cnet_client *owner,
+                                         cnet_connection handle);
 void p2p_connection_destroy(p2p_connection_t *conn);
 int p2p_connection_send(p2p_connection_t *conn, const void *data, size_t len);
 int p2p_connection_close(p2p_connection_t *conn);
