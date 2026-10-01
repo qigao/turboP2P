@@ -1,15 +1,13 @@
 #include "mesh_mgmt_crypto.h"
 
-#include <turbo_crypto.h>
+#include <monocypher.h>
 #include <openssl/evp.h>
 
 #include <string.h>
 
-/* Ed25519 signatures must stay on the OpenSSL EVP provider: TurboNet::Crypto
- * currently exposes Monocypher's BLAKE2b-based EdDSA, which is not RFC 8032
- * (SHA-512) compatible and would change the wire format of every signed
- * envelope and peer record.  The remaining primitives (BLAKE2b-256,
- * constant-time compare, secure wipe) come from TurboNet::Crypto. */
+/* Preserve RFC 8032 Ed25519 through OpenSSL EVP. Monocypher's EdDSA uses
+ * BLAKE2b and is not wire compatible; only its BLAKE2b, compare and wipe
+ * primitives are used here, matching the retired TurboNet provider. */
 
 mesh_mgmt_crypto_result_t
 mesh_mgmt_ed25519_public_from_private(const uint8_t private_key[MESH_MGMT_ED25519_PRIVATE_KEY_SIZE],
@@ -119,10 +117,7 @@ mesh_mgmt_crypto_result_t mesh_mgmt_blake2b_256(const uint8_t *message, size_t m
   if (!message && message_len != 0u) {
     return MESH_MGMT_CRYPTO_INVALID_ARG;
   }
-  if (turbo_crypto_blake2b(digest, MESH_MGMT_BLAKE2B_256_SIZE, message, message_len) !=
-      TURBO_CRYPTO_OK) {
-    return MESH_MGMT_CRYPTO_FAILURE;
-  }
+  crypto_blake2b(digest, MESH_MGMT_BLAKE2B_256_SIZE, message, message_len);
   return MESH_MGMT_CRYPTO_OK;
 }
 
@@ -131,16 +126,17 @@ int mesh_mgmt_crypto_equal_32(const uint8_t lhs[MESH_MGMT_BLAKE2B_256_SIZE],
   if (!lhs || !rhs) {
     return 0;
   }
-  return turbo_crypto_verify(lhs, rhs, MESH_MGMT_BLAKE2B_256_SIZE) == TURBO_CRYPTO_OK ? 1 : 0;
+  return crypto_verify32(lhs, rhs) == 0 ? 1 : 0;
 }
 
 int mesh_mgmt_crypto_equal_16(const uint8_t lhs[16], const uint8_t rhs[16]) {
   if (!lhs || !rhs) {
     return 0;
   }
-  return turbo_crypto_verify(lhs, rhs, 16u) == TURBO_CRYPTO_OK ? 1 : 0;
+  return crypto_verify16(lhs, rhs) == 0 ? 1 : 0;
 }
 
 void mesh_mgmt_crypto_wipe(void *data, size_t length) {
-  turbo_crypto_wipe(data, length);
+  if (data && length != 0u)
+    crypto_wipe(data, length);
 }
