@@ -738,6 +738,14 @@ static void test_tls_bind_authorizes_registry_stream(void) {
 }
 
 spec("mesh stream CoroNet integration") {
+  it("rejects a missing socket before initializing a transport") {
+    mesh_stream_transport_v1_t transport = {0};
+    mesh_stream_transport_config_v1_t config = test_config();
+    check_int_eq(mesh_stream_transport_init_coronet_v1(
+                     &transport, &config, NULL, accept_application_event, NULL),
+                 MESH_STREAM_TRANSPORT_INVALID_ARG);
+    check_null(transport.buffer);
+  }
   describe("secure transport boundary") {
     it("admits a registry stream only after TLS-bound mutual authentication") {
       test_tls_bind_authorizes_registry_stream();

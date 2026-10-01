@@ -1,6 +1,5 @@
 #include <tinytest.h>
 
-#include "mesh_stream_coronet_adapter.h"
 #include "mesh_stream_transport.h"
 
 #include <stdlib.h>
@@ -31,6 +30,7 @@ typedef struct {
   int send_result;
   int hwm_result;
   int timeout_result;
+  uint64_t sent_tokens[TEST_SEND_MAX];
 } fake_io_t;
 
 typedef struct {
@@ -107,7 +107,7 @@ static size_t encode_frame(const mesh_stream_transport_config_v1_t *config, uint
   input.metadata_len = metadata_len;
   input.payload = payload;
   input.payload_len = payload_len;
-  check_int_eq(mesh_stream_frame_encode(&input, config->receiver.max_frame_size, output, capacity,
+  check_equal(mesh_stream_frame_encode(&input, config->receiver.max_frame_size, output, capacity,
                                         &output_len),
                MESH_STREAM_CODEC_OK);
   return output_len;
@@ -176,6 +176,13 @@ static int fake_send(void *context, const uint8_t *bytes, size_t len) {
   return 0;
 }
 
+static int fake_async_send(void *context, const uint8_t *bytes, size_t len, uint64_t token) {
+  fake_io_t *io = (fake_io_t *)context;
+  if (io->sent_count < TEST_SEND_MAX)
+    io->sent_tokens[io->sent_count] = token;
+  return fake_send(context, bytes, len);
+}
+
 static int fake_set_send_hwm(void *context, size_t bytes) {
   fake_io_t *io = (fake_io_t *)context;
 
@@ -210,10 +217,21 @@ static int accept_event(void *context, const mesh_stream_receive_event_v1_t *eve
   application->event_types[application->event_count] = event->frame.type;
   application->event_count++;
   if (event->frame.type == MESH_STREAM_FRAME_DATA) {
-    check_mem_eq(event->frame.payload, TEST_PAYLOAD, event->frame.payload_len);
+    check_equal(event->frame.payload, TEST_PAYLOAD, event->frame.payload_len);
     application->data_bytes += event->frame.payload_len;
   }
   return 0;
+}
+
+static mesh_stream_transport_result_t init_async_transport(
+    mesh_stream_transport_v1_t *transport, mesh_stream_transport_config_v1_t *config,
+    fake_io_t *fake, fake_application_t *application) {
+  mesh_stream_transport_io_v1_t io = {0};
+  io.set_send_hwm = fake_set_send_hwm;
+  io.set_receive_timeout = fake_set_receive_timeout;
+  io.context = fake;
+  return mesh_stream_transport_init_async_v1(transport, config, &io, fake_async_send,
+                                            accept_event, application);
 }
 
 static mesh_stream_transport_result_t init_transport(mesh_stream_transport_v1_t *transport,
@@ -230,10 +248,10 @@ static mesh_stream_frame_view_t decode_sent(const fake_io_t *fake, size_t index)
   size_t consumed = 0u;
   size_t required = 0u;
 
-  check_int_eq(mesh_stream_frame_decode(fake->sent[index], fake->sent_lengths[index],
+  check_equal(mesh_stream_frame_decode(fake->sent[index], fake->sent_lengths[index],
                                         TEST_FRAME_MAX, &view, &consumed, &required),
                MESH_STREAM_CODEC_OK);
-  check_size_eq(consumed, fake->sent_lengths[index]);
+  check_equal(consumed, fake->sent_lengths[index]);
   return view;
 }
 
@@ -257,36 +275,36 @@ static void test_pumps_fragmented_stream_and_releases_every_chunk(void) {
   fake.chunk_lengths[2] = wire_len - 100u;
   fake.chunk_count = 3u;
 
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_size_eq(fake.configured_hwm, TEST_SEND_HWM);
-  check_hex64_eq(fake.configured_timeout_ms, TEST_RECV_TIMEOUT_MS);
-  check_size_eq(transport.config.receiver.max_frame_size, TEST_FRAME_MAX);
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(fake.configured_hwm, TEST_SEND_HWM);
+  check_equal(fake.configured_timeout_ms, TEST_RECV_TIMEOUT_MS);
+  check_equal(transport.config.receiver.max_frame_size, TEST_FRAME_MAX);
 
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
-  check_size_eq(frames, 0u);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
-  check_size_eq(frames, 1u);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
-  check_size_eq(frames, 3u);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
+  check_equal(frames, 0u);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
+  check_equal(frames, 1u);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames), MESH_STREAM_TRANSPORT_OK);
+  check_equal(frames, 3u);
 
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_CLOSED);
-  check_size_eq(fake.release_count, 3u);
-  check_size_eq(application.event_count, 4u);
-  check_size_eq(application.data_bytes, 12u);
-  check_int_eq(application.event_types[0], MESH_STREAM_FRAME_OPEN);
-  check_int_eq(application.event_types[3], MESH_STREAM_FRAME_CLOSE);
-  check_size_eq(fake.sent_count, 2u);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_CLOSED);
+  check_equal(fake.release_count, 3u);
+  check_equal(application.event_count, 4u);
+  check_equal(application.data_bytes, 12u);
+  check_equal(application.event_types[0], MESH_STREAM_FRAME_OPEN);
+  check_equal(application.event_types[3], MESH_STREAM_FRAME_CLOSE);
+  check_equal(fake.sent_count, 2u);
   control = decode_sent(&fake, 0u);
-  check_int_eq(control.type, MESH_STREAM_FRAME_ACCEPT);
-  check_hex64_eq(control.sequence, 0u);
-  check_hex64_eq(control.offset, 8u);
+  check_equal(control.type, MESH_STREAM_FRAME_ACCEPT);
+  check_equal(control.sequence, 0u);
+  check_equal(control.offset, 8u);
   control = decode_sent(&fake, 1u);
-  check_int_eq(control.type, MESH_STREAM_FRAME_WINDOW_UPDATE);
-  check_hex64_eq(control.sequence, 1u);
-  check_hex64_eq(control.offset, 12u);
-  check_hex64_eq(transport.received_bytes, wire_len);
-  check_hex64_eq(transport.received_frames, 4u);
-  check_hex64_eq(transport.sent_control_frames, 2u);
+  check_equal(control.type, MESH_STREAM_FRAME_WINDOW_UPDATE);
+  check_equal(control.sequence, 1u);
+  check_equal(control.offset, 12u);
+  check_equal(transport.received_bytes, wire_len);
+  check_equal(transport.received_frames, 4u);
+  check_equal(transport.sent_control_frames, 2u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -308,16 +326,16 @@ static void test_application_rejection_does_not_commit_open(void) {
   fake.chunks[0] = wire;
   fake.chunk_lengths[0] = wire_len;
   fake.chunk_count = 1u;
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames),
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
                MESH_STREAM_TRANSPORT_APPLICATION_REJECTED);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_FAILED);
-  check_int_eq(transport.last_application_result, -77);
-  check_int_eq(transport.session.state, MESH_STREAM_SESSION_AWAIT_OPEN);
-  check_hex64_eq(transport.session.generation, 0u);
-  check_size_eq(frames, 0u);
-  check_size_eq(fake.sent_count, 0u);
-  check_size_eq(fake.release_count, 1u);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+  check_equal(transport.last_application_result, -77);
+  check_equal(transport.session.state, MESH_STREAM_SESSION_AWAIT_OPEN);
+  check_equal(transport.session.generation, 0u);
+  check_equal(frames, 0u);
+  check_equal(fake.sent_count, 0u);
+  check_equal(fake.release_count, 1u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -339,15 +357,15 @@ static void test_send_failure_does_not_commit_accept(void) {
   fake.chunks[0] = wire;
   fake.chunk_lengths[0] = wire_len;
   fake.chunk_count = 1u;
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames),
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
                MESH_STREAM_TRANSPORT_IO_ERROR);
-  check_int_eq(transport.last_io_result, -55);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_FAILED);
-  check_int_eq(transport.session.state, MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND);
-  check_hex64_eq(transport.session.next_control_sequence, 0u);
-  check_size_eq(frames, 1u);
-  check_size_eq(fake.release_count, 1u);
+  check_equal(transport.last_io_result, -55);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+  check_equal(transport.session.state, MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND);
+  check_equal(transport.session.next_control_sequence, 0u);
+  check_equal(frames, 1u);
+  check_equal(fake.release_count, 1u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -369,13 +387,13 @@ static void test_binding_error_is_terminal_and_chunk_is_released(void) {
   fake.chunks[0] = wire;
   fake.chunk_lengths[0] = wire_len;
   fake.chunk_count = 1u;
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames),
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
                MESH_STREAM_TRANSPORT_SESSION_ERROR);
-  check_int_eq(transport.last_session_result, MESH_STREAM_SESSION_BINDING_MISMATCH);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_FAILED);
-  check_size_eq(fake.release_count, 1u);
-  check_size_eq(application.event_count, 0u);
+  check_equal(transport.last_session_result, MESH_STREAM_SESSION_BINDING_MISMATCH);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+  check_equal(fake.release_count, 1u);
+  check_equal(application.event_count, 0u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -388,12 +406,12 @@ static void test_interrupt_is_nonterminal_and_has_no_owned_chunk(void) {
 
   memset(&fake, 0, sizeof(fake));
   memset(&application, 0, sizeof(application));
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames),
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
                MESH_STREAM_TRANSPORT_INTERRUPTED);
-  check_size_eq(frames, 0u);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_READY);
-  check_size_eq(fake.release_count, 0u);
+  check_equal(frames, 0u);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_READY);
+  check_equal(fake.release_count, 0u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -418,13 +436,13 @@ static void test_rejects_trailing_bytes_after_terminal_frame(void) {
   fake.chunks[0] = wire;
   fake.chunk_lengths[0] = cursor;
   fake.chunk_count = 1u;
-  check_int_eq(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
-  check_int_eq(mesh_stream_transport_pump_once_v1(&transport, &frames),
+  check_equal(init_transport(&transport, &config, &fake, &application), MESH_STREAM_TRANSPORT_OK);
+  check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
                MESH_STREAM_TRANSPORT_SESSION_ERROR);
-  check_int_eq(transport.last_session_result, MESH_STREAM_SESSION_INVALID_STATE);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_FAILED);
-  check_size_eq(frames, 2u);
-  check_size_eq(fake.release_count, 1u);
+  check_equal(transport.last_session_result, MESH_STREAM_SESSION_INVALID_STATE);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+  check_equal(frames, 2u);
+  check_equal(fake.release_count, 1u);
   mesh_stream_transport_destroy_v1(&transport);
 }
 
@@ -437,21 +455,18 @@ static void test_hwm_setup_failure_leaves_no_owned_buffer(void) {
   memset(&fake, 0, sizeof(fake));
   memset(&application, 0, sizeof(application));
   fake.hwm_result = -66;
-  check_int_eq(init_transport(&transport, &config, &fake, &application),
+  check_equal(init_transport(&transport, &config, &fake, &application),
                MESH_STREAM_TRANSPORT_IO_ERROR);
-  check_int_eq(transport.last_io_result, -66);
+  check_equal(transport.last_io_result, -66);
   check_null(transport.buffer);
-  check_int_eq(transport.state, MESH_STREAM_TRANSPORT_UNINITIALIZED);
-  check_size_eq(fake.configured_hwm, TEST_SEND_HWM);
+  check_equal(transport.state, MESH_STREAM_TRANSPORT_UNINITIALIZED);
+  check_equal(fake.configured_hwm, TEST_SEND_HWM);
   mesh_stream_transport_destroy_v1(&transport);
 
-  check_int_eq(
-      mesh_stream_transport_init_coronet_v1(&transport, &config, NULL, accept_event, &application),
-      MESH_STREAM_TRANSPORT_INVALID_ARG);
 }
 
 spec("mesh stream transport adapter") {
-  describe("bounded CoroNet ownership boundary") {
+  describe("bounded synchronous transport ownership") {
     it("pumps arbitrary fragments and releases every owned chunk") {
       test_pumps_fragmented_stream_and_releases_every_chunk();
     }
@@ -468,8 +483,119 @@ spec("mesh stream transport adapter") {
     it("rejects bytes trailing a terminal stream frame") {
       test_rejects_trailing_bytes_after_terminal_frame();
     }
-    it("cleans initialization state when CoroNet HWM setup fails") {
+    it("cleans initialization state when HWM setup fails") {
       test_hwm_setup_failure_leaves_no_owned_buffer();
     }
+  }
+}
+
+
+spec("mesh stream asynchronous control settlement") {
+  mesh_stream_transport_config_v1_t config = transport_config();
+  static mesh_stream_transport_v1_t transport;
+  static fake_io_t fake;
+  static fake_application_t application;
+  uint8_t wire[320];
+  size_t frames = 0u;
+  size_t wire_len = build_complete_stream(&config, wire, sizeof(wire));
+  size_t open_len = MESH_STREAM_FIXED_HEADER_SIZE + 17u;
+  size_t data_len = MESH_STREAM_FIXED_HEADER_SIZE + sizeof(TEST_PAYLOAD);
+
+  before_each() {
+    memset(&transport, 0, sizeof(transport));
+    memset(&fake, 0, sizeof(fake));
+    memset(&application, 0, sizeof(application));
+    check_equal(init_async_transport(&transport, &config, &fake, &application),
+                MESH_STREAM_TRANSPORT_OK);
+  }
+  after_each() { mesh_stream_transport_destroy_v1(&transport); }
+
+  it("waits for real ACCEPT completion before activating or delivering buffered DATA") {
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, open_len + data_len, &frames),
+                MESH_STREAM_TRANSPORT_OK);
+    check_equal(frames, 1u);
+    check_equal(application.event_count, 1u);
+    check_equal(transport.session.state, MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(transport.sent_control_frames, 0u);
+    check_true(transport.send_pending);
+    check_equal(fake.sent_count, 1u);
+    check_equal(mesh_stream_transport_pump_once_v1(&transport, &frames),
+                MESH_STREAM_TRANSPORT_INVALID_STATE);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[0], 0,
+                  fake.sent_lengths[0], &frames), MESH_STREAM_TRANSPORT_OK);
+    check_equal(frames, 1u);
+    check_equal(application.data_bytes, sizeof(TEST_PAYLOAD));
+    check_equal(transport.session.state, MESH_STREAM_SESSION_ACTIVE);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(transport.sent_control_frames, 1u);
+    check_true(transport.send_pending); /* WINDOW_UPDATE is admitted, not advertised. */
+    check_equal(fake.sent_count, 2u);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[0], 0,
+                  fake.sent_lengths[0], &frames), MESH_STREAM_TRANSPORT_INVALID_STATE);
+    check_equal(transport.session.receive_limit, 8u);
+    check_true(transport.send_pending);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[1], 0,
+                  fake.sent_lengths[1], &frames), MESH_STREAM_TRANSPORT_OK);
+    check_equal(transport.session.receive_limit, 12u);
+    check_equal(transport.sent_control_frames, 2u);
+    check_false(transport.send_pending);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[1], 0,
+                  fake.sent_lengths[1], &frames), MESH_STREAM_TRANSPORT_INVALID_STATE);
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire + open_len + data_len,
+                  wire_len - open_len - data_len, &frames), MESH_STREAM_TRANSPORT_OK);
+    check_equal(transport.state, MESH_STREAM_TRANSPORT_CLOSED);
+    check_equal(application.event_count, 4u);
+    check_equal(application.data_bytes, 12u);
+  }
+
+  it("does not advertise WINDOW_UPDATE after cancellation") {
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, open_len, &frames),
+                MESH_STREAM_TRANSPORT_OK);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[0], 0,
+                  fake.sent_lengths[0], &frames), MESH_STREAM_TRANSPORT_OK);
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire + open_len, data_len, &frames),
+                MESH_STREAM_TRANSPORT_OK);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[1], -77,
+                  0u, &frames), MESH_STREAM_TRANSPORT_IO_ERROR);
+    check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+    check_equal(transport.last_io_result, -77);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(transport.sent_control_frames, 1u);
+    check_false(transport.send_pending);
+  }
+
+  it("rejects short successful completions and never activates ACCEPT") {
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, open_len, &frames),
+                MESH_STREAM_TRANSPORT_OK);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[0], 0,
+                  fake.sent_lengths[0] - 1u, &frames), MESH_STREAM_TRANSPORT_IO_ERROR);
+    check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+    check_equal(transport.session.state, MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND);
+    check_equal(transport.sent_control_frames, 0u);
+  }
+
+  it("treats admission rejection as terminal without promising any credit") {
+    fake.send_result = -88;
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, open_len, &frames),
+                MESH_STREAM_TRANSPORT_IO_ERROR);
+    check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(transport.sent_control_frames, 0u);
+    check_false(transport.send_pending);
+  }
+
+  it("bounds retained receive bytes while waiting for the owner terminal") {
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, open_len, &frames),
+                MESH_STREAM_TRANSPORT_OK);
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, config.receiver.max_frame_size,
+                  &frames), MESH_STREAM_TRANSPORT_OK);
+    check_equal(mesh_stream_transport_feed_v1(&transport, wire, 1u, &frames),
+                MESH_STREAM_TRANSPORT_RESOURCE_EXHAUSTED);
+    check_equal(transport.state, MESH_STREAM_TRANSPORT_FAILED);
+    check_equal(transport.session.receive_limit, 8u);
+    check_equal(mesh_stream_transport_complete_send_v1(&transport, fake.sent_tokens[0], 0,
+                  fake.sent_lengths[0], &frames), MESH_STREAM_TRANSPORT_INVALID_STATE);
   }
 }
