@@ -532,6 +532,9 @@ p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node);
 /* Infrastructure */
 P2P_API int p2p_node_start_server(p2p_node_t *node);
 void p2p_node_stop_server(p2p_node_t *node);
+int p2p_node_run_internal(p2p_node_t *node);
+int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms);
+void p2p_node_stop_internal(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
 void node_maintenance_cb(salts_timer_t *timer);
 
