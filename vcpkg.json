@@ -1,5 +1,5 @@
 {
-  "name": "vcpkg-example",
+  "name": "turbop2p",
   "version-semver": "0.1.0",
   "dependencies": [
     {
@@ -11,7 +11,7 @@
       "version>=": "0.8.3"
     },
     {
-      "name": "boringssl" 
+      "name": "boringssl"
     },
     {
       "name": "cjson",
@@ -27,5 +27,6 @@
       "name": "zlib"
     }
   ],
-  "builtin-baseline": "b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01"
+  "builtin-baseline": "b1b19307e2d2ec1eefbdb7ea069de7d4bcd31f01",
+  "description": "Modern Salts-based P2P and mesh runtime"
 }
