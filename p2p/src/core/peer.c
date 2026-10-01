@@ -4,7 +4,7 @@
 #include "../security/p2p_cookie.h"
 #include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_stream.h>
-#include <turbo_error.h>
+#include <salts/error_codes.h>
 #include <tlog.h>
 #include <platform.h>
 #include <stdlib.h>
@@ -125,7 +125,7 @@ const char* p2p_peer_state_str(p2p_peer_state_t state) {
  * Peer Lifecycle
  * ============================================================================= */
 
-CXX_C_API p2p_peer_t* p2p_peer_create(p2p_node_t *node, const char *ip, int port) {
+P2P_API p2p_peer_t* p2p_peer_create(p2p_node_t *node, const char *ip, int port) {
     if(ip == NULL)
         return NULL;
     p2p_peer_t *peer = (p2p_peer_t *)calloc(1, sizeof(p2p_peer_t));
@@ -151,7 +151,7 @@ CXX_C_API p2p_peer_t* p2p_peer_create(p2p_node_t *node, const char *ip, int port
     return peer;
 }
 
-CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer) {
+P2P_API void p2p_peer_destroy(p2p_peer_t *peer) {
     int should_finalize = 0;
 
     if (!peer) return;
@@ -448,7 +448,7 @@ static int peer_send_raw(p2p_peer_t *peer, const uint8_t *data, size_t len) {
     if (!peer || !peer->conn) return P2P_ERR_NETWORK;
     result = p2p_connection_send(peer->conn, data, len);
     if (result == 0) return P2P_OK;
-    return result == TURBO_ENOBUFS ? P2P_ERR_RESOURCE_EXHAUSTED
+    return result == SALTS_ENOBUFS ? P2P_ERR_RESOURCE_EXHAUSTED
                                   : P2P_ERR_NETWORK;
 }
 
