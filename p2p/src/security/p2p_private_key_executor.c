@@ -3,7 +3,6 @@
 #include "../core/peer.h"
 #include "../internal.h"
 
-#include <CoroNet/turbo_coro_context.h>
 #include <platform.h>
 #include <salts/thread.h>
 #include <salts/clock.h>
@@ -104,27 +103,12 @@ static void executor_finish_on_owner(
     operation_release(operation);
 }
 
-static void executor_completion_post(void *arg1, void *arg2) {
-    p2p_private_key_operation_t *operation =
-        (p2p_private_key_operation_t *)arg1;
-    int expected = 0;
-    (void)arg2;
-
-    if (operation && atomic_compare_exchange_strong_explicit(
-                         &operation->owner_claimed, &expected, 1,
-                         memory_order_acq_rel, memory_order_acquire)) {
-        executor_finish_on_owner(operation);
-    }
-    operation_release(operation);
-}
-
 static void executor_run_operation(void *argument) {
     p2p_private_key_operation_t *operation =
         (p2p_private_key_operation_t *)argument;
     p2p_private_key_executor_t *executor;
     p2p_private_key_cancel_v4_t cancel;
     uint64_t now_ms;
-    int post_result;
 
     if (!operation || !operation->executor || !operation->peer) {
         return;
@@ -161,34 +145,15 @@ static void executor_run_operation(void *argument) {
     }
     p2p_crypto_wipe(operation->payload, sizeof(operation->payload));
     operation->payload_len = 0;
-    /* Publish a completion only after reserving the post callback's
-     * reference.  The owner-side fallback pump may observe completed as soon
-     * as it is released and is then allowed to drop the list reference. */
-    atomic_fetch_add_explicit(&operation->references, 1,
-                              memory_order_relaxed);
+    /* Worker threads only publish completion and wake the CNet owner.
+     * cnet_client_wake() is the sole CNet progress-control operation that may
+     * be called concurrently from a non-owner thread.  The owner poll path
+     * drains completed private-key work before running further protocol work. */
     atomic_store_explicit(&operation->completed, 1, memory_order_release);
-    do {
-        post_result = coro_post(operation->node->ctx,
-                                executor_completion_post,
-                                operation, NULL);
-        if (post_result == 0 ||
-            p2p_private_key_executor_is_closing(executor) ||
-            operation_is_cancelled(operation)) {
-            break;
-        }
-        now_ms = salts_hrtime() / 1000000U;
-        if (now_ms >= operation->deadline_ms) {
-            break;
-        }
-        salts_sleep_ms(1);
-    } while (1);
-    if (post_result != 0) {
+    if (cnet_client_wake(&operation->node->network) != SALTS_OK) {
         salts_mutex_lock(&operation->node->mutex);
         executor->completion_post_failures++;
         salts_mutex_unlock(&operation->node->mutex);
-        /* Keep the completion reference until the last operation/node access.
-         * The owner fallback pump may concurrently drop the list reference. */
-        operation_release(operation);
     }
 }
 
