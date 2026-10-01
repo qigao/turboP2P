@@ -10,8 +10,6 @@
 extern "C" {
 #endif
 
-typedef struct coro_context_s coro_context_t;
-
 /* Opaque handles - forward declarations only */
 typedef struct p2p_node_s p2p_node_t;
 typedef struct p2p_peer_s p2p_peer_t;
@@ -344,15 +342,19 @@ P2P_API void p2p_destroy(p2p_node_t *node);
 P2P_API int p2p_start(p2p_node_t *node);
 
 /**
- * Start server and gossip (non-blocking)
- * Use this with p2p_get_loop() + coro_context_run() for custom event loop integration
+ * Start server and gossip without entering a blocking progress loop.
+ * Call p2p_poll() from the owning thread to advance network work.
  */
 P2P_API int p2p_start_nonblocking(p2p_node_t *node);
 
 /**
- * Get the CoroNet context for integration
+ * Advance bounded P2P/CNet work on the owning thread.
+ * A zero timeout performs one non-blocking progress pass.
  */
-P2P_API coro_context_t *p2p_get_loop(p2p_node_t *node);
+P2P_API int p2p_poll(p2p_node_t *node, uint32_t timeout_ms);
+
+/** Request termination of the node's blocking/progress loop. */
+P2P_API void p2p_stop(p2p_node_t *node);
 
 /**
  * Copy this node's stable P2P id.
