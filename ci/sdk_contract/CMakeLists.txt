@@ -3,7 +3,7 @@ project(TurboP2PSdkContract LANGUAGES C CXX)
 include(CTest)
 
 # No source-tree injection, retired package aliases, or independent DataBind package.
-foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "Chttp|CHTTP_ROOT")
+foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "SaltsNet|SALTS_NET_ROOT" "Chttp|CHTTP_ROOT")
   string(REPLACE "|" ";" _fields "${_entry}")
   list(GET _fields 0 _package)
   list(GET _fields 1 _variable)
@@ -21,7 +21,7 @@ foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "Chttp|
 endforeach()
 
 set(_required_targets Salts::CNet Salts::CMeta Salts::CFlow Salts::PluginABI
-    Salts::Plugin Salts::DataBind CHttp::Client CHttp::Server)
+    Salts::Plugin Salts::Crypto Salts::DataBind SaltsNet::ICE CHttp::Client CHttp::Server)
 foreach(_target IN LISTS _required_targets)
   if(NOT TARGET ${_target})
     message(FATAL_ERROR "Latest restored SDK graph is missing ${_target}")
