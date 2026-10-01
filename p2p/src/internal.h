@@ -12,6 +12,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <cnet/cnet.h>
 
 #include "../include/p2p_export.h"
 
@@ -295,6 +297,15 @@ typedef struct {
   uint8_t initiator_preface[44];
 } p2p_cookie_gate_t;
 
+struct p2p_transport_binding_s {
+  struct p2p_node_s *node;
+  cnet_connection connection;
+  p2p_cookie_gate_t *gate;
+  struct p2p_peer_s *peer;
+  uint8_t inbound;
+  uint8_t terminal;
+};
+
 /* Professional Core Modules */
 #include "crypto/p2p_crypto.h"
 #include "protocol/message.h"
@@ -539,7 +550,7 @@ int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms);
 void p2p_node_stop_internal(p2p_node_t *node);
 cnet_observer p2p_node_transport_observer(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
-void node_maintenance_cb(salts_timer_t *timer);
+void p2p_node_maintenance(p2p_node_t *node);
 
 /* Lifecycle and Events */
 void p2p_node_on_peer_connected(p2p_node_t *node, p2p_peer_t *peer);
