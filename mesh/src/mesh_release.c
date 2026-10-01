@@ -1,6 +1,6 @@
 #include "mesh_release.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -272,7 +272,7 @@ mesh_release_result_t mesh_release_digest_v1(const mesh_release_v1_t *release,
     return MESH_RELEASE_RESOURCE_EXHAUSTED;
   rc = mesh_release_encode_v1(release, buffer, size, &len);
   if (rc == MESH_RELEASE_OK) {
-    if (turbo_crypto_sha256(buffer, len, out_digest) != TURBO_CRYPTO_OK)
+    if (salts_crypto_sha256(buffer, len, out_digest) != SALTS_CRYPTO_OK)
       rc = MESH_RELEASE_INTEGRITY;
   }
   free(buffer);
