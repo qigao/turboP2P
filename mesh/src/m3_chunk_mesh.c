@@ -2,7 +2,7 @@
 
 #include "mesh_mgmt_crypto.h"
 
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -606,7 +606,7 @@ static m3_chunk_mesh_result_t mesh_client_wait(
 
   while (turbo_monotonic_ms() < deadline &&
          (!client->peer || !client->done))
-    turbo_sleep_ms(1);
+    salts_sleep_ms(1);
   if (!client->peer)
     return M3_CHUNK_MESH_NOT_READY;
   return client->done ? M3_CHUNK_MESH_OK : M3_CHUNK_MESH_TIMEOUT;
