@@ -7,7 +7,7 @@
 
 #include <iris/iris.h>
 #include <salts/crypto.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -62,7 +62,7 @@ static void gateway_meta_poll(m3_gateway_t *g);
  * thread on the node context. */
 static int gateway_meta_wait(m3_gateway_t *g) {
   for (size_t i = 0u; i < 5000u && g->meta_mutation_pending; i++) {
-    turbo_sleep_ms(1);
+    salts_sleep_ms(1);
   }
   return g->meta_mutation_pending ? -1 : 0;
 }
@@ -1081,7 +1081,7 @@ static int gateway_lookup(m3_gateway_t *g, Req *req, get_ctx_t *ctx) {
         /* The node loop is pumped by the owner (background thread or harness);
          * sleep-poll the completion instead of pumping here to avoid a race. */
         for (size_t i = 0u; i < 5000u && !ctx->handled; i++) {
-          turbo_sleep_ms(1);
+          salts_sleep_ms(1);
         }
       } else
 #endif
@@ -1262,7 +1262,7 @@ static int gateway_fetch_manifest(m3_gateway_t *g, const char *bucket,
 #ifdef TURBO_P2P_M3_RAFT_ENABLED
     if (g->node) {
       for (size_t i = 0u; i < 5000u && !ctx.handled; i++)
-        turbo_sleep_ms(1);
+        salts_sleep_ms(1);
     } else
 #endif
     {
@@ -2245,7 +2245,7 @@ int m3_gateway_meta_lookup_v1(m3_gateway_t *gateway, const char *bucket,
   /* The node loop is pumped by the owner (pump thread or harness); sleep-poll
    * here so this convenience path never races that thread on the node. */
   for (size_t i = 0u; i < 5000u && !done; i++) {
-    turbo_sleep_ms(1);
+    salts_sleep_ms(1);
     (void)m3_gateway_meta_lookup_try_v1(gateway, out, &done);
   }
   return done ? 0 : -1;
