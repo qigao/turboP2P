@@ -26,6 +26,8 @@
 
 基础测试直接消费安装 SDK，本身不生成 parser。Linux SDK 的 Crypto 依赖 OpenSSL；该测试任务使用 runner 的 `libssl-dev`，关闭 vcpkg manifest 恢复，以免拉入尚未迁移的根工程依赖。共享缓存和 re2c 设置仍由统一 action 提供。
 
+NuGet 实际最新已发布包为 SaltsUtils.Native 4.1.13（首轮 CI 恢复记录）；4.1.14 是源码与 SDK artifact 版本。两版 `crypto/` 及 `cmake/SaltsUtilsConfig.cmake.in` 经 Git diff 确认无差异，因此声明 SaltsUtils 最低版本 4.1.13，并继续恢复 `Version="*"` 的最新发布包。本地同时验证 4.1.14 SDK；不以重新构建旧版本绕过包发布边界。系统 OpenSSL 3.0.13 下也为 9/9 通过。
+
 ## 兼容性与取舍
 
 SHA-256 的输入、域分隔、输出长度和现有签名算法保持不变；没有修改协议或持久化格式。CID 定义从文件存储头文件拆到 `m3_chunk_cid.h`，原类型及布局不变，使媒体清单不再通过类型依赖旧文件系统。

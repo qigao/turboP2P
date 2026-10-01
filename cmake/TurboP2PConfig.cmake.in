@@ -14,7 +14,7 @@ unset(SaltsUtils_DIR CACHE)
 unset(SaltsUtils_DIR)
 find_dependency(Salts 1.8.9 CONFIG REQUIRED PATHS "$ENV{SALTS_ROOT}"
                 NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-find_dependency(SaltsUtils 4.1.14 CONFIG REQUIRED PATHS "$ENV{SALTS_UTILS_ROOT}"
+find_dependency(SaltsUtils 4.1.13 CONFIG REQUIRED PATHS "$ENV{SALTS_UTILS_ROOT}"
                 NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 find_dependency(TurboUtils REQUIRED)
 find_dependency(TurboParser CONFIG REQUIRED)

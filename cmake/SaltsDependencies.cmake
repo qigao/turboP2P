@@ -15,7 +15,7 @@ unset(SaltsUtils_DIR CACHE)
 unset(SaltsUtils_DIR)
 find_package(Salts 1.8.9 CONFIG REQUIRED PATHS "${_SALTS_ROOT_PATH}"
              NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-find_package(SaltsUtils 4.1.14 CONFIG REQUIRED PATHS "${_SALTS_UTILS_ROOT_PATH}"
+find_package(SaltsUtils 4.1.13 CONFIG REQUIRED PATHS "${_SALTS_UTILS_ROOT_PATH}"
              NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 foreach(_target IN ITEMS Salts::CSTL Salts::Crypto)
   if(NOT TARGET ${_target})
