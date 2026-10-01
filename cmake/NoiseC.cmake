@@ -77,7 +77,7 @@ function(turbo_p2p_configure_noise_c)
     PUBLIC "${_noise_source}/include"
     PRIVATE "${_noise_source}/src"
             "${_noise_source}/src/protocol")
-  target_link_libraries(noise_protocol PRIVATE Salts::Crypto)
+  target_link_libraries(noise_protocol PRIVATE Salts::Platform OpenSSL::Crypto)
   target_compile_definitions(noise_protocol PRIVATE
                              TURBO_P2P_NOISE_C_PINNED_COMMIT=\"${TURBO_P2P_NOISE_C_COMMIT}\")
   if(MSVC)
