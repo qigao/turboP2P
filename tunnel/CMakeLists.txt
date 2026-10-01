@@ -30,7 +30,7 @@ set(TUNNEL_LIB_SOURCES
 
 # Build object library (for internal tests)
 add_library(tunnel_objs STATIC ${TUNNEL_LIB_SOURCES})
-target_compile_definitions(tunnel_objs PRIVATE SHARED_CXX)
+target_compile_definitions(tunnel_objs PRIVATE TUNNEL_BUILDING_LIBRARY)
 target_include_directories(
   tunnel_objs
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -50,7 +50,7 @@ add_library(tunnel SHARED $<TARGET_OBJECTS:tunnel_objs>)
 add_library(TurboP2P::Tunnel ALIAS tunnel)
 
 # Define export macros for DLL
-target_compile_definitions(tunnel PRIVATE SHARED_CXX)
+target_compile_definitions(tunnel PRIVATE TUNNEL_BUILDING_LIBRARY)
 
 # Include directories (must be after add_library) Include directories (must be
 # after add_library)
