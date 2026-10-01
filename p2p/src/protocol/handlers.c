@@ -204,7 +204,7 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
             }
             break;
         default:
-            TLOG_DEBUG("[P2P] No handler for msg type {}", p2p_message_type_name(type));
+            TLOG_DEBUGF("[P2P] No handler for msg type {}", p2p_message_type_name(type));
             break;
     }
 }
@@ -338,7 +338,7 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     salts_mutex_unlock(&node->mutex);
 
     if (sample_accepted) {
-        TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)",
+        TLOG_DEBUGF("[P2P] PONG from {}:{} (RTT={} ms)",
                    peer_info.ip, peer_info.port, rtt_ms);
     }
     return P2P_OK;
@@ -406,7 +406,7 @@ int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t
                          msg->payload.dht_store.data_len);
     salts_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] DHT STORE from {}:{} (len={}) -> {}",
+    TLOG_DEBUGF("[P2P] DHT STORE from {}:{} (len={}) -> {}",
               peer_info.ip, peer_info.port, msg->payload.dht_store.data_len,
               ret == 0 ? "OK" : "ERR");
 
@@ -461,7 +461,7 @@ int p2p_handle_dht_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_messag
     }
 
     salts_mutex_lock(&node->mutex);
-    TLOG_DEBUG("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
+    TLOG_DEBUGF("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
               peer_info.ip, peer_info.port, res->node_count);
 
     p2p_import_dht_response_nodes_locked(node, res);
