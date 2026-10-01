@@ -142,7 +142,7 @@ static void lookup_finish_detached(p2p_dht_lookup_t *lookup) {
         return;
     }
 
-    TLOG_INFO("[P2P] DHT lookup finished (request_id={})", lookup->request_id);
+    TLOG_INFOF("[P2P] DHT lookup finished (request_id={})", lookup->request_id);
     if (lookup->callback) {
         lookup->callback(lookup, lookup->user_data);
     }
@@ -199,7 +199,7 @@ static p2p_dht_lookup_t *lookup_try_resolve_get_hit_locked(p2p_node_t *node,
     memcpy(key.bytes, lookup->target, KADEMLIA_ID_BYTES);
     if (kademlia_store(node->kad_dht, &key, res->data, res->data_len) == 0) {
         p2p_peer_fill_info_ex_locked(peer, &peer_info);
-        TLOG_DEBUG("[P2P] DHT GET resolved from {}:{} (len={})",
+        TLOG_DEBUGF("[P2P] DHT GET resolved from {}:{} (len={})",
                    peer_info.ip, peer_info.port, res->data_len);
     }
 
