@@ -141,7 +141,7 @@ add_library(mesh_control_durable_outbox_worker STATIC
 target_include_directories(mesh_control_durable_outbox_worker PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_durable_outbox_worker
-  PUBLIC mesh_control_durable_outbox Salts::Core
+  PUBLIC mesh_control_durable_outbox Salts::Core Salts::Concurrency
   PRIVATE OpenSSL::Crypto)
 set_property(TARGET mesh_control_durable_outbox_worker
   PROPERTY FOLDER "mesh/internal")
