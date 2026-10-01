@@ -127,7 +127,7 @@ typedef struct {
  * p2p_destroy() returns. get_public_key is called while configuring the node.
  * calculate_x25519 is called once during configuration with the standard
  * X25519 basepoint to verify that the provider owns the advertised public key,
- * then synchronously on the CoroNet owner thread during each Noise handshake.
+ * then synchronously on the CNet owner thread during each Noise handshake.
  * It therefore must be non-blocking, bounded-time, and must not call back into
  * the node. Both callbacks receive borrowed buffers and
  * must not retain them. calculate_x25519 must either return P2P_OK with exactly
@@ -162,7 +162,7 @@ typedef struct {
 } p2p_private_key_cancel_v4_t;
 
 /**
- * Blocking opaque X25519 provider executed outside the CoroNet owner loop.
+ * Blocking opaque X25519 provider executed outside the CNet owner lane.
  *
  * The node copies this structure. context remains borrowed until p2p_destroy()
  * returns. get_public_key runs synchronously during configuration, before the
@@ -204,7 +204,7 @@ typedef struct {
     uint32_t ready_timeout_ms;
     uint16_t handshake_frame_limit;
     uint16_t credential_limit;
-    /** Per-stream CoroNet queued-send hard limit; zero selects 1 MiB. */
+    /** Per-peer transport send-budget reservation; zero selects 1 MiB. */
     size_t send_hwm_bytes;
     /** Sum of admitted transport HWM reservations; zero selects 64 MiB. */
     size_t node_send_budget_bytes;
@@ -462,7 +462,7 @@ P2P_API int p2p_node_configure_pinned_security_v2(
 
 /**
  * Replace the built-in pinned provider's remote allowlist and immediately
- * revalidate established sessions. This must run on the CoroNet owner thread.
+ * revalidate established sessions. This must run on the CNet owner thread.
  * The node copies up to 256 contiguous keys before changing the trust
  * snapshot. A zero count with a NULL key pointer revokes every remote key.
  * Allocation or validation failure before the swap leaves the old snapshot
@@ -504,7 +504,7 @@ P2P_API int p2p_node_get_private_key_executor_status_v4(
 
 /**
  * Revalidate every established peer against the identity provider's current
- * trust snapshot. This must run on the node's CoroNet owner thread and must not
+ * trust snapshot. This must run on the node's CNet owner thread and must not
  * race p2p_destroy(). Provider callbacks run without the node mutex. A rejected
  * credential or an identity result different from the READY-bound identity
  * disconnects that session; identity changes require a fresh Noise handshake.
