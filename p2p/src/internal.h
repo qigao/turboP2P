@@ -37,7 +37,8 @@
 #include "uthash.h"
 #include "crypto/p2p_crypto.h"
 #include "dht/kademlia.h"
-#include <turbo_thread.h>
+#include <salts/thread.h>
+#include <salts/thread_pool.h>
 typedef struct turbo_stream_listener_s turbo_stream_listener_t;
 typedef struct p2p_private_key_executor_s p2p_private_key_executor_t;
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
@@ -469,12 +470,12 @@ struct p2p_node_s {
   p2p_topic_t *topics;
   p2p_download_t *downloads;
   p2p_transfer_manager_t *transfers;
-  turbo_timer_t *gossip_timer;
+  salts_timer_t *gossip_timer;
   kademlia_dht_t *kad_dht;
   p2p_dht_lookup_t *dht_lookups;
   p2p_connect_suppression_t *connect_suppressions;
   vivaldi_coord_t coord;
-  turbo_mutex_t mutex;
+  salts_mutex_t mutex;
 };
 
 /* =============================================================================
@@ -542,7 +543,7 @@ p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node);
 CXX_C_API int p2p_node_start_server(p2p_node_t *node);
 void p2p_node_stop_server(p2p_node_t *node);
 void p2p_gossip_start(p2p_node_t *node);
-void node_maintenance_cb(turbo_timer_t *timer);
+void node_maintenance_cb(salts_timer_t *timer);
 
 /* Lifecycle and Events */
 void p2p_node_on_peer_connected(p2p_node_t *node, p2p_peer_t *peer);
