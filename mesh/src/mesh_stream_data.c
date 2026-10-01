@@ -1,6 +1,6 @@
 #include "mesh_stream_data.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <turbo_thread.h>
 
 #include <stdio.h>
@@ -213,7 +213,7 @@ void mesh_stream_data_destroy(mesh_stream_data_t *stream) {
 
 static int hash_block(const uint8_t *bytes, size_t len,
                       uint8_t digest[MESH_STREAM_DATA_HASH_SIZE]) {
-  return turbo_crypto_sha256(bytes, len, digest) == TURBO_CRYPTO_OK ? 0 : -1;
+  return salts_crypto_sha256(bytes, len, digest) == SALTS_CRYPTO_OK ? 0 : -1;
 }
 
 static int io_send(mesh_stream_data_t *stream, const uint8_t *frame, size_t len) {
