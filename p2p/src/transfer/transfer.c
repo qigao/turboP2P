@@ -18,7 +18,7 @@ static void p2p_transfer_free(p2p_transfer_t *transfer) {
     p2p_transfer_free_bitmap_locked(transfer);
     salts_mutex_unlock(&transfer->mutex);
     salts_mutex_destroy(&transfer->mutex);
-    TLOG_DEBUG("[Transfer] Destroyed transfer #{}", transfer->id);
+    TLOG_DEBUGF("[Transfer] Destroyed transfer #{}", transfer->id);
     free(transfer);
 }
 
@@ -63,7 +63,7 @@ p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_di
     mgr->count++;
     salts_mutex_unlock(&mgr->mutex);
 
-    TLOG_DEBUG("[Transfer] Created transfer #{} ({})",
+    TLOG_DEBUGF("[Transfer] Created transfer #{} ({})",
               t->id, dir == P2P_TRANSFER_DIR_DOWNLOAD ? "download" : "upload");
     return t;
 }
@@ -172,7 +172,7 @@ int p2p_transfer_open_file_locked(p2p_transfer_t *transfer, const char *mode) {
 
     transfer->fp = fopen(transfer->filepath, mode);
     if (!transfer->fp) {
-        TLOG_ERROR("[Transfer] Failed to open file: {}", transfer->filepath);
+        TLOG_ERRORF("[Transfer] Failed to open file: {}", transfer->filepath);
         return P2P_ERR_IO;
     }
 
@@ -253,7 +253,7 @@ void p2p_transfer_complete(p2p_transfer_t *transfer, int success, const char *er
     user_data = transfer->user_data;
     salts_mutex_unlock(&transfer->mutex);
 
-    TLOG_INFO("[Transfer] Transfer #{} {}{}{}",
+    TLOG_INFOF("[Transfer] Transfer #{} {}{}{}",
              transfer_id,
              success ? "completed" : "failed",
              error ? ": " : "",
@@ -412,7 +412,7 @@ int p2p_transfer_mgr_pause(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     }
     salts_mutex_unlock(&t->mutex);
 
-    TLOG_INFO("[Transfer] Transfer #{} paused", transfer_id);
+    TLOG_INFOF("[Transfer] Transfer #{} paused", transfer_id);
     p2p_transfer_release(t);
     return P2P_OK;
 }
@@ -433,7 +433,7 @@ int p2p_transfer_mgr_resume(p2p_transfer_manager_t *mgr, uint32_t transfer_id,
     t->last_activity = salts_hrtime();
     salts_mutex_unlock(&t->mutex);
 
-    TLOG_INFO("[Transfer] Transfer #{} resumed", transfer_id);
+    TLOG_INFOF("[Transfer] Transfer #{} resumed", transfer_id);
 
     /* Receiver will request next chunk when state becomes ACTIVE */
     (void)node;
@@ -465,7 +465,7 @@ int p2p_transfer_mgr_cancel(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     user_data = t->user_data;
     salts_mutex_unlock(&t->mutex);
 
-    TLOG_INFO("[Transfer] Transfer #{} cancelled", transfer_id);
+    TLOG_INFOF("[Transfer] Transfer #{} cancelled", transfer_id);
 
     if (complete_cb) {
         complete_cb(t, 0, "Cancelled by user", user_data);
@@ -566,7 +566,7 @@ int p2p_transfer_check_timeouts_locked(p2p_transfer_t *transfer, uint32_t *timed
 
         if (elapsed >= timeout_ns) {
             if (entry->retry_count >= P2P_MAX_CHUNK_RETRIES) {
-                TLOG_ERROR("[Transfer] Chunk {} exceeded max retries ({})",
+                TLOG_ERRORF("[Transfer] Chunk {} exceeded max retries ({})",
                           entry->chunk_index, P2P_MAX_CHUNK_RETRIES);
                 return -1;
             }
@@ -575,7 +575,7 @@ int p2p_transfer_check_timeouts_locked(p2p_transfer_t *transfer, uint32_t *timed
             entry->retry_count++;
             entry->request_time = now;
 
-            TLOG_WARN("[Transfer] Chunk {} timed out, retry {}/{}",
+            TLOG_WARNF("[Transfer] Chunk {} timed out, retry {}/{}",
                      entry->chunk_index, entry->retry_count, P2P_MAX_CHUNK_RETRIES);
         }
     }
@@ -716,7 +716,7 @@ int p2p_transfer_source_add_locked(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     }
 
     if (transfer->source_count >= P2P_MAX_SOURCES) {
-        TLOG_WARN("[Transfer] Max sources reached for transfer #{}", transfer->id);
+        TLOG_WARNF("[Transfer] Max sources reached for transfer #{}", transfer->id);
         return P2P_ERR_NO_MEM;
     }
 
@@ -730,7 +730,7 @@ int p2p_transfer_source_add_locked(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     transfer->source_count++;
 
     p2p_transfer_snapshot_peer_info(peer, &peer_info);
-    TLOG_INFO("[Transfer] Added source {}:{} for transfer #{} (total: {})",
+    TLOG_INFOF("[Transfer] Added source {}:{} for transfer #{} (total: {})",
              peer_info.ip, peer_info.port, transfer->id, transfer->source_count);
 
     return P2P_OK;
@@ -745,7 +745,7 @@ void p2p_transfer_source_remove_locked(p2p_transfer_t *transfer, p2p_peer_t *pee
         if (transfer->sources[i].peer == peer) {
             transfer->sources[i].active = 0;
             p2p_transfer_snapshot_peer_info(peer, &peer_info);
-            TLOG_INFO("[Transfer] Removed source {}:{} from transfer #{}",
+            TLOG_INFOF("[Transfer] Removed source {}:{} from transfer #{}",
                      peer_info.ip, peer_info.port, transfer->id);
             return;
         }
@@ -808,7 +808,7 @@ void p2p_transfer_source_failed_locked(p2p_transfer_t *transfer, p2p_peer_t *pee
             if (transfer->sources[i].failure_count >= 3) {
                 transfer->sources[i].active = 0;
                 p2p_transfer_snapshot_peer_info(peer, &peer_info);
-                TLOG_WARN("[Transfer] Source {}:{} deactivated after {} failures",
+                TLOG_WARNF("[Transfer] Source {}:{} deactivated after {} failures",
                          peer_info.ip, peer_info.port, transfer->sources[i].failure_count);
             }
             return;
@@ -858,7 +858,7 @@ void p2p_transfer_enable_multi_source(p2p_transfer_t *transfer, int enable) {
     salts_mutex_lock(&transfer->mutex);
     transfer->multi_source_enabled = enable ? 1 : 0;
     salts_mutex_unlock(&transfer->mutex);
-    TLOG_DEBUG("[Transfer] Multi-source {} for transfer #{}",
+    TLOG_DEBUGF("[Transfer] Multi-source {} for transfer #{}",
               enable ? "enabled" : "disabled", transfer->id);
 }
 
