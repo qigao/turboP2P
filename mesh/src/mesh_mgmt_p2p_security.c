@@ -1,6 +1,6 @@
 #include "mesh_mgmt_p2p_security.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <string.h>
 #include <time.h>
@@ -47,23 +47,23 @@ static int derive_identity(
     const uint8_t *credential, size_t credential_len,
     p2p_authenticated_identity_v2_t *out_identity) {
   static const uint8_t routing_domain[] = "turbo-p2p-routing-id-v2";
-  turbo_crypto_sha256_ctx_t hash;
+  salts_crypto_sha256_ctx_t hash;
 
   memset(out_identity, 0, sizeof(*out_identity));
   memcpy(out_identity->principal_id, certificate->management_key,
          P2P_SECURITY_ID_SIZE);
-  if (turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, routing_domain,
+  if (salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, routing_domain,
                                  sizeof(routing_domain) - 1u) !=
-          TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, provider->mesh_id_hash,
-                                 P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, certificate->managed_node_id,
-                                 P2P_SECURITY_ID_SIZE) != TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_final(&hash, out_identity->routing_id) !=
-          TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256(credential, credential_len,
-                          out_identity->credential_digest) != TURBO_CRYPTO_OK) {
+          SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, provider->mesh_id_hash,
+                                 P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, certificate->managed_node_id,
+                                 P2P_SECURITY_ID_SIZE) != SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_final(&hash, out_identity->routing_id) !=
+          SALTS_CRYPTO_OK ||
+      salts_crypto_sha256(credential, credential_len,
+                          out_identity->credential_digest) != SALTS_CRYPTO_OK) {
     memset(&hash, 0, sizeof(hash));
     memset(out_identity, 0, sizeof(*out_identity));
     return P2P_ERR_CRYPTO;
