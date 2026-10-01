@@ -1,3 +1,4 @@
+#include <salts/clock.h>
 #include "mesh_product_controller_iris.h"
 
 #include <json_parser.h>
@@ -245,7 +246,7 @@ mesh_control_result_t mesh_product_controller_iris_plan_v1(
   request.selector_program = program;
   request.predicate_count =
       salts_selector_program_predicate_count(program);
-  request.deadline_ms = turbo_monotonic_ms();
+  request.deadline_ms = salts_monotonic_ms();
   if (request.deadline_ms > UINT64_MAX - adapter->config.plan_timeout_ms) {
     result = MESH_CONTROL_INVALID_STATE;
     goto cleanup;
@@ -605,7 +606,7 @@ mesh_control_result_t mesh_product_controller_iris_network_json_v1(
   request.document = body;
   request.document_size = body_size;
   request.drain_timeout_ms = drain_timeout_ms;
-  request.deadline_ms = turbo_monotonic_ms();
+  request.deadline_ms = salts_monotonic_ms();
   if (request.deadline_ms > UINT64_MAX - adapter->config.network_timeout_ms) {
     atomic_fetch_add_explicit(&adapter->rejected_input, 1u,
                               memory_order_relaxed);
