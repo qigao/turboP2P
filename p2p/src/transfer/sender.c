@@ -80,7 +80,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
         return P2P_ERR_NO_MEM;
     }
 
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
     memcpy(transfer->file_id, file_id, P2P_DHT_KEY_SIZE);
     strncpy(transfer->filepath, file->filepath, sizeof(transfer->filepath) - 1);
     strncpy(transfer->filename, file->filename, sizeof(transfer->filename) - 1);
@@ -93,7 +93,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
     if (ret == P2P_OK) {
         transfer->state = P2P_TRANSFER_STATE_ACTIVE;
     }
-    turbo_mutex_unlock(&transfer->mutex);
+    salts_mutex_unlock(&transfer->mutex);
     if (ret != P2P_OK) {
         p2p_transfer_destroy(mgr, transfer);
         return ret;
@@ -155,7 +155,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
         goto done;
     }
 
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
 
     /* Open file if not already open */
     if (!transfer->fp) {
@@ -209,7 +209,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
 
 done:
     if (transfer) {
-        turbo_mutex_unlock(&transfer->mutex);
+        salts_mutex_unlock(&transfer->mutex);
     }
     if (transfer) {
         p2p_transfer_release(transfer);
