@@ -37,7 +37,8 @@ typedef enum {
 /**
  * recv returns an owned chunk on success; release_recv must release it exactly
  * once. send must copy or consume bytes before returning because control frames
- * are encoded in temporary storage.
+ * are encoded in temporary storage. A synchronous send returns zero only
+ * after the full write completes; asynchronous admission uses init_async.
  */
 typedef struct {
   int (*recv)(void *context, uint8_t **out_bytes, size_t *out_len);
@@ -47,6 +48,14 @@ typedef struct {
   int (*set_receive_timeout)(void *context, uint64_t timeout_ms);
   void *context;
 } mesh_stream_transport_io_v1_t;
+
+/** Admission only: copy/retain bytes before returning, then deliver exactly one
+ * terminal through complete_send. Never complete inline or block this owner.
+ * Tokens belong to one initialized transport lifetime; quiesce callbacks before
+ * destroy/reinitialize. A backend must serialize all writes on this connection.
+ */
+typedef int (*mesh_stream_transport_async_send_fn)(void *context, const uint8_t *bytes,
+                                                   size_t len, uint64_t token);
 
 typedef int (*mesh_stream_transport_event_fn)(void *context,
                                               const mesh_stream_receive_event_v1_t *event);
@@ -61,7 +70,7 @@ typedef struct {
 /**
  * One coroutine/event-loop owner must serialize all calls. buffer owns one
  * allocation exactly receiver.max_frame_size bytes long. The adapter does not
- * own io.context (including a CoroNet socket).
+ * own io.context (including the backend connection).
  */
 typedef struct {
   mesh_stream_transport_config_v1_t config;
@@ -79,6 +88,11 @@ typedef struct {
   uint64_t received_bytes;
   uint64_t received_frames;
   uint64_t sent_control_frames;
+  mesh_stream_transport_async_send_fn send_async;
+  mesh_stream_control_preparation_v1_t pending_control;
+  uint64_t pending_send_token;
+  size_t pending_send_size;
+  uint8_t send_pending;
 } mesh_stream_transport_v1_t;
 
 mesh_stream_transport_result_t
@@ -86,6 +100,28 @@ mesh_stream_transport_init_v1(mesh_stream_transport_v1_t *transport,
                               const mesh_stream_transport_config_v1_t *config,
                               const mesh_stream_transport_io_v1_t *io,
                               mesh_stream_transport_event_fn on_event, void *event_context);
+
+/**
+ * Callback-driven counterpart to init. io.send must be NULL; recv/release_recv
+ * are unused and may be NULL. feed copies borrowed receive views into the same
+ * bounded window. While one control send is pending, buffered frames wait for
+ * its terminal; admission never advances advertised credit or activates ACCEPT.
+ */
+mesh_stream_transport_result_t mesh_stream_transport_init_async_v1(
+    mesh_stream_transport_v1_t *transport, const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *io, mesh_stream_transport_async_send_fn send_async,
+    mesh_stream_transport_event_fn on_event, void *event_context);
+
+/**
+ * Settle the exact pending token. Success requires the complete encoded size;
+ * error/cancellation/partial completion makes the transport terminally FAILED
+ * without committing the control. Success commits then drains buffered frames,
+ * possibly admitting the next control. Duplicate/stale tokens are rejected
+ * without mutating the live pending control. Views in callbacks remain borrowed.
+ */
+mesh_stream_transport_result_t mesh_stream_transport_complete_send_v1(
+    mesh_stream_transport_v1_t *transport, uint64_t token, int io_result,
+    size_t sent_bytes, size_t *out_frames);
 
 void mesh_stream_transport_destroy_v1(mesh_stream_transport_v1_t *transport);
 

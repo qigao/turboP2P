@@ -7,6 +7,8 @@
 static mesh_stream_transport_result_t transport_fail(mesh_stream_transport_v1_t *transport,
                                                      mesh_stream_transport_result_t result) {
   transport->state = MESH_STREAM_TRANSPORT_FAILED;
+  transport->send_pending = 0u;
+  memset(&transport->pending_control, 0, sizeof(transport->pending_control));
   return result;
 }
 
@@ -28,6 +30,21 @@ send_prepared_control(mesh_stream_transport_v1_t *transport,
   if (codec_result != MESH_STREAM_CODEC_OK) {
     transport->last_session_result = MESH_STREAM_SESSION_INVALID_FRAME;
     return transport_fail(transport, MESH_STREAM_TRANSPORT_SESSION_ERROR);
+  }
+  if (transport->send_async) {
+    if (transport->send_pending)
+      return transport_fail(transport, MESH_STREAM_TRANSPORT_INVALID_STATE);
+    transport->pending_control = *preparation;
+    transport->pending_send_token = preparation->generation;
+    transport->pending_send_size = encoded_len;
+    transport->send_pending = 1u;
+    io_result = transport->send_async(transport->io.context, encoded, encoded_len,
+                                      transport->pending_send_token);
+    if (io_result != 0) {
+      transport->last_io_result = io_result;
+      return transport_fail(transport, MESH_STREAM_TRANSPORT_IO_ERROR);
+    }
+    return MESH_STREAM_TRANSPORT_OK;
   }
   io_result = transport->io.send(transport->io.context, encoded, encoded_len);
   if (io_result != 0) {
@@ -107,7 +124,7 @@ static void consume_frame(mesh_stream_transport_v1_t *transport, size_t consumed
 
 static mesh_stream_transport_result_t drain_frames(mesh_stream_transport_v1_t *transport,
                                                    size_t *out_frames) {
-  while (transport->buffer_begin < transport->buffer_end) {
+  while (!transport->send_pending && transport->buffer_begin < transport->buffer_end) {
     mesh_stream_receive_event_v1_t event;
     mesh_stream_receive_preparation_v1_t preparation;
     mesh_stream_session_result_t session_result;
@@ -179,15 +196,17 @@ static void compact_buffer(mesh_stream_transport_v1_t *transport) {
   transport->buffer_end = buffered;
 }
 
-mesh_stream_transport_result_t
-mesh_stream_transport_init_v1(mesh_stream_transport_v1_t *transport,
-                              const mesh_stream_transport_config_v1_t *config,
-                              const mesh_stream_transport_io_v1_t *io,
-                              mesh_stream_transport_event_fn on_event, void *event_context) {
+static mesh_stream_transport_result_t
+transport_init(mesh_stream_transport_v1_t *transport,
+               const mesh_stream_transport_config_v1_t *config,
+               const mesh_stream_transport_io_v1_t *io,
+               mesh_stream_transport_async_send_fn send_async,
+               mesh_stream_transport_event_fn on_event, void *event_context) {
   mesh_stream_session_result_t session_result;
   int io_result = 0;
 
-  if (!transport || !config || !io || !io->recv || !io->release_recv || !io->send ||
+  if (!transport || !config || !io ||
+      (send_async ? io->send != NULL : (!io->recv || !io->release_recv || !io->send)) ||
       !io->set_send_hwm || !io->set_receive_timeout || !on_event ||
       config->window_update_threshold == 0u ||
       config->window_update_threshold > config->receiver.initial_receive_window ||
@@ -222,10 +241,55 @@ mesh_stream_transport_init_v1(mesh_stream_transport_v1_t *transport,
   }
   transport->config = *config;
   transport->io = *io;
+  transport->send_async = send_async;
   transport->on_event = on_event;
   transport->event_context = event_context;
   transport->state = MESH_STREAM_TRANSPORT_READY;
   return MESH_STREAM_TRANSPORT_OK;
+}
+
+mesh_stream_transport_result_t
+mesh_stream_transport_init_v1(mesh_stream_transport_v1_t *transport,
+                              const mesh_stream_transport_config_v1_t *config,
+                              const mesh_stream_transport_io_v1_t *io,
+                              mesh_stream_transport_event_fn on_event, void *event_context) {
+  return transport_init(transport, config, io, NULL, on_event, event_context);
+}
+
+mesh_stream_transport_result_t mesh_stream_transport_init_async_v1(
+    mesh_stream_transport_v1_t *transport, const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *io, mesh_stream_transport_async_send_fn send_async,
+    mesh_stream_transport_event_fn on_event, void *event_context) {
+  if (!send_async)
+    return MESH_STREAM_TRANSPORT_INVALID_ARG;
+  return transport_init(transport, config, io, send_async, on_event, event_context);
+}
+
+mesh_stream_transport_result_t mesh_stream_transport_complete_send_v1(
+    mesh_stream_transport_v1_t *transport, uint64_t token, int io_result,
+    size_t sent_bytes, size_t *out_frames) {
+  mesh_stream_session_result_t session_result;
+
+  if (!transport || !out_frames)
+    return MESH_STREAM_TRANSPORT_INVALID_ARG;
+  *out_frames = 0u;
+  if (transport->state != MESH_STREAM_TRANSPORT_READY || !transport->send_async ||
+      !transport->send_pending || token != transport->pending_send_token)
+    return MESH_STREAM_TRANSPORT_INVALID_STATE;
+  if (io_result != 0 || sent_bytes != transport->pending_send_size) {
+    transport->last_io_result = io_result != 0 ? io_result : -1;
+    return transport_fail(transport, MESH_STREAM_TRANSPORT_IO_ERROR);
+  }
+  session_result = mesh_stream_receiver_commit_control_v1(&transport->session,
+                                                          &transport->pending_control);
+  if (session_result != MESH_STREAM_SESSION_OK) {
+    transport->last_session_result = session_result;
+    return transport_fail(transport, MESH_STREAM_TRANSPORT_SESSION_ERROR);
+  }
+  transport->sent_control_frames++;
+  transport->send_pending = 0u;
+  memset(&transport->pending_control, 0, sizeof(transport->pending_control));
+  return drain_frames(transport, out_frames);
 }
 
 void mesh_stream_transport_destroy_v1(mesh_stream_transport_v1_t *transport) {
@@ -298,7 +362,8 @@ mesh_stream_transport_pump_once_v1(mesh_stream_transport_v1_t *transport, size_t
   if (!transport || !out_frames)
     return MESH_STREAM_TRANSPORT_INVALID_ARG;
   *out_frames = 0u;
-  if (transport->state != MESH_STREAM_TRANSPORT_READY || !transport->buffer)
+  if (transport->state != MESH_STREAM_TRANSPORT_READY || !transport->buffer ||
+      transport->send_async)
     return MESH_STREAM_TRANSPORT_INVALID_STATE;
   io_result = transport->io.recv(transport->io.context, &bytes, &len);
   if (io_result != 0) {

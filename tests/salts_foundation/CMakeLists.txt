@@ -10,12 +10,15 @@ include(SaltsDependencies)
 find_package(OpenSSL REQUIRED)
 
 # Compile real production sources against installed SDKs without admitting a
-# second network runtime. Full transport tests stay in the normal root build.
+# second network runtime. Full product transport tests stay in the normal root build.
 set(mesh_src "${TURBOP2P_SOURCE_DIR}/mesh/src")
 set(mesh_tests "${TURBOP2P_SOURCE_DIR}/mesh/tests")
 add_library(foundation STATIC
   "${mesh_src}/mesh_control_primitives.c"
   "${mesh_src}/mesh_control_outbox.c"
+  "${mesh_src}/mesh_stream_codec.c"
+  "${mesh_src}/mesh_stream_session.c"
+  "${mesh_src}/mesh_stream_transport.c"
   "${mesh_src}/mesh_stream_data.c"
   "${mesh_src}/mesh_stream_multisource.c"
   "${mesh_src}/mesh_stream_source_selector.c"
@@ -40,6 +43,7 @@ target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::C
 
 foreach(test_name IN ITEMS
   test_mesh_control_outbox
+  test_mesh_stream_transport
   test_mesh_stream_data
   test_mesh_stream_source_selector
   test_mesh_media_index
@@ -57,3 +61,12 @@ add_executable(test_salts_sha256 test_salts_sha256.c)
 set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
 add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
+
+add_executable(test_mesh_stream_cnet "${mesh_tests}/test_mesh_stream_cnet.c")
+set_property(TARGET test_mesh_stream_cnet PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_stream_cnet PRIVATE foundation Salts::TinyTest Salts::CNet)
+target_compile_definitions(test_mesh_stream_cnet PRIVATE
+  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/localhost-cert.pem"
+  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/localhost-key.pem")
+add_test(NAME test_mesh_stream_cnet COMMAND test_mesh_stream_cnet)
+set_tests_properties(test_mesh_stream_cnet PROPERTIES TIMEOUT 30)
