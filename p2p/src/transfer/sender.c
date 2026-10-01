@@ -51,7 +51,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
     file = p2p_node_find_local_file_by_id(node, file_id);
 
     if (!file) {
-        TLOG_WARN("[P2P] FILE_REQUEST for unknown file from {}:{}", peer_info.ip, peer_info.port);
+        TLOG_WARNF("[P2P] FILE_REQUEST for unknown file from {}:{}", peer_info.ip, peer_info.port);
 
         /* Send negative response */
         reply = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
@@ -68,7 +68,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
         return P2P_ERR_NOT_FOUND;
     }
 
-    TLOG_INFO("[P2P] FILE_REQUEST for '{}' from {}:{}",
+    TLOG_INFOF("[P2P] FILE_REQUEST for '{}' from {}:{}",
              file->filename, peer_info.ip, peer_info.port);
 
     mgr = node->transfers;
@@ -149,7 +149,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
     /* Find transfer */
     transfer = p2p_transfer_find_upload_by_remote_id(mgr, transfer_id, peer);
     if (!transfer) {
-        TLOG_WARN("[P2P] CHUNK_REQUEST for unknown transfer {} from {}:{}",
+        TLOG_WARNF("[P2P] CHUNK_REQUEST for unknown transfer {} from {}:{}",
                  transfer_id, peer_info.ip, peer_info.port);
         ret = P2P_ERR_NOT_FOUND;
         goto done;
@@ -161,7 +161,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
     if (!transfer->fp) {
         ret = p2p_transfer_open_file_locked(transfer, "rb");
         if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] Failed to open file for transfer {}", transfer_id);
+            TLOG_ERRORF("[P2P] Failed to open file for transfer {}", transfer_id);
             goto done;
         }
     }
@@ -192,7 +192,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
     read_bytes = fread(msg->payload.chunk_data.data, 1, size, transfer->fp);
     
     if (read_bytes != size) {
-        TLOG_ERROR("[P2P] Failed to read chunk {} from disk", chunk_index);
+        TLOG_ERRORF("[P2P] Failed to read chunk {} from disk", chunk_index);
         ret = P2P_ERR_IO;
         goto done;
     }
@@ -202,7 +202,7 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
                msg->payload.chunk_data.chunk_hash);
     msg->header.payload_len = (uint16_t)(sizeof(p2p_chunk_data_payload_t) - (65536 - 128) + read_bytes);
 
-    TLOG_DEBUG("[P2P] Sending chunk {} of transfer {} ({} bytes)", 
+    TLOG_DEBUGF("[P2P] Sending chunk {} of transfer {} ({} bytes)", 
               chunk_index + 1, transfer_id, read_bytes);
 
     ret = p2p_peer_send(peer, msg);
