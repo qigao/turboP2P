@@ -26,7 +26,7 @@ add_library(mesh_mgmt_crypto STATIC
   src/mesh_mgmt_crypto.h)
 target_include_directories(mesh_mgmt_crypto PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto Salts::Crypto)
+target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto monocypher)
 set_property(TARGET mesh_mgmt_crypto PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_mgmt_envelope STATIC
