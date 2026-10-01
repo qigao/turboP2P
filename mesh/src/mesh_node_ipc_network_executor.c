@@ -1,12 +1,13 @@
 #include "mesh_node_ipc_network_executor.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <string.h>
 
 static int bytes_equal(const uint8_t *left, const uint8_t *right,
                        size_t size) {
-  return turbo_crypto_verify(left, right, size) == TURBO_CRYPTO_OK;
+  return CRYPTO_memcmp(left, right, size) == 0;
 }
 
 static const mesh_network_reconciler_record_v1_t *find_record(
@@ -65,8 +66,8 @@ mesh_control_result_t mesh_node_ipc_network_execute_v1(
   if (command->action == MESH_CONTROL_DESIRED_APPLY) {
     const mesh_network_reconciler_record_v1_t *record;
     if (!command->document || command->document_size == 0u ||
-        turbo_crypto_sha256(command->document, command->document_size,
-                            document_digest) != TURBO_CRYPTO_OK ||
+        salts_crypto_sha256(command->document, command->document_size,
+                            document_digest) != SALTS_CRYPTO_OK ||
         !bytes_equal(document_digest, command->document_digest,
                      sizeof(document_digest)) ||
         mesh_control_network_document_decode_v1(
