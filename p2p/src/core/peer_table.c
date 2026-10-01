@@ -79,7 +79,7 @@ int peer_table_count(p2p_peer_entry_t *table) {
     return HASH_COUNT(table);
 }
 
-CXX_C_API p2p_peer_t* p2p_peer_find(p2p_node_t *node, const char *ip, int port) {
+P2P_API p2p_peer_t* p2p_peer_find(p2p_node_t *node, const char *ip, int port) {
     if (!node || !ip) return NULL;
     salts_mutex_lock(&node->mutex);
     p2p_peer_entry_t *entry = peer_table_find(node->peers_table, ip, port);
