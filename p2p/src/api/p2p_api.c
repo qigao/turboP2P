@@ -1488,18 +1488,18 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
         return ret;
     }
 
-    deadline_ms = (salts_hrtime() / 1000000) + P2P_DHT_GET_TIMEOUT_MS;
-    while ((salts_hrtime() / 1000000) < deadline_ms) {
-        coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
-
+    deadline_ms = salts_monotonic_ms() + P2P_DHT_GET_TIMEOUT_MS;
+    while (salts_monotonic_ms() < deadline_ms) {
+        ret = p2p_poll(node, 10u);
+        if (ret != P2P_OK) {
+            return ret;
+        }
         if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
             return P2P_OK;
         }
         if (!p2p_dht_lookup_is_active(node, request_id)) {
             return P2P_ERR_NOT_FOUND;
         }
-
-        salts_sleep_ms(10);
     }
 
     if (p2p_try_get_local_dht_value(node, &kkey, buf, buf_len) == P2P_OK) {
