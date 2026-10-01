@@ -368,7 +368,7 @@ void p2p_stop(p2p_node_t *node) {
 }
 
 static int p2p_node_identity_is_mutable_locked(const p2p_node_t *node) {
-    return !node->server && node->peer_count == 0 &&
+    return !node->listener_initialized && node->peer_count == 0 &&
            !node->security_configured;
 }
 
@@ -816,7 +816,7 @@ static int p2p_node_configure_security_locked(
              handshake_timeout_ms)) {
         return P2P_ERR_INVALID_ARG;
     }
-    if (node->server || node->peer_count > 0 || node->security_configured) {
+    if (node->listener_initialized || node->peer_count > 0 || node->security_configured) {
         return P2P_ERR_INVALID_STATE;
     }
 
@@ -1223,7 +1223,7 @@ int p2p_node_configure_pinned_security_v2(
            trusted_key_count * P2P_KEY_SIZE);
 
     salts_mutex_lock(&node->mutex);
-    if (node->server || node->peer_count > 0 || node->security_configured ||
+    if (node->listener_initialized || node->peer_count > 0 || node->security_configured ||
         node->pinned_trusted_keys) {
         salts_mutex_unlock(&node->mutex);
         p2p_crypto_wipe(key_copy, trusted_key_count * P2P_KEY_SIZE);
