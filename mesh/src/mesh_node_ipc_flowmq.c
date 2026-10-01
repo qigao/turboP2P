@@ -1,6 +1,6 @@
 #include "mesh_node_ipc_flowmq.h"
 
-#include <turbo_error.h>
+#include <salts/error_codes.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -63,30 +63,30 @@ static int text_view_equal(tstr_v view, const char *text) {
 
 static mesh_control_result_t map_flow_status(int status) {
   switch (status) {
-    case TURBO_OK: return MESH_CONTROL_OK;
-    case TURBO_EINVAL:
-    case TURBO_ERANGE:
-    case TURBO_EPROTO:
-    case TURBO_EMSGSIZE: return MESH_CONTROL_INVALID_ARG;
-    case TURBO_ENOMEM:
-    case TURBO_ENOSPC:
-    case TURBO_EBUSY: return MESH_CONTROL_RESOURCE_EXHAUSTED;
-    case TURBO_ENOTCONN: return MESH_CONTROL_PROVIDER_UNAVAILABLE;
-    case TURBO_ETIMEDOUT: return MESH_CONTROL_TIMEOUT;
-    case TURBO_EPERM: return MESH_CONTROL_UNAUTHORIZED;
-    case TURBO_ECANCELED:
-    case TURBO_ESHUTDOWN: return MESH_CONTROL_CLOSED;
+    case SALTS_OK: return MESH_CONTROL_OK;
+    case SALTS_EINVAL:
+    case SALTS_ERANGE:
+    case SALTS_EPROTO:
+    case SALTS_EMSGSIZE: return MESH_CONTROL_INVALID_ARG;
+    case SALTS_ENOMEM:
+    case SALTS_ENOSPC:
+    case SALTS_EBUSY: return MESH_CONTROL_RESOURCE_EXHAUSTED;
+    case SALTS_ENOTCONN: return MESH_CONTROL_PROVIDER_UNAVAILABLE;
+    case SALTS_ETIMEDOUT: return MESH_CONTROL_TIMEOUT;
+    case SALTS_EPERM: return MESH_CONTROL_UNAUTHORIZED;
+    case SALTS_ECANCELED:
+    case SALTS_ESHUTDOWN: return MESH_CONTROL_CLOSED;
     default: return MESH_CONTROL_INVALID_STATE;
   }
 }
 
 static int map_receive_status(mesh_control_result_t result) {
   switch (result) {
-    case MESH_CONTROL_OK: return TURBO_OK;
-    case MESH_CONTROL_RESOURCE_EXHAUSTED: return TURBO_ENOSPC;
-    case MESH_CONTROL_CLOSED: return TURBO_ECANCELED;
-    case MESH_CONTROL_UNAUTHORIZED: return TURBO_EPERM;
-    default: return TURBO_EPROTO;
+    case MESH_CONTROL_OK: return SALTS_OK;
+    case MESH_CONTROL_RESOURCE_EXHAUSTED: return SALTS_ENOSPC;
+    case MESH_CONTROL_CLOSED: return SALTS_ECANCELED;
+    case MESH_CONTROL_UNAUTHORIZED: return SALTS_EPERM;
+    default: return SALTS_EPROTO;
   }
 }
 
@@ -95,7 +95,7 @@ static int receive_payload(mesh_node_ipc_flowmq_v1_t *adapter,
   mesh_control_result_t result;
   if (!adapter || !frame || adapter->initialized == 0u ||
       frame->kind != FLOWMQ_PROTOCOL_FRAME_DATA)
-    return TURBO_EPROTO;
+    return SALTS_EPROTO;
   result = mesh_node_ipc_channel_try_push_v1(
       adapter->inbound, (const uint8_t *)frame->payload.data,
       frame->payload.len);
@@ -115,7 +115,7 @@ static int router_receive(void *context, const flowmq_router_route_t *route,
   (void)peer_topic;
   if (!adapter || !route ||
       !text_view_equal(peer_identity, adapter->expected_peer_identity))
-    return TURBO_EPERM;
+    return SALTS_EPERM;
   atomic_store_explicit(&adapter->route_generation, 0u, memory_order_release);
   atomic_store_explicit(&adapter->route_endpoint_id, route->endpoint_id,
                         memory_order_relaxed);
@@ -156,7 +156,7 @@ static int connect_receive(void *context, const flowmq_protocol_frame_t *frame,
   (void)generation;
   if (!adapter || !frame ||
       !text_view_equal(frame->identity, adapter->expected_peer_identity))
-    return TURBO_EPERM;
+    return SALTS_EPERM;
   return receive_payload(adapter, frame);
 }
 
@@ -290,7 +290,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_init_v1(
   map_config.binding_count = binding_count;
   map_config.policy_generation = config->identity_policy_generation;
   status = flowmq_tls_identity_map_create(&map_config, &adapter->identity_map);
-  if (status != TURBO_OK) {
+  if (status != SALTS_OK) {
     mesh_node_ipc_flowmq_destroy_v1(adapter);
     return map_flow_status(status);
   }
@@ -301,7 +301,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_init_v1(
   atomic_init(&adapter->receive_rejected, 0u);
   atomic_init(&adapter->next_message_id, 0u);
   atomic_init(&adapter->send_completion_id, 0u);
-  atomic_init(&adapter->send_completion_status, TURBO_EBUSY);
+  atomic_init(&adapter->send_completion_status, SALTS_EBUSY);
   atomic_init(&adapter->send_completion_done, 0);
   if (config->mode == MESH_NODE_IPC_FLOWMQ_BIND_V1) {
     flowmq_router_endpoint_config_t endpoint = *config->bind_endpoint;
@@ -338,7 +338,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_init_v1(
     status = flowmq_connect_endpoint_create(&endpoint, &adapter->connect);
   }
   adapter->last_flow_status = status;
-  if (status != TURBO_OK) {
+  if (status != SALTS_OK) {
     mesh_node_ipc_flowmq_destroy_v1(adapter);
     return map_flow_status(status);
   }
@@ -358,7 +358,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_start_v1(
                ? flowmq_router_endpoint_start(adapter->router, timeout_ns)
                : flowmq_connect_endpoint_start(adapter->connect, timeout_ns);
   adapter->last_flow_status = status;
-  if (status != TURBO_OK) return map_flow_status(status);
+  if (status != SALTS_OK) return map_flow_status(status);
   adapter->started = 1u;
   return MESH_CONTROL_OK;
 }
@@ -380,7 +380,7 @@ static mesh_control_result_t finish_send(mesh_node_ipc_flowmq_v1_t *adapter,
   adapter->last_flow_status = status;
   send_request_destroy(request);
   adapter->send_request = NULL;
-  if (status != TURBO_OK) {
+  if (status != SALTS_OK) {
     adapter->send_failed++;
     return map_flow_status(status);
   }
@@ -437,7 +437,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_pump_send_v1(
                                       view.frame_size);
       status = flowmq_protocol_encode_frame(
           &frame, MESH_NODE_IPC_FLOWMQ_MAX_FRAME_SIZE_V1, &encoded);
-      if (status != TURBO_OK) {
+      if (status != SALTS_OK) {
         send_request_destroy(request);
         return map_flow_status(status);
       }
@@ -469,7 +469,7 @@ mesh_control_result_t mesh_node_ipc_flowmq_pump_send_v1(
                          adapter->connect, request->completion_id, encoded,
                          tstr_len(encoded));
       tstr_freep(&encoded);
-      if (status != TURBO_OK) {
+      if (status != SALTS_OK) {
         adapter->send_request = NULL;
         send_request_destroy(request);
         adapter->last_flow_status = status;
