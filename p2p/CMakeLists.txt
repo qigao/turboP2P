@@ -52,7 +52,8 @@ target_include_directories(
 target_link_libraries(
   p2p
   PUBLIC Salts::Core Salts::CNet
-  PRIVATE OpenSSL::Crypto Salts::Crypto TurboP2P::NoiseProtocol roaring uthash)
+  PRIVATE Salts::Platform Salts::Concurrency Salts::Crypto
+          OpenSSL::Crypto TurboP2P::NoiseProtocol roaring uthash)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)
 else()
