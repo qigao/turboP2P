@@ -40,10 +40,10 @@ static mesh_stream_bind_claims_v1_t test_claims(void) {
   fill_bytes(claims.stream_id, sizeof(claims.stream_id), 0xc0);
   claims.stream_epoch = 17u;
   claims.admission_generation = 23u;
-  check_int_eq(
+  check_equal(
       mesh_mgmt_ed25519_public_from_private(INITIATOR_PRIVATE_KEY, claims.initiator_principal_key),
       MESH_MGMT_CRYPTO_OK);
-  check_int_eq(
+  check_equal(
       mesh_mgmt_ed25519_public_from_private(RESPONDER_PRIVATE_KEY, claims.responder_principal_key),
       MESH_MGMT_CRYPTO_OK);
   return claims;
@@ -57,8 +57,8 @@ static void fixture_init(bind_fixture_t *fixture, size_t capacity) {
   config.capacity = capacity;
   config.max_ttl_ms = TEST_TTL_MS;
   fill_bytes(fixture->channel_binding, sizeof(fixture->channel_binding), 0xe0);
-  check_int_eq(mesh_stream_bind_store_init_v1(&fixture->store, &config), MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_ticket_issue_v1(&fixture->store, &claims, TEST_NOW_MS, TEST_TTL_MS,
+  check_equal(mesh_stream_bind_store_init_v1(&fixture->store, &config), MESH_STREAM_BIND_OK);
+  check_equal(mesh_stream_bind_ticket_issue_v1(&fixture->store, &claims, TEST_NOW_MS, TEST_TTL_MS,
                                                 &fixture->ticket),
                MESH_STREAM_BIND_OK);
 }
@@ -68,15 +68,15 @@ static void run_to_confirm(bind_fixture_t *fixture, mesh_stream_bind_initiator_v
                            uint8_t accept[MESH_STREAM_BIND_ACCEPT_SIZE],
                            uint8_t confirm[MESH_STREAM_BIND_CONFIRM_SIZE]) {
   memset(initiator, 0, sizeof(*initiator));
-  check_int_eq(mesh_stream_bind_initiator_start_v1(initiator, &fixture->ticket,
+  check_equal(mesh_stream_bind_initiator_start_v1(initiator, &fixture->ticket,
                                                    INITIATOR_PRIVATE_KEY, fixture->channel_binding,
                                                    init),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(
+  check_equal(mesh_stream_bind_responder_accept_v1(
                    &fixture->store, init, MESH_STREAM_BIND_INIT_SIZE, RESPONDER_PRIVATE_KEY,
                    fixture->channel_binding, TEST_NOW_MS, accept),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_initiator_confirm_v1(
+  check_equal(mesh_stream_bind_initiator_confirm_v1(
                    initiator, accept, MESH_STREAM_BIND_ACCEPT_SIZE, INITIATOR_PRIVATE_KEY,
                    fixture->channel_binding, confirm),
                MESH_STREAM_BIND_OK);
@@ -92,14 +92,14 @@ static void test_round_trip_consumes_ticket_and_rejects_replay(void) {
 
   fixture_init(&fixture, 2u);
   run_to_confirm(&fixture, &initiator, init, accept, confirm);
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_OK);
-  check_mem_eq(&admitted, &fixture.ticket, sizeof(admitted));
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(&admitted, &fixture.ticket, sizeof(admitted));
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_REPLAY);
-  check_mem_eq(&admitted, &(mesh_stream_bind_ticket_v1_t){0}, sizeof(admitted));
+  check_equal(&admitted, &(mesh_stream_bind_ticket_v1_t){0}, sizeof(admitted));
   mesh_stream_bind_store_destroy_v1(&fixture.store);
 }
 
@@ -117,33 +117,33 @@ static void test_channel_binding_mismatch_does_not_burn_ticket(void) {
   memset(&initiator, 0, sizeof(initiator));
   memcpy(wrong_binding, fixture.channel_binding, sizeof(wrong_binding));
   wrong_binding[0] ^= 0x80u;
-  check_int_eq(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
+  check_equal(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
                                                    INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                    init),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, zero_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_INVALID_ARG);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, wrong_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_CHANNEL_MISMATCH);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_initiator_confirm_v1(&initiator, accept, sizeof(accept),
+  check_equal(mesh_stream_bind_initiator_confirm_v1(&initiator, accept, sizeof(accept),
                                                      INITIATOR_PRIVATE_KEY, wrong_binding, confirm),
                MESH_STREAM_BIND_CHANNEL_MISMATCH);
-  check_int_eq(mesh_stream_bind_initiator_confirm_v1(
+  check_equal(mesh_stream_bind_initiator_confirm_v1(
                    &initiator, accept, sizeof(accept), INITIATOR_PRIVATE_KEY,
                    fixture.channel_binding, confirm),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     wrong_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_CHANNEL_MISMATCH);
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_OK);
   mesh_stream_bind_store_destroy_v1(&fixture.store);
@@ -160,42 +160,42 @@ static void test_tampering_fails_without_advancing_state(void) {
 
   fixture_init(&fixture, 1u);
   memset(&initiator, 0, sizeof(initiator));
-  check_int_eq(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
+  check_equal(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
                                                    INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                    init),
                MESH_STREAM_BIND_OK);
   init[60] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_AUTH_FAILED);
   init[60] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS, valid_accept),
                MESH_STREAM_BIND_OK);
 
   memcpy(accept, valid_accept, sizeof(accept));
   accept[sizeof(accept) - 1u] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_initiator_confirm_v1(&initiator, accept, sizeof(accept),
+  check_equal(mesh_stream_bind_initiator_confirm_v1(&initiator, accept, sizeof(accept),
                                                      INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                      confirm),
                MESH_STREAM_BIND_AUTH_FAILED);
-  check_int_eq(mesh_stream_bind_initiator_confirm_v1(&initiator, valid_accept, sizeof(valid_accept),
+  check_equal(mesh_stream_bind_initiator_confirm_v1(&initiator, valid_accept, sizeof(valid_accept),
                                                      INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                      confirm),
                MESH_STREAM_BIND_OK);
   confirm[TEST_CONFIRM_CHANNEL_OFFSET] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_CHANNEL_MISMATCH);
   confirm[TEST_CONFIRM_CHANNEL_OFFSET] ^= 0x01u;
   confirm[sizeof(confirm) - 1u] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_AUTH_FAILED);
   confirm[sizeof(confirm) - 1u] ^= 0x01u;
-  check_int_eq(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
+  check_equal(mesh_stream_bind_responder_finish_v1(&fixture.store, confirm, sizeof(confirm),
                                                     fixture.channel_binding, TEST_NOW_MS, &admitted),
                MESH_STREAM_BIND_OK);
   mesh_stream_bind_store_destroy_v1(&fixture.store);
@@ -211,21 +211,21 @@ static void test_expiry_and_capacity_are_bounded(void) {
 
   fixture_init(&fixture, 1u);
   memset(&initiator, 0, sizeof(initiator));
-  check_int_eq(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
+  check_equal(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
                                                    INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                    init),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS + TEST_TTL_MS, accept),
                MESH_STREAM_BIND_EXPIRED);
-  check_int_eq(
+  check_equal(
       mesh_stream_bind_ticket_issue_v1(&fixture.store, &claims, TEST_NOW_MS, TEST_TTL_MS, &ticket),
       MESH_STREAM_BIND_RESOURCE_EXHAUSTED);
-  check_size_eq(mesh_stream_bind_ticket_sweep_v1(&fixture.store, TEST_NOW_MS + TEST_TTL_MS - 1u),
+  check_equal(mesh_stream_bind_ticket_sweep_v1(&fixture.store, TEST_NOW_MS + TEST_TTL_MS - 1u),
                 0u);
-  check_size_eq(mesh_stream_bind_ticket_sweep_v1(&fixture.store, TEST_NOW_MS + TEST_TTL_MS), 1u);
-  check_int_eq(mesh_stream_bind_ticket_issue_v1(&fixture.store, &claims, TEST_NOW_MS + TEST_TTL_MS,
+  check_equal(mesh_stream_bind_ticket_sweep_v1(&fixture.store, TEST_NOW_MS + TEST_TTL_MS), 1u);
+  check_equal(mesh_stream_bind_ticket_issue_v1(&fixture.store, &claims, TEST_NOW_MS + TEST_TTL_MS,
                                                 TEST_TTL_MS, &ticket),
                MESH_STREAM_BIND_OK);
   mesh_stream_bind_store_destroy_v1(&fixture.store);
@@ -243,14 +243,14 @@ static void test_role_reflection_and_wrong_private_key_are_rejected(void) {
   memset(&store, 0, sizeof(store));
   memset(&initiator, 0, sizeof(initiator));
   fill_bytes(channel_binding, sizeof(channel_binding), 0xe0);
-  check_int_eq(mesh_stream_bind_store_init_v1(&store, &config), MESH_STREAM_BIND_OK);
+  check_equal(mesh_stream_bind_store_init_v1(&store, &config), MESH_STREAM_BIND_OK);
   memcpy(claims.responder_principal_key, claims.initiator_principal_key, 32);
-  check_int_eq(mesh_stream_bind_ticket_issue_v1(&store, &claims, TEST_NOW_MS, TEST_TTL_MS, &ticket),
+  check_equal(mesh_stream_bind_ticket_issue_v1(&store, &claims, TEST_NOW_MS, TEST_TTL_MS, &ticket),
                MESH_STREAM_BIND_INVALID_ARG);
   claims = test_claims();
-  check_int_eq(mesh_stream_bind_ticket_issue_v1(&store, &claims, TEST_NOW_MS, TEST_TTL_MS, &ticket),
+  check_equal(mesh_stream_bind_ticket_issue_v1(&store, &claims, TEST_NOW_MS, TEST_TTL_MS, &ticket),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_initiator_start_v1(&initiator, &ticket, RESPONDER_PRIVATE_KEY,
+  check_equal(mesh_stream_bind_initiator_start_v1(&initiator, &ticket, RESPONDER_PRIVATE_KEY,
                                                    channel_binding, init),
                MESH_STREAM_BIND_AUTH_FAILED);
   mesh_stream_bind_store_destroy_v1(&store);
@@ -264,21 +264,21 @@ static void test_invalid_frames_and_explicit_invalidation_fail_closed(void) {
 
   fixture_init(&fixture, 1u);
   memset(&initiator, 0, sizeof(initiator));
-  check_int_eq(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
+  check_equal(mesh_stream_bind_initiator_start_v1(&initiator, &fixture.ticket,
                                                    INITIATOR_PRIVATE_KEY, fixture.channel_binding,
                                                    init),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init) - 1u,
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init) - 1u,
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_INVALID_FRAME);
-  check_int_eq(mesh_stream_bind_responder_abort_init_v1(&fixture.store, init, sizeof(init) - 1u,
+  check_equal(mesh_stream_bind_responder_abort_init_v1(&fixture.store, init, sizeof(init) - 1u,
                                                         TEST_NOW_MS),
                MESH_STREAM_BIND_INVALID_FRAME);
-  check_int_eq(mesh_stream_bind_responder_abort_init_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_abort_init_v1(&fixture.store, init, sizeof(init),
                                                         TEST_NOW_MS),
                MESH_STREAM_BIND_OK);
-  check_int_eq(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
+  check_equal(mesh_stream_bind_responder_accept_v1(&fixture.store, init, sizeof(init),
                                                     RESPONDER_PRIVATE_KEY, fixture.channel_binding,
                                                     TEST_NOW_MS, accept),
                MESH_STREAM_BIND_REPLAY);

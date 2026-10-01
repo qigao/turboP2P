@@ -1,7 +1,7 @@
 name: Salts foundation regression
 on:
   pull_request:
-    branches: [master, codex/salts-foundation-phase-1]
+    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control]
   push:
     branches: [master]
   workflow_dispatch:

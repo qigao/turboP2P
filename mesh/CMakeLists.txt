@@ -26,7 +26,7 @@ add_library(mesh_mgmt_crypto STATIC
   src/mesh_mgmt_crypto.h)
 target_include_directories(mesh_mgmt_crypto PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto TurboNet::Crypto)
+target_link_libraries(mesh_mgmt_crypto PRIVATE OpenSSL::Crypto monocypher)
 set_property(TARGET mesh_mgmt_crypto PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_mgmt_envelope STATIC
@@ -1161,7 +1161,7 @@ add_library(mesh_stream_bind STATIC
 target_include_directories(mesh_stream_bind PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_stream_bind PUBLIC
-  mesh_mgmt_crypto TurboUtils::Core)
+  mesh_mgmt_crypto Salts::Platform)
 set_property(TARGET mesh_stream_bind PROPERTY FOLDER "mesh/internal")
 
 # MMP Stream V1 ticket schemas and the responder-owned issuance command. The
