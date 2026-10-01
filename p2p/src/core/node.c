@@ -167,6 +167,10 @@ int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms) {
         if (status == SALTS_ESHUTDOWN && node->stop_requested) return P2P_OK;
         return P2P_ERR_NETWORK;
     }
+    /* Private-key workers publish completion from non-owner threads and wake
+     * this CNet poll.  Drain those completions on the owner before processing
+     * further transport/protocol work. */
+    p2p_private_key_executor_pump(node);
     status = node_accept_ready(node);
     if (status != P2P_OK) return status;
 
