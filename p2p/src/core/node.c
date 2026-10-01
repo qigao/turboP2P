@@ -120,6 +120,30 @@ void p2p_node_destroy(p2p_node_t *node) {
     p2p_destroy_clean(node);
 }
 
+int p2p_node_run_internal(p2p_node_t *node) {
+    if (!node || !node->ctx) return P2P_ERR_INVALID_ARG;
+    return coro_context_run(node->ctx, TURBO_RUN_DEFAULT) < 0
+               ? P2P_ERR_NETWORK
+               : P2P_OK;
+}
+
+int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms) {
+    int status;
+    if (!node || !node->ctx) return P2P_ERR_INVALID_ARG;
+    status = coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
+    if (status < 0) return P2P_ERR_NETWORK;
+    if (status == 0 && timeout_ms != 0u) {
+        salts_sleep_ms(timeout_ms);
+        status = coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
+        if (status < 0) return P2P_ERR_NETWORK;
+    }
+    return P2P_OK;
+}
+
+void p2p_node_stop_internal(p2p_node_t *node) {
+    if (node && node->ctx) coro_context_stop(node->ctx);
+}
+
 /* =============================================================================
  * File Management
  * ============================================================================= */
