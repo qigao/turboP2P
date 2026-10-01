@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 PACKAGES = {
     "Salts.Native": ("SALTS_ROOT", "lib/cmake/Salts/SaltsConfig.cmake"),
     "SaltsUtils.Native": ("SALTS_UTILS_ROOT", "lib/cmake/SaltsUtils/SaltsUtilsConfig.cmake"),
+    "SaltsNet.Native": ("SALTS_NET_ROOT", "lib/cmake/SaltsNet/SaltsNetConfig.cmake"),
     "CHttp.Native": ("CHTTP_ROOT", "lib/cmake/Chttp/ChttpConfig.cmake"),
 }
 RIDS = ("linux-x64", "windows-x64")
