@@ -7,6 +7,9 @@
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "SALTS_ROOT": "$env{SALTS_ROOT}",
+        "SALTS_UTILS_ROOT": "$env{SALTS_UTILS_ROOT}",
+        "CHTTP_ROOT": "$env{CHTTP_ROOT}",
         "VCPKG_TARGET_TRIPLET": "$env{VCPKG_TARGET_TRIPLET}",
         "VCPKG_HOST_TRIPLET": "$env{VCPKG_HOST_TRIPLET}",
         "VCPKG_INSTALLED_DIR": "${sourceDir}/build/vcpkg_installed",
