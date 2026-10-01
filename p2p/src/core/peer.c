@@ -663,14 +663,14 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
             break;
         }
         if (ret != P2P_OK) {
-            TLOG_DEBUG("[P2P] peer_on_data: invalid frame from {}:{} (code: {})",
+            TLOG_DEBUGF("[P2P] peer_on_data: invalid frame from {}:{} (code: {})",
                       peer->ip, peer->port, ret);
             free(msg);
             return ret;
         }
 
         if (consumed == 0 || consumed > peer->recv_len) {
-            TLOG_DEBUG("[P2P] peer_on_data: corrupt frame accounting from {}:{} (consumed={}, recv_len={})",
+            TLOG_DEBUGF("[P2P] peer_on_data: corrupt frame accounting from {}:{} (consumed={}, recv_len={})",
                       peer->ip, peer->port, consumed, peer->recv_len);
             free(msg);
             return P2P_ERR_PROTOCOL;
