@@ -67,7 +67,7 @@ set_target_properties(mesh_stream_live_source_main PROPERTIES
 add_executable(mesh_stream_live_client_main
     mesh_stream_live_client_main.c)
 target_link_libraries(mesh_stream_live_client_main
-    PRIVATE TurboNet::CoroNet TurboHttp::HttpClient Salts::Core)
+    PRIVATE TurboNet::CoroNet CHttp::Client Salts::Core)
 if(WIN32)
     target_link_libraries(mesh_stream_live_client_main PRIVATE ws2_32)
 endif()
@@ -81,7 +81,7 @@ add_executable(mesh_stream_media_main
 target_link_libraries(mesh_stream_media_main
     PRIVATE mesh_stream_media_pull mesh_media_playlist mesh_media_index
             mesh_release m3_object_manifest m3_gateway_sigv4 mesh_mgmt_crypto
-            TurboNet::Crypto TurboNet::CoroNet TurboHttp::HttpClient OpenSSL::Crypto)
+            TurboNet::Crypto TurboNet::CoroNet CHttp::Client OpenSSL::Crypto)
 if(WIN32)
     target_link_libraries(mesh_stream_media_main PRIVATE ws2_32)
 endif()
@@ -102,7 +102,7 @@ set_target_properties(mesh_stream_node_main PROPERTIES
 add_executable(m3_gateway_main
     m3_gateway_main.c)
 target_link_libraries(m3_gateway_main
-    PRIVATE m3_gateway TurboHttp::Iris)
+    PRIVATE m3_gateway CHttp::Server)
 if(WIN32)
     target_link_libraries(m3_gateway_main PRIVATE ws2_32)
 endif()
@@ -120,7 +120,7 @@ target_link_libraries(meshctl
     PRIVATE mesh
     meshctl_product
     TurboP2P::P2P
-    TurboHttp::TurboHttp
+    CHttp::Client
     Salts::Core)
 
 target_compile_definitions(meshctl PRIVATE USING_EXAMPLES)
