@@ -163,15 +163,15 @@ foreach(test_source ${MESH_TEST_SOURCES})
 
     set(extra_test_libs)
     if(test_name STREQUAL "test_mesh")
-        list(APPEND extra_test_libs TurboNet::Crypto)
+        list(APPEND extra_test_libs Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_multi_network")
-        list(APPEND extra_test_libs TurboNet::Crypto TurboP2P::P2P)
+        list(APPEND extra_test_libs Salts::Crypto TurboP2P::P2P)
     endif()
     if(test_name STREQUAL "test_mesh_network_reconciler")
         list(APPEND extra_test_libs mesh_network_reconciler
             mesh_node_ipc_network_executor
-            TurboNet::Crypto TurboP2P::P2P)
+            Salts::Crypto TurboP2P::P2P)
     endif()
     if(test_name STREQUAL "test_mesh_node_ipc_flowmq")
         target_sources(${test_name} PRIVATE
@@ -182,7 +182,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
             mesh_node_control_flowmq_provider
             mesh_node_control_flowmq_network_provider
             mesh_node_network_control_service
-            TurboNet::Crypto TurboP2P::P2P)
+            Salts::Crypto TurboP2P::P2P)
         target_compile_definitions(${test_name} PRIVATE
             MESH_TEST_FLOWMQ_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/ca.pem"
             MESH_TEST_FLOWMQ_SERVER_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-cert.pem"
@@ -223,7 +223,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
         target_sources(${test_name} PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_config.c
             ${CMAKE_CURRENT_SOURCE_DIR}/../examples/mesh_runtime_health.c)
-        list(APPEND extra_test_libs TurboP2P::P2P TurboHttp::TurboHttp)
+        list(APPEND extra_test_libs TurboP2P::P2P CHttp::Client)
         if(WIN32)
             list(APPEND extra_test_libs ws2_32)
         endif()
@@ -274,13 +274,13 @@ foreach(test_source ${MESH_TEST_SOURCES})
         list(APPEND extra_test_libs mesh_stream_data)
     endif()
     if(test_name STREQUAL "test_mesh_stream_source_selector")
-        list(APPEND extra_test_libs mesh_stream_multisource mesh_stream_source_selector TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_stream_multisource mesh_stream_source_selector Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_sync_engine")
-        list(APPEND extra_test_libs mesh_sync_engine m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_sync_engine m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_media_index")
-        list(APPEND extra_test_libs mesh_media_index m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_media_index m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_stream_live")
         list(APPEND extra_test_libs mesh_stream_live)
@@ -289,22 +289,22 @@ foreach(test_source ${MESH_TEST_SOURCES})
         list(APPEND extra_test_libs mesh_stream_discovery mesh_stream_qos mesh_mgmt_service_record mesh_flow_ruleset)
     endif()
     if(test_name STREQUAL "test_mesh_stream_kcp")
-        list(APPEND extra_test_libs mesh_stream_kcp_adapter mesh_stream_live TurboNet::CoroNet)
+        list(APPEND extra_test_libs mesh_stream_kcp_adapter mesh_stream_live Salts::CNet)
         if(WIN32)
             list(APPEND extra_test_libs ws2_32)
         endif()
     endif()
     if(test_name STREQUAL "test_mesh_stream_media_pull")
-        list(APPEND extra_test_libs mesh_stream_media_pull mesh_media_index m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_stream_media_pull mesh_media_index m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_stream_media_pull_multisource")
-        list(APPEND extra_test_libs mesh_stream_media_pull_multisource mesh_stream_media_pull mesh_stream_multisource mesh_media_index m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_stream_media_pull_multisource mesh_stream_media_pull mesh_stream_multisource mesh_media_index m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_media_playlist")
-        list(APPEND extra_test_libs mesh_media_playlist mesh_media_index m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_media_playlist mesh_media_index m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_release")
-        list(APPEND extra_test_libs mesh_release m3_object_manifest TurboNet::Crypto)
+        list(APPEND extra_test_libs mesh_release m3_object_manifest Salts::Crypto)
     endif()
     if(test_name STREQUAL "test_mesh_stream_live_hls")
         list(APPEND extra_test_libs mesh_stream_live_hls mesh_stream_live)
@@ -347,7 +347,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
         target_compile_definitions(${test_name} PRIVATE
             M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
     elseif(test_name STREQUAL "test_m3_gateway_http")
-        list(APPEND extra_test_libs m3_gateway m3_raft_node m3_object_manifest TurboHttp::Iris TurboHttp::HttpClient)
+        list(APPEND extra_test_libs m3_gateway m3_raft_node m3_object_manifest CHttp::Server CHttp::Client)
         target_compile_definitions(${test_name} PRIVATE
             M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
     elseif(test_name STREQUAL "test_m3_gateway_datapane")
@@ -355,7 +355,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
         target_compile_definitions(${test_name} PRIVATE
             M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
     elseif(test_name STREQUAL "test_m3_raft_tls_handshake")
-        list(APPEND extra_test_libs TurboRaft::CoroNet TurboRaft::Core TurboNet::CoroNet)
+        list(APPEND extra_test_libs TurboRaft::CoroNet TurboRaft::Core Salts::CNet)
         target_compile_definitions(${test_name} PRIVATE
             M3_TEST_TLS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/m3tls")
     elseif(test_name STREQUAL "test_mesh_task_lease_raft_adapter")
@@ -490,7 +490,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
 
     target_link_libraries(${test_name}
         PRIVATE mesh
-                TurboUtils::TinyTest
+                Salts::TinyTest
                 ${extra_test_libs})
 
     set(test_runtime_output_directory "${CMAKE_BINARY_DIR}/bin")
@@ -531,7 +531,7 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
                 ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_link_libraries(test_mesh_node_ipc_flowmq_process
-        PRIVATE mesh_node_ipc_flowmq TurboUtils::Core)
+        PRIVATE mesh_node_ipc_flowmq Salts::Core)
     target_compile_definitions(test_mesh_node_ipc_flowmq_process PRIVATE
         MESH_TEST_FLOWMQ_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/ca.pem"
         MESH_TEST_FLOWMQ_SERVER_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls/server-current-cert.pem"
@@ -597,7 +597,7 @@ target_compile_definitions(test_mesh_control_controller_runtime PRIVATE
 
 target_link_libraries(test_mesh_control_agent_controller_e2e PRIVATE
     mesh_control_agent_runtime mesh_control_controller_runtime
-    mesh_control_document mesh_control_mmp TurboUtils::Core
+    mesh_control_document mesh_control_mmp Salts::Core
 )
 target_compile_definitions(test_mesh_control_agent_controller_e2e PRIVATE
     MESH_TEST_CERTIFICATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data/flowmq_tls")
@@ -678,7 +678,7 @@ target_link_libraries(test_mesh_control_wal_worker PRIVATE
 )
 
 target_link_libraries(test_mesh_control_agent PRIVATE
-    mesh_control_agent TurboHttp::TurboHttp
+    mesh_control_agent CHttp::Client
 )
 if(WIN32)
     target_link_libraries(test_mesh_control_agent PRIVATE ws2_32)
