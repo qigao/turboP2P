@@ -3,7 +3,7 @@
 /* Placement records per chunk are bounded by the data plane replica cap. */
 #define M3_NAMESPACE_LOCAL_MAX_PLACEMENTS_PER_CHUNK 8u
 
-#include <turbo_fs.h>
+#include <salts_fs.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -184,11 +184,11 @@ static int join_path(const char *root, const char *name, char *out, size_t out_s
   return written >= 0 && (size_t)written < out_size ? 0 : -1;
 }
 
-static int read_exact(turbo_file_t file, uint8_t *bytes, size_t size) {
+static int read_exact(salts_file_t file, uint8_t *bytes, size_t size) {
   size_t offset = 0u;
 
   while (offset < size) {
-    int read_size = turbo_fs_read(file, (char *)bytes + offset, size - offset);
+    int read_size = salts_fs_read(file, (char *)bytes + offset, size - offset);
     if (read_size <= 0)
       return -1;
     offset += (size_t)read_size;
@@ -196,11 +196,11 @@ static int read_exact(turbo_file_t file, uint8_t *bytes, size_t size) {
   return 0;
 }
 
-static m3_namespace_local_result_t write_all(turbo_file_t file, const uint8_t *bytes, size_t size) {
+static m3_namespace_local_result_t write_all(salts_file_t file, const uint8_t *bytes, size_t size) {
   size_t written = 0u;
 
   while (written < size) {
-    int result = turbo_fs_write(file, (const char *)bytes + written, size - written);
+    int result = salts_fs_write(file, (const char *)bytes + written, size - written);
     if (result <= 0)
       return M3_NAMESPACE_LOCAL_INVALID_STATE;
     written += (size_t)result;
@@ -481,14 +481,14 @@ m3_namespace_local_store_adapter_v1(m3_namespace_local_store_v1_t *store) {
 
 m3_namespace_local_result_t
 m3_namespace_local_store_persist_v1(m3_namespace_local_store_v1_t *store, const char *root) {
-  char state_path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH];
+  char state_path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH];
   uint8_t *bytes = NULL;
   uint64_t total_size;
   size_t offset;
   size_t index;
   size_t count = 0u;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_file_t file = SALTS_INVALID_FILE;
   m3_namespace_local_result_t result;
 
   if (!store || !store->open || !root || root[0] == '\0')
@@ -568,32 +568,32 @@ m3_namespace_local_store_persist_v1(m3_namespace_local_store_v1_t *store, const 
     write_u64_be(bytes + M3_NAMESPACE_LOCAL_OFFSET_CHECKSUM, checksum);
   }
 
-  file = turbo_fs_open(temp_path, TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+  file = salts_fs_open(temp_path, SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
                        M3_NAMESPACE_LOCAL_FILE_MODE);
-  if (file == TURBO_INVALID_FILE) {
+  if (file == SALTS_INVALID_FILE) {
     result = M3_NAMESPACE_LOCAL_INVALID_STATE;
     goto cleanup;
   }
   result = write_all(file, bytes, (size_t)total_size);
   if (result != M3_NAMESPACE_LOCAL_OK)
     goto cleanup;
-  if (turbo_fs_fsync(file) != 0 || turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (salts_fs_fsync(file) != 0 || salts_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = M3_NAMESPACE_LOCAL_INVALID_STATE;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
-  if (turbo_fs_rename(temp_path, state_path) != 0) {
+  file = SALTS_INVALID_FILE;
+  if (salts_fs_rename(temp_path, state_path) != 0) {
     result = M3_NAMESPACE_LOCAL_INVALID_STATE;
     goto cleanup;
   }
   result = M3_NAMESPACE_LOCAL_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   if (result != M3_NAMESPACE_LOCAL_OK)
-    (void)turbo_fs_unlink(temp_path);
+    (void)salts_fs_unlink(temp_path);
   free(bytes);
   return result;
 }
@@ -614,9 +614,9 @@ static int manifest_decodes(const m3_namespace_local_store_v1_t *store,
 
 m3_namespace_local_result_t m3_namespace_local_store_load_v1(m3_namespace_local_store_v1_t *store,
                                                              const char *root, size_t capacity) {
-  char state_path[TURBO_FS_MAX_PATH];
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  char state_path[SALTS_FS_MAX_PATH];
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   uint64_t applied_index;
   uint64_t entry_count;
@@ -638,9 +638,9 @@ m3_namespace_local_result_t m3_namespace_local_store_load_v1(m3_namespace_local_
    * Probe with access() so the expected absence does not surface as an
    * ERROR log from stat().
    */
-  if (turbo_fs_access(state_path, TURBO_FS_ACCESS_EXISTS) != 0)
+  if (salts_fs_access(state_path, SALTS_FS_ACCESS_EXISTS) != 0)
     return M3_NAMESPACE_LOCAL_OK;
-  if (turbo_fs_stat(state_path, &stat) != 0)
+  if (salts_fs_stat(state_path, &stat) != 0)
     return M3_NAMESPACE_LOCAL_CORRUPT;
   if (!stat.is_file || stat.size < M3_NAMESPACE_LOCAL_HEADER_SIZE || stat.size > SIZE_MAX)
     return M3_NAMESPACE_LOCAL_CORRUPT;
@@ -663,8 +663,8 @@ m3_namespace_local_result_t m3_namespace_local_store_load_v1(m3_namespace_local_
       return M3_NAMESPACE_LOCAL_CORRUPT;
   }
 
-  file = turbo_fs_open(state_path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = salts_fs_open(state_path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     return M3_NAMESPACE_LOCAL_CORRUPT;
   bytes = (uint8_t *)malloc((size_t)stat.size);
   if (!bytes) {
@@ -675,12 +675,12 @@ m3_namespace_local_result_t m3_namespace_local_store_load_v1(m3_namespace_local_
     result = M3_NAMESPACE_LOCAL_CORRUPT;
     goto cleanup;
   }
-  if (turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (salts_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = M3_NAMESPACE_LOCAL_CORRUPT;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
+  file = SALTS_INVALID_FILE;
   file_size = (size_t)stat.size;
 
   if (memcmp(bytes, m3_namespace_local_magic, sizeof(m3_namespace_local_magic)) != 0 ||
@@ -812,8 +812,8 @@ m3_namespace_local_result_t m3_namespace_local_store_load_v1(m3_namespace_local_
   result = M3_NAMESPACE_LOCAL_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   free(bytes);
   return result;
 }
