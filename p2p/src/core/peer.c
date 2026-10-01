@@ -457,8 +457,8 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
     if (peer->state != P2P_PEER_STATE_CONNECTED ||
         peer->security_stage != P2P_SECURITY_STAGE_ESTABLISHED ||
         !p2p_crypto_session_is_ready(&peer->crypto)) {
-        TLOG_DEBUG("[P2P] peer_send: peer not connected (state={})",
-                 p2p_peer_state_str(peer->state));
+        TLOG_DEBUGF("[P2P] peer_send: peer not connected (state={})",
+                  p2p_peer_state_str(peer->state));
         return P2P_ERR_NETWORK;
     }
 
