@@ -2,7 +2,7 @@
 
 #include <turbo_http.h>
 #include <turbo_parser.h>
-#include <turbo_selector.h>
+#include <salts_selector.h>
 #include <turbo_fs.h>
 #include <platform.h>
 
@@ -96,27 +96,27 @@ static int meshctl_placement_subject_valid(const char *value) {
 static int meshctl_selector_canonicalize(
     const char *source, char *output, size_t output_capacity,
     meshctl_product_parse_diagnostic_t *diagnostic) {
-  turbo_selector_schema_v1_t schema;
-  turbo_selector_diagnostic_v1_t selector_diagnostic;
-  turbo_selector_program_t *program = NULL;
+  salts_selector_schema_v1_t schema;
+  salts_selector_diagnostic_v1_t selector_diagnostic;
+  salts_selector_program_t *program = NULL;
   size_t required = 0u;
   int result;
   if (!source || !output || output_capacity == 0u || !diagnostic) return -1;
   memset(&schema, 0, sizeof(schema));
-  schema.size = TURBO_SELECTOR_SCHEMA_V1_SIZE;
+  schema.size = SALTS_SELECTOR_SCHEMA_V1_SIZE;
   schema.allowed_fields = MESHCTL_SELECTOR_FIELDS_V1;
   schema.allowed_field_count = sizeof(MESHCTL_SELECTOR_FIELDS_V1) /
                                sizeof(MESHCTL_SELECTOR_FIELDS_V1[0]);
   schema.allow_tag_fields = 1;
   memset(&selector_diagnostic, 0, sizeof(selector_diagnostic));
-  selector_diagnostic.size = TURBO_SELECTOR_DIAGNOSTIC_V1_SIZE;
-  result = turbo_selector_compile_v1(source, strlen(source), &schema, &program,
+  selector_diagnostic.size = SALTS_SELECTOR_DIAGNOSTIC_V1_SIZE;
+  result = salts_selector_compile_v1(source, strlen(source), &schema, &program,
                                      &selector_diagnostic);
-  if (result == TURBO_SELECTOR_OK)
-    result = turbo_selector_program_canonical_v1(
+  if (result == SALTS_SELECTOR_OK)
+    result = salts_selector_program_canonical_v1(
         program, output, output_capacity, &required, &selector_diagnostic);
-  turbo_selector_program_destroy(program);
-  if (result != TURBO_SELECTOR_OK) {
+  salts_selector_program_destroy(program);
+  if (result != SALTS_SELECTOR_OK) {
     char message[MESHCTL_PRODUCT_DIAGNOSTIC_CAPACITY];
     (void)snprintf(message, sizeof(message),
                    "selector at byte %zu (line %u, column %u): %s",
@@ -126,11 +126,11 @@ static int meshctl_selector_canonicalize(
                        ? selector_diagnostic.message
                        : "selector validation failed");
     meshctl_diagnostic_set(diagnostic, MESHCTL_PRODUCT_PARSE_INVALID,
-                           result == TURBO_SELECTOR_RESOURCE_LIMIT
+                           result == SALTS_SELECTOR_RESOURCE_LIMIT
                                ? "selector-resource-limit"
                                : "invalid-selector",
                            message);
-    return result == TURBO_SELECTOR_NO_MEMORY ? -1 : 0;
+    return result == SALTS_SELECTOR_NO_MEMORY ? -1 : 0;
   }
   return 1;
 }
@@ -445,7 +445,7 @@ int meshctl_product_parse(int argc, char **argv,
       goto cleanup;
     }
     out_command->args.placements_plan.selector_language_version =
-        TURBO_SELECTOR_LANGUAGE_VERSION_V1;
+        SALTS_SELECTOR_LANGUAGE_VERSION_V1;
   } else if (result.leaf == storage.networks_list) {
     out_command->kind = MESHCTL_PRODUCT_COMMAND_NETWORKS_LIST;
   } else if (result.leaf == storage.networks_get &&
@@ -722,7 +722,7 @@ static int meshctl_product_build_plan_body(
       !meshctl_placement_subject_valid(
           command->args.placements_plan.subject) ||
       command->args.placements_plan.selector_language_version !=
-          TURBO_SELECTOR_LANGUAGE_VERSION_V1 ||
+          SALTS_SELECTOR_LANGUAGE_VERSION_V1 ||
       command->args.placements_plan.selector[0] == '\0')
     return -1;
   memset(&diagnostic, 0, sizeof(diagnostic));
