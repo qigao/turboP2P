@@ -7,7 +7,7 @@
 #define P2P_PEER_H
 
 #include "types.h"
-#include <CoroNet/turbo_callbacks.h>
+#include <cnet/cnet.h>
 #include <stdbool.h>
 
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
