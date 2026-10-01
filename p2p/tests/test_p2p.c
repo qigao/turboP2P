@@ -2147,10 +2147,10 @@ static void on_peer_connected_cb(p2p_peer_t *peer, void *user_data) {
     (void)user_data;
     g_connected_count++;
     if (peer && p2p_peer_get_info(peer, &info) == P2P_OK) {
-        TLOG_INFO("[TEST] Peer connected! {}:{} (count={})",
+        TLOG_INFOF("[TEST] Peer connected! {}:{} (count={})",
                   info.ip, info.port, g_connected_count);
     } else {
-        TLOG_INFO("[TEST] Peer connected! (count={})", g_connected_count);
+        TLOG_INFOF("[TEST] Peer connected! (count={})", g_connected_count);
     }
 }
 
@@ -2161,10 +2161,10 @@ static void on_peer_disconnected_cb(p2p_peer_t *peer, void *user_data) {
     (void)user_data;
     g_disconnected_count++;
     if (peer && p2p_peer_get_info(peer, &info) == P2P_OK) {
-        TLOG_INFO("[TEST] Peer disconnected! {}:{} (count={})",
+        TLOG_INFOF("[TEST] Peer disconnected! {}:{} (count={})",
                   info.ip, info.port, g_disconnected_count);
     } else {
-        TLOG_INFO("[TEST] Peer disconnected! (count={})", g_disconnected_count);
+        TLOG_INFOF("[TEST] Peer disconnected! (count={})", g_disconnected_count);
     }
 }
 
@@ -2179,7 +2179,7 @@ static void on_message_cb(p2p_node_t *node, p2p_peer_t *peer,
         memcpy(g_last_message, data, len);
         g_last_message[len] = '\0';
     }
-    TLOG_INFO("[TEST] Message received: '{}' (count={})", g_last_message, g_message_count);
+    TLOG_INFOF("[TEST] Message received: '{}' (count={})", g_last_message, g_message_count);
 }
 
 static void p2p_test_pump_loop(void *arg) {
@@ -2872,12 +2872,12 @@ void test_p2p_two_nodes_real_connection(void) {
     /* Verify connection */
     check(g_connected_count > 0);
     check_int_eq(0, g_disconnected_count);
-    TLOG_INFO("[TEST] Connection verified: connected={}, disconnected={}",
+    TLOG_INFOF("[TEST] Connection verified: connected={}, disconnected={}",
            g_connected_count, g_disconnected_count);
 
     /* Send a test message from node 2 to node 1 */
     const char *msg = "Hello from node 2!";
-    TLOG_INFO("[TEST] Sending test message: '{}'", msg);
+    TLOG_INFOF("[TEST] Sending test message: '{}'", msg);
     ret = p2p_broadcast(node2, msg, strlen(msg) + 1);
     check_int_eq(P2P_OK, ret);
 
