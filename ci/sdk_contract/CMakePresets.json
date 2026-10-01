@@ -1,0 +1,45 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "common", "hidden": true, "generator": "Ninja",
+      "toolchainFile": "$env{QIGAO_VCPKG_TOOLCHAIN_FILE}",
+      "binaryDir": "${sourceDir}/../../build/sdk-${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VCPKG_TARGET_TRIPLET": "$env{VCPKG_TARGET_TRIPLET}",
+        "VCPKG_HOST_TRIPLET": "$env{VCPKG_HOST_TRIPLET}",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/../../build/vcpkg_installed",
+        "VCPKG_MANIFEST_DIR": "${sourceDir}/../.."
+      }
+    },
+    {
+      "name": "linux-release", "inherits": "common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "cacheVariables": {"CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++"}
+    },
+    {
+      "name": "windows-release", "inherits": "common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+      "cacheVariables": {"CMAKE_C_COMPILER": "cl", "CMAKE_CXX_COMPILER": "cl"}
+    },
+    {
+      "name": "linux-clang-asan", "inherits": "common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Debug", "TURBOP2P_CONTRACT_SANITIZERS": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "linux-release", "configurePreset": "linux-release"},
+    {"name": "windows-release", "configurePreset": "windows-release"},
+    {"name": "linux-clang-asan", "configurePreset": "linux-clang-asan"}
+  ],
+  "testPresets": [
+    {"name": "linux-release", "configurePreset": "linux-release", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}},
+    {"name": "windows-release", "configurePreset": "windows-release", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}},
+    {"name": "linux-clang-asan", "configurePreset": "linux-clang-asan", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}, "environment": {"ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1", "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"}}
+  ]
+}

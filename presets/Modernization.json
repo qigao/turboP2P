@@ -1,0 +1,53 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "migration-common", "hidden": true, "generator": "Ninja",
+      "toolchainFile": "$env{QIGAO_VCPKG_TOOLCHAIN_FILE}",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VCPKG_TARGET_TRIPLET": "$env{VCPKG_TARGET_TRIPLET}",
+        "VCPKG_HOST_TRIPLET": "$env{VCPKG_HOST_TRIPLET}",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/vcpkg_installed",
+        "ENABLE_ASAN": false,
+        "ENABLE_SANITIZER_ADDRESS": false,
+        "ENABLE_SANITIZER_UNDEFINED": false,
+        "ENABLE_SANITIZER_LEAK": false,
+        "ENABLE_SANITIZER_THREAD": false,
+        "ENABLE_SANITIZER_MEMORY": false,
+        "ENABLE_TESTS": true, "BUILD_TESTING": true,
+        "BUILD_TESTS": true, "BUILD_EXAMPLES": true
+      }
+    },
+    {
+      "name": "migration-linux-release", "inherits": "migration-common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "cacheVariables": {"CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++"}
+    },
+    {
+      "name": "migration-windows-release", "inherits": "migration-common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows"},
+      "cacheVariables": {"CMAKE_C_COMPILER": "cl", "CMAKE_CXX_COMPILER": "cl"}
+    },
+    {
+      "name": "migration-linux-clang-asan", "inherits": "migration-common",
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "Debug", "ENABLE_SANITIZER_ADDRESS": true,
+        "ENABLE_SANITIZER_UNDEFINED": true, "ENABLE_SANITIZER_LEAK": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "migration-linux-release", "configurePreset": "migration-linux-release"},
+    {"name": "migration-windows-release", "configurePreset": "migration-windows-release"},
+    {"name": "migration-linux-clang-asan", "configurePreset": "migration-linux-clang-asan"}
+  ],
+  "testPresets": [
+    {"name": "migration-linux-release", "configurePreset": "migration-linux-release", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}},
+    {"name": "migration-windows-release", "configurePreset": "migration-windows-release", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}},
+    {"name": "migration-linux-clang-asan", "configurePreset": "migration-linux-clang-asan", "output": {"outputOnFailure": true}, "execution": {"noTestsAction": "error", "timeout": 300}, "environment": {"ASAN_OPTIONS": "detect_leaks=1:halt_on_error=1", "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"}}
+  ]
+}

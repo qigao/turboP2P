@@ -1,0 +1,164 @@
+name: Salts-native migration
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: salts-migration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TURBOP2P_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  restore-contract-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TURBOP2P_HEAD_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s ci/tests -v
+
+  qualification:
+    name: ${{ matrix.name }} / SDK then full migration
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-release
+            os: ubuntu-24.04
+            rid: linux-x64
+          - name: windows-release
+            os: windows-latest
+            rid: windows-x64
+          - name: linux-clang-asan
+            os: ubuntu-24.04
+            rid: linux-x64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TURBOP2P_HEAD_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Activate Windows compiler before canonical cache setup
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Prepare Unix build tools
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ninja-build pkg-config nasm clang
+      - name: Prepare Windows build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja nasm -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'build tool installation failed' }
+      - name: Canonical shared vcpkg cache
+        id: shared-cache
+        uses: qigao/vcpkg-cache/.github/actions/setup-vcpkg-cache@master
+        with:
+          mode: read
+      - name: Select canonical target and host triplets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($IsWindows) {
+            $target = $env:QIGAO_VCPKG_WINDOWS_TRIPLET
+            $hostTriplet = $env:QIGAO_VCPKG_WINDOWS_HOST_TRIPLET
+          } else {
+            $target = 'x64-linux'
+            $hostTriplet = 'x64-linux'
+          }
+          if (-not $target -or -not $hostTriplet) { throw 'canonical triplets are missing' }
+          "VCPKG_TARGET_TRIPLET=$target" >> $env:GITHUB_ENV
+          "VCPKG_HOST_TRIPLET=$hostTriplet" >> $env:GITHUB_ENV
+      - name: Restore local binary-cache layer
+        id: local-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-${{ matrix.name }}-${{ steps.shared-cache.outputs.cache_revision }}-${{ hashFiles('vcpkg.json') }}-${{ env.TURBOP2P_HEAD_SHA }}
+          restore-keys: |
+            vcpkg-${{ matrix.name }}-${{ steps.shared-cache.outputs.cache_revision }}-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-${{ matrix.name }}-${{ steps.shared-cache.outputs.cache_revision }}-
+      - name: Restore latest Salts, SaltsUtils and CHttp packages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python ci/restore_native_sdks.py --rid '${{ matrix.rid }}'
+      - name: Configure installed SDK consumer (runs vcpkg manifest install)
+        id: sdk-configure
+        working-directory: ci/sdk_contract
+        run: cmake --preset '${{ matrix.name }}'
+      - name: Build installed SDK consumer
+        working-directory: ci/sdk_contract
+        run: cmake --build --preset '${{ matrix.name }}' --parallel 2
+      - name: Test CMeta ABI and CNet-only UDP contract
+        id: sdk-test
+        working-directory: ci/sdk_contract
+        run: ctest --preset '${{ matrix.name }}'
+      # This is deliberately not continue-on-error: legacy production code must
+      # become a real migration failure, never a green dependency-only result.
+      - name: Configure complete TurboP2P graph
+        id: full-configure
+        run: cmake --preset 'migration-${{ matrix.name }}'
+      - name: Build complete TurboP2P graph
+        run: cmake --build --preset 'migration-${{ matrix.name }}' --parallel 2
+      - name: Test complete TurboP2P graph
+        id: full-test
+        run: ctest --preset 'migration-${{ matrix.name }}'
+      - name: Save local binary packages independently of migration failures
+        if: always() && steps.sdk-configure.outcome == 'success' && steps.local-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ steps.local-cache.outputs.cache-primary-key }}
+      - name: Record qualification boundaries
+        if: always()
+        shell: pwsh
+        env:
+          SDK_TEST: ${{ steps.sdk-test.outcome }}
+          FULL_CONFIGURE: ${{ steps.full-configure.outcome }}
+          FULL_TEST: ${{ steps.full-test.outcome }}
+        run: |
+          @(
+            '### TurboP2P qualification status'
+            "Head: $env:TURBOP2P_HEAD_SHA"
+            "SDK consumer tests: $env:SDK_TEST"
+            "Full production configure: $env:FULL_CONFIGURE"
+            "Full production tests: $env:FULL_TEST"
+            'SDK-only success does not complete issues #1 or #2.'
+            'The sanitizer job instruments consumer/TurboP2P sources, not the prebuilt SDK libraries.'
+            'Optional Raft/FlowMQ and isolated installed TurboP2P consumer gates remain tracked in #1.'
+          ) >> $env:GITHUB_STEP_SUMMARY
+      - name: Verify exact checkout
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TURBOP2P_HEAD_SHA"
+          git diff --exit-code
