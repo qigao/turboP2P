@@ -1776,7 +1776,7 @@ P2P_API int p2p_node_start_server(p2p_node_t *node) {
     if (cnet_listener_port(&node->listener, &bound_port) == SALTS_OK)
         node->port = (int)bound_port;
     node->last_maintenance_ms = salts_monotonic_ms();
-    TLOG_INFO("[P2P] Node listening on {}:{}", node->ip, node->port);
+    TLOG_INFOF("[P2P] Node listening on {}:{}", node->ip, node->port);
     return P2P_OK;
 }
 
@@ -1866,7 +1866,7 @@ static void node_maintenance_run(p2p_node_t *node) {
         salts_mutex_unlock(&node->mutex);
 
         if (stale) {
-            TLOG_INFO("[P2P] Pruning stale peer {}:{}",
+            TLOG_INFOF("[P2P] Pruning stale peer {}:{}",
                       peer_info.ip, peer_info.port);
             p2p_peer_disconnect(peer);
         } else if (probe_due) {
