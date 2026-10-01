@@ -2,7 +2,7 @@
 #define MESH_CONTROL_DURABLE_OUTBOX_H
 
 #include "mesh_control_primitives.h"
-#include "turbo_fs.h"
+#include "salts_fs.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -112,10 +112,10 @@ typedef struct {
   mesh_control_durable_outbox_config_v1_t config;
   mesh_control_durable_outbox_entry_v1_t *entries;
   mesh_control_durable_outbox_session_v1_t *sessions;
-  char path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH + 5u];
-  char lock_path[TURBO_FS_MAX_PATH + 6u];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH + 5u];
+  char lock_path[SALTS_FS_MAX_PATH + 6u];
+  salts_file_t lock_file;
   uint64_t generation;
   size_t count;
   size_t retained_payload_bytes;
