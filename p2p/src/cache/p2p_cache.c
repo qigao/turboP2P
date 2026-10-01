@@ -15,10 +15,7 @@
 #include <unistd.h>
 #endif
 
-/* Add CXX_C_API prefix to functions */
-#ifndef CXX_C_API
-#define CXX_C_API
-#endif
+#include <p2p_export.h>
 
 /* 默认配置 */
 #define DEFAULT_CACHE_SIZE_MB 100
@@ -85,7 +82,7 @@ static time_t get_current_time(void) {
  * 缓存管理
  * ============================================================================= */
 
-CXX_C_API int p2p_cache_impl_init(p2p_cache_t *cache, const char *cache_dir, uint64_t max_size_mb) {
+P2P_API int p2p_cache_impl_init(p2p_cache_t *cache, const char *cache_dir, uint64_t max_size_mb) {
     if (!cache || !cache_dir) return -1;
 
     memset(cache, 0, sizeof(p2p_cache_t));
@@ -117,7 +114,7 @@ CXX_C_API int p2p_cache_impl_init(p2p_cache_t *cache, const char *cache_dir, uin
     return 0;
 }
 
-CXX_C_API void p2p_cache_impl_destroy(p2p_cache_t *cache) {
+P2P_API void p2p_cache_impl_destroy(p2p_cache_t *cache) {
     if (!cache) return;
 
     /* 保存缓存索引 */
@@ -192,7 +189,7 @@ static void make_space(p2p_cache_t *cache, uint64_t needed_size) {
  * 公共API
  * ============================================================================= */
 
-CXX_C_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath, size_t max_len) {
+P2P_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath, size_t max_len) {
     if (!cache || !key || !filepath) return -1;
 
     /* 查找缓存条目 */
@@ -212,7 +209,7 @@ CXX_C_API int p2p_cache_get(p2p_cache_t *cache, const char *key, char *filepath,
     return -1;  /* 未找�?*/
 }
 
-CXX_C_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filepath,
+P2P_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *filepath,
                   uint64_t size, int is_local) {
     if (!cache || !key || !filepath) return -1;
 
@@ -264,7 +261,7 @@ CXX_C_API int p2p_cache_put(p2p_cache_t *cache, const char *key, const char *fil
     return -1;
 }
 
-CXX_C_API int p2p_cache_remove(p2p_cache_t *cache, const char *key) {
+P2P_API int p2p_cache_remove(p2p_cache_t *cache, const char *key) {
     if (!cache || !key) return -1;
 
     for (int i = 0; i < cache->entry_count; i++) {
@@ -278,7 +275,7 @@ CXX_C_API int p2p_cache_remove(p2p_cache_t *cache, const char *key) {
     return -1;
 }
 
-CXX_C_API int p2p_cache_has(p2p_cache_t *cache, const char *key) {
+P2P_API int p2p_cache_has(p2p_cache_t *cache, const char *key) {
     if (!cache || !key) return 0;
 
     for (int i = 0; i < cache->entry_count; i++) {
@@ -290,7 +287,7 @@ CXX_C_API int p2p_cache_has(p2p_cache_t *cache, const char *key) {
     return 0;
 }
 
-CXX_C_API int p2p_cache_cleanup(p2p_cache_t *cache, time_t max_age) {
+P2P_API int p2p_cache_cleanup(p2p_cache_t *cache, time_t max_age) {
     if (!cache) return 0;
 
     time_t now = get_current_time();
@@ -310,7 +307,7 @@ CXX_C_API int p2p_cache_cleanup(p2p_cache_t *cache, time_t max_age) {
     return removed;
 }
 
-CXX_C_API void p2p_cache_impl_get_stats(p2p_cache_t *cache, p2p_cache_stats_t *stats) {
+P2P_API void p2p_cache_impl_get_stats(p2p_cache_t *cache, p2p_cache_stats_t *stats) {
     if (!cache || !stats) return;
 
     memset(stats, 0, sizeof(p2p_cache_stats_t));
@@ -333,7 +330,7 @@ CXX_C_API void p2p_cache_impl_get_stats(p2p_cache_t *cache, p2p_cache_stats_t *s
     }
 }
 
-CXX_C_API void p2p_cache_impl_clear(p2p_cache_t *cache) {
+P2P_API void p2p_cache_impl_clear(p2p_cache_t *cache) {
     if (!cache) return;
 
     /* Save current state before clearing */
@@ -344,7 +341,7 @@ CXX_C_API void p2p_cache_impl_clear(p2p_cache_t *cache) {
     cache->dirty = 1;
 }
 
-CXX_C_API int p2p_cache_impl_save(p2p_cache_t *cache) {
+P2P_API int p2p_cache_impl_save(p2p_cache_t *cache) {
     if (!cache) return -1;
 
     TLOG_DEBUG("[CACHE] Save called, dirty={}, entry_count={}", cache->dirty, cache->entry_count);
@@ -384,7 +381,7 @@ CXX_C_API int p2p_cache_impl_save(p2p_cache_t *cache) {
     return 0;
 }
 
-CXX_C_API int p2p_cache_impl_load(p2p_cache_t *cache) {
+P2P_API int p2p_cache_impl_load(p2p_cache_t *cache) {
     if (!cache) return -1;
 
     TLOG_DEBUG("[CACHE] Loading cache from: {}", cache->cache_dir);
