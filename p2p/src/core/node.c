@@ -934,7 +934,7 @@ static p2p_peer_t *node_find_connected_peer_by_id_locked(p2p_node_t *node,
     return NULL;
 }
 
-CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
+P2P_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
                                                              const char *ip,
                                                              int port) {
     p2p_peer_entry_t *entry = NULL;
@@ -947,7 +947,7 @@ CXX_C_API p2p_peer_t *p2p_node_find_peer_by_endpoint_locked(p2p_node_t *node,
     return entry ? entry->peer : NULL;
 }
 
-CXX_C_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer) {
+P2P_API void p2p_node_add_peer_locked(p2p_node_t *node, p2p_peer_t *peer) {
     if (!node || !peer) {
         return;
     }
@@ -1021,7 +1021,7 @@ node_pending_peer_rejection_locked(p2p_node_t *node,
     return P2P_SECURITY_REJECTION_REASON_COUNT;
 }
 
-CXX_C_API int p2p_node_pending_peer_source_capacity_available_locked(
+P2P_API int p2p_node_pending_peer_source_capacity_available_locked(
     p2p_node_t *node, const char *source_ip) {
     if (!node) {
         return 0;
@@ -1086,7 +1086,7 @@ static void node_source_admission_refill_locked(
     bucket->last_refill_ms = now_ms;
 }
 
-CXX_C_API int p2p_node_source_admission_acquire_locked(
+P2P_API int p2p_node_source_admission_acquire_locked(
     p2p_node_t *node, const char *source_ip, uint64_t now_ms) {
     p2p_source_admission_bucket_t *bucket = NULL;
     p2p_source_admission_bucket_t *reclaim = NULL;
@@ -1152,11 +1152,11 @@ CXX_C_API int p2p_node_source_admission_acquire_locked(
     return P2P_OK;
 }
 
-CXX_C_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node) {
+P2P_API int p2p_node_pending_peer_capacity_available_locked(p2p_node_t *node) {
     return p2p_node_pending_peer_source_capacity_available_locked(node, NULL);
 }
 
-CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
+P2P_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
                                                        const char *ip,
                                                        int port) {
     if (!node || !ip) {
@@ -1166,7 +1166,7 @@ CXX_C_API void p2p_node_remove_peer_by_endpoint_locked(p2p_node_t *node,
     peer_table_remove(&node->peers_table, ip, port);
 }
 
-CXX_C_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
+P2P_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
     kad_node_t knode;
 
     if (!node || !node->kad_dht || !node->kad_dht->routing || !ip) {
@@ -1177,7 +1177,7 @@ CXX_C_API void p2p_node_add_route_locked(p2p_node_t *node, const uint8_t *id, co
     kad_routing_add_node(node->kad_dht->routing, &knode);
 }
 
-CXX_C_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
+P2P_API void p2p_node_remove_route_locked(p2p_node_t *node, const uint8_t *id, const char *ip, int port) {
     kad_id_t route_id;
 
     if (!node || !node->kad_dht || !node->kad_dht->routing) {
@@ -1649,7 +1649,7 @@ static void node_server_accept_cb(void *server_handle, void *client_handle, void
     }
 }
 
-CXX_C_API int p2p_node_start_server(p2p_node_t *node) {
+P2P_API int p2p_node_start_server(p2p_node_t *node) {
     struct sockaddr_storage addr;
     turbo_stream_kind_t kind;
 
