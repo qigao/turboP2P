@@ -27,7 +27,7 @@ include(CMakeOptions.cmake)
 include(Sanitizers)
 
 # Same installed-SDK ownership model as CHttp: explicit current roots only.
-foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "Chttp|CHTTP_ROOT")
+foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "SaltsNet|SALTS_NET_ROOT" "Chttp|CHTTP_ROOT")
   string(REPLACE "|" ";" _fields "${_entry}")
   list(GET _fields 0 _package)
   list(GET _fields 1 _root_variable)
@@ -44,7 +44,7 @@ foreach(_entry IN ITEMS "Salts|SALTS_ROOT" "SaltsUtils|SALTS_UTILS_ROOT" "Chttp|
 endforeach()
 
 foreach(_target IN ITEMS Salts::CNet Salts::CMeta Salts::CFlow Salts::PluginABI
-                         Salts::Plugin Salts::DataBind CHttp::Client CHttp::Server)
+                         Salts::Plugin Salts::Crypto Salts::DataBind SaltsNet::ICE CHttp::Client CHttp::Server)
   if(NOT TARGET ${_target})
     message(FATAL_ERROR "Required current dependency target is missing: ${_target}")
   endif()
