@@ -1,6 +1,7 @@
 #ifndef P2P_TRANSFER_H
 #define P2P_TRANSFER_H
 
+#include <salts/thread.h>
 #include "../core/types.h"
 #include "sha256.h"
 #include "bitmap.h"
@@ -107,7 +108,7 @@ typedef struct p2p_transfer_s {
     uint8_t parallel_enabled;                 /* Enable parallel requests */
     uint8_t destroying;
     uint32_t ref_count;
-    turbo_mutex_t mutex;
+    salts_mutex_t mutex;
 
     struct p2p_transfer_s *next;
 } p2p_transfer_t;
@@ -116,7 +117,7 @@ struct p2p_transfer_manager_s {
     p2p_transfer_t *active;
     uint32_t count;
     uint32_t next_id;
-    turbo_mutex_t mutex;
+    salts_mutex_t mutex;
 };
 
 void p2p_transfer_manager_init(p2p_transfer_manager_t *mgr);
