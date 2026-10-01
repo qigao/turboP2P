@@ -2,7 +2,8 @@
 
 #include "mesh_mgmt_wire.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
+#include <openssl/crypto.h>
 
 #include <string.h>
 
@@ -89,17 +90,17 @@ static int envelope_valid(const mesh_node_ipc_envelope_v1_t *envelope) {
 static int message_digest(const uint8_t *header, const uint8_t *body,
                           size_t body_size, uint8_t out_digest[32]) {
   static const uint8_t zeros[32] = {0u};
-  turbo_crypto_sha256_ctx_t hash;
-  if (turbo_crypto_sha256_init(&hash) != TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, header, 88u) != TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, zeros, sizeof(zeros)) !=
-          TURBO_CRYPTO_OK ||
-      turbo_crypto_sha256_update(&hash, header + 120u, 8u) !=
-          TURBO_CRYPTO_OK ||
+  salts_crypto_sha256_ctx_t hash;
+  if (salts_crypto_sha256_init(&hash) != SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, header, 88u) != SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, zeros, sizeof(zeros)) !=
+          SALTS_CRYPTO_OK ||
+      salts_crypto_sha256_update(&hash, header + 120u, 8u) !=
+          SALTS_CRYPTO_OK ||
       (body_size != 0u &&
-       turbo_crypto_sha256_update(&hash, body, body_size) !=
-           TURBO_CRYPTO_OK) ||
-      turbo_crypto_sha256_final(&hash, out_digest) != TURBO_CRYPTO_OK)
+       salts_crypto_sha256_update(&hash, body, body_size) !=
+           SALTS_CRYPTO_OK) ||
+      salts_crypto_sha256_final(&hash, out_digest) != SALTS_CRYPTO_OK)
     return 0;
   return 1;
 }
@@ -169,8 +170,7 @@ mesh_control_result_t mesh_node_ipc_envelope_decode_v1(
       input_size != MESH_NODE_IPC_HEADER_SIZE_V1 + body_size ||
       !message_digest(input, input + MESH_NODE_IPC_HEADER_SIZE_V1, body_size,
                       digest) ||
-      turbo_crypto_verify(digest, input + 88u, sizeof(digest)) !=
-          TURBO_CRYPTO_OK) {
+      CRYPTO_memcmp(digest, input + 88u, sizeof(digest)) != 0) {
     memset(digest, 0, sizeof(digest));
     return MESH_CONTROL_INVALID_ARG;
   }
@@ -231,10 +231,10 @@ mesh_control_result_t mesh_node_ipc_command_encode_v1(
   if (output_capacity < total_size)
     return MESH_CONTROL_RESOURCE_EXHAUSTED;
   if (command->document_size != 0u &&
-      (turbo_crypto_sha256(command->document, command->document_size, digest) !=
-           TURBO_CRYPTO_OK ||
-       turbo_crypto_verify(digest, command->document_digest,
-                           sizeof(digest)) != TURBO_CRYPTO_OK)) {
+      (salts_crypto_sha256(command->document, command->document_size, digest) !=
+           SALTS_CRYPTO_OK ||
+       CRYPTO_memcmp(digest, command->document_digest,
+                           sizeof(digest)) != 0)) {
     memset(digest, 0, sizeof(digest));
     return MESH_CONTROL_CONFLICT;
   }
@@ -298,10 +298,10 @@ mesh_control_result_t mesh_node_ipc_command_decode_v1(
     return MESH_CONTROL_INVALID_ARG;
   }
   if (document_size != 0u &&
-      (turbo_crypto_sha256(decoded.document, document_size, digest) !=
-           TURBO_CRYPTO_OK ||
-       turbo_crypto_verify(digest, decoded.document_digest,
-                           sizeof(digest)) != TURBO_CRYPTO_OK)) {
+      (salts_crypto_sha256(decoded.document, document_size, digest) !=
+           SALTS_CRYPTO_OK ||
+       CRYPTO_memcmp(digest, decoded.document_digest,
+                           sizeof(digest)) != 0)) {
     memset(digest, 0, sizeof(digest));
     memset(out_command, 0, sizeof(*out_command));
     return MESH_CONTROL_INVALID_ARG;
