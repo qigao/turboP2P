@@ -5,8 +5,12 @@
 
 #include "p2p_crypto.h"
 #include "../internal.h"
-#include <turbo_crypto.h>
-#include <platform.h>
+#include <salts/crypto.h>
+#include <salts/random.h>
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
+#include <limits.h>
 #include <string.h>
 
 static const uint8_t P2P_NOISE_PROLOGUE[] =
@@ -20,26 +24,27 @@ int p2p_crypto_random(uint8_t *buf, size_t len) {
     if (!buf && len > 0) {
         return P2P_ERR_INVALID_ARG;
     }
-
-    if (turbo_crypto_random(buf, len) != TURBO_CRYPTO_OK) {
+    if (salts_platform_secure_random(buf, len) != 0) {
         if (buf && len > 0) {
-            turbo_crypto_wipe(buf, len);
+            OPENSSL_cleanse(buf, len);
         }
         return P2P_ERR_CRYPTO;
     }
-
     return P2P_OK;
 }
 
 int p2p_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
                            const uint8_t *data, size_t data_len,
                            uint8_t output[32]) {
-    if ((!key && key_len != 0) || (!data && data_len != 0) || !output) {
+    unsigned int output_len = 0;
+    if ((!key && key_len != 0) || (!data && data_len != 0) || !output ||
+        key_len > INT_MAX) {
         return P2P_ERR_INVALID_ARG;
     }
-    if (turbo_crypto_hmac_sha256(key, key_len, data, data_len, output) !=
-        TURBO_CRYPTO_OK) {
-        p2p_crypto_wipe(output, 32);
+    if (!HMAC(EVP_sha256(), key, (int)key_len, data, data_len, output,
+              &output_len) ||
+        output_len != 32U) {
+        OPENSSL_cleanse(output, 32);
         return P2P_ERR_CRYPTO;
     }
     return P2P_OK;
@@ -50,7 +55,30 @@ int p2p_crypto_verify(const uint8_t *expected, const uint8_t *actual,
     if ((!expected || !actual) && len != 0) {
         return 0;
     }
-    return turbo_crypto_verify(expected, actual, len) == TURBO_CRYPTO_OK;
+    if (len == 0) {
+        return 1;
+    }
+    return CRYPTO_memcmp(expected, actual, len) == 0;
+}
+
+static int p2p_crypto_x25519_public_key(
+    uint8_t public_key[P2P_KEY_SIZE],
+    const uint8_t secret_key[P2P_KEY_SIZE]) {
+    EVP_PKEY *key = NULL;
+    size_t public_size = P2P_KEY_SIZE;
+    int result = P2P_ERR_CRYPTO;
+    if (!public_key || !secret_key) return P2P_ERR_INVALID_ARG;
+    key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL, secret_key,
+                                       P2P_KEY_SIZE);
+    if (key &&
+        EVP_PKEY_get_raw_public_key(key, public_key, &public_size) == 1 &&
+        public_size == P2P_KEY_SIZE) {
+        result = P2P_OK;
+    } else {
+        OPENSSL_cleanse(public_key, P2P_KEY_SIZE);
+    }
+    EVP_PKEY_free(key);
+    return result;
 }
 
 /* =============================================================================
@@ -65,19 +93,18 @@ int p2p_crypto_generate_identity(p2p_identity_t *identity) {
 
     ret = p2p_crypto_random(generated.secret_key, P2P_KEY_SIZE);
     if (ret != P2P_OK) {
-        turbo_crypto_wipe(&generated, sizeof(generated));
+        OPENSSL_cleanse(&generated, sizeof(generated));
         return ret;
     }
 
-    if (turbo_crypto_x25519_public_key(generated.public_key,
-                                      generated.secret_key) !=
-        TURBO_CRYPTO_OK) {
-        turbo_crypto_wipe(&generated, sizeof(generated));
+    if (p2p_crypto_x25519_public_key(generated.public_key,
+                                      generated.secret_key) != P2P_OK) {
+        OPENSSL_cleanse(&generated, sizeof(generated));
         return P2P_ERR_CRYPTO;
     }
     p2p_crypto_wipe(identity, sizeof(*identity));
     memcpy(identity, &generated, sizeof(*identity));
-    turbo_crypto_wipe(&generated, sizeof(generated));
+    OPENSSL_cleanse(&generated, sizeof(generated));
 
     return P2P_OK;
 }
@@ -89,8 +116,8 @@ int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
     if (!identity || !secret_key) return P2P_ERR_INVALID_ARG;
 
     memcpy(loaded.secret_key, secret_key, P2P_KEY_SIZE);
-    if (turbo_crypto_x25519_public_key(loaded.public_key, loaded.secret_key) !=
-        TURBO_CRYPTO_OK) {
+    if (p2p_crypto_x25519_public_key(loaded.public_key,
+                                      loaded.secret_key) != P2P_OK) {
         p2p_crypto_wipe(&loaded, sizeof(loaded));
         return P2P_ERR_CRYPTO;
     }
@@ -145,7 +172,7 @@ int p2p_crypto_identity_from_blocking_provider(
  * ============================================================================= */
 
 void p2p_crypto_wipe(void *data, size_t len) {
-    turbo_crypto_wipe(data, len);
+    if (data && len > 0) OPENSSL_cleanse(data, len);
 }
 
 /* =============================================================================
@@ -277,13 +304,13 @@ void p2p_noise_handshake_destroy(p2p_noise_handshake_t *hs) {
 }
 
 /* =============================================================================
- * SHA-256 (using BLAKE2b as substitute, or implement simple SHA-256)
- *
- * For file hashing we use BLAKE2b which is faster and at least as secure.
- * If strict SHA-256 is needed, a dedicated implementation would be added.
+ * SHA-256
  * ============================================================================= */
 
 void p2p_crypto_sha256(const uint8_t *data, size_t len, uint8_t hash[32]) {
-    /* Use BLAKE2b-256 as a secure hash replacement */
-    (void)turbo_crypto_blake2b(hash, 32, data, len);
+    if (!hash) return;
+    if ((!data && len != 0) ||
+        salts_crypto_sha256(data, len, hash) != SALTS_CRYPTO_OK) {
+        OPENSSL_cleanse(hash, 32);
+    }
 }
