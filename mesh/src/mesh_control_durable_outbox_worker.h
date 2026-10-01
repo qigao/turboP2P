@@ -2,7 +2,8 @@
 #define MESH_CONTROL_DURABLE_OUTBOX_WORKER_H
 
 #include "mesh_control_durable_outbox.h"
-#include "turbo_thread.h"
+#include <salts/thread.h>
+#include <salts/thread_pool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,8 +57,8 @@ typedef struct {
  */
 typedef struct {
   mesh_control_durable_outbox_v1_t outbox;
-  turbo_threadpool_t *pool;
-  turbo_mutex_t mutex;
+  salts_threadpool_t *pool;
+  salts_mutex_t mutex;
   mesh_control_durable_outbox_worker_operation_v1_t operation;
   uint64_t request_token;
   mesh_control_durable_outbox_message_v1_t message;
