@@ -176,7 +176,7 @@ int p2p_receiver_request_chunk(p2p_node_t *node, p2p_transfer_t *transfer, uint3
     msg->payload.chunk_request.chunk_index = chunk_index;
     msg->header.payload_len = sizeof(p2p_chunk_request_payload_t);
 
-    TLOG_DEBUG("[P2P] Requesting chunk {} from {}:{}",
+    TLOG_DEBUGF("[P2P] Requesting chunk {} from {}:{}",
               chunk_index, peer_info.ip, peer_info.port);
 
     ret = p2p_peer_send(peer, msg);
@@ -210,7 +210,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
     /* Find pending transfer by request_id */
     p2p_transfer_t *transfer = p2p_transfer_find_by_id(mgr, request_id);
     if (!transfer) {
-        TLOG_WARN("[P2P] FILE_RESPONSE for unknown transfer from {}:{}",
+        TLOG_WARNF("[P2P] FILE_RESPONSE for unknown transfer from {}:{}",
                  peer_info.ip, peer_info.port);
         return P2P_ERR_NOT_FOUND;
     }
@@ -344,7 +344,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
         return ret;
     }
 
-    TLOG_INFO("[P2P] Starting download: {} bytes, {} chunks",
+    TLOG_INFOF("[P2P] Starting download: {} bytes, {} chunks",
              transfer->file_size, transfer->total_chunks);
 
     /* Request first chunk(s) */
@@ -439,7 +439,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
 
     transfer = p2p_transfer_find_by_id(mgr, transfer_id);
     if (!transfer) {
-        TLOG_WARN("[P2P] CHUNK_DATA for unknown transfer {}", transfer_id);
+        TLOG_WARNF("[P2P] CHUNK_DATA for unknown transfer {}", transfer_id);
         ret = P2P_ERR_NOT_FOUND;
         goto done;
     }
@@ -448,7 +448,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
     transfer_locked = 1;
 
     if (transfer->direction != P2P_TRANSFER_DIR_DOWNLOAD) {
-        TLOG_WARN("[P2P] CHUNK_DATA for upload transfer {}", transfer_id);
+        TLOG_WARNF("[P2P] CHUNK_DATA for upload transfer {}", transfer_id);
         ret = P2P_ERR_INVALID_STATE;
         goto done;
     }
@@ -482,7 +482,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
 
     /* Write chunk to file */
     if (!transfer->fp) {
-        TLOG_ERROR("[P2P] No file open for transfer {}", transfer_id);
+        TLOG_ERRORF("[P2P] No file open for transfer {}", transfer_id);
         ret = P2P_ERR_INVALID_STATE;
         goto done;
     }
@@ -492,7 +492,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
 
     size_t written = fwrite(data, 1, data_len, transfer->fp);
     if (written != data_len) {
-        TLOG_ERROR("[P2P] Failed to write chunk {}", chunk_index);
+        TLOG_ERRORF("[P2P] Failed to write chunk {}", chunk_index);
         ret = P2P_ERR_IO;
         goto done;
     }
@@ -509,7 +509,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
     transfer_locked = 0;
     p2p_transfer_update_progress(transfer, data_len);
 
-    TLOG_DEBUG("[P2P] Received chunk {}/{} of transfer {} ({} bytes)",
+    TLOG_DEBUGF("[P2P] Received chunk {}/{} of transfer {} ({} bytes)",
               chunk_index + 1, total_chunks, transfer_id, data_len);
 
     /* Check if transfer is complete */
@@ -529,7 +529,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
             }
             p2p_transfer_complete(transfer, 1, NULL);
         }
-        TLOG_INFO("[P2P] Transfer {} complete", transfer_id);
+        TLOG_INFOF("[P2P] Transfer {} complete", transfer_id);
 
         /* Release every peer-scoped upload created for this swarm. */
         p2p_receiver_send_source_acks(transfer, ret == P2P_OK);
