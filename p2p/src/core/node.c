@@ -7,8 +7,6 @@
 #include "peer.h"
 #include "../transfer/transfer.h"
 #include "../internal.h"
-#include <CoroNet/turbo_coro_context.h>
-#include <CoroNet/turbo_stream.h>
 #include <tlog.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,11 +17,15 @@
 #include "../security/p2p_private_key_executor.h"
 
 /* Forward declarations */
-void node_maintenance_cb(salts_timer_t *timer);
-static int node_build_sockaddr(const char *ip, int port, struct sockaddr_storage *addr);
-static int node_sockaddr_to_peer(const struct sockaddr_storage *addr, char *ip,
-                                 size_t ip_size, int *port);
-static void node_server_accept_cb(void *server_handle, void *client_handle, void *peer);
+static native_io_backend_kind node_network_backend(void);
+static cnet_client_config node_network_config(void);
+static int node_accept_ready(p2p_node_t *node);
+static void node_maintenance_run(p2p_node_t *node);
+static void node_cnet_state(void *user, cnet_connection connection,
+                            cnet_connection_state state, const cnet_error *error);
+static void node_cnet_receive(void *user, cnet_connection connection,
+                              const cnet_receive_view *view);
+static void node_cnet_send(void *user, cnet_connection connection, size_t size);
 static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer);
 static int node_ip_is_publishable(const char *ip);
 typedef void (*node_peer_event_cb_t)(struct p2p_peer_s *peer, void *user_data);
@@ -45,12 +47,12 @@ static int node_activate_authenticated_peer_locked(p2p_node_t *node, p2p_peer_t 
                                                    p2p_peer_t **duplicate_peer);
 static p2p_peer_t *node_take_expired_pending_peer_locked(p2p_node_t *node,
                                                          uint64_t now_ms);
-static turbo_stream_t *node_take_expired_cookie_stream_locked(
-    p2p_node_t *node, uint64_t now_ms);
-static int node_cookie_gate_recv(void *handle, const mem_slice_t *slice,
-                                 void *peer_ctx);
+static int node_take_expired_cookie_connection_locked(
+    p2p_node_t *node, uint64_t now_ms, cnet_connection *out_connection);
+static void node_cookie_gate_receive(p2p_cookie_gate_t *gate,
+                                     const cnet_receive_view *view);
 static p2p_cookie_gate_t *node_cookie_gate_allocate_locked(
-    p2p_node_t *node, turbo_stream_t *stream, const char *source_ip,
+    p2p_node_t *node, cnet_connection connection, const char *source_ip,
     int source_port, uint64_t now_ms);
 static int node_promote_cookie_gate(
     p2p_cookie_gate_t *gate,
@@ -60,28 +62,49 @@ static int node_promote_cookie_gate(
  * Node Lifecycle
  * ============================================================================= */
 
+static native_io_backend_kind node_network_backend(void) {
+#if defined(_WIN32)
+    return NATIVE_IO_BACKEND_IOCP;
+#elif defined(__linux__)
+    return NATIVE_IO_BACKEND_EPOLL;
+#else
+    return NATIVE_IO_BACKEND_KQUEUE;
+#endif
+}
+
+static cnet_client_config node_network_config(void) {
+    cnet_client_config config;
+    memset(&config, 0, sizeof(config));
+    config.backend = node_network_backend();
+    config.connection_capacity = 512u;
+    config.command_capacity = 1024u;
+    config.request_capacity = 1024u;
+    config.completion_batch_capacity = 128u;
+    config.event_capacity = 1024u;
+    config.max_send_bytes = P2P_SECURITY_SEND_HWM_MAX_BYTES;
+    config.receive_buffer_bytes = 256u * 1024u;
+    config.connect_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    config.read_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    config.write_timeout_ms = P2P_PEER_TIMEOUT_MS;
+    return config;
+}
+
 p2p_node_t* p2p_node_create(const char *ip, int port) {
-    if (!ip) return NULL;
+    cnet_client_config network_config;
+    p2p_node_t *node;
+    if (!ip || port < 0 || port > UINT16_MAX) return NULL;
 
-    p2p_node_t *node = (p2p_node_t *)calloc(1, sizeof(p2p_node_t));
+    node = (p2p_node_t *)calloc(1, sizeof(*node));
     if (!node) return NULL;
-
     strncpy(node->ip, ip, sizeof(node->ip) - 1);
     node->port = port;
     vivaldi_init(&node->coord);
 
-    /* Initialize Hash Table for Peers */
-    node->peers_table = NULL;
-    node->peer_count = 0;
-
-    /* Initialize Kademlia DHT */
     node->kad_dht = kademlia_create(ip, (uint16_t)port);
     if (!node->kad_dht) {
         free(node);
         return NULL;
     }
-
-    /* Sync local ID from Kademlia instance */
     memcpy(node->id, node->kad_dht->routing->local_id.bytes, KADEMLIA_ID_BYTES);
     if (p2p_crypto_generate_identity(&node->crypto.identity) != P2P_OK) {
         kademlia_destroy(node->kad_dht);
@@ -89,59 +112,87 @@ p2p_node_t* p2p_node_create(const char *ip, int port) {
         return NULL;
     }
 
-    node->ctx = coro_context_create(NULL);
-    if (!node->ctx) {
+    salts_mutex_init(&node->mutex);
+    network_config = node_network_config();
+    if (cnet_client_init(&node->network, &network_config) != SALTS_OK) {
+        salts_mutex_destroy(&node->mutex);
         kademlia_destroy(node->kad_dht);
+        p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
         free(node);
         return NULL;
     }
+    node->network_initialized = 1;
 
-    /* Initialize node mutex */
-    salts_mutex_init(&node->mutex);
-
-    node->transfers = (p2p_transfer_manager_t *)calloc(1, sizeof(p2p_transfer_manager_t));
+    node->transfers = (p2p_transfer_manager_t *)calloc(1, sizeof(*node->transfers));
     if (!node->transfers) {
+        (void)cnet_client_stop(&node->network, 0u);
+        (void)cnet_client_destroy(&node->network);
+        node->network_initialized = 0;
         salts_mutex_destroy(&node->mutex);
-        coro_context_destroy(node->ctx);
         kademlia_destroy(node->kad_dht);
+        p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
         free(node);
         return NULL;
     }
     p2p_transfer_manager_init(node->transfers);
-
     return node;
 }
 
 void p2p_node_destroy(p2p_node_t *node) {
     if (!node) return;
-    
-    /* Use professional cleanup orchestration from cleanup.c */
-    void p2p_destroy_clean(p2p_node_t *node); /* Forward declaration */
     p2p_destroy_clean(node);
 }
 
 int p2p_node_run_internal(p2p_node_t *node) {
-    if (!node || !node->ctx) return P2P_ERR_INVALID_ARG;
-    return coro_context_run(node->ctx, TURBO_RUN_DEFAULT) < 0
-               ? P2P_ERR_NETWORK
-               : P2P_OK;
+    int status;
+    if (!node || !node->network_initialized) return P2P_ERR_INVALID_ARG;
+    node->stop_requested = 0;
+    while (!node->stop_requested) {
+        status = p2p_node_poll_internal(node, 50u);
+        if (status != P2P_OK) return status;
+    }
+    return P2P_OK;
 }
 
 int p2p_node_poll_internal(p2p_node_t *node, uint32_t timeout_ms) {
+    size_t events = 0u;
+    uint64_t now_ms;
     int status;
-    if (!node || !node->ctx) return P2P_ERR_INVALID_ARG;
-    status = coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
-    if (status < 0) return P2P_ERR_NETWORK;
-    if (status == 0 && timeout_ms != 0u) {
-        salts_sleep_ms(timeout_ms);
-        status = coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
-        if (status < 0) return P2P_ERR_NETWORK;
+    if (!node || !node->network_initialized) return P2P_ERR_INVALID_ARG;
+
+    status = node_accept_ready(node);
+    if (status != P2P_OK) return status;
+    status = cnet_client_poll(&node->network, timeout_ms, &events);
+    if (status != SALTS_OK) {
+        if (status == SALTS_ESHUTDOWN && node->stop_requested) return P2P_OK;
+        return P2P_ERR_NETWORK;
+    }
+    status = node_accept_ready(node);
+    if (status != P2P_OK) return status;
+
+    now_ms = salts_monotonic_ms();
+    if (node->last_maintenance_ms == 0u ||
+        now_ms - node->last_maintenance_ms >= P2P_GOSSIP_INTERVAL) {
+        node->last_maintenance_ms = now_ms;
+        node_maintenance_run(node);
     }
     return P2P_OK;
 }
 
 void p2p_node_stop_internal(p2p_node_t *node) {
-    if (node && node->ctx) coro_context_stop(node->ctx);
+    if (!node) return;
+    node->stop_requested = 1;
+    if (node->network_initialized) (void)cnet_client_wake(&node->network);
+}
+
+cnet_observer p2p_node_transport_observer(p2p_node_t *node) {
+    cnet_observer observer;
+    memset(&observer, 0, sizeof(observer));
+    observer.on_state = node_cnet_state;
+    observer.on_receive = node_cnet_receive;
+    observer.on_send = node_cnet_send;
+    observer.user = node;
+    return observer;
 }
 
 /* =============================================================================
