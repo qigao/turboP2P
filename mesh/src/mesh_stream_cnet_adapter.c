@@ -262,19 +262,41 @@ int mesh_stream_cnet_bind_authorizes_v1(
   return matches;
 }
 
+mesh_stream_channel_v1_t *mesh_stream_cnet_channel_borrow_v1(
+    const mesh_stream_cnet_channel_v1_t *adapter) {
+  mesh_stream_channel_v1_t *channel = NULL;
+  if (!adapter)
+    return NULL;
+  if (!adapter->registry)
+    return (mesh_stream_channel_v1_t *)&adapter->channel;
+  if (mesh_stream_registry_borrow_channel_v1(adapter->registry, adapter->registry_handle,
+                                             &channel) != MESH_STREAM_REGISTRY_OK)
+    return NULL;
+  return channel;
+}
+
 static int channel_binding_is_current(const mesh_stream_cnet_channel_v1_t *adapter) {
   return adapter->binding && adapter->binding->client == adapter->client &&
          same_connection(adapter->binding->connection, adapter->connection);
 }
 
 static int channel_is_authorized(const mesh_stream_cnet_channel_v1_t *adapter, uint64_t now_ms) {
-  return channel_binding_is_current(adapter) &&
-         mesh_stream_cnet_bind_authorizes_v1(adapter->binding, &adapter->channel.admission, now_ms);
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  return channel && channel->state == MESH_STREAM_CHANNEL_READY &&
+         channel_binding_is_current(adapter) &&
+         mesh_stream_cnet_bind_authorizes_v1(adapter->binding, &channel->admission, now_ms);
 }
 
 static void retire_channel_binding(mesh_stream_cnet_channel_v1_t *adapter, uint64_t now_ms) {
   if (channel_binding_is_current(adapter))
     (void)mesh_stream_cnet_bind_abort_v1(adapter->binding, adapter->connection, now_ms);
+}
+
+static void retire_channel_owner(mesh_stream_cnet_channel_v1_t *adapter, uint64_t now_ms) {
+  if (adapter->registry)
+    (void)mesh_stream_registry_close_v1(adapter->registry, adapter->registry_handle);
+  else
+    retire_channel_binding(adapter, now_ms);
 }
 
 static int channel_set_hwm(void *context, size_t bytes) {
@@ -293,8 +315,9 @@ static int channel_send_control(void *context, const uint8_t *bytes, size_t len,
   int status;
   if (!channel_is_authorized(adapter, salts_monotonic_ms()))
     return SALTS_EPERM;
-  if (!adapter->channel.transport.send_pending ||
-      token != adapter->channel.transport.pending_send_token)
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  if (!channel || !channel->transport.send_pending ||
+      token != channel->transport.pending_send_token)
     return SALTS_EINVAL;
   buffer = mem_get_buffer(mem_global(), len);
   if (!buffer)
@@ -318,45 +341,59 @@ static mesh_stream_channel_result_t validate_channel_lifetime(
     uint64_t admission_generation, uint64_t now_ms) {
   if (!adapter || admission_generation == 0u || now_ms == 0u)
     return MESH_STREAM_CHANNEL_INVALID_ARG;
-  if (adapter->channel.state == MESH_STREAM_CHANNEL_UNINITIALIZED || !adapter->client ||
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  if (!channel || channel->state == MESH_STREAM_CHANNEL_UNINITIALIZED || !adapter->client ||
       !same_connection(adapter->connection, connection))
     return MESH_STREAM_CHANNEL_INVALID_STATE;
-  if (adapter->channel.admission.generation != admission_generation)
+  if (channel->admission.generation != admission_generation)
     return MESH_STREAM_CHANNEL_STALE_ADMISSION;
   return MESH_STREAM_CHANNEL_OK;
 }
 
 static mesh_stream_channel_result_t require_channel_authorization(
     mesh_stream_cnet_channel_v1_t *adapter, uint64_t now_ms) {
-  if (adapter->channel.state != MESH_STREAM_CHANNEL_READY)
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  if (!channel || channel->state != MESH_STREAM_CHANNEL_READY)
     return MESH_STREAM_CHANNEL_INVALID_STATE;
   if (channel_is_authorized(adapter, now_ms))
     return MESH_STREAM_CHANNEL_OK;
-  (void)mesh_stream_channel_revoke_v1(&adapter->channel, adapter->channel.admission.generation);
-  retire_channel_binding(adapter, now_ms);
+  (void)mesh_stream_channel_revoke_v1(channel, channel->admission.generation);
+  retire_channel_owner(adapter, now_ms);
   return MESH_STREAM_CHANNEL_AUTH_REQUIRED;
 }
 
 static mesh_stream_channel_result_t finish_channel_operation(
     mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_channel_result_t result, uint64_t now_ms) {
-  if (adapter->channel.state != MESH_STREAM_CHANNEL_READY)
-    retire_channel_binding(adapter, now_ms);
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  if (channel && channel->state != MESH_STREAM_CHANNEL_READY)
+    retire_channel_owner(adapter, now_ms);
   return result;
 }
 
-mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
+static void clear_channel_route(mesh_stream_cnet_channel_v1_t *adapter) {
+  adapter->binding = NULL;
+  adapter->client = NULL;
+  adapter->registry = NULL;
+  memset(&adapter->registry_handle, 0, sizeof(adapter->registry_handle));
+  memset(&adapter->connection, 0, sizeof(adapter->connection));
+  memset(&adapter->policy, 0, sizeof(adapter->policy));
+  adapter->on_event = NULL;
+  adapter->event_context = NULL;
+}
+
+static mesh_stream_channel_result_t prepare_channel_route(
     mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_cnet_bind_v1_t *binding,
     const mesh_stream_channel_admission_v1_t *admission,
     const mesh_stream_transport_config_v1_t *config,
     const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
-    mesh_stream_transport_event_fn on_event, void *event_context) {
-  mesh_stream_transport_io_v1_t io = {0};
-  mesh_stream_channel_result_t result;
+    mesh_stream_transport_event_fn on_event, void *event_context,
+    mesh_stream_transport_io_v1_t *io) {
   if (!adapter || !binding || !admission || !config || !policy || !on_event || now_ms == 0u ||
       policy->send || policy->recv || policy->release_recv ||
       !policy->set_send_hwm || !policy->set_receive_timeout)
     return MESH_STREAM_CHANNEL_INVALID_ARG;
-  if (adapter->channel.state != MESH_STREAM_CHANNEL_UNINITIALIZED || adapter->channel.transport.buffer)
+  if (adapter->registry || adapter->channel.state != MESH_STREAM_CHANNEL_UNINITIALIZED ||
+      adapter->channel.transport.buffer)
     return MESH_STREAM_CHANNEL_INVALID_STATE;
   if (!mesh_stream_cnet_bind_authorizes_v1(binding, admission, now_ms))
     return MESH_STREAM_CHANNEL_AUTH_REQUIRED;
@@ -366,20 +403,73 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
   adapter->policy = *policy;
   adapter->on_event = on_event;
   adapter->event_context = event_context;
-  io.context = adapter;
-  io.set_send_hwm = channel_set_hwm;
-  io.set_receive_timeout = channel_set_timeout;
+  io->context = adapter;
+  io->set_send_hwm = channel_set_hwm;
+  io->set_receive_timeout = channel_set_timeout;
+  return MESH_STREAM_CHANNEL_OK;
+}
+
+mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_cnet_bind_v1_t *binding,
+    const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
+    mesh_stream_transport_event_fn on_event, void *event_context) {
+  mesh_stream_transport_io_v1_t io = {0};
+  mesh_stream_channel_result_t result = prepare_channel_route(adapter, binding, admission,
+      config, policy, now_ms, on_event, event_context, &io);
+  if (result != MESH_STREAM_CHANNEL_OK)
+    return result;
   result = mesh_stream_channel_init_async_v1(&adapter->channel, admission, config, &io,
                                              channel_send_control, channel_deliver_event, adapter);
-  if (result != MESH_STREAM_CHANNEL_OK) {
-    adapter->binding = NULL;
-    adapter->client = NULL;
-    memset(&adapter->connection, 0, sizeof(adapter->connection));
-    memset(&adapter->policy, 0, sizeof(adapter->policy));
-    adapter->on_event = NULL;
-    adapter->event_context = NULL;
-  }
+  if (result != MESH_STREAM_CHANNEL_OK)
+    clear_channel_route(adapter);
   return result;
+}
+
+static void registry_retire_binding(void *context) {
+  retire_channel_binding(context, salts_monotonic_ms());
+}
+
+mesh_stream_registry_result_t mesh_stream_cnet_channel_register_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_registry_v1_t *registry,
+    mesh_stream_cnet_bind_v1_t *binding, const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
+    mesh_stream_transport_event_fn on_event, void *event_context,
+    mesh_stream_channel_handle_v1_t *out_handle) {
+  mesh_stream_registry_async_open_v1_t request = {0};
+  mesh_stream_registry_result_t result;
+  mesh_stream_channel_result_t prepared;
+  if (adapter && out_handle == &adapter->registry_handle)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  if (out_handle)
+    memset(out_handle, 0, sizeof(*out_handle));
+  if (!registry || !out_handle)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  prepared = prepare_channel_route(adapter, binding, admission, config, policy, now_ms,
+      on_event, event_context, &request.channel.io);
+  if (prepared != MESH_STREAM_CHANNEL_OK) {
+    if (prepared == MESH_STREAM_CHANNEL_AUTH_REQUIRED)
+      return MESH_STREAM_REGISTRY_AUTH_REQUIRED;
+    return prepared == MESH_STREAM_CHANNEL_INVALID_ARG ? MESH_STREAM_REGISTRY_INVALID_ARG
+                                                        : MESH_STREAM_REGISTRY_INVALID_STATE;
+  }
+  request.channel.admission = *admission;
+  request.channel.transport = *config;
+  request.channel.on_event = channel_deliver_event;
+  request.channel.event_context = adapter;
+  request.send_async = channel_send_control;
+  request.on_retire = registry_retire_binding;
+  request.retire_context = adapter;
+  result = mesh_stream_registry_open_async_v1(registry, &request, out_handle);
+  if (result != MESH_STREAM_REGISTRY_OK) {
+    clear_channel_route(adapter);
+    return result;
+  }
+  adapter->registry = registry;
+  adapter->registry_handle = *out_handle;
+  return MESH_STREAM_REGISTRY_OK;
 }
 
 mesh_stream_channel_result_t mesh_stream_cnet_channel_feed_v1(
@@ -397,7 +487,8 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_feed_v1(
   if (result != MESH_STREAM_CHANNEL_OK)
     return result;
   return finish_channel_operation(adapter,
-      mesh_stream_channel_feed_v1(&adapter->channel, admission_generation, bytes, len, out_frames),
+      mesh_stream_channel_feed_v1(mesh_stream_cnet_channel_borrow_v1(adapter),
+                                  admission_generation, bytes, len, out_frames),
       now_ms);
 }
 
@@ -412,14 +503,16 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_complete_send_v1(
   result = validate_channel_lifetime(adapter, connection, admission_generation, now_ms);
   if (result != MESH_STREAM_CHANNEL_OK)
     return result;
-  if (!adapter->channel.transport.send_pending ||
-      token != adapter->channel.transport.pending_send_token)
+  mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
+  if (!channel || !channel->transport.send_pending ||
+      token != channel->transport.pending_send_token)
     return MESH_STREAM_CHANNEL_INVALID_STATE;
   result = require_channel_authorization(adapter, now_ms);
   if (result != MESH_STREAM_CHANNEL_OK)
     return result;
   return finish_channel_operation(adapter,
-      mesh_stream_channel_complete_send_v1(&adapter->channel, admission_generation, token,
+      mesh_stream_channel_complete_send_v1(mesh_stream_cnet_channel_borrow_v1(adapter),
+                                            admission_generation, token,
                                             status, bytes, out_frames), now_ms);
 }
 
@@ -430,15 +523,22 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_close_v1(
       validate_channel_lifetime(adapter, connection, admission_generation, now_ms);
   if (result != MESH_STREAM_CHANNEL_OK)
     return result;
-  result = mesh_stream_channel_close_v1(&adapter->channel, admission_generation);
-  retire_channel_binding(adapter, now_ms);
+  result = mesh_stream_channel_close_v1(mesh_stream_cnet_channel_borrow_v1(adapter),
+                                        admission_generation);
+  retire_channel_owner(adapter, now_ms);
   return result;
 }
 
 void mesh_stream_cnet_channel_destroy_v1(mesh_stream_cnet_channel_v1_t *adapter) {
   if (!adapter)
     return;
-  retire_channel_binding(adapter, salts_monotonic_ms());
-  mesh_stream_channel_destroy_v1(&adapter->channel);
+  if (adapter->registry) {
+    /* The generation check runs before any borrowed binding access. */
+    if (mesh_stream_cnet_channel_borrow_v1(adapter))
+      (void)mesh_stream_registry_close_v1(adapter->registry, adapter->registry_handle);
+  } else {
+    retire_channel_binding(adapter, salts_monotonic_ms());
+    mesh_stream_channel_destroy_v1(&adapter->channel);
+  }
   memset(adapter, 0, sizeof(*adapter));
 }

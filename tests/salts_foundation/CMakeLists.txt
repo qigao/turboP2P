@@ -51,6 +51,7 @@ foreach(test_name IN ITEMS
   test_mesh_mgmt_crypto
   test_mesh_stream_bind
   test_mesh_stream_channel
+  test_mesh_stream_registry
   test_mesh_control_outbox
   test_mesh_stream_transport
   test_mesh_stream_data
@@ -71,7 +72,7 @@ set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
 add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
 
-foreach(test_name IN ITEMS test_mesh_stream_cnet test_mesh_stream_cnet_bind test_mesh_stream_cnet_channel)
+foreach(test_name IN ITEMS test_mesh_stream_cnet test_mesh_stream_cnet_bind test_mesh_stream_cnet_channel test_mesh_stream_cnet_registry)
   add_executable(${test_name} "${mesh_tests}/${test_name}.c")
   set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
   target_link_libraries(${test_name} PRIVATE foundation Salts::TinyTest Salts::CNet)

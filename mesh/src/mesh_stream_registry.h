@@ -48,6 +48,17 @@ typedef struct {
   void *event_context;
 } mesh_stream_registry_open_v1_t;
 
+/** Called once when a registered async channel retires, before slot reuse.
+ * Same owner loop, no reentry. The borrowed context must survive retirement. */
+typedef void (*mesh_stream_registry_retire_fn)(void *context);
+
+typedef struct {
+  mesh_stream_registry_open_v1_t channel;
+  mesh_stream_transport_async_send_fn send_async;
+  mesh_stream_registry_retire_fn on_retire;
+  void *retire_context;
+} mesh_stream_registry_async_open_v1_t;
+
 typedef struct {
   mesh_stream_channel_admission_v1_t admission;
   mesh_stream_channel_state_t state;
@@ -74,11 +85,14 @@ typedef struct {
   mesh_stream_channel_v1_t channel;
   uint64_t generation;
   uint8_t occupied;
+  mesh_stream_registry_retire_fn on_retire;
+  void *retire_context;
 } mesh_stream_registry_slot_v1_t;
 
 /**
  * Internal bounded owner-loop registry. Open/revoke/stats scan at most capacity
- * slots; handle-based data operations are O(1). Neither registry nor channels
+ * slots; handle-based data operations are O(1). All calls are serialized and
+ * callbacks must not reenter. Neither registry nor channels
  * own their I/O contexts or CoroNet sockets. owner_generation must change each
  * time storage at this registry address is initialized for a new owner life.
  * The caller must zero-initialize this object before its first init.
@@ -94,13 +108,30 @@ mesh_stream_registry_result_t
 mesh_stream_registry_init_v1(mesh_stream_registry_v1_t *registry,
                              const mesh_stream_registry_config_v1_t *config);
 
-/** Destroy all channel storage. The owner must first stop every pending receive. */
+/** Quiesce all receive/send callbacks first. Retires then frees every channel. */
 void mesh_stream_registry_destroy_v1(mesh_stream_registry_v1_t *registry);
 
 mesh_stream_registry_result_t
 mesh_stream_registry_open_v1(mesh_stream_registry_v1_t *registry,
                              const mesh_stream_registry_open_v1_t *request,
                              mesh_stream_channel_handle_v1_t *out_handle);
+
+/** Explicit async admission; no synchronous fallback. Retired slots retain
+ * quota and diagnostics until release. Null send_async is rejected. */
+mesh_stream_registry_result_t mesh_stream_registry_open_async_v1(
+    mesh_stream_registry_v1_t *registry, const mesh_stream_registry_async_open_v1_t *request,
+    mesh_stream_channel_handle_v1_t *out_handle);
+
+/** Internal adapter-only borrow, valid solely during the serialized owner call.
+ * Never retain the pointer across release/destroy or invoke data operations on
+ * a TLS-bound channel directly; route those through its authenticated adapter. */
+mesh_stream_registry_result_t mesh_stream_registry_borrow_channel_v1(
+    mesh_stream_registry_v1_t *registry, mesh_stream_channel_handle_v1_t handle,
+    mesh_stream_channel_v1_t **out_channel);
+
+mesh_stream_registry_result_t mesh_stream_registry_complete_send_v1(
+    mesh_stream_registry_v1_t *registry, mesh_stream_channel_handle_v1_t handle,
+    uint64_t admission_generation, uint64_t token, int status, size_t bytes, size_t *out_frames);
 
 mesh_stream_registry_result_t mesh_stream_registry_feed_v1(mesh_stream_registry_v1_t *registry,
                                                            mesh_stream_channel_handle_v1_t handle,
@@ -123,7 +154,9 @@ mesh_stream_registry_revoke_peer_v1(mesh_stream_registry_v1_t *registry,
                                     const uint8_t remote_peer_id[MESH_STREAM_CHANNEL_PEER_ID_SIZE],
                                     uint64_t admission_generation, size_t *out_revoked);
 
-/** Release a terminal slot. READY channels must first be closed or revoked. */
+/** Release a terminal slot after quiescing all receive/send callbacks.
+ * READY channels must first be closed or revoked; retirement alone does not
+ * prove that backend callbacks have stopped. */
 mesh_stream_registry_result_t
 mesh_stream_registry_release_v1(mesh_stream_registry_v1_t *registry,
                                 mesh_stream_channel_handle_v1_t handle);

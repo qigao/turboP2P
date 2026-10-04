@@ -1,6 +1,6 @@
 # Salts / SaltsUtils 分阶段迁移
 
-已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
+已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
 
 ## 审查发现
 
@@ -127,3 +127,33 @@ CNet adapter 的 `mesh_stream_cnet_channel_v1_t` 借用已完成绑定的对象�
 完整根工程、Windows/macOS、registry 的 CNet 接线及 P2P/tunnel/HTTP owner 仍待后续验证；此阶段只完成独立 receiver channel 路径。
 
 本阶段本地 Release 16/16 CTest、ASan/UBSan 16/16 通过，使用 Salts 1.8.15 / SaltsUtils 4.1.17 发布包快照；consumer 不限制版本。sanitizer 仍设 `detect_leaks=0`，不声称完成泄漏检测。CI 延续 latest Packages 与共享 vcpkg-cache/re2c。
+
+
+## 第二阶段 E：异步 registry 与 CNet 授权路由
+
+**HIGH（事实，已处理）**：原 registry 只初始化同步 channel；把 CNet adapter 内嵌的 channel 再复制进 registry 会产生两套 session/window 和生命周期。现在新增显式 `mesh_stream_registry_open_async_v1` / `complete_send_v1`，与同步入口共享重复流、总容量、每 peer 配额及 slot generation 检查。没有 async callback 或混入同步 send 立即失败；初始化失败不占槽位、不推进 generation、不发布 handle。
+
+CNet 的 `mesh_stream_cnet_channel_register_v1` 先验证完整 TLS 1.3 绑定，并在 registry 初始化 channel 时验证实际 client policy，注册同一发送/应用回调。registry 是 channel 存储的唯一 owner；route 的 standalone 存储保持零，只持有 borrowed registry 与带 owner/slot generation 的 handle。每个 receive、terminal、应用事件和 control send 都通过 handle 借用当前存储，并执行原有 exporter/TTL/身份/stream 门禁。指针只在同一次 owner 调用内有效，不能缓存到 release/destroy 之后。
+
+```mermaid
+flowchart TD
+    R["CNet route"] -->|"owner/slot generation"| H["Registry handle"]
+    H -->|"验证后借用"| C["唯一 channel 存储"]
+    R -->|"TLS/exporter/TTL"| B["Binding proof"]
+    C -->|"关闭或撤销"| T["一次性 retire callback"]
+    T -->|"清除授权"| B
+```
+
+**HIGH（事实，已处理）**：registry 的 close/revoke/destroy 必须清除绑定授权，不能只释放 transport window。每个 async slot 可登记一次性 retire observer，终态先保留诊断和计数，再在 release/reuse 前通知 owner；callback 在调用前从 slot 清除，重复关闭、释放或销毁不重复通知。CNet 注册路径用它 abort 精确 borrowed binding。终态槽位继续占用配额并可查询，只有明确 release 才可复用。stale route 在访问 borrowed binding 前先验证 registry handle，因此不能撤销 replacement binding。
+
+**MED（事实，已处理）**：原 query 在 READY 状态读取仅在 terminal 时保存的计数，活跃 channel 的统计始终为零。现在 READY 直接读取唯一 transport 的实时 received bytes/frames/control frames；terminal 查询沿用关闭时的最终快照，不改变 channel 状态。
+
+方案比较：独立维护第二套 CNet registry 会重复配额和句柄策略；复制 channel 会破坏唯一状态；让通用 core 直接依赖 CNet 则扩大 backend 依赖。当前选择 backend-neutral async registry + 注册 route + retire observer，通用 core 不引入 CNet API。原 synchronous registry 与 standalone CNet 入口继续有各自明确语义，新入口不自动选择或降级后端。代价是 borrowed route/context 必须存活至 retirement，并且 caller 必须统一生命周期。
+
+owner 契约：所有操作及 policy/application/retire callbacks 串行且禁止重入；仍只提交一个 receive demand，control pending 时暂停 demand；CNet 连接专属 write FIFO 不混入未登记写。close/revoke 清除授权后 caller 请求 socket close，并等待全部 callbacks 静默；此后才 release slot、destroy registry 或复用 route。registry 对象本身必须比 route 活得更久，同地址重建必须改变 owner_generation。route destroy 在注册模式下只 retire slot，不代替 release，也不关闭 borrowed CNet client。
+
+验证包含既有六个同步 registry 回归及四个异步核心回归；真实 TLS 三消息绑定后 OPEN/DATA、对端 control 解码和按实际 on_send settlement 提交 credit；未认证、policy 错误、重复、总容量/peer 配额拒绝不损伤现有授权；关闭、匹配 peer generation 撤销、短 terminal、TTL 过期、abort 后实际 DATA 拒绝、静默 registry destroy；同一 CNet clients 重连及同地址 registry 重建后，旧 handle/token/route 的 feed/terminal/close/destroy 不影响新 grant。
+
+撤销本阶段不涉及 wire 格式或数据转换。完整根工程、Windows/macOS、多核 owner qualification，以及 P2P/tunnel/HTTP 产品调用方仍需迁移和验证；此阶段没有移除全部 legacy SDK。
+
+本阶段本地 Release 与 ASan/UBSan 均为 18/18 CTest 通过，使用 Salts 1.8.15 / SaltsUtils 4.1.17 发布包验证快照；依赖仍 floating/latest。sanitizer 设置 detect_leaks=0，不声称完成泄漏检测。re2c 延续共享 vcpkg-cache，无 bootstrap。

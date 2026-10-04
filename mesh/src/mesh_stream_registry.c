@@ -73,6 +73,22 @@ map_channel_result(mesh_stream_channel_result_t channel_result) {
   }
 }
 
+static void notify_retired(mesh_stream_registry_slot_v1_t *slot) {
+  mesh_stream_registry_retire_fn callback = slot->on_retire;
+  void *context = slot->retire_context;
+  if (slot->channel.state == MESH_STREAM_CHANNEL_READY || !callback)
+    return;
+  slot->on_retire = NULL;
+  slot->retire_context = NULL;
+  callback(context);
+}
+
+static mesh_stream_registry_result_t finish_operation(mesh_stream_registry_slot_v1_t *slot,
+                                                       mesh_stream_channel_result_t result) {
+  notify_retired(slot);
+  return map_channel_result(result);
+}
+
 static int stream_key_matches(const mesh_stream_registry_slot_v1_t *slot,
                               const mesh_stream_registry_open_v1_t *request) {
   return slot->channel.admission.generation == request->admission.generation &&
@@ -128,18 +144,23 @@ void mesh_stream_registry_destroy_v1(mesh_stream_registry_v1_t *registry) {
     return;
   if (registry->slots) {
     for (index = 0u; index < registry->config.capacity; index++) {
-      if (registry->slots[index].occupied)
-        mesh_stream_channel_destroy_v1(&registry->slots[index].channel);
+      mesh_stream_registry_slot_v1_t *slot = &registry->slots[index];
+      if (slot->occupied) {
+        (void)mesh_stream_channel_close_v1(&slot->channel, slot->channel.admission.generation);
+        notify_retired(slot);
+        mesh_stream_channel_destroy_v1(&slot->channel);
+      }
     }
   }
   free(registry->slots);
   memset(registry, 0, sizeof(*registry));
 }
 
-mesh_stream_registry_result_t
-mesh_stream_registry_open_v1(mesh_stream_registry_v1_t *registry,
-                             const mesh_stream_registry_open_v1_t *request,
-                             mesh_stream_channel_handle_v1_t *out_handle) {
+static mesh_stream_registry_result_t registry_open(
+    mesh_stream_registry_v1_t *registry, const mesh_stream_registry_open_v1_t *request,
+    mesh_stream_transport_async_send_fn send_async,
+    mesh_stream_registry_retire_fn on_retire, void *retire_context,
+    mesh_stream_channel_handle_v1_t *out_handle) {
   mesh_stream_registry_slot_v1_t *available = NULL;
   size_t available_index = 0u;
   size_t index = 0u;
@@ -173,11 +194,15 @@ mesh_stream_registry_open_v1(mesh_stream_registry_v1_t *registry,
   if (!available)
     return MESH_STREAM_REGISTRY_CAPACITY_EXHAUSTED;
 
-  channel_result =
-      mesh_stream_channel_init_v1(&available->channel, &request->admission, &request->transport,
-                                  &request->io, request->on_event, request->event_context);
+  channel_result = send_async
+      ? mesh_stream_channel_init_async_v1(&available->channel, &request->admission,
+          &request->transport, &request->io, send_async, request->on_event, request->event_context)
+      : mesh_stream_channel_init_v1(&available->channel, &request->admission, &request->transport,
+          &request->io, request->on_event, request->event_context);
   if (channel_result != MESH_STREAM_CHANNEL_OK)
     return map_channel_result(channel_result);
+  available->on_retire = on_retire;
+  available->retire_context = retire_context;
   available->generation++;
   available->occupied = 1u;
   registry->occupied_channels++;
@@ -188,16 +213,66 @@ mesh_stream_registry_open_v1(mesh_stream_registry_v1_t *registry,
   return MESH_STREAM_REGISTRY_OK;
 }
 
+mesh_stream_registry_result_t mesh_stream_registry_open_v1(
+    mesh_stream_registry_v1_t *registry, const mesh_stream_registry_open_v1_t *request,
+    mesh_stream_channel_handle_v1_t *out_handle) {
+  return registry_open(registry, request, NULL, NULL, NULL, out_handle);
+}
+
+mesh_stream_registry_result_t mesh_stream_registry_open_async_v1(
+    mesh_stream_registry_v1_t *registry, const mesh_stream_registry_async_open_v1_t *request,
+    mesh_stream_channel_handle_v1_t *out_handle) {
+  if (out_handle)
+    memset(out_handle, 0, sizeof(*out_handle));
+  if (!request || !request->send_async)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  return registry_open(registry, &request->channel, request->send_async,
+                        request->on_retire, request->retire_context, out_handle);
+}
+
+mesh_stream_registry_result_t mesh_stream_registry_borrow_channel_v1(
+    mesh_stream_registry_v1_t *registry, mesh_stream_channel_handle_v1_t handle,
+    mesh_stream_channel_v1_t **out_channel) {
+  mesh_stream_registry_slot_v1_t *slot = NULL;
+  mesh_stream_registry_result_t result;
+  if (!out_channel)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  *out_channel = NULL;
+  result = validate_handle(registry, handle, &slot);
+  if (result == MESH_STREAM_REGISTRY_OK)
+    *out_channel = &slot->channel;
+  return result;
+}
+
+mesh_stream_registry_result_t mesh_stream_registry_complete_send_v1(
+    mesh_stream_registry_v1_t *registry, mesh_stream_channel_handle_v1_t handle,
+    uint64_t admission_generation, uint64_t token, int status, size_t bytes, size_t *out_frames) {
+  mesh_stream_registry_slot_v1_t *slot = NULL;
+  mesh_stream_registry_result_t result;
+  if (!out_frames)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  *out_frames = 0u;
+  result = validate_handle(registry, handle, &slot);
+  if (result != MESH_STREAM_REGISTRY_OK)
+    return result;
+  return finish_operation(slot, mesh_stream_channel_complete_send_v1(&slot->channel,
+      admission_generation, token, status, bytes, out_frames));
+}
+
 mesh_stream_registry_result_t mesh_stream_registry_feed_v1(mesh_stream_registry_v1_t *registry,
                                                            mesh_stream_channel_handle_v1_t handle,
                                                            const uint8_t *bytes, size_t len,
                                                            size_t *out_frames) {
   mesh_stream_registry_slot_v1_t *slot = NULL;
-  mesh_stream_registry_result_t validation_result = validate_handle(registry, handle, &slot);
+  mesh_stream_registry_result_t validation_result;
 
+  if (!out_frames || (!bytes && len != 0u))
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  *out_frames = 0u;
+  validation_result = validate_handle(registry, handle, &slot);
   if (validation_result != MESH_STREAM_REGISTRY_OK)
     return validation_result;
-  return map_channel_result(mesh_stream_channel_feed_v1(
+  return finish_operation(slot, mesh_stream_channel_feed_v1(
       &slot->channel, slot->channel.admission.generation, bytes, len, out_frames));
 }
 
@@ -205,11 +280,15 @@ mesh_stream_registry_result_t
 mesh_stream_registry_pump_once_v1(mesh_stream_registry_v1_t *registry,
                                   mesh_stream_channel_handle_v1_t handle, size_t *out_frames) {
   mesh_stream_registry_slot_v1_t *slot = NULL;
-  mesh_stream_registry_result_t validation_result = validate_handle(registry, handle, &slot);
+  mesh_stream_registry_result_t validation_result;
 
+  if (!out_frames)
+    return MESH_STREAM_REGISTRY_INVALID_ARG;
+  *out_frames = 0u;
+  validation_result = validate_handle(registry, handle, &slot);
   if (validation_result != MESH_STREAM_REGISTRY_OK)
     return validation_result;
-  return map_channel_result(mesh_stream_channel_pump_once_v1(
+  return finish_operation(slot, mesh_stream_channel_pump_once_v1(
       &slot->channel, slot->channel.admission.generation, out_frames));
 }
 
@@ -221,7 +300,7 @@ mesh_stream_registry_close_v1(mesh_stream_registry_v1_t *registry,
 
   if (validation_result != MESH_STREAM_REGISTRY_OK)
     return validation_result;
-  return map_channel_result(
+  return finish_operation(slot,
       mesh_stream_channel_close_v1(&slot->channel, slot->channel.admission.generation));
 }
 
@@ -250,6 +329,7 @@ mesh_stream_registry_revoke_peer_v1(mesh_stream_registry_v1_t *registry,
     if (slot->channel.state != MESH_STREAM_CHANNEL_READY)
       continue;
     channel_result = mesh_stream_channel_revoke_v1(&slot->channel, admission_generation);
+    notify_retired(slot);
     if (channel_result != MESH_STREAM_CHANNEL_OK)
       return map_channel_result(channel_result);
     (*out_revoked)++;
@@ -267,6 +347,7 @@ mesh_stream_registry_release_v1(mesh_stream_registry_v1_t *registry,
     return validation_result;
   if (slot->channel.state == MESH_STREAM_CHANNEL_READY)
     return MESH_STREAM_REGISTRY_INVALID_STATE;
+  notify_retired(slot);
   mesh_stream_channel_destroy_v1(&slot->channel);
   slot->occupied = 0u;
   registry->occupied_channels--;
@@ -295,6 +376,11 @@ mesh_stream_registry_query_channel_v1(const mesh_stream_registry_v1_t *registry,
   out_info->received_bytes = slot->channel.received_bytes;
   out_info->received_frames = slot->channel.received_frames;
   out_info->sent_control_frames = slot->channel.sent_control_frames;
+  if (slot->channel.state == MESH_STREAM_CHANNEL_READY) {
+    out_info->received_bytes = slot->channel.transport.received_bytes;
+    out_info->received_frames = slot->channel.transport.received_frames;
+    out_info->sent_control_frames = slot->channel.transport.sent_control_frames;
+  }
   return MESH_STREAM_REGISTRY_OK;
 }
 

@@ -14,6 +14,9 @@
 typedef struct {
   size_t configured_hwm;
   uint64_t configured_timeout_ms;
+  uint64_t pending_token;
+  size_t pending_bytes;
+  size_t retired;
 } fake_io_t;
 
 static int fake_recv(void *context, uint8_t **out_bytes, size_t *out_len) {
@@ -95,8 +98,8 @@ static void prepare_open(mesh_stream_registry_open_v1_t *request, fake_io_t *fak
 
 static void close_and_release(mesh_stream_registry_v1_t *registry,
                               mesh_stream_channel_handle_v1_t handle) {
-  check_int_eq(mesh_stream_registry_close_v1(registry, handle), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_release_v1(registry, handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_close_v1(registry, handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_release_v1(registry, handle), MESH_STREAM_REGISTRY_OK);
 }
 
 static void test_rejects_invalid_capacity_policy(void) {
@@ -104,10 +107,10 @@ static void test_rejects_invalid_capacity_policy(void) {
   mesh_stream_registry_config_v1_t config = registry_config(0u, 1u);
 
   memset(&registry, 0, sizeof(registry));
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_INVALID_ARG);
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_INVALID_ARG);
   check_null(registry.slots);
   config = registry_config(2u, 3u);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_INVALID_ARG);
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_INVALID_ARG);
   check_null(registry.slots);
 }
 
@@ -124,20 +127,20 @@ static void test_rejects_duplicate_and_peer_quota_without_mutation(void) {
   memset(&registry, 0, sizeof(registry));
   memset(&fake, 0, sizeof(fake));
   prepare_open(&request, &fake, 0x31u, TEST_ADMISSION_GENERATION, 0x41u, TEST_STREAM_EPOCH);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &request, &handle), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &request, &rejected),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &request, &handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &request, &rejected),
                MESH_STREAM_REGISTRY_DUPLICATE);
-  check_hex64_eq(rejected.generation, 0u);
+  check_equal(rejected.generation, 0u);
   second = request;
   memset(second.admission.stream_id, 0x42, sizeof(second.admission.stream_id));
   memcpy(second.transport.receiver.stream_id, second.admission.stream_id,
          sizeof(second.admission.stream_id));
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &second, &rejected),
+  check_equal(mesh_stream_registry_open_v1(&registry, &second, &rejected),
                MESH_STREAM_REGISTRY_PEER_LIMIT);
-  check_int_eq(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
-  check_size_eq(stats.occupied_channels, 1u);
-  check_size_eq(stats.peak_occupied_channels, 1u);
+  check_equal(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
+  check_equal(stats.occupied_channels, 1u);
+  check_equal(stats.peak_occupied_channels, 1u);
   close_and_release(&registry, handle);
   mesh_stream_registry_destroy_v1(&registry);
 }
@@ -159,19 +162,19 @@ static void test_fails_closed_at_capacity_and_preserves_peak(void) {
   prepare_open(&first, &fake, 0x31u, TEST_ADMISSION_GENERATION, 0x41u, TEST_STREAM_EPOCH);
   prepare_open(&second, &fake, 0x32u, TEST_ADMISSION_GENERATION, 0x42u, TEST_STREAM_EPOCH);
   prepare_open(&third, &fake, 0x33u, TEST_ADMISSION_GENERATION, 0x43u, TEST_STREAM_EPOCH);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &first, &first_handle),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &first, &first_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &second, &second_handle),
+  check_equal(mesh_stream_registry_open_v1(&registry, &second, &second_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &third, &rejected),
+  check_equal(mesh_stream_registry_open_v1(&registry, &third, &rejected),
                MESH_STREAM_REGISTRY_CAPACITY_EXHAUSTED);
-  check_int_eq(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
-  check_size_eq(stats.capacity, 2u);
-  check_hex64_eq(stats.owner_generation, TEST_REGISTRY_GENERATION);
-  check_size_eq(stats.occupied_channels, 2u);
-  check_size_eq(stats.peak_occupied_channels, 2u);
-  check_size_eq(stats.ready_channels, 2u);
+  check_equal(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
+  check_equal(stats.capacity, 2u);
+  check_equal(stats.owner_generation, TEST_REGISTRY_GENERATION);
+  check_equal(stats.occupied_channels, 2u);
+  check_equal(stats.peak_occupied_channels, 2u);
+  check_equal(stats.ready_channels, 2u);
   close_and_release(&registry, first_handle);
   close_and_release(&registry, second_handle);
   mesh_stream_registry_destroy_v1(&registry);
@@ -194,35 +197,35 @@ static void test_reused_slot_rejects_stale_handle(void) {
   memset(&fake, 0, sizeof(fake));
   prepare_open(&first, &fake, 0x31u, TEST_ADMISSION_GENERATION, 0x41u, TEST_STREAM_EPOCH);
   prepare_open(&second, &fake, 0x32u, TEST_ADMISSION_GENERATION, 0x42u, TEST_STREAM_EPOCH);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &first, &old_handle),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &first, &old_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_init_v1(&other_registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&other_registry, old_handle, &info),
+  check_equal(mesh_stream_registry_init_v1(&other_registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_query_channel_v1(&other_registry, old_handle, &info),
                MESH_STREAM_REGISTRY_STALE_HANDLE);
   mesh_stream_registry_destroy_v1(&other_registry);
   close_and_release(&registry, old_handle);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &second, &new_handle),
+  check_equal(mesh_stream_registry_open_v1(&registry, &second, &new_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_size_eq(new_handle.slot, old_handle.slot);
-  check_hex64_eq(new_handle.generation, old_handle.generation + 1u);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
+  check_equal(new_handle.slot, old_handle.slot);
+  check_equal(new_handle.generation, old_handle.generation + 1u);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
                MESH_STREAM_REGISTRY_STALE_HANDLE);
-  check_int_eq(mesh_stream_registry_close_v1(&registry, old_handle),
+  check_equal(mesh_stream_registry_close_v1(&registry, old_handle),
                MESH_STREAM_REGISTRY_STALE_HANDLE);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, new_handle, &info),
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, new_handle, &info),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(info.state, MESH_STREAM_CHANNEL_READY);
+  check_equal(info.state, MESH_STREAM_CHANNEL_READY);
   close_and_release(&registry, new_handle);
   mesh_stream_registry_destroy_v1(&registry);
 
   config.owner_generation++;
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &first, &reincarnated_handle),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &first, &reincarnated_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_size_eq(reincarnated_handle.slot, old_handle.slot);
-  check_hex64_eq(reincarnated_handle.generation, old_handle.generation);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
+  check_equal(reincarnated_handle.slot, old_handle.slot);
+  check_equal(reincarnated_handle.generation, old_handle.generation);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
                MESH_STREAM_REGISTRY_STALE_HANDLE);
   close_and_release(&registry, reincarnated_handle);
   mesh_stream_registry_destroy_v1(&registry);
@@ -248,34 +251,34 @@ static void test_revoke_matches_peer_and_admission_generation(void) {
   prepare_open(&new_peer_generation, &fake, 0x31u, TEST_ADMISSION_GENERATION + 1u, 0x42u,
                TEST_STREAM_EPOCH + 1u);
   prepare_open(&other_peer, &fake, 0x32u, TEST_ADMISSION_GENERATION, 0x43u, TEST_STREAM_EPOCH);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &old_peer, &old_handle),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &old_peer, &old_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &new_peer_generation, &new_handle),
+  check_equal(mesh_stream_registry_open_v1(&registry, &new_peer_generation, &new_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &other_peer, &other_handle),
+  check_equal(mesh_stream_registry_open_v1(&registry, &other_peer, &other_handle),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_revoke_peer_v1(&registry, old_peer.admission.remote_peer_id,
+  check_equal(mesh_stream_registry_revoke_peer_v1(&registry, old_peer.admission.remote_peer_id,
                                                    TEST_ADMISSION_GENERATION, &revoked),
                MESH_STREAM_REGISTRY_OK);
-  check_size_eq(revoked, 1u);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
+  check_equal(revoked, 1u);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, old_handle, &info),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(info.state, MESH_STREAM_CHANNEL_REVOKED);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, new_handle, &info),
+  check_equal(info.state, MESH_STREAM_CHANNEL_REVOKED);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, new_handle, &info),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(info.state, MESH_STREAM_CHANNEL_READY);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, other_handle, &info),
+  check_equal(info.state, MESH_STREAM_CHANNEL_READY);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, other_handle, &info),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(info.state, MESH_STREAM_CHANNEL_READY);
-  check_int_eq(mesh_stream_registry_revoke_peer_v1(&registry, old_peer.admission.remote_peer_id,
+  check_equal(info.state, MESH_STREAM_CHANNEL_READY);
+  check_equal(mesh_stream_registry_revoke_peer_v1(&registry, old_peer.admission.remote_peer_id,
                                                    TEST_ADMISSION_GENERATION, &revoked),
                MESH_STREAM_REGISTRY_OK);
-  check_size_eq(revoked, 0u);
-  check_int_eq(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
-  check_size_eq(stats.ready_channels, 2u);
-  check_size_eq(stats.terminal_channels, 1u);
-  check_int_eq(mesh_stream_registry_release_v1(&registry, old_handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(revoked, 0u);
+  check_equal(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
+  check_equal(stats.ready_channels, 2u);
+  check_equal(stats.terminal_channels, 1u);
+  check_equal(mesh_stream_registry_release_v1(&registry, old_handle), MESH_STREAM_REGISTRY_OK);
   close_and_release(&registry, new_handle);
   close_and_release(&registry, other_handle);
   mesh_stream_registry_destroy_v1(&registry);
@@ -296,31 +299,254 @@ static void test_terminal_failure_remains_queryable_until_release(void) {
   memset(&fake, 0, sizeof(fake));
   memset(invalid_frame, 0, sizeof(invalid_frame));
   prepare_open(&request, &fake, 0x31u, TEST_ADMISSION_GENERATION, 0x41u, TEST_STREAM_EPOCH);
-  check_int_eq(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &request, &handle), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_release_v1(&registry, handle),
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_v1(&registry, &request, &handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_release_v1(&registry, handle),
                MESH_STREAM_REGISTRY_INVALID_STATE);
-  check_int_eq(mesh_stream_registry_feed_v1(&registry, handle, invalid_frame, sizeof(invalid_frame),
+  check_equal(mesh_stream_registry_feed_v1(&registry, handle, invalid_frame, sizeof(invalid_frame),
                                             &frames),
                MESH_STREAM_REGISTRY_CHANNEL_ERROR);
-  check_size_eq(frames, 0u);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
+  check_equal(frames, 0u);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
                MESH_STREAM_REGISTRY_OK);
-  check_int_eq(info.state, MESH_STREAM_CHANNEL_FAILED);
-  check_int_eq(info.last_transport_result, MESH_STREAM_TRANSPORT_SESSION_ERROR);
-  check_int_eq(info.last_session_result, MESH_STREAM_SESSION_INVALID_FRAME);
-  check_size_eq(info.received_bytes, sizeof(invalid_frame));
-  check_int_eq(mesh_stream_registry_open_v1(&registry, &request, &rejected),
+  check_equal(info.state, MESH_STREAM_CHANNEL_FAILED);
+  check_equal(info.last_transport_result, MESH_STREAM_TRANSPORT_SESSION_ERROR);
+  check_equal(info.last_session_result, MESH_STREAM_SESSION_INVALID_FRAME);
+  check_equal(info.received_bytes, sizeof(invalid_frame));
+  check_equal(mesh_stream_registry_open_v1(&registry, &request, &rejected),
                MESH_STREAM_REGISTRY_DUPLICATE);
-  check_hex64_eq(rejected.generation, 0u);
-  check_int_eq(mesh_stream_registry_release_v1(&registry, handle), MESH_STREAM_REGISTRY_OK);
-  check_int_eq(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
+  check_equal(rejected.generation, 0u);
+  check_equal(mesh_stream_registry_release_v1(&registry, handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
                MESH_STREAM_REGISTRY_STALE_HANDLE);
+  mesh_stream_registry_destroy_v1(&registry);
+}
+
+
+static int fake_send_async(void *context, const uint8_t *bytes, size_t len, uint64_t token) {
+  fake_io_t *fake = context;
+  if (!bytes || len != MESH_STREAM_FIXED_HEADER_SIZE || !token)
+    return -1;
+  fake->pending_token = token;
+  fake->pending_bytes = len;
+  return 0;
+}
+
+static void record_retirement(void *context) {
+  fake_io_t *fake = context;
+  fake->retired++;
+}
+
+static mesh_stream_registry_async_open_v1_t async_request(fake_io_t *fake) {
+  mesh_stream_registry_async_open_v1_t request = {0};
+  prepare_open(&request.channel, fake, 0x31u, TEST_ADMISSION_GENERATION, 0x41u, TEST_STREAM_EPOCH);
+  request.channel.io.recv = NULL;
+  request.channel.io.release_recv = NULL;
+  request.channel.io.send = NULL;
+  request.send_async = fake_send_async;
+  request.on_retire = record_retirement;
+  request.retire_context = fake;
+  return request;
+}
+
+static size_t encode_registry_frame(const mesh_stream_registry_async_open_v1_t *request,
+                                    uint8_t type, uint8_t wire[TEST_FRAME_MAX]) {
+  static const uint8_t metadata[] = {0u, 1u, 0u, 1u, MESH_STREAM_CLASS_MEDIA,
+      0u, 2u, 0u, 8u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 12u};
+  static const uint8_t payload[] = {1u, 2u, 3u, 4u};
+  mesh_stream_frame_input_t frame = {0};
+  size_t length = 0u;
+  memcpy(frame.stream_id, request->channel.admission.stream_id, MESH_STREAM_ID_SIZE);
+  frame.stream_epoch = request->channel.admission.stream_epoch;
+  frame.type = type;
+  if (type == MESH_STREAM_FRAME_OPEN) {
+    frame.metadata = metadata;
+    frame.metadata_len = sizeof(metadata);
+  } else {
+    frame.sequence = 1u;
+    frame.payload = payload;
+    frame.payload_len = sizeof(payload);
+  }
+  check_equal(mesh_stream_frame_encode(&frame, TEST_FRAME_MAX, wire, TEST_FRAME_MAX, &length),
+              MESH_STREAM_CODEC_OK);
+  return length;
+}
+
+static void test_async_admission_has_no_fallback_or_failed_slot(void) {
+  mesh_stream_registry_v1_t registry = {0};
+  mesh_stream_registry_config_v1_t config = registry_config(1u, 1u);
+  fake_io_t fake = {0};
+  mesh_stream_registry_async_open_v1_t request = async_request(&fake);
+  mesh_stream_channel_handle_v1_t handle;
+  mesh_stream_registry_stats_v1_t stats;
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  request.send_async = NULL;
+  memset(&handle, 0xff, sizeof(handle));
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_INVALID_ARG);
+  check_equal(&handle, &(mesh_stream_channel_handle_v1_t){0}, sizeof(handle));
+  request.send_async = fake_send_async;
+  request.channel.io.send = fake_send;
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_CHANNEL_ERROR);
+  check_equal(mesh_stream_registry_query_stats_v1(&registry, &stats), MESH_STREAM_REGISTRY_OK);
+  check_equal(stats.occupied_channels, 0u);
+  check_equal(registry.slots[0].generation, 0u);
+  check_equal(fake.retired, 0u);
+  request.channel.io.send = NULL;
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_OK);
+  size_t frames = 99u;
+  check_equal(mesh_stream_registry_pump_once_v1(&registry, handle, &frames),
+              MESH_STREAM_REGISTRY_INVALID_STATE);
+  check_equal(frames, 0u);
+  close_and_release(&registry, handle);
+  check_equal(fake.retired, 1u);
+  mesh_stream_registry_destroy_v1(&registry);
+  check_equal(fake.retired, 1u);
+}
+
+static void test_async_terminal_drains_data_but_not_obsolete_credit(void) {
+  mesh_stream_registry_v1_t registry = {0};
+  mesh_stream_registry_config_v1_t config = registry_config(1u, 1u);
+  fake_io_t fake = {0};
+  mesh_stream_registry_async_open_v1_t request = async_request(&fake);
+  mesh_stream_channel_handle_v1_t handle;
+  mesh_stream_registry_channel_info_v1_t info;
+  uint8_t wire[TEST_FRAME_MAX];
+  size_t frames = 0u;
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_OK);
+  size_t length = encode_registry_frame(&request, MESH_STREAM_FRAME_OPEN, wire);
+  check_equal(mesh_stream_registry_feed_v1(&registry, handle, wire, length, &frames),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(info.received_frames, 1u);
+  check_equal(info.received_bytes, length);
+  check_equal(info.sent_control_frames, 0u);
+  uint64_t accept_token = fake.pending_token;
+  length = encode_registry_frame(&request, MESH_STREAM_FRAME_DATA, wire);
+  check_equal(mesh_stream_registry_feed_v1(&registry, handle, wire, length, &frames),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(frames, 0u);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, handle,
+      TEST_ADMISSION_GENERATION + 1u, accept_token, 0, fake.pending_bytes, &frames),
+      MESH_STREAM_REGISTRY_CHANNEL_ERROR);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, handle,
+      TEST_ADMISSION_GENERATION, accept_token, 0, fake.pending_bytes, &frames),
+      MESH_STREAM_REGISTRY_OK);
+  check_equal(frames, 1u);
+  check_false(fake.pending_token == accept_token);
+  mesh_stream_channel_v1_t *channel = NULL;
+  check_equal(mesh_stream_registry_borrow_channel_v1(&registry, handle, &channel),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(channel->transport.session.receive_limit, 8u);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, handle,
+      TEST_ADMISSION_GENERATION, accept_token, 0, fake.pending_bytes, &frames),
+      MESH_STREAM_REGISTRY_INVALID_STATE);
+  check_true(channel->transport.send_pending);
+  check_not_null(channel->transport.buffer);
+  check_equal(fake.retired, 0u);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, handle,
+      TEST_ADMISSION_GENERATION, fake.pending_token, 0, fake.pending_bytes - 1u, &frames),
+      MESH_STREAM_REGISTRY_CHANNEL_ERROR);
+  check_equal(mesh_stream_registry_query_channel_v1(&registry, handle, &info),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(info.state, MESH_STREAM_CHANNEL_FAILED);
+  check_equal(info.sent_control_frames, 1u);
+  check_equal(info.received_frames, 2u);
+  check_equal(fake.retired, 1u);
+  check_equal(mesh_stream_registry_close_v1(&registry, handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_release_v1(&registry, handle), MESH_STREAM_REGISTRY_OK);
+  mesh_stream_registry_destroy_v1(&registry);
+  check_equal(fake.retired, 1u);
+}
+
+static void test_async_slot_and_owner_reuse_reject_old_terminals(void) {
+  mesh_stream_registry_v1_t registry = {0};
+  mesh_stream_registry_config_v1_t config = registry_config(1u, 1u);
+  fake_io_t fake = {0};
+  mesh_stream_registry_async_open_v1_t request = async_request(&fake);
+  mesh_stream_channel_handle_v1_t first, second, third;
+  mesh_stream_channel_v1_t *channel = NULL;
+  size_t frames = 99u;
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &first),
+              MESH_STREAM_REGISTRY_OK);
+  close_and_release(&registry, first);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &second),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, first,
+      TEST_ADMISSION_GENERATION, 1u, 0, MESH_STREAM_FIXED_HEADER_SIZE, &frames),
+      MESH_STREAM_REGISTRY_STALE_HANDLE);
+  check_equal(frames, 0u);
+  check_equal(mesh_stream_registry_borrow_channel_v1(&registry, first, &channel),
+              MESH_STREAM_REGISTRY_STALE_HANDLE);
+  check_null(channel);
+  check_equal(mesh_stream_registry_feed_v1(&registry, first, NULL, 0u, &frames),
+              MESH_STREAM_REGISTRY_STALE_HANDLE);
+  mesh_stream_registry_destroy_v1(&registry);
+  check_equal(fake.retired, 2u);
+  config.owner_generation++;
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &third),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(third.generation, first.generation);
+  check_equal(mesh_stream_registry_close_v1(&registry, first), MESH_STREAM_REGISTRY_STALE_HANDLE);
+  check_equal(mesh_stream_registry_complete_send_v1(&registry, second,
+      TEST_ADMISSION_GENERATION, 1u, 0, MESH_STREAM_FIXED_HEADER_SIZE, &frames),
+      MESH_STREAM_REGISTRY_STALE_HANDLE);
+  close_and_release(&registry, third);
+  mesh_stream_registry_destroy_v1(&registry);
+  check_equal(fake.retired, 3u);
+}
+
+static void test_retired_async_slot_preserves_quota_until_release(void) {
+  mesh_stream_registry_v1_t registry = {0};
+  mesh_stream_registry_config_v1_t config = registry_config(2u, 1u);
+  fake_io_t fake = {0};
+  mesh_stream_registry_async_open_v1_t request = async_request(&fake);
+  mesh_stream_channel_handle_v1_t handle, rejected;
+  size_t count = 0u;
+  check_equal(mesh_stream_registry_init_v1(&registry, &config), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_revoke_peer_v1(&registry,
+      request.channel.admission.remote_peer_id, TEST_ADMISSION_GENERATION + 1u, &count),
+      MESH_STREAM_REGISTRY_OK);
+  check_equal(count, 0u);
+  check_equal(fake.retired, 0u);
+  check_equal(mesh_stream_registry_revoke_peer_v1(&registry,
+      request.channel.admission.remote_peer_id, TEST_ADMISSION_GENERATION, &count),
+      MESH_STREAM_REGISTRY_OK);
+  check_equal(count, 1u);
+  check_equal(fake.retired, 1u);
+  request.channel.admission.generation++;
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &rejected),
+              MESH_STREAM_REGISTRY_PEER_LIMIT);
+  check_equal(mesh_stream_registry_release_v1(&registry, handle), MESH_STREAM_REGISTRY_OK);
+  check_equal(mesh_stream_registry_open_async_v1(&registry, &request, &handle),
+              MESH_STREAM_REGISTRY_OK);
+  close_and_release(&registry, handle);
   mesh_stream_registry_destroy_v1(&registry);
 }
 
 spec("mesh stream registry") {
   describe("bounded owner-loop channel management") {
+    it("requires explicit async IO without consuming a slot on failure") {
+      test_async_admission_has_no_fallback_or_failed_slot();
+    }
+    it("commits async credit by the matching token and retires once on error") {
+      test_async_terminal_drains_data_but_not_obsolete_credit();
+    }
+    it("rejects old terminals after slot reuse and owner reincarnation") {
+      test_async_slot_and_owner_reuse_reject_old_terminals();
+    }
+    it("retains revoked quota until explicit release") {
+      test_retired_async_slot_preserves_quota_until_release();
+    }
     it("rejects invalid total and per-peer capacities") { test_rejects_invalid_capacity_policy(); }
     it("rejects duplicate streams and per-peer quota overflow without mutation") {
       test_rejects_duplicate_and_peer_quota_without_mutation();
