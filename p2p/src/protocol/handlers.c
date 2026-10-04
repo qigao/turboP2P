@@ -4,11 +4,10 @@
  */
 
 #include "handlers.h"
+#include "../core/peer.h"
 #include "../../src/internal.h"
 #include "../protocol/message.h"
-#include "../transfer/sender.h"
-#include "../transfer/receiver.h"
-#include "../transfer/transfer.h"
+#include <salts/clock.h>
 #include <tlog.h>
 #include <stddef.h>
 #include <string.h>
@@ -149,54 +148,13 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
             p2p_handle_dht_response(node, peer, msg);
             break;
         case P2P_MSG_FILE_GET:
-            if (peer && msg->header.payload_len >= P2P_HASH_SIZE) {
-                p2p_sender_handle_file_request(
-                    node, peer, msg->payload.file_response.file_id,
-                    P2P_DEFAULT_CHUNK_SIZE, msg->header.request_id);
-            }
-            break;
         case P2P_MSG_FILE_PUT:
-            if (peer &&
-                msg->header.payload_len >= sizeof(p2p_file_response_payload_t)) {
-                p2p_receiver_handle_file_response(
-                    node, peer, msg->header.request_id,
-                    msg->payload.file_response.file_size,
-                    msg->payload.file_response.total_chunks,
-                    msg->payload.file_response.file_hash);
-            }
-            break;
         case P2P_MSG_CHUNK_REQUEST:
-            if (peer &&
-                msg->header.payload_len >= sizeof(p2p_chunk_request_payload_t)) {
-                p2p_sender_handle_chunk_request(
-                    node, peer, msg->payload.chunk_request.transfer_id,
-                    msg->payload.chunk_request.chunk_index,
-                    msg->header.request_id);
-            }
-            break;
         case P2P_MSG_CHUNK_DATA:
-            if (peer &&
-                msg->header.payload_len >= offsetof(p2p_chunk_data_payload_t, data) &&
-                msg->payload.chunk_data.data_len <=
-                    sizeof(msg->payload.chunk_data.data) &&
-                msg->header.payload_len ==
-                    offsetof(p2p_chunk_data_payload_t, data) +
-                    msg->payload.chunk_data.data_len) {
-                p2p_receiver_handle_chunk_data(
-                    node, peer, msg->payload.chunk_data.transfer_id,
-                    msg->payload.chunk_data.chunk_index,
-                    msg->payload.chunk_data.chunk_hash,
-                    msg->payload.chunk_data.data,
-                    msg->payload.chunk_data.data_len, 0);
-            }
-            break;
         case P2P_MSG_FILE_ACK:
-            if (peer &&
-                msg->header.payload_len >= sizeof(p2p_file_ack_payload_t)) {
-                p2p_sender_handle_file_ack(
-                    node, peer, msg->payload.file_ack.transfer_id,
-                    msg->payload.file_ack.success != 0);
-            }
+            if (node->file_message_handler)
+                node->file_message_handler(node, peer, msg);
+            else if (peer) p2p_peer_transport_closed(peer, !peer->keep_entry);
             break;
         case P2P_MSG_CUSTOM:
             if (node->on_message) {
@@ -204,7 +162,7 @@ void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message
             }
             break;
         default:
-            TLOG_DEBUG("[P2P] No handler for msg type {}", p2p_message_type_name(type));
+            TLOG_DEBUGF("[P2P] No handler for msg type {}", p2p_message_type_name(type));
             break;
     }
 }
@@ -235,7 +193,7 @@ int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
         return P2P_ERR_UNTRUSTED_IDENTITY;
     }
     p2p_publish_peer_route(node, &msg->payload.ping);
-    
+
     /* Sync Vivaldi coordinates */
     memcpy(peer->coord.coords, msg->payload.ping.coords, sizeof(double)*4);
     peer->coord.height = msg->payload.ping.height;
@@ -312,7 +270,7 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
-    now_ms = turbo_hrtime() / 1000000U;
+    now_ms = salts_hrtime() / 1000000U;
     salts_mutex_lock(&node->mutex);
     if (p2p_id_is_zero(msg->payload.ping.node_id) ||
         memcmp(peer->id, msg->payload.ping.node_id,
@@ -338,7 +296,7 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
     salts_mutex_unlock(&node->mutex);
 
     if (sample_accepted) {
-        TLOG_DEBUG("[P2P] PONG from {}:{} (RTT={} ms)",
+        TLOG_DEBUGF("[P2P] PONG from {}:{} (RTT={} ms)",
                    peer_info.ip, peer_info.port, rtt_ms);
     }
     return P2P_OK;
@@ -406,7 +364,7 @@ int p2p_handle_dht_store(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t
                          msg->payload.dht_store.data_len);
     salts_mutex_unlock(&node->mutex);
 
-    TLOG_DEBUG("[P2P] DHT STORE from {}:{} (len={}) -> {}",
+    TLOG_DEBUGF("[P2P] DHT STORE from {}:{} (len={}) -> {}",
               peer_info.ip, peer_info.port, msg->payload.dht_store.data_len,
               ret == 0 ? "OK" : "ERR");
 
@@ -461,7 +419,7 @@ int p2p_handle_dht_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_messag
     }
 
     salts_mutex_lock(&node->mutex);
-    TLOG_DEBUG("[P2P] DHT RESPONSE from {}:{} ({} nodes)", 
+    TLOG_DEBUGF("[P2P] DHT RESPONSE from {}:{} ({} nodes)",
               peer_info.ip, peer_info.port, res->node_count);
 
     p2p_import_dht_response_nodes_locked(node, res);

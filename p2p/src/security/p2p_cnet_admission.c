@@ -37,10 +37,10 @@ struct p2p_cnet_admission_s {
 };
 
 static void reject(p2p_cnet_admission_t *admission,
-                    const cnet_stream_peer *source, int status) {
+    const cnet_stream_peer *source, int status, p2p_cnet_rejection_origin_t origin) {
     admission->stats.rejected++;
     if (admission->callbacks.rejected)
-        admission->callbacks.rejected(source, status, admission->callbacks.context);
+        admission->callbacks.rejected(source, status, origin, admission->callbacks.context);
 }
 
 static void release_gate(gate_t *gate) {
@@ -55,7 +55,7 @@ static void fail_gate(gate_t *gate, int status) {
      * recycled gate. Transport observer storage survives until quiescence. */
     p2p_connection_destroy(gate->connection);
     release_gate(gate);
-    reject(admission, &source, status);
+    reject(admission, &source, status, P2P_CNET_REJECT_COOKIE);
 }
 
 static int expired(const gate_t *gate, uint64_t now_ms) {
@@ -92,7 +92,8 @@ static void promote(gate_t *gate) {
     }
     if (result != P2P_OK) {
         p2p_connection_destroy(connection);
-        reject(admission, &verified.source, result);
+        reject(admission, &verified.source, result,
+            produced ? P2P_CNET_REJECT_TRANSPORT : P2P_CNET_REJECT_PEER_POLICY);
         p2p_crypto_wipe(&verified, sizeof(verified));
         if (produced && next.closed) next.closed(connection, result, next.context);
         return;
@@ -220,6 +221,7 @@ int p2p_cnet_admission_accept(p2p_cnet_owner_t *owner,
     size_t prefix_size;
     char ip[INET6_ADDRSTRLEN];
     int family, result = P2P_OK;
+    p2p_cnet_rejection_origin_t origin = P2P_CNET_REJECT_TRANSPORT;
     if (!admission || !source || !connection || owner != admission->owner)
         return P2P_ERR_INVALID_ARG;
     if (admission->busy || admission->stopped) return P2P_ERR_INVALID_STATE;
@@ -237,11 +239,12 @@ int p2p_cnet_admission_accept(p2p_cnet_owner_t *owner,
                  !memcmp(gate->source.address, source->address, prefix_size)) source_count++;
     }
     if (!free_gate || source_count >= admission->config.source_limit) {
+        origin = !free_gate ? P2P_CNET_REJECT_GATE_CAPACITY : P2P_CNET_REJECT_SOURCE_CAPACITY;
         result = P2P_ERR_RESOURCE_EXHAUSTED;
         goto reject_accept;
     }
     result = admission->callbacks.admit(source, admission->callbacks.context);
-    if (result != P2P_OK) goto reject_accept;
+    if (result != P2P_OK) { origin = P2P_CNET_REJECT_NODE_POLICY; goto reject_accept; }
     result = p2p_cnet_connection_set_send_hwm(connection, P2P_COOKIE_PACKET_SIZE);
     if (result != P2P_OK) goto reject_accept;
     free_gate->admission = admission;
@@ -264,7 +267,7 @@ int p2p_cnet_admission_accept(p2p_cnet_owner_t *owner,
     admission->busy = 0;
     return P2P_OK;
 reject_accept:
-    reject(admission, source, result);
+    reject(admission, source, result, origin);
     admission->busy = 0;
     return result;
 }
@@ -309,5 +312,27 @@ int p2p_cnet_admission_stats(const p2p_cnet_admission_t *admission,
                             p2p_cnet_admission_stats_t *output) {
     if (!admission || !output) return P2P_ERR_INVALID_ARG;
     *output = admission->stats;
+    return P2P_OK;
+}
+
+int p2p_cnet_admission_pending(const p2p_cnet_admission_t *admission,
+    const char *source_ip, size_t *total, size_t *source) {
+    uint8_t address[16] = {0};
+    cnet_datagram_address_family family = CNET_DATAGRAM_ADDRESS_IPV4;
+    size_t prefix_size = 4;
+    if (!admission || !total || !source) return P2P_ERR_INVALID_ARG;
+    if (source_ip && inet_pton(AF_INET, source_ip, address) != 1) {
+        if (inet_pton(AF_INET6, source_ip, address) != 1)
+            return P2P_ERR_INVALID_ARG;
+        family = CNET_DATAGRAM_ADDRESS_IPV6;
+        prefix_size = 8;
+    }
+    *total = admission->stats.active;
+    *source = 0;
+    for (size_t i = 0; source_ip && i < admission->config.gate_limit; ++i) {
+        const gate_t *gate = &admission->gates[i];
+        if (gate->state != GATE_FREE && gate->source.family == family &&
+            !memcmp(gate->source.address, address, prefix_size)) ++*source;
+    }
     return P2P_OK;
 }

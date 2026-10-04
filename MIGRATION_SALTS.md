@@ -452,3 +452,23 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 验证：基础工程首次编译真实 `peer.c`、`peer_cnet.c`、应用消息 codec 与 node-bound executor；新的 `test_p2p_cnet_peer` 包含 13 个场景：双向认证和加密消息、7 字节碎片、双边 v4 executor、凭证拒绝、READY 身份不匹配、销毁中的私钥任务、销毁前摘除 preface 完成、延迟 READY、已缓存尾部、迟到完成、发送入队拒绝、close/send 竞争及认证回调内销毁。节点准入策略、路由/事件通知是测试替身；peer、cookie gate、crypto、executor 和 CNet 均为生产源码。Linux Release 全部 **35/35 CTest 通过**；peer、transport、admission、worker 四个相关套件在 ASan/UBSan 下通过。仍设置 `detect_leaks=0`，不据此声称完成泄漏检测或 SDK 内部 sanitizer 验证。
 
 **MED（事实，剩余范围）**：本阶段没有切换公开 `p2p_create/start/get_loop` 的 node owner，也没有把完整 node 的限流、pending peer 配额、路由和维护循环接到 CNet。旧 CoroNet adapter、完整根工程及跨平台运行仍未验证。新 peer 接线属于未由公开构造器选择的内部路径；后续须接入 node owner 并完成这些验证，才能移除 legacy SDK 和宣布整个 P2P 迁移完成。
+
+## 第二阶段 M：真实 node 网络策略与 CNet owner
+
+**MED（事实，已接入内部路径）**：旧 `node.c` 把 peer 表、认证去重、发送预算、来源限流、cookie 配额及路由策略，与 CoroNet listener/timer 放在同一编译单元。上一阶段的真实 peer 测试因此仍需 node 策略替身。本阶段把这些生产策略移到 `node_network.c`，CNet 和明确配置的 CoroNet adapter 共享它们；新的 node 套件直接链接实际策略、peer 表、PING/PONG、Kademlia RPC 和 Vivaldi，没有这些模块的测试替身。
+
+选择共享策略加显式 owner 绑定，是为了保留身份去重、配额及路由的一处实现。复制第二套 node 会使策略漂移；直接替换公开构造器则会破坏仍声明返回 `coro_context_t *` 的 `p2p_get_loop` 契约。代价是多一个内部两操作表（connect、pending-gate 查询），并继续保留旧生命周期入口。公开 API、配置格式、应用/Noise wire 和密钥格式不变。本阶段撤销即可回滚，不需要数据迁移。
+
+状态与生命周期：
+
+- `node_cnet` 明确借用已初始化 mutex/DHT、完成安全配置的 node；拒绝附加到已有 legacy context/listener/timer、peer 表或 lookup 的节点。它拥有 CNet transport 和 admission；node 继续拥有 peer 表、配额、路由和身份，调用者保留 node 与私钥 executor 存储，直到 owner 销毁成功。
+- gate 数量直接查询 admission 实际状态，不镜像到旧 CoroNet gate 数组。全局和同来源配额合并 gate、HANDSHAKING 与 CONNECTING peer；晋升先移除 gate，再检查 peer 配额并预留发送预算。来源限流继续使用原有 token bucket。准入拒绝携带内部来源分类，避免将 node 配额拒绝再次计为 cookie 错误。
+- CNet node 的 peer 表（包括保留的失败端点）受 `client.connection_capacity` 限制；新连接入队失败回滚新增表项和发送预算。旧 public constructor 显式绑定 CoroNet，没有探测或自动后备路径。
+- 每轮 owner poll 先过期 gate/待握手 peer，再处理私钥完成与 CNet；到期边界为 `now >= deadline`。昂贵的已连接 peer 快照、PING 探测和 DHT 刷新保留原有维护周期，不在每次空轮询分配快照。协议直接断开后，在同一轮收敛 node 成员与计数；stale peer 通过共享断开事件路径清理计数/预算。
+- 认证去重保留身份顺序决定方向的规则。入站临时源端口不会发布成路由；PING/PONG 学习对端监听端口。DHT 候选连接通过 node 的显式 transport binding 发起。
+- 回调内 stop 延迟到本轮退出，destroy 被拒绝。停止立即关闭新连接/lookup 的入口，摘除 peer/lookup 表，取消并等待私钥 worker，运行 lookup cleanup，再等待 CNet drain。超时保留 owner 和借用的 node/context，重试成功后才释放。cleanup 回调不能重新挂入 lookup。
+- 文件消息分派单独放在 `handlers_transfer.c`，旧 constructor 仍接入原生产 transfer handler。内部 CNet node 尚无文件 owner；未显式接入 handler 时收到文件消息会关闭连接。这个入口在私有头中标为 `@internal @incomplete`，没有加入公开构造器。
+
+验证范围：新增 `test_p2p_cnet_node` 的 15 个 Linux 场景，覆盖双向认证/加密消息、监听端口学习、DHT 查询与唯一 cleanup、7 字节分片和双边私钥 worker、回调 stop、工作中取消、stale 清理、截止边界、发送预算、gate/peer 共享来源配额、凭证拒绝、保留端点容量、交叉连接去重、直接断开回收与 drain 超时后重试。仅 node 构造/凭证 provider 是 fixture；网络策略、协议和存储实现都是生产源码。Linux Release 全套 **36/36** 通过；node/peer/transport/admission/worker 五个套件通过 ASan/UBSan（`detect_leaks=0`，安装 SDK 未插桩）。本次编译覆盖的修改源码通过 `-Wall -Wextra -Werror` 语法检查。
+
+**MED（事实，剩余范围）**：公开 create/start/get_loop 和安全配置入口仍走旧生命周期；完整文件传输、旧 adapter、根工程以及 Windows/macOS 运行尚未验证。CNet ingress 统计通过内部 admission snapshot 读取，尚未接入 public node status 中的旧 gate/延迟统计字段。不能把本阶段当作完整产品 owner 切换或全量迁移完成。根工程仍需 legacy SDK；依赖持续浮动 latest，re2c 持续使用共享 vcpkg-cache action。后续需要完成公共循环契约、node 构造/配置/状态查询及 transfer 生命周期的共同迁移，再移除旧依赖。

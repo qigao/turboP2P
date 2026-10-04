@@ -6,6 +6,15 @@
 
 typedef struct p2p_cnet_admission_s p2p_cnet_admission_t;
 
+typedef enum {
+    P2P_CNET_REJECT_GATE_CAPACITY,
+    P2P_CNET_REJECT_SOURCE_CAPACITY,
+    P2P_CNET_REJECT_NODE_POLICY,
+    P2P_CNET_REJECT_PEER_POLICY,
+    P2P_CNET_REJECT_COOKIE,
+    P2P_CNET_REJECT_TRANSPORT
+} p2p_cnet_rejection_origin_t;
+
 typedef struct {
     size_t gate_limit;
     size_t source_limit; /* IPv4 address or IPv6 /64, across pending gates. */
@@ -34,7 +43,9 @@ typedef struct {
                    const uint8_t preface[P2P_SECURE_PREFACE_SIZE],
                    const uint8_t binding[P2P_COOKIE_BINDING_SIZE],
                    p2p_cnet_callbacks_t *output, void *context);
-    void (*rejected)(const cnet_stream_peer *source, int status, void *context);
+    /* Origin keeps node policy/accounting failures separate from cookie errors. */
+    void (*rejected)(const cnet_stream_peer *source, int status,
+        p2p_cnet_rejection_origin_t origin, void *context);
     void *context;
 } p2p_cnet_admission_callbacks_t;
 
@@ -68,5 +79,9 @@ int p2p_cnet_admission_stop(p2p_cnet_admission_t *admission);
 int p2p_cnet_admission_destroy(p2p_cnet_admission_t *admission);
 int p2p_cnet_admission_stats(const p2p_cnet_admission_t *admission,
                             p2p_cnet_admission_stats_t *output);
+/* Read-only owner-thread query, valid inside admission callbacks. NULL source
+ * queries only the total; a source uses the same IPv4/IPv6 /64 gate policy. */
+int p2p_cnet_admission_pending(const p2p_cnet_admission_t *admission,
+    const char *source_ip, size_t *total, size_t *source);
 
 #endif

@@ -10,6 +10,8 @@
 /* Dispatch incoming messages */
 void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg);
 
+void p2p_handlers_dispatch_transfer(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg);
+
 /* Core Handlers */
 int p2p_handle_ping(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg);
 int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg);
