@@ -149,7 +149,7 @@ p2p/src/security/p2p_noise_backend.c
 - Split 为两个 CipherState，encrypt/decrypt/rekey/destroy。
 - 把 backend 错误映射为项目错误；第三方类型不得进入公开头文件。
 
-当前 C 实现是 Noise 官方实现列表链接的 `rweather/noise-c`，固定 commit `cfe25410979a87391bb9ac8d4d4bef64e9f268c6`，许可证为 MIT。构建只选择 XX 所需的 protocol、ChaChaPoly、BLAKE2s 代码，并通过本地薄适配层提供 X25519/RNG。以下准入门中，固定来源、许可证、Windows/MSVC 构建和真实会话测试已完成；其余仍是发布阻断项：
+当前 C 实现是 Noise 官方实现列表链接的 `rweather/noise-c`，跟随上游 `master`，configure 日志记录实际 revision（固定测试向量仍取自 `cfe25410979a87391bb9ac8d4d4bef64e9f268c6`），许可证为 MIT。构建只选择 XX 所需的 protocol、ChaChaPoly、BLAKE2s 代码，并通过本地薄适配层复用 Monocypher X25519 与 Salts CSPRNG。旧实现已验证来源、许可证、Windows/MSVC 构建和真实会话；Salts 迁移中的 Linux 密码闭包另有向量与故障回归，完整 node 与 Windows/MSVC 尚须重新验证。以下其余准入项仍是发布阻断项：
 
 1. 固定上游 commit/tag，记录来源、许可证和本地补丁。
 2. 核对最近维护状态、公开安全问题、release 策略和 CI。

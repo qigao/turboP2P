@@ -110,3 +110,30 @@ endforeach()
 set(BUILD_TESTS ON)
 set(BUILD_EXAMPLES OFF)
 add_subdirectory("${TURBOP2P_SOURCE_DIR}/tunnel" tunnel)
+
+# Compile the P2P security production closure before migrating its network owner.
+include(NoiseC)
+turbo_p2p_configure_noise_c()
+add_library(p2p_security STATIC
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/crypto/p2p_crypto.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cookie.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_noise_backend.c")
+target_include_directories(p2p_security PUBLIC
+  "${TURBOP2P_SOURCE_DIR}/p2p/src"
+  "${TURBOP2P_SOURCE_DIR}/p2p/include")
+target_link_libraries(p2p_security PUBLIC Salts::Core Salts::Platform
+  OpenSSL::Crypto monocypher TurboP2P::NoiseProtocol)
+if(WIN32)
+  target_link_libraries(p2p_security PUBLIC ws2_32)
+endif()
+add_executable(test_p2p_security
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_security.c")
+set_property(TARGET test_p2p_security PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_security PRIVATE p2p_security Salts::TinyTest)
+add_test(NAME test_p2p_security COMMAND test_p2p_security)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_p2p_security PRIVATE P2P_TEST_WRAP_RANDOM)
+  target_link_options(test_p2p_security PRIVATE
+    "-Wl,--wrap=salts_platform_secure_random")
+endif()

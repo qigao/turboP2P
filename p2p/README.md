@@ -231,10 +231,10 @@ p2p/
 
 - **TurboUtils::Core** — utilities, logging, secure random
 - **TurboNet::CoroNet** — event loop and stream transport
-- **Noise-C** — pinned standard Noise handshake/CipherState implementation
-- **TurboNet::Crypto** — operating-system CSPRNG, X25519 platform backend,
-  SHA-256 and secure wipe
-- **OpenSSL** — SHA-256 for DHT key/id derivation
+- **Noise-C** — floating upstream `master`, fixed XX/25519/ChaChaPoly/BLAKE2s suite
+- **Salts Platform / Crypto** — operating-system CSPRNG and SHA-256
+- **Monocypher** — X25519, historical BLAKE2b-256 and secure wipe
+- **OpenSSL** — HMAC-SHA256, constant-time byte equality and DHT key/id derivation
 - **vendor/** — roaring (bitmap), uthash (hash tables)
 
 Third-party source and license details are recorded in

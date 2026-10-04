@@ -29,7 +29,7 @@
 #include <CoroNet/turbo_coro_socket.h>
 #include <turbo_error.h>
 #include <tlog.h>
-#include <turbo_crypto.h>
+#include "p2p_security_fixture.h"
 
 /* Test fixtures */
 static p2p_node_t *test_node = NULL;
@@ -695,10 +695,8 @@ static int p2p_test_private_key_calculate(
     if (provider->calculate_result != P2P_OK) {
         return provider->calculate_result;
     }
-    return turbo_crypto_x25519(shared_key_out, provider->secret_key,
-                               remote_public_key) == TURBO_CRYPTO_OK
-               ? P2P_OK
-               : P2P_ERR_CRYPTO;
+    return p2p_test_x25519(shared_key_out, provider->secret_key,
+                            remote_public_key);
 }
 
 static int p2p_test_blocking_private_key_get_public(
@@ -740,10 +738,8 @@ static int p2p_test_blocking_private_key_calculate(
     if (provider->calculate_result != P2P_OK) {
         return provider->calculate_result;
     }
-    return turbo_crypto_x25519(shared_key_out, provider->secret_key,
-                               remote_public_key) == TURBO_CRYPTO_OK
-               ? P2P_OK
-               : P2P_ERR_CRYPTO;
+    return p2p_test_x25519(shared_key_out, provider->secret_key,
+                            remote_public_key);
 }
 
 static void p2p_test_blocking_private_key_request_cancel(void *context) {
@@ -928,7 +924,7 @@ void test_p2p_node_set_private_key_provider_is_opaque(void) {
     check_uint_eq(1, context.calculate_calls);
 
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 void test_p2p_private_key_provider_fails_closed(void) {
@@ -970,7 +966,7 @@ void test_p2p_private_key_provider_fails_closed(void) {
     check(memcmp(original_public, current_public, sizeof(original_public)) == 0);
 
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_provider_is_bounded_and_opaque(void) {
@@ -1030,7 +1026,7 @@ static void test_p2p_blocking_private_key_provider_is_bounded_and_opaque(void) {
                                                               &status));
 
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_security_status_v3_includes_blocking_executor(void) {
@@ -1064,7 +1060,7 @@ static void test_p2p_security_status_v3_includes_blocking_executor(void) {
     check_true(status.private_key_executor.accepting);
 
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_provider_self_test_times_out(void) {
@@ -1089,7 +1085,7 @@ static void test_p2p_blocking_private_key_provider_self_test_times_out(void) {
     check_mem_eq(original_public, current_public, sizeof(original_public));
 
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_timeout_must_fit_handshake(void) {
@@ -1120,7 +1116,7 @@ static void test_p2p_blocking_private_key_timeout_must_fit_handshake(void) {
 
     p2p_destroy(candidate);
     p2p_destroy(template_node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 void test_p2p_generate_private_key(void) {
@@ -1130,133 +1126,6 @@ void test_p2p_generate_private_key(void) {
     check_int_eq(P2P_OK, p2p_generate_private_key(secret));
     check(memcmp(secret, zero, sizeof(secret)) != 0);
     check_int_eq(P2P_ERR_INVALID_ARG, p2p_generate_private_key(NULL));
-}
-
-void test_p2p_crypto_random_uses_checked_csprng(void) {
-    uint8_t random_bytes[P2P_KEY_SIZE] = {0};
-    uint8_t zero[P2P_KEY_SIZE] = {0};
-
-    check_int_eq(P2P_OK, p2p_crypto_random(random_bytes, sizeof(random_bytes)));
-    check(memcmp(random_bytes, zero, sizeof(random_bytes)) != 0);
-    check_int_eq(P2P_OK, p2p_crypto_random(NULL, 0));
-    check_int_eq(P2P_ERR_INVALID_ARG, p2p_crypto_random(NULL, 1));
-}
-
-static void test_p2p_cookie_codec_matches_vector_and_binds_source(void) {
-    static const uint8_t expected_packet[P2P_COOKIE_PACKET_SIZE] = {
-        0x54, 0x50, 0x43, 0x32, 0x00, 0x02, 0x01, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x39,
-        0x31, 0xce, 0x75, 0x47, 0x63, 0x49, 0xb4, 0x2a,
-        0xbf, 0x95, 0x4d, 0x08, 0x32, 0x63, 0x94, 0x89,
-        0x77, 0x99, 0x06, 0x93, 0x3d, 0x1a, 0x64, 0x28,
-        0x0f, 0xd4, 0x0c, 0x62, 0x29, 0x0e, 0x95, 0xb9,
-    };
-    uint8_t secret[P2P_COOKIE_SECRET_SIZE];
-    uint8_t network_id[P2P_SECURITY_ID_SIZE];
-    uint8_t preface[P2P_SECURE_PREFACE_SIZE];
-    uint8_t altered_preface[P2P_SECURE_PREFACE_SIZE];
-    uint8_t challenge[P2P_COOKIE_PACKET_SIZE];
-    uint8_t response[P2P_COOKIE_PACKET_SIZE];
-    uint8_t binding[P2P_COOKIE_BINDING_SIZE];
-
-    for (size_t index = 0; index < sizeof(secret); ++index) {
-        secret[index] = (uint8_t)index;
-    }
-    for (size_t index = 0; index < sizeof(network_id); ++index) {
-        network_id[index] = (uint8_t)(index + 32U);
-    }
-    p2p_secure_preface_build(network_id, preface);
-    check_int_eq(P2P_OK,
-                 p2p_secure_preface_validate(network_id, preface));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_challenge(
-                     secret, "192.0.2.10", preface, UINT64_C(123456789),
-                     10000U, 300000U, challenge));
-    check_mem_eq(expected_packet, challenge, sizeof(challenge));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_response(challenge, response, binding));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_verify_response(
-                     secret, "192.0.2.10", preface, UINT64_C(123456789),
-                     10000U, 300000U, response, binding));
-    check_int_eq(P2P_ERR_CRYPTO,
-                 p2p_cookie_verify_response(
-                     secret, "192.0.2.11", preface, UINT64_C(123456789),
-                     10000U, 300000U, response, binding));
-    memcpy(altered_preface, preface, sizeof(altered_preface));
-    altered_preface[12] ^= 1U;
-    check_int_eq(P2P_ERR_CRYPTO,
-                 p2p_cookie_verify_response(
-                     secret, "192.0.2.10", altered_preface,
-                     UINT64_C(123456789), 10000U, 300000U, response,
-                     binding));
-    response[47] ^= 1U;
-    check_int_eq(P2P_ERR_CRYPTO,
-                 p2p_cookie_verify_response(
-                     secret, "192.0.2.10", preface, UINT64_C(123456789),
-                     10000U, 300000U, response, binding));
-}
-
-static void test_p2p_cookie_codec_bounds_time_and_rotation(void) {
-    uint8_t secret[P2P_COOKIE_SECRET_SIZE] = {7};
-    uint8_t network_id[P2P_SECURITY_ID_SIZE] = {9};
-    uint8_t preface[P2P_SECURE_PREFACE_SIZE];
-    uint8_t challenge[P2P_COOKIE_PACKET_SIZE];
-    uint8_t response[P2P_COOKIE_PACKET_SIZE];
-    uint8_t binding[P2P_COOKIE_BINDING_SIZE];
-    const uint64_t now_ms = UINT64_C(123456789);
-
-    p2p_secure_preface_build(network_id, preface);
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_challenge(
-                     secret, "2001:db8::1", preface, now_ms - 10000U,
-                     10000U, 300000U, challenge));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_response(challenge, response, binding));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_verify_response(
-                     secret, "2001:db8::1", preface, now_ms, 10000U,
-                     300000U, response, binding));
-
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_challenge(
-                     secret, "2001:db8::1", preface, now_ms - 20000U,
-                     10000U, 300000U, challenge));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_response(challenge, response, binding));
-    check_int_eq(P2P_ERR_TIMEOUT,
-                 p2p_cookie_verify_response(
-                     secret, "2001:db8::1", preface, now_ms, 10000U,
-                     300000U, response, binding));
-
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_challenge(
-                     secret, "2001:db8::1", preface, now_ms + 10000U,
-                     10000U, 300000U, challenge));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_response(challenge, response, binding));
-    check_int_eq(P2P_ERR_TIMEOUT,
-                 p2p_cookie_verify_response(
-                     secret, "2001:db8::1", preface, now_ms, 10000U,
-                     300000U, response, binding));
-
-    /* Bucket 29 uses the previous derived key epoch while bucket 30 uses the
-     * current epoch; the previous bucket remains valid across rotation. */
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_challenge(
-                     secret, "2001:db8::1", preface, UINT64_C(299999),
-                     10000U, 300000U, challenge));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_build_response(challenge, response, binding));
-    check_int_eq(P2P_OK,
-                 p2p_cookie_verify_response(
-                     secret, "2001:db8::1", preface, UINT64_C(300000),
-                     10000U, 300000U, response, binding));
-    response[7] = 1U;
-    check_int_eq(P2P_ERR_PROTOCOL,
-                 p2p_cookie_verify_response(
-                     secret, "2001:db8::1", preface, UINT64_C(300000),
-                     10000U, 300000U, response, binding));
 }
 
 void test_p2p_endpoint_ids_are_deterministic(void) {
@@ -4020,58 +3889,6 @@ void test_p2p_error_str_unknown(void) {
     check_str_eq("Unknown error", str);
 }
 
-enum {
-    P2P_TEST_AEAD_FRAME_OVERHEAD = P2P_NOISE_TAG_SIZE,
-};
-
-static int p2p_test_crypto_sessions(p2p_crypto_session_t *initiator_session,
-                                    p2p_crypto_session_t *responder_session) {
-    p2p_identity_t initiator_identity;
-    p2p_identity_t responder_identity;
-    p2p_noise_handshake_t initiator;
-    p2p_noise_handshake_t responder;
-    uint8_t message[P2P_SECURITY_HANDSHAKE_FRAME_MAX];
-    size_t message_len = 0;
-    int result = P2P_ERR_CRYPTO;
-
-    memset(&initiator_identity, 0, sizeof(initiator_identity));
-    memset(&responder_identity, 0, sizeof(responder_identity));
-    memset(&initiator, 0, sizeof(initiator));
-    memset(&responder, 0, sizeof(responder));
-    memset(initiator_session, 0, sizeof(*initiator_session));
-    memset(responder_session, 0, sizeof(*responder_session));
-    if (p2p_crypto_generate_identity(&initiator_identity) != P2P_OK ||
-        p2p_crypto_generate_identity(&responder_identity) != P2P_OK ||
-        p2p_noise_init_initiator(&initiator, &initiator_identity, NULL) != P2P_OK ||
-        p2p_noise_init_responder(&responder, &responder_identity) != P2P_OK ||
-        p2p_noise_write_message(&initiator, message, &message_len,
-                                sizeof(message)) != P2P_OK ||
-        p2p_noise_read_message(&responder, message, message_len) != P2P_OK ||
-        p2p_noise_write_message(&responder, message, &message_len,
-                                sizeof(message)) != P2P_OK ||
-        p2p_noise_read_message(&initiator, message, message_len) != P2P_OK ||
-        p2p_noise_write_message(&initiator, message, &message_len,
-                                sizeof(message)) != P2P_OK ||
-        p2p_noise_read_message(&responder, message, message_len) != P2P_OK ||
-        p2p_noise_split(&initiator, initiator_session) != P2P_OK ||
-        p2p_noise_split(&responder, responder_session) != P2P_OK) {
-        goto cleanup;
-    }
-    result = P2P_OK;
-
-cleanup:
-    p2p_noise_handshake_destroy(&initiator);
-    p2p_noise_handshake_destroy(&responder);
-    p2p_crypto_wipe(&initiator_identity, sizeof(initiator_identity));
-    p2p_crypto_wipe(&responder_identity, sizeof(responder_identity));
-    p2p_crypto_wipe(message, sizeof(message));
-    if (result != P2P_OK) {
-        p2p_crypto_session_destroy(initiator_session);
-        p2p_crypto_session_destroy(responder_session);
-    }
-    return result;
-}
-
 static void test_p2p_private_key_provider_completes_noise_xx(void) {
     p2p_test_private_key_provider_t context;
     p2p_private_key_provider_v3_t provider;
@@ -4124,7 +3941,7 @@ static void test_p2p_private_key_provider_completes_noise_xx(void) {
     p2p_crypto_wipe(&responder_identity, sizeof(responder_identity));
     p2p_crypto_wipe(message, sizeof(message));
     p2p_destroy(provider_node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_private_key_provider_propagates_dh_failure(void) {
@@ -4165,7 +3982,7 @@ static void test_p2p_private_key_provider_propagates_dh_failure(void) {
     p2p_crypto_wipe(&initiator_identity, sizeof(initiator_identity));
     p2p_crypto_wipe(message, sizeof(message));
     p2p_destroy(provider_node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_provider_completes_both_xx_roles(void) {
@@ -4233,8 +4050,8 @@ static void test_p2p_blocking_private_key_provider_completes_both_xx_roles(void)
     p2p_test_shutdown_nodes(node1, node2, NULL);
     p2p_destroy(node2);
     p2p_destroy(node1);
-    turbo_crypto_wipe(&context2, sizeof(context2));
-    turbo_crypto_wipe(&context1, sizeof(context1));
+    p2p_crypto_wipe(&context2, sizeof(context2));
+    p2p_crypto_wipe(&context1, sizeof(context1));
 }
 
 static void test_p2p_blocking_private_key_provider_runtime_timeout_is_closed(void) {
@@ -4285,7 +4102,7 @@ static void test_p2p_blocking_private_key_provider_runtime_timeout_is_closed(voi
     p2p_test_shutdown_nodes(server, client, NULL);
     p2p_destroy(client);
     p2p_destroy(server);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_provider_destroy_cancels_and_drains(void) {
@@ -4344,7 +4161,7 @@ static void test_p2p_blocking_private_key_provider_destroy_cancels_and_drains(vo
         turbo_sleep_ms(2);
     }
     p2p_destroy(client);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_provider_rejects_at_capacity(void) {
@@ -4401,7 +4218,7 @@ static void test_p2p_blocking_private_key_provider_rejects_at_capacity(void) {
     p2p_destroy(client2);
     p2p_destroy(client1);
     p2p_destroy(server);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_executor_enforces_64_65_boundary(
@@ -4470,7 +4287,7 @@ static void test_p2p_blocking_private_key_executor_enforces_64_65_boundary(
         p2p_peer_destroy(peers[index]);
     }
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_stale_generation_is_isolated(void) {
@@ -4587,7 +4404,7 @@ cleanup:
         free(replacement_handshake);
     }
     p2p_destroy(node);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static void test_p2p_blocking_private_key_late_completion_fails_closed(void) {
@@ -4668,7 +4485,7 @@ static void test_p2p_blocking_private_key_late_completion_fails_closed(void) {
     p2p_test_shutdown_nodes(server, client, NULL);
     p2p_destroy(client);
     p2p_destroy(server);
-    turbo_crypto_wipe(&context, sizeof(context));
+    p2p_crypto_wipe(&context, sizeof(context));
 }
 
 static int p2p_test_send_enobufs(void *handle, const void *data, size_t len) {
@@ -4778,340 +4595,6 @@ static void test_p2p_session_byte_limit_closes_before_encrypt(void) {
     p2p_peer_destroy(peer);
 }
 
-static int p2p_test_hex_nibble(char value) {
-    if (value >= '0' && value <= '9') {
-        return value - '0';
-    }
-    if (value >= 'a' && value <= 'f') {
-        return value - 'a' + 10;
-    }
-    if (value >= 'A' && value <= 'F') {
-        return value - 'A' + 10;
-    }
-    return -1;
-}
-
-static int p2p_test_decode_hex(const char *hex,
-                               uint8_t *output,
-                               size_t output_capacity,
-                               size_t *output_len) {
-    size_t hex_len;
-    size_t index;
-
-    if (!hex || !output || !output_len) {
-        return 0;
-    }
-
-    hex_len = strlen(hex);
-    if ((hex_len & 1U) != 0 || (hex_len / 2U) > output_capacity) {
-        return 0;
-    }
-
-    for (index = 0; index < hex_len / 2U; ++index) {
-        int high = p2p_test_hex_nibble(hex[index * 2U]);
-        int low = p2p_test_hex_nibble(hex[index * 2U + 1U]);
-        if (high < 0 || low < 0) {
-            return 0;
-        }
-        output[index] = (uint8_t)((high << 4) | low);
-    }
-
-    *output_len = hex_len / 2U;
-    return 1;
-}
-
-void test_p2p_noise_xx_matches_pinned_upstream_vector(void) {
-    /* Source: noise-c/tests/vector/noise-c-basic.txt at the commit pinned by
-     * cmake/NoiseC.cmake.  Keep this copy independent of the fetched file so
-     * a dependency update cannot silently update both code and expectation. */
-    static const char *const protocol_name =
-        "Noise_XX_25519_ChaChaPoly_BLAKE2s";
-    static const char *const prologue_hex = "50726f6c6f677565313233";
-    static const char *const initiator_static_hex =
-        "e61ef9919cde45dd5f82166404bd08e38bceb5dfdfded0a34c8df7ed542214d1";
-    static const char *const initiator_ephemeral_hex =
-        "893e28b9dc6ca8d611ab664754b8ceb7bac5117349a4439a6b0569da977c464a";
-    static const char *const responder_static_hex =
-        "4a3acbfdb163dec651dfa3194dece676d437029c62a408b4c5ea9114246e4893";
-    static const char *const responder_ephemeral_hex =
-        "bbdb4cdbd309f1a1f2e1456967fe288cadd6f712d65dc7b7793d5e63da6b375b";
-    static const char *const handshake_hash_hex =
-        "ff2542ab6833ab2243a6a19599fde5e2b2ac5a6dc4f34a9be3046233fd790d41";
-    static const struct {
-        const char *payload_hex;
-        const char *ciphertext_hex;
-    } messages[] = {
-        {
-            "4c756477696720766f6e204d69736573",
-            "ca35def5ae56cec33dc2036731ab14896bc4c75dbb07a61f879f8e3afa4c7944"
-            "4c756477696720766f6e204d69736573",
-        },
-        {
-            "4d757272617920526f746862617264",
-            "95ebc60d2b1fa672c1f46a8aa265ef51bfe38e7ccb39ec5be34069f144808843"
-            "7c365eb362a1c991b0557fe8a7fb187d99346765d93ec63db6c1b01504ebeec5a"
-            "11745edbea05ef4097ca82afe861d8aa196a6cead1e11b2bb13e336fa13614136"
-            "f53e3d34be699da5983876f700ff",
-        },
-        {
-            "462e20412e20486179656b",
-            "46c3307de83b014258717d97781c1f50936d8b7d50c0722a1739654d10392d41"
-            "76a11f5a0f70968037b0e0bedf68d18d802efa4220cff733e7b566970e749fef0"
-            "6ea55e598cdb819d0a33e",
-        },
-    };
-    NoiseHandshakeState *initiator = NULL;
-    NoiseHandshakeState *responder = NULL;
-    NoiseHandshakeState *sender;
-    NoiseHandshakeState *receiver;
-    NoiseDHState *dh;
-    NoiseBuffer message_buffer;
-    NoiseBuffer payload_buffer;
-    uint8_t key[32] = {0};
-    uint8_t prologue[32] = {0};
-    uint8_t message[256] = {0};
-    uint8_t plaintext[256] = {0};
-    uint8_t expected_payload[256] = {0};
-    uint8_t expected_ciphertext[256] = {0};
-    uint8_t actual_hash[32] = {0};
-    uint8_t expected_hash[32] = {0};
-    size_t key_len = 0;
-    size_t prologue_len = 0;
-    size_t expected_payload_len = 0;
-    size_t expected_ciphertext_len = 0;
-    size_t expected_hash_len = 0;
-    size_t index;
-    int result;
-
-    result = noise_handshakestate_new_by_name(
-        &initiator, protocol_name, NOISE_ROLE_INITIATOR);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-    result = noise_handshakestate_new_by_name(
-        &responder, protocol_name, NOISE_ROLE_RESPONDER);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-
-#define SET_NOISE_PRIVATE_KEY(state, accessor, hex_value)                       \
-    do {                                                                        \
-        check(p2p_test_decode_hex((hex_value), key, sizeof(key), &key_len));     \
-        dh = accessor((state));                                                  \
-        check_not_null(dh);                                                      \
-        if (!dh || key_len != sizeof(key)) {                                     \
-            goto cleanup;                                                        \
-        }                                                                        \
-        result = noise_dhstate_set_keypair_private(dh, key, key_len);            \
-        check_int_eq(NOISE_ERROR_NONE, result);                                  \
-        if (result != NOISE_ERROR_NONE) {                                        \
-            goto cleanup;                                                        \
-        }                                                                        \
-    } while (0)
-
-    SET_NOISE_PRIVATE_KEY(initiator,
-                          noise_handshakestate_get_local_keypair_dh,
-                          initiator_static_hex);
-    SET_NOISE_PRIVATE_KEY(initiator,
-                          noise_handshakestate_get_fixed_ephemeral_dh,
-                          initiator_ephemeral_hex);
-    SET_NOISE_PRIVATE_KEY(responder,
-                          noise_handshakestate_get_local_keypair_dh,
-                          responder_static_hex);
-    SET_NOISE_PRIVATE_KEY(responder,
-                          noise_handshakestate_get_fixed_ephemeral_dh,
-                          responder_ephemeral_hex);
-#undef SET_NOISE_PRIVATE_KEY
-
-    check(p2p_test_decode_hex(prologue_hex, prologue, sizeof(prologue),
-                              &prologue_len));
-    result = noise_handshakestate_set_prologue(
-        initiator, prologue, prologue_len);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-    result = noise_handshakestate_set_prologue(
-        responder, prologue, prologue_len);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-    result = noise_handshakestate_start(initiator);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-    result = noise_handshakestate_start(responder);
-    check_int_eq(NOISE_ERROR_NONE, result);
-    if (result != NOISE_ERROR_NONE) {
-        goto cleanup;
-    }
-
-    for (index = 0; index < sizeof(messages) / sizeof(messages[0]); ++index) {
-        sender = (index == 1U) ? responder : initiator;
-        receiver = (index == 1U) ? initiator : responder;
-        check_int_eq(NOISE_ACTION_WRITE_MESSAGE,
-                     noise_handshakestate_get_action(sender));
-        check_int_eq(NOISE_ACTION_READ_MESSAGE,
-                     noise_handshakestate_get_action(receiver));
-        check(p2p_test_decode_hex(messages[index].payload_hex,
-                                  expected_payload,
-                                  sizeof(expected_payload),
-                                  &expected_payload_len));
-        check(p2p_test_decode_hex(messages[index].ciphertext_hex,
-                                  expected_ciphertext,
-                                  sizeof(expected_ciphertext),
-                                  &expected_ciphertext_len));
-
-        noise_buffer_set_output(message_buffer, message, sizeof(message));
-        noise_buffer_set_input(payload_buffer,
-                               expected_payload,
-                               expected_payload_len);
-        result = noise_handshakestate_write_message(
-            sender, &message_buffer, &payload_buffer);
-        check_int_eq(NOISE_ERROR_NONE, result);
-        if (result != NOISE_ERROR_NONE) {
-            goto cleanup;
-        }
-        check_int_eq((int)expected_ciphertext_len, (int)message_buffer.size);
-        check(memcmp(message, expected_ciphertext, expected_ciphertext_len) == 0);
-
-        noise_buffer_set_input(message_buffer, message, message_buffer.size);
-        noise_buffer_set_output(payload_buffer, plaintext, sizeof(plaintext));
-        result = noise_handshakestate_read_message(
-            receiver, &message_buffer, &payload_buffer);
-        check_int_eq(NOISE_ERROR_NONE, result);
-        if (result != NOISE_ERROR_NONE) {
-            goto cleanup;
-        }
-        check_int_eq((int)expected_payload_len, (int)payload_buffer.size);
-        check(memcmp(plaintext, expected_payload, expected_payload_len) == 0);
-    }
-
-    check_int_eq(NOISE_ACTION_SPLIT,
-                 noise_handshakestate_get_action(initiator));
-    check_int_eq(NOISE_ACTION_SPLIT,
-                 noise_handshakestate_get_action(responder));
-    check(p2p_test_decode_hex(handshake_hash_hex,
-                              expected_hash,
-                              sizeof(expected_hash),
-                              &expected_hash_len));
-    check_int_eq((int)sizeof(actual_hash), (int)expected_hash_len);
-    result = noise_handshakestate_get_handshake_hash(
-        initiator, actual_hash, sizeof(actual_hash));
-    check_int_eq(NOISE_ERROR_NONE, result);
-    check(memcmp(actual_hash, expected_hash, sizeof(actual_hash)) == 0);
-    result = noise_handshakestate_get_handshake_hash(
-        responder, actual_hash, sizeof(actual_hash));
-    check_int_eq(NOISE_ERROR_NONE, result);
-    check(memcmp(actual_hash, expected_hash, sizeof(actual_hash)) == 0);
-
-cleanup:
-    if (initiator) {
-        (void)noise_handshakestate_free(initiator);
-    }
-    if (responder) {
-        (void)noise_handshakestate_free(responder);
-    }
-    p2p_crypto_wipe(key, sizeof(key));
-    p2p_crypto_wipe(message, sizeof(message));
-    p2p_crypto_wipe(plaintext, sizeof(plaintext));
-}
-
-void test_p2p_crypto_rejects_replayed_ciphertext(void) {
-    const uint8_t plaintext[] = "mesh-replay-test";
-    uint8_t ciphertext[sizeof(plaintext) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
-    uint8_t output[sizeof(ciphertext)] = {0};
-    size_t ciphertext_len = 0;
-    size_t output_len = 0;
-    p2p_crypto_session_t sender;
-    p2p_crypto_session_t receiver;
-
-    check_int_eq(P2P_OK, p2p_test_crypto_sessions(&sender, &receiver));
-    check_int_eq(P2P_OK,
-                 p2p_crypto_encrypt(&sender, plaintext, sizeof(plaintext),
-                                    ciphertext, &ciphertext_len));
-    check_int_eq(P2P_OK,
-                 p2p_crypto_decrypt(&receiver, ciphertext, ciphertext_len,
-                                    output, sizeof(output), &output_len));
-    check_int_eq((int)sizeof(plaintext), (int)output_len);
-    check(memcmp(plaintext, output, sizeof(plaintext)) == 0);
-    check_int_eq(P2P_ERR_CRYPTO,
-                 p2p_crypto_decrypt(&receiver, ciphertext, ciphertext_len,
-                                    output, sizeof(output), &output_len));
-    check_int_eq(1, (int)receiver.received_frames);
-    p2p_crypto_session_destroy(&sender);
-    p2p_crypto_session_destroy(&receiver);
-}
-
-void test_p2p_crypto_rejects_out_of_order_without_advancing(void) {
-    const uint8_t first[] = "first";
-    const uint8_t second[] = "second";
-    uint8_t first_ciphertext[sizeof(first) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
-    uint8_t second_ciphertext[sizeof(second) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
-    uint8_t output[sizeof(second_ciphertext)] = {0};
-    size_t first_ciphertext_len = 0;
-    size_t second_ciphertext_len = 0;
-    size_t output_len = 0;
-    p2p_crypto_session_t sender;
-    p2p_crypto_session_t receiver;
-
-    check_int_eq(P2P_OK, p2p_test_crypto_sessions(&sender, &receiver));
-    check_int_eq(P2P_OK,
-                 p2p_crypto_encrypt(&sender, first, sizeof(first),
-                                    first_ciphertext, &first_ciphertext_len));
-    check_int_eq(P2P_OK,
-                 p2p_crypto_encrypt(&sender, second, sizeof(second),
-                                    second_ciphertext, &second_ciphertext_len));
-
-    check_int_eq(P2P_ERR_CRYPTO,
-                 p2p_crypto_decrypt(&receiver, second_ciphertext,
-                                    second_ciphertext_len, output,
-                                    sizeof(output), &output_len));
-    check_int_eq(0, (int)receiver.received_frames);
-    check_int_eq(P2P_OK,
-                 p2p_crypto_decrypt(&receiver, first_ciphertext,
-                                    first_ciphertext_len, output,
-                                    sizeof(output), &output_len));
-    check_int_eq((int)sizeof(first), (int)output_len);
-    check(memcmp(first, output, sizeof(first)) == 0);
-    check_int_eq(P2P_OK,
-                 p2p_crypto_decrypt(&receiver, second_ciphertext,
-                                    second_ciphertext_len, output,
-                                    sizeof(output), &output_len));
-    check_int_eq((int)sizeof(second), (int)output_len);
-    check(memcmp(second, output, sizeof(second)) == 0);
-    p2p_crypto_session_destroy(&sender);
-    p2p_crypto_session_destroy(&receiver);
-}
-
-void test_p2p_crypto_rejects_counter_exhaustion(void) {
-    const uint8_t plaintext[] = "counter";
-    uint8_t ciphertext[sizeof(plaintext) + P2P_TEST_AEAD_FRAME_OVERHEAD] = {0};
-    uint8_t output[sizeof(ciphertext)] = {0};
-    size_t ciphertext_len = 0;
-    size_t output_len = 0;
-    p2p_crypto_session_t sender;
-    p2p_crypto_session_t receiver;
-
-    check_int_eq(P2P_OK, p2p_test_crypto_sessions(&sender, &receiver));
-    sender.sent_frames = P2P_NOISE_SESSION_FRAME_LIMIT;
-    receiver.received_frames = P2P_NOISE_SESSION_FRAME_LIMIT;
-    check_int_eq(P2P_ERR_KEY_EXHAUSTED,
-                 p2p_crypto_encrypt(&sender, plaintext, sizeof(plaintext),
-                                    ciphertext, &ciphertext_len));
-    check_int_eq(P2P_ERR_KEY_EXHAUSTED,
-                 p2p_crypto_decrypt(&receiver, ciphertext, sizeof(ciphertext),
-                                    output, sizeof(output), &output_len));
-    check(sender.sent_frames == P2P_NOISE_SESSION_FRAME_LIMIT);
-    check(receiver.received_frames == P2P_NOISE_SESSION_FRAME_LIMIT);
-    p2p_crypto_session_destroy(&sender);
-    p2p_crypto_session_destroy(&receiver);
-}
-
 spec("p2p module") {
     before_all() {
         p2p_test_logger_init();
@@ -5154,9 +4637,6 @@ spec("p2p module") {
             test_p2p_private_key_provider_fails_closed();
         }
         it("generates a private key for stable identity") { test_p2p_generate_private_key(); }
-        it("uses a checked operating-system csprng") {
-            test_p2p_crypto_random_uses_checked_csprng();
-        }
         it("derives deterministic provisional ids from endpoints") {
             test_p2p_endpoint_ids_are_deterministic();
         }
@@ -5318,24 +4798,6 @@ spec("p2p module") {
         }
         it("rejects a blocking key completion delayed past its deadline") {
             test_p2p_blocking_private_key_late_completion_fails_closed();
-        }
-        it("matches the pinned upstream Noise XX handshake vector") {
-            test_p2p_noise_xx_matches_pinned_upstream_vector();
-        }
-        it("matches the listener cookie vector and binds the source") {
-            test_p2p_cookie_codec_matches_vector_and_binds_source();
-        }
-        it("bounds listener cookie time and derived-key rotation") {
-            test_p2p_cookie_codec_bounds_time_and_rotation();
-        }
-        it("rejects replayed ciphertext") {
-            test_p2p_crypto_rejects_replayed_ciphertext();
-        }
-        it("rejects out-of-order ciphertext without advancing") {
-            test_p2p_crypto_rejects_out_of_order_without_advancing();
-        }
-        it("rejects exhausted counters") {
-            test_p2p_crypto_rejects_counter_exhaustion();
         }
         it("closes a session when send backpressure follows nonce advance") {
             test_p2p_send_hwm_rejection_closes_advanced_session();

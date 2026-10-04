@@ -1,12 +1,14 @@
 /**
- * P2P cryptographic boundary for stable X25519 identity and the pinned
+ * P2P cryptographic boundary for stable X25519 identity and the
  * Noise-C XX/ChaChaPoly/BLAKE2s state machine.
  */
 
 #include "p2p_crypto.h"
-#include "../internal.h"
-#include <turbo_crypto.h>
-#include <platform.h>
+#include <monocypher.h>
+#include <openssl/crypto.h>
+#include <openssl/hmac.h>
+#include <salts/random.h>
+#include <limits.h>
 #include <string.h>
 
 static const uint8_t P2P_NOISE_PROLOGUE[] =
@@ -21,9 +23,9 @@ int p2p_crypto_random(uint8_t *buf, size_t len) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    if (turbo_crypto_random(buf, len) != TURBO_CRYPTO_OK) {
+    if (salts_platform_secure_random(buf, len) != 0) {
         if (buf && len > 0) {
-            turbo_crypto_wipe(buf, len);
+            crypto_wipe(buf, len);
         }
         return P2P_ERR_CRYPTO;
     }
@@ -34,11 +36,16 @@ int p2p_crypto_random(uint8_t *buf, size_t len) {
 int p2p_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
                            const uint8_t *data, size_t data_len,
                            uint8_t output[32]) {
-    if ((!key && key_len != 0) || (!data && data_len != 0) || !output) {
+    unsigned int output_len = 0;
+    static const uint8_t empty = 0;
+
+    if ((!key && key_len != 0) || (!data && data_len != 0) || !output ||
+        key_len > INT_MAX) {
         return P2P_ERR_INVALID_ARG;
     }
-    if (turbo_crypto_hmac_sha256(key, key_len, data, data_len, output) !=
-        TURBO_CRYPTO_OK) {
+    if (!HMAC(EVP_sha256(), key ? key : &empty, (int)key_len,
+              data ? data : &empty, data_len, output, &output_len) ||
+        output_len != 32) {
         p2p_crypto_wipe(output, 32);
         return P2P_ERR_CRYPTO;
     }
@@ -50,7 +57,7 @@ int p2p_crypto_verify(const uint8_t *expected, const uint8_t *actual,
     if ((!expected || !actual) && len != 0) {
         return 0;
     }
-    return turbo_crypto_verify(expected, actual, len) == TURBO_CRYPTO_OK;
+    return len == 0 || CRYPTO_memcmp(expected, actual, len) == 0;
 }
 
 /* =============================================================================
@@ -65,19 +72,14 @@ int p2p_crypto_generate_identity(p2p_identity_t *identity) {
 
     ret = p2p_crypto_random(generated.secret_key, P2P_KEY_SIZE);
     if (ret != P2P_OK) {
-        turbo_crypto_wipe(&generated, sizeof(generated));
+        crypto_wipe(&generated, sizeof(generated));
         return ret;
     }
 
-    if (turbo_crypto_x25519_public_key(generated.public_key,
-                                      generated.secret_key) !=
-        TURBO_CRYPTO_OK) {
-        turbo_crypto_wipe(&generated, sizeof(generated));
-        return P2P_ERR_CRYPTO;
-    }
+    crypto_x25519_public_key(generated.public_key, generated.secret_key);
     p2p_crypto_wipe(identity, sizeof(*identity));
     memcpy(identity, &generated, sizeof(*identity));
-    turbo_crypto_wipe(&generated, sizeof(generated));
+    crypto_wipe(&generated, sizeof(generated));
 
     return P2P_OK;
 }
@@ -89,11 +91,7 @@ int p2p_crypto_identity_from_secret(p2p_identity_t *identity,
     if (!identity || !secret_key) return P2P_ERR_INVALID_ARG;
 
     memcpy(loaded.secret_key, secret_key, P2P_KEY_SIZE);
-    if (turbo_crypto_x25519_public_key(loaded.public_key, loaded.secret_key) !=
-        TURBO_CRYPTO_OK) {
-        p2p_crypto_wipe(&loaded, sizeof(loaded));
-        return P2P_ERR_CRYPTO;
-    }
+    crypto_x25519_public_key(loaded.public_key, loaded.secret_key);
     p2p_crypto_wipe(identity, sizeof(*identity));
     memcpy(identity, &loaded, sizeof(*identity));
     p2p_crypto_wipe(&loaded, sizeof(loaded));
@@ -145,7 +143,7 @@ int p2p_crypto_identity_from_blocking_provider(
  * ============================================================================= */
 
 void p2p_crypto_wipe(void *data, size_t len) {
-    turbo_crypto_wipe(data, len);
+    crypto_wipe(data, len);
 }
 
 /* =============================================================================
@@ -276,14 +274,8 @@ void p2p_noise_handshake_destroy(p2p_noise_handshake_t *hs) {
     p2p_noise_backend_handshake_destroy(hs);
 }
 
-/* =============================================================================
- * SHA-256 (using BLAKE2b as substitute, or implement simple SHA-256)
- *
- * For file hashing we use BLAKE2b which is faster and at least as secure.
- * If strict SHA-256 is needed, a dedicated implementation would be added.
- * ============================================================================= */
-
+/* Historical internal name: retain BLAKE2b-256 output for compatibility.
+ * Actual file SHA-256 is implemented by Salts::Crypto at its call sites. */
 void p2p_crypto_sha256(const uint8_t *data, size_t len, uint8_t hash[32]) {
-    /* Use BLAKE2b-256 as a secure hash replacement */
-    (void)turbo_crypto_blake2b(hash, 32, data, len);
+    crypto_blake2b(hash, 32, data, len);
 }

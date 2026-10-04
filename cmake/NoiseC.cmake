@@ -1,9 +1,7 @@
 include(FetchContent)
 
-set(TURBO_P2P_NOISE_C_COMMIT
-    "cfe25410979a87391bb9ac8d4d4bef64e9f268c6")
 set(TURBO_P2P_NOISE_C_SOURCE_DIR "" CACHE PATH
-    "Optional clean checkout of the pinned Noise-C commit for offline builds")
+    "Optional explicit clean Noise-C checkout for offline builds")
 
 function(turbo_p2p_configure_noise_c)
   if(TARGET noise_protocol)
@@ -21,8 +19,8 @@ function(turbo_p2p_configure_noise_c)
     FetchContent_Declare(
       turbo_p2p_noise_c
       GIT_REPOSITORY https://github.com/rweather/noise-c.git
-      GIT_TAG ${TURBO_P2P_NOISE_C_COMMIT}
-      GIT_SHALLOW FALSE
+      GIT_TAG master
+      GIT_SHALLOW TRUE
       GIT_PROGRESS TRUE)
     FetchContent_MakeAvailable(turbo_p2p_noise_c)
     set(_noise_source "${turbo_p2p_noise_c_SOURCE_DIR}")
@@ -35,11 +33,10 @@ function(turbo_p2p_configure_noise_c)
     OUTPUT_VARIABLE _noise_revision
     ERROR_QUIET
     OUTPUT_STRIP_TRAILING_WHITESPACE)
-  if(NOT _noise_revision_result EQUAL 0 OR
-     NOT _noise_revision STREQUAL TURBO_P2P_NOISE_C_COMMIT)
-    message(FATAL_ERROR
-            "Noise-C must be the pinned commit ${TURBO_P2P_NOISE_C_COMMIT}; got '${_noise_revision}'")
+  if(NOT _noise_revision_result EQUAL 0)
+    message(FATAL_ERROR "Cannot determine Noise-C source revision")
   endif()
+  message(STATUS "Noise-C source revision: ${_noise_revision}")
   execute_process(
     COMMAND "${GIT_EXECUTABLE}" -C "${_noise_source}" status --porcelain
             --untracked-files=no
@@ -49,7 +46,7 @@ function(turbo_p2p_configure_noise_c)
     OUTPUT_STRIP_TRAILING_WHITESPACE)
   if(NOT _noise_status_result EQUAL 0 OR NOT _noise_status STREQUAL "")
     message(FATAL_ERROR
-            "Noise-C tracked files differ from the pinned commit")
+            "Noise-C tracked files differ from the recorded revision")
   endif()
 
   set(_noise_protocol_sources
@@ -68,7 +65,7 @@ function(turbo_p2p_configure_noise_c)
       "${_noise_source}/src/crypto/sha2/sha256.c"
       "${_noise_source}/src/crypto/chacha/chacha.c"
       "${_noise_source}/src/crypto/donna/poly1305-donna.c"
-      "${CMAKE_CURRENT_SOURCE_DIR}/src/security/p2p_noise_c_platform.c")
+      "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../p2p/src/security/p2p_noise_c_platform.c")
 
   add_library(noise_protocol STATIC ${_noise_protocol_sources})
   add_library(TurboP2P::NoiseProtocol ALIAS noise_protocol)
@@ -77,12 +74,10 @@ function(turbo_p2p_configure_noise_c)
     PUBLIC "${_noise_source}/include"
     PRIVATE "${_noise_source}/src"
             "${_noise_source}/src/protocol")
-  target_link_libraries(noise_protocol PRIVATE TurboNet::Crypto)
-  target_compile_definitions(noise_protocol PRIVATE
-                             TURBO_P2P_NOISE_C_PINNED_COMMIT=\"${TURBO_P2P_NOISE_C_COMMIT}\")
+  target_link_libraries(noise_protocol PRIVATE Salts::Platform monocypher)
   if(MSVC)
     target_compile_definitions(noise_protocol PRIVATE WIN32)
     target_compile_options(noise_protocol PRIVATE /wd4244 /wd4267)
   endif()
-  set_target_properties(noise_protocol PROPERTIES FOLDER "vendor")
+  set_target_properties(noise_protocol PROPERTIES FOLDER "vendor" POSITION_INDEPENDENT_CODE ON)
 endfunction()

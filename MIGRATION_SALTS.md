@@ -225,3 +225,53 @@ re2c 继续使用共享 `qigao/vcpkg-cache` 发布版本；CI 每次恢复 lates
 
 本阶段本地 Release 30/30、ASan/UBSan 30/30 CTest 通过。设置
 `ASAN_OPTIONS=detect_leaks=0`，发布 SDK 二进制未重新插桩，不声称完成泄漏检测或 SDK 内部验证。
+
+## 第二阶段 H：P2P 密码、Noise 与 cookie 闭包
+
+P2P 的 cookie gate、Noise 握手和异步私钥 executor 先于 peer 发布，不能在网络迁移中
+跳过。本阶段先移除生产密码闭包对 TurboNet Crypto 和 node 内部头文件的依赖：
+随机数直接调用 Salts Platform CSPRNG；X25519 和擦除复用已有 Monocypher；
+HMAC-SHA256 和任意长度常量时间比较使用已有 OpenSSL。固定 Noise
+XX/25519/ChaChaPoly/BLAKE2s suite、prologue、cookie 编码和错误传播保持原契约。
+
+**HIGH（兼容性约束，已验证）**：X25519 不能只调用返回 void 的运算函数就视为成功。
+适配层继续拒绝全零 shared secret，包括非零低阶公钥和 opaque provider 返回的零输出；
+provider 失败时擦除输出并传播原错误，无软件私钥 fallback。CSPRNG 部分写入后失败时
+擦除随机输出，identity 生成失败保留旧 identity，Noise ephemeral 失败清空密钥并终止。
+
+**MED（事实，已澄清）**：内部历史函数 `p2p_crypto_sha256` 实际产生 BLAKE2b-256。
+本阶段保留原输出并纠正注释，用独立摘要向量约束；不把它悄悄替换为 SHA-256。
+真实文件 SHA-256 调用继续使用前期已迁移的 Salts Crypto。
+
+Noise-C 从固定提交改为 floating upstream `master`，每次 configure 记录 resolved revision；
+显式离线 source checkout 必须是干净 Git 工作树。引用源码路径按 CMake module 所在位置
+解析，生产和独立测试复用同一 Noise target，静态库启用 PIC。解析失败或 tracked source
+被修改立即报错，不转用别的 backend。固定上游测试向量保留原值和来源 revision，避免
+升级依赖同时改变测试期望。Salts/SaltsUtils 与共享 vcpkg-cache re2c 的 latest 获取方式不变。
+
+将旧 node 综合测试里的 7 个独立密码/cookie 测试迁至 `test_p2p_security`，会话 fixture
+由两套测试共享，根工程也注册独立测试。focused CMake 直接编译实际 crypto、Noise backend、
+cookie 和平台适配源码，不链接 CoroNet/TurboNet。共 15 个用例覆盖 cookie 固定向量与
+IPv4/IPv6、时间窗口与轮转、Noise XX 三帧密文及 handshake hash、重放/乱序/计数耗尽、
+RFC 4231 HMAC 与 RFC 7748 静态公钥、79 字节长度比较、alias identity reload、同步与
+阻塞 opaque provider、deadline/cancellation 借用范围、错误清理和低阶密钥。
+Linux focused 测试使用链接器 wrap 注入 CSPRNG 故障；生产代码没有故障开关。
+
+验证命令（先设置 `SALTS_ROOT`、`SALTS_UTILS_ROOT` 和共享 re2c PATH）：
+
+```sh
+cmake -S tests/salts_foundation -B build/salts-foundation -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/salts-foundation --parallel 2
+ctest --test-dir build/salts-foundation --output-on-failure
+```
+
+本地 Release 与 ASan/UBSan 均已通过 31/31 CTest，其中密码测试 15/15、390 assertions。
+本地文件系统的三个链接产物缺少执行权限，恢复产物权限后仅重跑受阻用例并通过；无测试
+代码调整。SDK 验证快照为 Salts 1.8.15 / SaltsUtils 4.1.17，Noise-C 为
+`cfe25410979a87391bb9ac8d4d4bef64e9f268c6`（当前 master，仅记录输入，不限制依赖）。
+ASan 使用 `detect_leaks=0`；预编译 SDK 未重新插桩，不声称泄漏检测或 SDK 内部验证。
+
+此阶段没有完成 P2P node/peer/executor 的 CNet owner 接线；旧网络综合测试、fuzzer 全目标、
+完整根工程和 Windows/macOS 尚待验证。下一步仍需把 cookie gate 到 peer 的 observer
+生命周期、worker completion、timer、异步关闭及管理 agent owner 一起迁移。回滚撤销本阶段
+提交即可，不涉及数据或协议转换。
