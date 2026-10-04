@@ -1203,6 +1203,14 @@ target_link_libraries(mesh_stream_transport PUBLIC
   mesh_stream_bind mesh_stream_session TurboNet::CoroNet)
 set_property(TARGET mesh_stream_transport PROPERTY FOLDER "mesh/internal")
 
+# Event-loop identity bind adapter; deliberately independent of CoroNet.
+add_library(mesh_stream_cnet_adapter STATIC
+  src/mesh_stream_cnet_adapter.c
+  src/mesh_stream_cnet_adapter.h)
+target_include_directories(mesh_stream_cnet_adapter PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_cnet_adapter PUBLIC mesh_stream_bind Salts::CNet)
+set_property(TARGET mesh_stream_cnet_adapter PROPERTY FOLDER "mesh/internal")
+
 # Reliable ordered block-stream session (P1): frame protocol, sliding
 # window, selective retransmit, backpressure and resume, over a pluggable
 # byte transport (mesh_stream_transport / CoroNet TLS adapter later).

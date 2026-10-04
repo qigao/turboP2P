@@ -17,6 +17,7 @@ add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/monocypher" monocypher)
 add_library(foundation STATIC
   "${mesh_src}/mesh_mgmt_crypto.c"
   "${mesh_src}/mesh_stream_bind.c"
+  "${mesh_src}/mesh_stream_cnet_adapter.c"
   "${mesh_src}/mesh_control_primitives.c"
   "${mesh_src}/mesh_control_outbox.c"
   "${mesh_src}/mesh_stream_codec.c"
@@ -33,7 +34,7 @@ add_library(foundation STATIC
   "${mesh_src}/mesh_stream_media_pull_multisource.c")
 target_include_directories(foundation PUBLIC "${mesh_src}")
 target_link_libraries(foundation PUBLIC
-  Salts::CSTL Salts::Platform Salts::Crypto OpenSSL::Crypto monocypher)
+  Salts::CSTL Salts::Platform Salts::Crypto Salts::CNet OpenSSL::Crypto monocypher)
 
 # These two vector owners still call P2P/management adapters. Compile-check
 # their new CSTL contracts here; their lifecycle tests require the root build.
@@ -71,7 +72,18 @@ add_executable(test_mesh_stream_cnet "${mesh_tests}/test_mesh_stream_cnet.c")
 set_property(TARGET test_mesh_stream_cnet PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_mesh_stream_cnet PRIVATE foundation Salts::TinyTest Salts::CNet)
 target_compile_definitions(test_mesh_stream_cnet PRIVATE
-  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/localhost-cert.pem"
-  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/localhost-key.pem")
+  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/cnet-server-cert.pem"
+  MESH_TEST_TLS_CA_FILE="${mesh_tests}/data/cnet-ca-cert.pem"
+  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/cnet-server-key.pem")
 add_test(NAME test_mesh_stream_cnet COMMAND test_mesh_stream_cnet)
 set_tests_properties(test_mesh_stream_cnet PROPERTIES TIMEOUT 30)
+
+add_executable(test_mesh_stream_cnet_bind "${mesh_tests}/test_mesh_stream_cnet_bind.c")
+set_property(TARGET test_mesh_stream_cnet_bind PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_stream_cnet_bind PRIVATE foundation Salts::TinyTest OpenSSL::SSL)
+target_compile_definitions(test_mesh_stream_cnet_bind PRIVATE
+  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/cnet-server-cert.pem"
+  MESH_TEST_TLS_CA_FILE="${mesh_tests}/data/cnet-ca-cert.pem"
+  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/cnet-server-key.pem")
+add_test(NAME test_mesh_stream_cnet_bind COMMAND test_mesh_stream_cnet_bind)
+set_tests_properties(test_mesh_stream_cnet_bind PROPERTIES TIMEOUT 60)
