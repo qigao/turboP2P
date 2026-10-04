@@ -158,7 +158,7 @@ static void init_pair(test_pair_t *pair) {
   server_config.key_file = MESH_TEST_TLS_KEY_FILE;
   server_config.client_auth = CNET_TLS_CLIENT_AUTH_NONE;
   tls_config.size = sizeof(tls_config);
-  tls_config.ca_file = MESH_TEST_TLS_CERT_FILE;
+  tls_config.ca_file = MESH_TEST_TLS_CA_FILE;
   tls_config.server_name = "localhost";
   check_equal(cnet_tls_server_init(&pair->tls, &server_config), SALTS_OK);
   check_equal(cnet_client_init(&pair->sender.client, &config), SALTS_OK);
