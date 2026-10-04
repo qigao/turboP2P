@@ -82,7 +82,8 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_endpoint_pool.c
     test_mesh_mgmt_endpoint_record.c
     test_mesh_mgmt_service_record.c
-    test_mesh_mgmt_coronet_transport.c
+    test_mesh_mgmt_cnet_peer.c
+    test_mesh_mgmt_cnet_tls_policy.c
     test_mesh_stream_codec.c
     test_mesh_stream_bind.c
     test_mesh_stream_cnet_bind.c
@@ -456,14 +457,16 @@ foreach(test_source ${MESH_TEST_SOURCES})
     if(test_name STREQUAL "test_mesh_mgmt_service_record")
         list(APPEND extra_test_libs mesh_mgmt_service_record)
     endif()
-    if(test_name STREQUAL "test_mesh_mgmt_coronet_transport")
-        list(APPEND extra_test_libs mesh_mgmt_coronet_adapter)
-        target_compile_definitions(${test_name} PRIVATE
-            MESH_TEST_TLS_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/localhost-cert.pem"
-            MESH_TEST_TLS_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/localhost-key.pem")
-        if(WIN32)
-            list(APPEND extra_test_libs ws2_32)
+    if(test_name STREQUAL "test_mesh_mgmt_cnet_peer" OR
+       test_name STREQUAL "test_mesh_mgmt_cnet_tls_policy")
+        list(APPEND extra_test_libs mesh_mgmt_cnet_peer OpenSSL::SSL)
+        if(test_name STREQUAL "test_mesh_mgmt_cnet_tls_policy")
+            list(APPEND extra_test_libs mesh_stream_cnet_adapter)
         endif()
+        target_compile_definitions(${test_name} PRIVATE
+            MESH_TEST_TLS_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/cnet-server-cert.pem"
+            MESH_TEST_TLS_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/cnet-ca-cert.pem"
+            MESH_TEST_TLS_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/data/cnet-server-key.pem")
     endif()
     if(test_name STREQUAL "test_mesh_stream_codec")
         list(APPEND extra_test_libs mesh_stream_codec)
@@ -511,7 +514,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
 
     set(test_framework TurboUtils::TinyTest)
-    if(test_name MATCHES "^test_mesh_(mgmt_crypto|stream_bind|stream_cnet_bind|stream_cnet_channel|stream_cnet_registry|stream_registry|stream_channel|control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
+    if(test_name MATCHES "^test_mesh_(mgmt_cnet_peer|mgmt_cnet_tls_policy|mgmt_transport|mgmt_session|mgmt_peer_signer|mgmt_crypto|stream_bind|stream_cnet_bind|stream_cnet_channel|stream_cnet_registry|stream_registry|stream_channel|control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
         set(test_framework Salts::TinyTest)
         # Direct headers must resolve to the same runtime as the selected SDK.
         target_include_directories(${test_name} BEFORE PRIVATE "$ENV{SALTS_ROOT}/include")

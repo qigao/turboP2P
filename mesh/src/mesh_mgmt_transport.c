@@ -21,10 +21,14 @@ static void release_recv_chunk(mesh_mgmt_transport_v1_t *transport) {
 static mesh_mgmt_transport_result_t enter_terminal(mesh_mgmt_transport_v1_t *transport,
                                                    mesh_mgmt_transport_result_t error) {
   release_recv_chunk(transport);
-  memset(transport->frame, 0, transport->used);
-  transport->used = 0u;
-  transport->expected = 0u;
-  transport->frame_ready = 0;
+  /* An event response may fail while its incoming receipt is still borrowed. */
+  if (!transport->frame_ready) {
+    memset(transport->frame, 0, transport->used);
+    transport->used = 0u;
+    transport->expected = 0u;
+  }
+  transport->pending_send_token = 0u;
+  transport->pending_send_bytes = 0u;
   transport->terminal = 1;
   transport->last_error = error;
   return error;
@@ -54,6 +58,9 @@ static mesh_mgmt_transport_result_t prepare_chunk(mesh_mgmt_transport_v1_t *tran
   int recv_result;
 
   recv_result = transport->io.recv(transport->io.context, &bytes, &length);
+  if (transport->asynchronous && recv_result == MESH_MGMT_TRANSPORT_PENDING &&
+      !bytes && length == 0u)
+    return MESH_MGMT_TRANSPORT_PENDING;
   if (recv_result != 0 || !bytes || length == 0u) {
     if (bytes)
       transport->io.release(transport->io.context, bytes);
@@ -80,6 +87,47 @@ mesh_mgmt_transport_result_t mesh_mgmt_transport_init_v1(mesh_mgmt_transport_v1_
   transport->generation = MESH_MGMT_TRANSPORT_INITIAL_GENERATION;
   transport->last_error = MESH_MGMT_TRANSPORT_OK;
   transport->initialized = 1;
+  return MESH_MGMT_TRANSPORT_OK;
+}
+
+mesh_mgmt_transport_result_t mesh_mgmt_transport_init_async_v1(
+    mesh_mgmt_transport_v1_t *transport, const mesh_mgmt_transport_async_io_v1_t *io) {
+  if (!transport || !io || !io->context || !io->recv || !io->release || !io->send)
+    return MESH_MGMT_TRANSPORT_INVALID_ARG;
+  if (transport->initialized || transport->recv_chunk || transport->io.context)
+    return MESH_MGMT_TRANSPORT_INVALID_STATE;
+  memset(transport, 0, sizeof(*transport));
+  transport->io.context = io->context;
+  transport->io.recv = io->recv;
+  transport->io.release = io->release;
+  transport->admit = io->send;
+  transport->generation = MESH_MGMT_TRANSPORT_INITIAL_GENERATION;
+  transport->next_send_token = MESH_MGMT_TRANSPORT_INITIAL_GENERATION;
+  transport->asynchronous = 1;
+  transport->initialized = 1;
+  return MESH_MGMT_TRANSPORT_OK;
+}
+
+mesh_mgmt_transport_result_t mesh_mgmt_transport_abort_v1(mesh_mgmt_transport_v1_t *transport) {
+  if (!transport || !transport->initialized)
+    return MESH_MGMT_TRANSPORT_INVALID_STATE;
+  transport->frame_ready = 0;
+  return enter_terminal(transport, transport->terminal ? transport->last_error
+                                                     : MESH_MGMT_TRANSPORT_IO_FAILED);
+}
+
+mesh_mgmt_transport_result_t mesh_mgmt_transport_complete_send_v1(
+    mesh_mgmt_transport_v1_t *transport, uint64_t token, int success, size_t bytes) {
+  if (!transport || !transport->initialized || !transport->asynchronous)
+    return MESH_MGMT_TRANSPORT_INVALID_STATE;
+  if (transport->terminal)
+    return transport->last_error;
+  if (!token || token != transport->pending_send_token)
+    return MESH_MGMT_TRANSPORT_INVALID_STATE;
+  if (!success || bytes != transport->pending_send_bytes)
+    return enter_terminal(transport, MESH_MGMT_TRANSPORT_IO_FAILED);
+  transport->pending_send_token = 0u;
+  transport->pending_send_bytes = 0u;
   return MESH_MGMT_TRANSPORT_OK;
 }
 
@@ -183,11 +231,24 @@ mesh_mgmt_transport_result_t mesh_mgmt_transport_send_v1(mesh_mgmt_transport_v1_
     return MESH_MGMT_TRANSPORT_INVALID_STATE;
   if (transport->terminal)
     return transport->last_error;
+  if (transport->pending_send_token)
+    return MESH_MGMT_TRANSPORT_BUSY;
   codec_result = mesh_mgmt_frame_decode(frame, frame_len, &view);
   if (codec_result == MESH_MGMT_CODEC_RESOURCE_EXHAUSTED)
     return MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED;
   if (codec_result != MESH_MGMT_CODEC_OK)
     return MESH_MGMT_TRANSPORT_INVALID_FRAME;
+  if (transport->asynchronous) {
+    uint64_t token = transport->next_send_token;
+    if (!token || token == UINT64_MAX)
+      return enter_terminal(transport, MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED);
+    transport->pending_send_token = token;
+    transport->pending_send_bytes = frame_len;
+    transport->next_send_token++;
+    if (transport->admit(transport->io.context, frame, frame_len, token) != 0)
+      return enter_terminal(transport, MESH_MGMT_TRANSPORT_IO_FAILED);
+    return MESH_MGMT_TRANSPORT_PENDING;
+  }
   if (transport->io.send(transport->io.context, frame, frame_len) != 0)
     return enter_terminal(transport, MESH_MGMT_TRANSPORT_IO_FAILED);
   return MESH_MGMT_TRANSPORT_OK;

@@ -15,6 +15,7 @@ typedef struct {
   size_t release_count;
   size_t send_count;
   int send_result;
+  uint64_t token;
   uint8_t sent[MESH_MGMT_FRAME_MAX];
   size_t sent_len;
 } fake_io_t;
@@ -96,8 +97,8 @@ static void test_receive_preserves_fragmented_and_coalesced_frames(void) {
   memset(&transport, 0, sizeof(transport));
   first_len = encode_test_frame(MESH_MGMT_KIND_HELLO, 0x11u, first, sizeof(first));
   second_len = encode_test_frame(MESH_MGMT_KIND_ERROR, 0x22u, second, sizeof(second));
-  check_size_gt(first_len, 3u);
-  check_size_gt(second_len, 0u);
+  check_greater(first_len, 3u);
+  check_greater(second_len, 0u);
   memcpy(combined, first + 3u, first_len - 3u);
   memcpy(combined + first_len - 3u, second, second_len);
   fake.chunks[0] = first;
@@ -107,17 +108,17 @@ static void test_receive_preserves_fragmented_and_coalesced_frames(void) {
   fake.chunk_count = 2u;
   io = fake_transport_io(&fake);
 
-  check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
-  check_size_eq(receipt.frame_len, first_len);
-  check_mem_eq(receipt.frame, first, first_len);
-  check_int_eq(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
-  check_size_eq(receipt.frame_len, second_len);
-  check_mem_eq(receipt.frame, second, second_len);
-  check_int_eq(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
-  check_size_eq(fake.recv_count, 2u);
-  check_size_eq(fake.release_count, 2u);
+  check_equal(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(receipt.frame_len, first_len);
+  check_equal(receipt.frame, first, first_len);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(receipt.frame_len, second_len);
+  check_equal(receipt.frame, second, second_len);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(fake.recv_count, 2u);
+  check_equal(fake.release_count, 2u);
   mesh_mgmt_transport_destroy_v1(&transport);
 }
 
@@ -143,14 +144,14 @@ static void test_stale_receipt_cannot_consume_new_frame(void) {
   fake.chunk_count = 2u;
   io = fake_transport_io(&fake);
 
-  check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &first_receipt), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_commit_v1(&transport, &first_receipt), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &second_receipt), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_commit_v1(&transport, &first_receipt),
+  check_equal(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &first_receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &first_receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &second_receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &first_receipt),
                MESH_MGMT_TRANSPORT_INVALID_STATE);
-  check_mem_eq(second_receipt.frame, second, second_len);
-  check_int_eq(mesh_mgmt_transport_commit_v1(&transport, &second_receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(second_receipt.frame, second, second_len);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &second_receipt), MESH_MGMT_TRANSPORT_OK);
   mesh_mgmt_transport_destroy_v1(&transport);
 }
 
@@ -169,14 +170,14 @@ static void test_oversized_prefix_is_terminal_and_released(void) {
   fake.chunk_count = 1u;
   io = fake_transport_io(&fake);
 
-  check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &receipt),
+  check_equal(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt),
                MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED);
   check_true(transport.terminal);
-  check_size_eq(fake.release_count, 1u);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &receipt),
+  check_equal(fake.release_count, 1u);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt),
                MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED);
-  check_size_eq(fake.recv_count, 1u);
+  check_equal(fake.recv_count, 1u);
   mesh_mgmt_transport_destroy_v1(&transport);
 }
 
@@ -195,12 +196,12 @@ static void test_oversized_recv_chunk_is_terminal_and_released(void) {
   fake.chunk_count = 1u;
   io = fake_transport_io(&fake);
 
-  check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_receive_v1(&transport, &receipt),
+  check_equal(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt),
                MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED);
   check_true(transport.terminal);
-  check_size_eq(fake.recv_count, 1u);
-  check_size_eq(fake.release_count, 1u);
+  check_equal(fake.recv_count, 1u);
+  check_equal(fake.release_count, 1u);
   mesh_mgmt_transport_destroy_v1(&transport);
 }
 
@@ -216,24 +217,118 @@ static void test_send_validates_before_io_and_io_failure_is_terminal(void) {
   frame_len = encode_test_frame(MESH_MGMT_KIND_ERROR, 0x41u, frame, sizeof(frame));
   io = fake_transport_io(&fake);
 
-  check_int_eq(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
-  check_int_eq(mesh_mgmt_transport_send_v1(&transport, frame, frame_len), MESH_MGMT_TRANSPORT_OK);
-  check_size_eq(fake.send_count, 1u);
-  check_size_eq(fake.sent_len, frame_len);
-  check_mem_eq(fake.sent, frame, frame_len);
+  check_equal(mesh_mgmt_transport_init_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, frame_len), MESH_MGMT_TRANSPORT_OK);
+  check_equal(fake.send_count, 1u);
+  check_equal(fake.sent_len, frame_len);
+  check_equal(fake.sent, frame, frame_len);
   frame[0] = 'X';
-  check_int_eq(mesh_mgmt_transport_send_v1(&transport, frame, frame_len),
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, frame_len),
                MESH_MGMT_TRANSPORT_INVALID_FRAME);
-  check_size_eq(fake.send_count, 1u);
+  check_equal(fake.send_count, 1u);
   frame[0] = 'T';
   fake.send_result = -1;
-  check_int_eq(mesh_mgmt_transport_send_v1(&transport, frame, frame_len),
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, frame_len),
                MESH_MGMT_TRANSPORT_IO_FAILED);
   check_true(transport.terminal);
   mesh_mgmt_transport_destroy_v1(&transport);
 }
 
+static int async_recv(void *context, uint8_t **bytes, size_t *len) {
+  fake_io_t *fake = context;
+  if (fake->recv_count == fake->chunk_count) {
+    *bytes = NULL;
+    *len = 0u;
+    return MESH_MGMT_TRANSPORT_PENDING;
+  }
+  return fake_recv(context, bytes, len);
+}
+
+static int async_send(void *context, const uint8_t *bytes, size_t len, uint64_t token) {
+  fake_io_t *fake = context;
+  fake->token = token;
+  return fake_send(context, bytes, len);
+}
+
+static mesh_mgmt_transport_async_io_v1_t async_io(fake_io_t *fake) {
+  mesh_mgmt_transport_async_io_v1_t io = {fake, async_recv, fake_release, async_send};
+  return io;
+}
+
+static void test_async_receive(void) {
+  fake_io_t fake = {0};
+  mesh_mgmt_transport_v1_t transport = {0};
+  mesh_mgmt_transport_async_io_v1_t io = async_io(&fake);
+  mesh_mgmt_transport_receipt_v1_t receipt;
+  uint8_t frame[128], combined[256];
+  size_t len = encode_test_frame(MESH_MGMT_KIND_ERROR, 0x11u, frame, sizeof(frame));
+  check_equal(mesh_mgmt_transport_init_async_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_PENDING);
+  check_null(receipt.frame);
+  fake.chunks[0] = frame;
+  fake.chunk_lengths[0] = 3u;
+  fake.chunk_count = 1u;
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_PENDING);
+  check_equal(transport.used, 3u);
+  check_equal(fake.release_count, 1u);
+  check_false(transport.terminal);
+  memcpy(combined, frame + 3u, len - 3u);
+  memcpy(combined + len - 3u, frame, len);
+  fake.chunks[1] = combined;
+  fake.chunk_lengths[1] = len * 2u - 3u;
+  fake.chunk_count = 2u;
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(receipt.frame, frame, len);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(receipt.frame, frame, len);
+  check_equal(mesh_mgmt_transport_commit_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_receive_v1(&transport, &receipt), MESH_MGMT_TRANSPORT_PENDING);
+  check_equal(fake.release_count, 2u);
+  mesh_mgmt_transport_destroy_v1(&transport);
+}
+
+static void test_async_tokens(int failure) {
+  fake_io_t fake = {0};
+  mesh_mgmt_transport_v1_t transport = {0};
+  mesh_mgmt_transport_async_io_v1_t io = async_io(&fake);
+  uint8_t frame[128];
+  size_t len = encode_test_frame(MESH_MGMT_KIND_ERROR, 0x11u, frame, sizeof(frame));
+  uint64_t first;
+  check_equal(mesh_mgmt_transport_init_async_v1(&transport, &io), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, len), MESH_MGMT_TRANSPORT_PENDING);
+  first = fake.token;
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, len), MESH_MGMT_TRANSPORT_BUSY);
+  check_equal(fake.send_count, 1u);
+  check_equal(mesh_mgmt_transport_complete_send_v1(&transport, first + 1u, 1, len), MESH_MGMT_TRANSPORT_INVALID_STATE);
+  check_equal(transport.pending_send_token, first);
+  check_equal(mesh_mgmt_transport_complete_send_v1(&transport, first, 1, len), MESH_MGMT_TRANSPORT_OK);
+  check_equal(mesh_mgmt_transport_complete_send_v1(&transport, first, 1, len), MESH_MGMT_TRANSPORT_INVALID_STATE);
+  check_equal(mesh_mgmt_transport_send_v1(&transport, frame, len), MESH_MGMT_TRANSPORT_PENDING);
+  check_greater(fake.token, first);
+  check_equal(mesh_mgmt_transport_complete_send_v1(&transport, first, 1, len), MESH_MGMT_TRANSPORT_INVALID_STATE);
+  check_equal(transport.pending_send_token, fake.token);
+  if (failure) {
+    check_equal(mesh_mgmt_transport_complete_send_v1(&transport, fake.token, failure == 1, failure == 1 ? len - 1u : 0u), MESH_MGMT_TRANSPORT_IO_FAILED);
+    check_true(transport.terminal);
+    check_equal(transport.pending_send_token, 0u);
+    check_equal(mesh_mgmt_transport_send_v1(&transport, frame, len), MESH_MGMT_TRANSPORT_IO_FAILED);
+  } else {
+    check_equal(mesh_mgmt_transport_complete_send_v1(&transport, fake.token, 1, len), MESH_MGMT_TRANSPORT_OK);
+    transport.next_send_token = UINT64_MAX;
+    check_equal(mesh_mgmt_transport_send_v1(&transport, frame, len), MESH_MGMT_TRANSPORT_RESOURCE_EXHAUSTED);
+    check_equal(fake.send_count, 2u);
+  }
+  mesh_mgmt_transport_destroy_v1(&transport);
+}
+
 spec("mesh management framed transport") {
+  describe("explicit asynchronous IO") {
+    it("preserves partial input and drains coalesced receipts across pending reads") { test_async_receive(); }
+    it("rejects stale/duplicate tokens and token exhaustion without new IO") { test_async_tokens(0); }
+    it("makes a matching short completion terminal") { test_async_tokens(1); }
+    it("settles a matching failed write terminally") { test_async_tokens(2); }
+  }
   describe("bounded receive lifecycle") {
     it("preserves fragmented and coalesced frames") {
       test_receive_preserves_fragmented_and_coalesced_frames();

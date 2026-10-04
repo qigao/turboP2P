@@ -1013,7 +1013,7 @@ target_include_directories(mesh_mgmt_peer PUBLIC
 target_link_libraries(mesh_mgmt_peer PUBLIC mesh_mgmt_connection)
 set_property(TARGET mesh_mgmt_peer PROPERTY FOLDER "mesh/internal")
 
-# Short-lived local signer for HELLO/ACK builders. It uses TurboUtils CSPRNG,
+# Short-lived local signer for HELLO/ACK builders. It uses Salts Platform CSPRNG,
 # copies the caller-loaded management seed, and wipes the copy on destroy.
 add_library(mesh_mgmt_peer_signer STATIC
   src/mesh_mgmt_peer_signer.c
@@ -1021,19 +1021,16 @@ add_library(mesh_mgmt_peer_signer STATIC
 target_include_directories(mesh_mgmt_peer_signer PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_peer_signer PUBLIC
-  mesh_mgmt_peer mesh_mgmt_identity mesh_mgmt_session TurboUtils::Core)
+  mesh_mgmt_peer mesh_mgmt_identity mesh_mgmt_session Salts::Platform Salts::Core)
 set_property(TARGET mesh_mgmt_peer_signer PROPERTY FOLDER "mesh/internal")
 
-# Thin secure-socket adapter. It accepts only an already-open TLS 1.3 CoroNet
-# connection and never takes ownership of the caller's socket.
-add_library(mesh_mgmt_coronet_adapter STATIC
-  src/mesh_mgmt_coronet_adapter.c
-  src/mesh_mgmt_coronet_adapter.h)
-target_include_directories(mesh_mgmt_coronet_adapter PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_mgmt_coronet_adapter PUBLIC
-  mesh_mgmt_transport TurboNet::CoroNet)
-set_property(TARGET mesh_mgmt_coronet_adapter PROPERTY FOLDER "mesh/internal")
+# Signed MMP composition over a caller-owned CNet TLS 1.3 connection.
+add_library(mesh_mgmt_cnet_peer STATIC
+  src/mesh_mgmt_cnet_peer.c
+  src/mesh_mgmt_cnet_peer.h)
+target_include_directories(mesh_mgmt_cnet_peer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_cnet_peer PUBLIC mesh_mgmt_peer_signer Salts::CNet)
+set_property(TARGET mesh_mgmt_cnet_peer PROPERTY FOLDER "mesh/internal")
 
 # P2P custom-message adapter. It accepts only peers whose encrypted handshake
 # exposed a static public key and never owns the node, peer, or callback bytes.

@@ -152,10 +152,13 @@ recv chunk，因此拆包和一块内多帧都不会丢字节或产生无界扩�
 显式 commit。陈旧 receipt 不推进连接。非法长度/canonical frame 或 recv/send ambiguity 令
 transport terminal，调用方必须关闭 socket，不得在半可信字节流上继续。
 
-首个 socket adapter 接受 caller-owned、已经完成握手的 CoroNet TLS 1.3 connection，并以
-RFC 9266 exporter query 作为类型、open-state、版本和客户端证书验证门；raw TCP、未完成 TLS、
-非 TLS 1.3 或客户端未验证 server certificate 均在分配 transport 状态前拒绝。adapter 释放
-每个 recv buffer，但不关闭 socket。
+TLS composition root `mesh_mgmt_cnet_peer` 接受 caller-owned、已完成握手的 CNet handle，
+先通过公开 `cnet_tls_negotiated_version` 要求实际 TLS 1.3，再取得 RFC 9266 exporter。
+实际 exporter 同时写入 signer HELLO 与 dispatcher session，后续发送、接收和完成边界均重新核对。
+raw TCP、TLS 1.2、未连接、stale/关闭 handle 或 exporter 不匹配均拒绝；CNet 本身仍自动协商
+TLS >= 1.2，本层没有改写协商配置。MMP direct-trust certificate/transport ID、管理签名与 replay
+门禁独立保留；TLS 认证不能替代 MMP identity。CNet callback loan 先复制到有界接收缓冲，
+签名 frame 则在 admission 内复制到 retained buffer，调用方引用立即释放。
 
 当前另有内部 `mesh_mgmt_p2p_adapter`：它只接受
 `p2p_peer_get_security_info_v2()` 返回 `authenticated`、非零 Noise static key 与非零 handshake
@@ -312,7 +315,7 @@ signature 字段自身不包含在签名输入中。接收端先完成 frame 长
 上限检查，再计算 hash 和验证签名，最后才解析可产生状态变化的 payload。
 
 当前代码包含未安装的内部 `mesh_mgmt_codec`、`mesh_mgmt_transport`、
-`mesh_mgmt_coronet_adapter`、`mesh_mgmt_envelope`、
+`mesh_mgmt_cnet_peer`、`mesh_mgmt_envelope`、
 `mesh_mgmt_identity`、`mesh_mgmt_session`、`mesh_mgmt_replay` 与
 `mesh_mgmt_dispatch`，以及握手 owner `mesh_mgmt_connection`、`mesh_mgmt_peer`、
 `mesh_mgmt_peer_signer`、`mesh_mgmt_p2p_adapter`、`mesh_mgmt_p2p_peer` 静态模块。codec 在任何
@@ -454,15 +457,19 @@ transport peer ID 和同步 typed-event consumer 收敛到同一个 event-loop o
 回调期间借用 envelope view，必须先复制需要延后使用的数据。分发失败会先消费已完整读取的
 transport receipt，再把连接置为 terminal；consumer 拒绝时 replay 已经由 dispatcher 提交，
 因此同样先提交 receipt 再 terminal，禁止在同一连接重试产生不确定副作用。HELLO/HELLO_ACK
-发送采用 `send -> local session mark` 顺序；send 之后若状态提交失败，外部副作用无法回滚，连接
-立即 terminal，由上层关闭 socket。该 owner 不记录日志、不保存私钥，也不拥有/关闭 CoroNet
-socket；CoroNet adapter 只在 live TLS 1.3 socket 上构造借用 IO。实际 `mesh-agent` listener、
-连接重试、endpoint discovery、持久化密钥加载、post-handshake envelope 构造和事件领域编排仍未实现。
+同步发送保留 `send -> local session mark` 顺序；显式 async init 使用
+`admission -> matching token/full logical write completion -> local session mark`。PENDING 不标记
+HELLO/ACK；BUSY 不接收新写。入站认证暂停到写完成，已复制的 coalesced tail 保留待续。
+短写、失败和关闭清除 pending token 并 terminal，stale token 不消费新写；event response 失败时
+仍保持入站 borrowed view 到 consumer 返回。协议 owner 不保存私钥，也不拥有 socket。
+CNet root 请求异步 close 并保留对象到同 handle 的 CLOSED/FAILED，随后才允许 destroy。
+当前 agent runtime/listener/endpoint 重连仍使用 P2P/CoroNet，CNet root 尚未接入完整 agent runtime；
+持久化密钥加载、endpoint discovery 和事件领域编排也不属于此迁移。
 
 当前内部 `mesh_mgmt_peer` 在 connection owner 之上驱动相邻握手，但不持有私钥：未来 agent
 注入 HELLO/HELLO_ACK builder，builder 只在同步调用期间借出完整 signed frame。driver 在任何
 socket send 前重新验证本地 HELLO signature、direct-trust certificate、时间、mesh、transport
-identity、node/management identity、connection ID、Noise channel binding、features 与资源上限；并保存 HELLO 的本地
+identity、node/management identity、connection ID、secure channel binding、features 与资源上限；并保存 HELLO 的本地
 origin session binding。收到远端 HELLO 后，先让 consumer 接受 typed event 并提交 receipt，
 再调用 ACK builder；返回的 ACK 必须签名有效、与 accepted negotiation 逐字段一致，并与本地
 HELLO 使用同一 principal/node/session/incarnation/epoch/certificate binding。builder 失败、签名
@@ -471,7 +478,7 @@ HELLO 使用同一 principal/node/session/incarnation/epoch/certificate binding�
 当前内部 `mesh_mgmt_peer_signer` 实现上述 builder 契约。它在初始化时重新验证 direct-trust
 certificate、management private/public key、mesh/node/transport 绑定，复制由 agent 已加载的
 32-byte Ed25519 seed，并在 destroy 时通过不可优化掉的 wipe 清除 seed 与 frame buffer。每个
-HELLO/ACK frame 使用 TurboUtils 系统 CSPRNG 生成独立 message ID，使用 agent session 的
+HELLO/ACK frame 使用 Salts Platform 系统 CSPRNG 生成独立 message ID，使用 agent session 的
 incarnation/session ID 和单调 sequence，并限制本地 frame TTL 不超过 60 秒；CSPRNG、时间溢出、
 payload 编码或签名失败均不推进 sequence，也不返回可发送 frame。测试可显式注入 clock/entropy，
 生产默认没有弱随机 fallback。该模块不生成、读取或持久化 key，不替代 OS keychain/受限密钥文件。

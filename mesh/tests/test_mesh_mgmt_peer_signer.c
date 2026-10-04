@@ -66,10 +66,10 @@ static void prepare_fixture(signer_fixture_t *fixture) {
   memset(&claims, 0, sizeof(claims));
   fixture->callbacks.now_ms = TEST_NOW_MS;
   memcpy(fixture->config.private_key, MANAGEMENT_PRIVATE_KEY, sizeof(fixture->config.private_key));
-  check_int_eq(
+  check_equal(
       mesh_mgmt_ed25519_public_from_private(ROOT_PRIVATE_KEY, fixture->config.trusted_issuer_key),
       MESH_MGMT_CRYPTO_OK);
-  check_int_eq(mesh_mgmt_ed25519_public_from_private(MANAGEMENT_PRIVATE_KEY, management_public_key),
+  check_equal(mesh_mgmt_ed25519_public_from_private(MANAGEMENT_PRIVATE_KEY, management_public_key),
                MESH_MGMT_CRYPTO_OK);
   fill_bytes(fixture->config.expected_mesh_id_hash, sizeof(fixture->config.expected_mesh_id_hash),
              0x20u);
@@ -87,11 +87,11 @@ static void prepare_fixture(signer_fixture_t *fixture) {
   claims.expires_at_ms = 3000u;
   claims.serial = TEST_CERT_SERIAL;
   claims.principal_epoch = TEST_PRINCIPAL_EPOCH;
-  check_int_eq(
+  check_equal(
       mesh_mgmt_certificate_issue_v1(&claims, ROOT_PRIVATE_KEY, fixture->config.hello.certificate,
                                      sizeof(fixture->config.hello.certificate), &certificate_len),
       MESH_MGMT_IDENTITY_OK);
-  check_size_eq(certificate_len, MESH_MGMT_CERTIFICATE_V1_SIZE);
+  check_equal(certificate_len, MESH_MGMT_CERTIFICATE_V1_SIZE);
 
   fixture->config.hello.major = MESH_MGMT_MAJOR_V1;
   fixture->config.hello.min_minor = MESH_MGMT_MINOR_V1;
@@ -100,7 +100,7 @@ static void prepare_fixture(signer_fixture_t *fixture) {
   fixture->config.hello.platform = MESH_MGMT_PLATFORM_LINUX;
   memcpy(fixture->config.hello.build_version, "signer-test", 11u);
   fixture->config.hello.build_version_len = 11u;
-  check_int_eq(mesh_mgmt_blake2b_256(fixture->config.trusted_issuer_key,
+  check_equal(mesh_mgmt_blake2b_256(fixture->config.trusted_issuer_key,
                                      sizeof(fixture->config.trusted_issuer_key),
                                      fixture->config.hello.issuer_chain_hash),
                MESH_MGMT_CRYPTO_OK);
@@ -157,79 +157,79 @@ static void test_signer_builds_bound_hello_and_ack(void) {
   memset(&signer, 0, sizeof(signer));
   prepare_fixture(&fixture);
   prepare_ack(&expected_ack, &fixture.config.hello);
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
   frame = (const uint8_t *)1;
   frame_len = 1u;
-  check_int_eq(mesh_mgmt_peer_signer_build_ack_v1(&signer, &expected_ack, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_build_ack_v1(&signer, &expected_ack, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_INVALID_STATE);
   check_null(frame);
-  check_size_eq(frame_len, 0u);
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(frame_len, 0u);
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);
   check_not_null(frame);
-  check_size_gt(frame_len, 0u);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(frame, frame_len, &hello_envelope),
+  check_greater(frame_len, 0u);
+  check_equal(mesh_mgmt_envelope_verify_v1(frame, frame_len, &hello_envelope),
                MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(mesh_mgmt_hello_decode_v1(hello_envelope.frame.payload,
+  check_equal(mesh_mgmt_hello_decode_v1(hello_envelope.frame.payload,
                                          hello_envelope.frame.payload_len, &decoded_hello),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(hello_envelope.frame.kind, MESH_MGMT_KIND_HELLO);
-  check_hex64_eq(hello_envelope.header.origin_sequence, TEST_FIRST_SEQUENCE);
-  check_hex64_eq(hello_envelope.header.issued_at_ms, TEST_NOW_MS);
-  check_hex64_eq(hello_envelope.header.expires_at_ms, TEST_NOW_MS + TEST_FRAME_TTL_MS);
+  check_equal(hello_envelope.frame.kind, MESH_MGMT_KIND_HELLO);
+  check_equal(hello_envelope.header.origin_sequence, TEST_FIRST_SEQUENCE);
+  check_equal(hello_envelope.header.issued_at_ms, TEST_NOW_MS);
+  check_equal(hello_envelope.header.expires_at_ms, TEST_NOW_MS + TEST_FRAME_TTL_MS);
   fill_bytes(expected_message_id, sizeof(expected_message_id), 0x40u);
-  check_mem_eq(hello_envelope.header.message_id, expected_message_id, sizeof(expected_message_id));
-  check_mem_eq(decoded_hello.connection_id, fixture.config.hello.connection_id,
+  check_equal(hello_envelope.header.message_id, expected_message_id, sizeof(expected_message_id));
+  check_equal(decoded_hello.connection_id, fixture.config.hello.connection_id,
                sizeof(decoded_hello.connection_id));
-  check_mem_eq(decoded_hello.channel_binding,
+  check_equal(decoded_hello.channel_binding,
                fixture.config.hello.channel_binding,
                sizeof(decoded_hello.channel_binding));
 
-  check_int_eq(mesh_mgmt_peer_signer_build_ack_v1(&signer, &expected_ack, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_build_ack_v1(&signer, &expected_ack, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(frame, frame_len, &ack_envelope),
+  check_equal(mesh_mgmt_envelope_verify_v1(frame, frame_len, &ack_envelope),
                MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(mesh_mgmt_hello_ack_decode_v1(ack_envelope.frame.payload,
+  check_equal(mesh_mgmt_hello_ack_decode_v1(ack_envelope.frame.payload,
                                              ack_envelope.frame.payload_len, &decoded_ack),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(ack_envelope.frame.kind, MESH_MGMT_KIND_HELLO_ACK);
-  check_hex64_eq(ack_envelope.header.origin_sequence, TEST_FIRST_SEQUENCE + 1u);
+  check_equal(ack_envelope.frame.kind, MESH_MGMT_KIND_HELLO_ACK);
+  check_equal(ack_envelope.header.origin_sequence, TEST_FIRST_SEQUENCE + 1u);
   fill_bytes(expected_message_id, sizeof(expected_message_id), 0x50u);
-  check_mem_eq(ack_envelope.header.message_id, expected_message_id, sizeof(expected_message_id));
-  check_mem_eq(ack_envelope.header.session_id, hello_envelope.header.session_id,
+  check_equal(ack_envelope.header.message_id, expected_message_id, sizeof(expected_message_id));
+  check_equal(ack_envelope.header.session_id, hello_envelope.header.session_id,
                sizeof(ack_envelope.header.session_id));
-  check_mem_eq(&decoded_ack, &expected_ack, sizeof(decoded_ack));
-  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE + 2u);
-  check_size_eq(fixture.callbacks.random_calls, 2u);
+  check_equal(&decoded_ack, &expected_ack, sizeof(decoded_ack));
+  check_equal(signer.next_sequence, TEST_FIRST_SEQUENCE + 2u);
+  check_equal(fixture.callbacks.random_calls, 2u);
 
   fill_bytes(target_node_id, sizeof(target_node_id), 0x70u);
-  check_int_eq(mesh_mgmt_peer_signer_build_targeted_v1(
+  check_equal(mesh_mgmt_peer_signer_build_targeted_v1(
                    &signer, MESH_MGMT_KIND_COMMAND_REQUEST, target_node_id,
                    NULL, 0u, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);
-  check_int_eq(signer.last_envelope_result, MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(
+  check_equal(signer.last_envelope_result, MESH_MGMT_ENVELOPE_OK);
+  check_equal(mesh_mgmt_envelope_verify_v1(
                    frame, frame_len, &targeted_envelope),
                MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(targeted_envelope.frame.kind,
+  check_equal(targeted_envelope.frame.kind,
                MESH_MGMT_KIND_COMMAND_REQUEST);
-  check_mem_eq(targeted_envelope.header.target_node_id, target_node_id,
+  check_equal(targeted_envelope.header.target_node_id, target_node_id,
                sizeof(target_node_id));
-  check_size_eq(targeted_envelope.frame.payload_len, 0u);
-  check_hex64_eq(targeted_envelope.header.origin_sequence,
+  check_equal(targeted_envelope.frame.payload_len, 0u);
+  check_equal(targeted_envelope.header.origin_sequence,
                  TEST_FIRST_SEQUENCE + 2u);
-  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE + 3u);
-  check_size_eq(fixture.callbacks.random_calls, 3u);
+  check_equal(signer.next_sequence, TEST_FIRST_SEQUENCE + 3u);
+  check_equal(fixture.callbacks.random_calls, 3u);
 
   frame = (const uint8_t *)1;
   frame_len = 1u;
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_INVALID_STATE);
   check_null(frame);
-  check_size_eq(frame_len, 0u);
+  check_equal(frame_len, 0u);
   mesh_mgmt_peer_signer_destroy_v1(&signer);
-  check_int_eq(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
-  check_mem_eq(signer.private_key, zero_key, sizeof(zero_key));
+  check_equal(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
+  check_equal(signer.private_key, zero_key, sizeof(zero_key));
 }
 
 static void test_signer_rejects_identity_mismatch(void) {
@@ -239,15 +239,15 @@ static void test_signer_rejects_identity_mismatch(void) {
   memset(&signer, 0, sizeof(signer));
   prepare_fixture(&fixture);
   fixture.config.local_transport_peer_id[0] ^= 1u;
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config),
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config),
                MESH_MGMT_PEER_SIGNER_IDENTITY_FAILED);
-  check_int_eq(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
+  check_equal(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
 
   fixture.config.local_transport_peer_id[0] ^= 1u;
   fixture.config.private_key[0] ^= 1u;
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config),
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config),
                MESH_MGMT_PEER_SIGNER_IDENTITY_FAILED);
-  check_int_eq(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
+  check_equal(signer.state, MESH_MGMT_PEER_SIGNER_UNINITIALIZED);
 }
 
 static void test_signer_propagates_random_failure_without_sequence_advance(void) {
@@ -259,30 +259,30 @@ static void test_signer_propagates_random_failure_without_sequence_advance(void)
   memset(&signer, 0, sizeof(signer));
   prepare_fixture(&fixture);
   fixture.callbacks.random_result = -77;
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_RANDOM_FAILED);
   check_null(frame);
-  check_size_eq(frame_len, 0u);
-  check_int_eq(signer.last_random_result, -77);
-  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE);
+  check_equal(frame_len, 0u);
+  check_equal(signer.last_random_result, -77);
+  check_equal(signer.next_sequence, TEST_FIRST_SEQUENCE);
   check_false(signer.hello_built);
 
   fixture.callbacks.random_result = 0;
   signer.random_bytes = zero_random_bytes;
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_RANDOM_FAILED);
-  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE);
+  check_equal(signer.next_sequence, TEST_FIRST_SEQUENCE);
   check_false(signer.hello_built);
 
   signer.random_bytes = test_random_bytes;
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);
-  check_hex64_eq(signer.next_sequence, TEST_FIRST_SEQUENCE + 1u);
+  check_equal(signer.next_sequence, TEST_FIRST_SEQUENCE + 1u);
   mesh_mgmt_peer_signer_destroy_v1(&signer);
 }
 
-static void test_signer_uses_turboutils_csprng_by_default(void) {
+static void test_signer_uses_salts_csprng_by_default(void) {
   signer_fixture_t fixture;
   mesh_mgmt_peer_signer_v1_t signer;
   mesh_mgmt_verified_envelope_v1_t envelope;
@@ -293,11 +293,11 @@ static void test_signer_uses_turboutils_csprng_by_default(void) {
   memset(&signer, 0, sizeof(signer));
   prepare_fixture(&fixture);
   fixture.config.random_bytes = NULL;
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
-  check_int_eq(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &fixture.config), MESH_MGMT_PEER_SIGNER_OK);
+  check_equal(mesh_mgmt_peer_signer_build_hello_v1(&signer, &frame, &frame_len),
                MESH_MGMT_PEER_SIGNER_OK);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(frame, frame_len, &envelope), MESH_MGMT_ENVELOPE_OK);
-  check_mem_ne(envelope.header.message_id, zero_message_id, sizeof(zero_message_id));
+  check_equal(mesh_mgmt_envelope_verify_v1(frame, frame_len, &envelope), MESH_MGMT_ENVELOPE_OK);
+  check_true(memcmp(envelope.header.message_id, zero_message_id, sizeof(zero_message_id)) != 0);
   mesh_mgmt_peer_signer_destroy_v1(&signer);
 }
 
@@ -311,7 +311,7 @@ spec("mesh management peer signer") {
       test_signer_propagates_random_failure_without_sequence_advance();
     }
     it("uses TurboUtils system CSPRNG by default") {
-      test_signer_uses_turboutils_csprng_by_default();
+      test_signer_uses_salts_csprng_by_default();
     }
   }
 }

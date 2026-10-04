@@ -1,6 +1,6 @@
 # Salts / SaltsUtils 分阶段迁移
 
-已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由、tunnel 产品 TCP/TLS 调用方。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
+已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由、tunnel 产品 TCP/TLS 调用方、MMP 异步协议和 CNet TLS 签名 peer。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
 
 ## 审查发现
 
@@ -175,3 +175,53 @@ owner 契约：所有操作及 policy/application/retire callbacks 串行且禁�
 本地 Release 25/25、ASan/UBSan 25/25 CTest 通过，验证快照 Salts 1.8.15 / SaltsUtils 4.1.17；依赖继续 floating/latest。ASan 设置 detect_leaks=0，发布的 SDK 二进制未重新插桩，不声称完成泄漏或 SDK 内部 sanitizer 验证。CI 使用 latest 包和共享 vcpkg-cache re2c，不增加 pin 或 bootstrap。
 
 此阶段完成 tunnel 的 TCP/TLS 产品路径，未验证特权 TUN 系统配置、Windows/macOS 运行和完整 IPv6 TUN 转发；UDP/SS/VMess/Trojan 仍不提供传输。P2P、安全/维护协程、管理传输与 HTTP 产品 owner、完整根工程仍需后续迁移，暂不移除根工程 legacy SDK。
+
+
+## 第二阶段 G：MMP 异步协议与 CNet TLS 签名 peer
+
+**HIGH（事实，已处理）**：原管理 connection 将 IO send 的成功返回直接用作 HELLO/ACK
+已发送事实。CNet 的成功返回只表示 admission；这样连接可能在写失败前就推进握手。
+transport、connection、peer 增加显式 async init、PENDING/BUSY 与 token completion；同步 P2P
+入口保留原契约，不进行 backend 检测或 fallback。一个 owner 至多有一个 pending write。
+匹配 token 和完整逻辑字节数之后才 mark HELLO/ACK；发送失败、短写、token 耗尽和关闭进入
+terminal。stale/duplicate token 不消费当前写。pump 在 pending write 期间暂停，partial frame
+和 coalesced tail 保存在有界缓冲中；无数据返回 PENDING，不当作 EOF。
+
+**HIGH（事实，已处理）**：consumer 内发送响应失败时，不能提前擦除仍在 callback 内借用的
+入站 frame。transport terminal 保留已借出的 receipt，connection 在 callback 返回之后才
+abort/清理；错误继续传播到 peer，不能被 callback 的成功返回覆盖。
+
+新增内部 `mesh_mgmt_cnet_peer` 组成实际 signer、peer、connection 与 dispatcher。init 使用
+CNet 公开协商版本查询要求真实 TLS 1.3，再把 actual exporter 写入两侧签名握手的 binding；
+start/receive/admission/completion 再核对 TLS/exporter。TLS 1.2、明文、失效或错误 generation
+不授权，也不降低 CNet 自动协商规则。调用方提供 MMP trust anchor、证书、身份与管理 seed；
+Ed25519 验证、身份约束、资源/feature negotiation、replay 和 borrowed typed-event consumer
+保留原协议。signer 默认时钟/CSPRNG 改为 Salts Core/Platform；consumer 包继续 floating/latest。
+
+CNet root 借用 caller-owned client/handle，独占该 handle 的逻辑写。调用方将 observer 的
+receive/send/terminal 转发给 root；root 不嵌套 poll。callback 接收 loan 复制到固定 16 KiB
+chunk，builder frame 在 admission 内复制到 Salts retained buffer。应用发送遇 BUSY 不入队。
+错误先停止协议并请求异步 close，storage 与 seed 保留到匹配 CLOSED/FAILED，再 destroy/wipe；
+不能在 CNet callbacks 静默前释放或复用对象。已关闭请求的 EALREADY 视为成功；close command
+admission 失败时调用方在 poll 后重试 close 或 stop client，仍不得提前 destroy。使用方式见可运行的
+`mesh/tests/test_mesh_mgmt_cnet_peer.c`。
+
+仅供旧 loopback 测试使用的 CoroNet 管理 socket adapter 和测试被替换为 CNet signed peer
+及 negotiated TLS policy 测试。根工程 target 已更新，但完整 agent runtime/router 仍依赖
+P2P/CoroNet；本阶段不声称它们已经迁移，也不移除全工程 legacy SDK。完整根构建、
+Windows/macOS、P2P、管理 HTTP 和 agent endpoint owner 接线仍待后续阶段。
+
+验证覆盖真实 TLS 1.3 双向 signed HELLO/ACK 和 targeted observer message、builder loan 重用、
+7-byte 接收分片、延迟 send completion、错误 generation、pending close/short write、签名篡改和
+consumer 拒绝。复用既有 test-only OpenSSL TLS 1.2/CNet fixture，实际协商 TLS 1.2 后证明
+management init 在 signing/admission 前拒绝；fixture 保留 CA/hostname 验证。核心还覆盖
+partial/coalesced frame、stale/duplicate token、token 耗尽、失败 ACK 不建立 replay binding，
+以及 consumer 响应 admission 失败期间的 borrowed view。原同步 session/connection/peer 与 signer
+回归已迁移到当前 Salts TinyTest 并纳入独立基础构建。
+
+本地 SDK 快照仍为 Salts 1.8.15 / SaltsUtils 4.1.17（仅记录验证输入，不限制 consumer）。
+re2c 继续使用共享 `qigao/vcpkg-cache` 发布版本；CI 每次恢复 latest SDK。
+回滚只需撤销本阶段提交，不涉及数据或报文格式转换。
+
+本阶段本地 Release 30/30、ASan/UBSan 30/30 CTest 通过。设置
+`ASAN_OPTIONS=detect_leaks=0`，发布 SDK 二进制未重新插桩，不声称完成泄漏检测或 SDK 内部验证。
