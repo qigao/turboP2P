@@ -23,9 +23,8 @@ typedef struct p2p_private_key_operation_s {
     uint8_t finish_noise;
 } p2p_private_key_operation_t;
 
-/* Legacy node binding only. Worker owns all task/terminal state; the node owns
- * the peer lease, generation check and protocol continuation. CNet uses the
- * same worker with explicit owner polling and no CoroNet notification. */
+/* Node binding owns the peer lease, generation check and protocol continuation.
+ * Worker owns task/terminal state. The CNet owner polls without a notifier. */
 struct p2p_private_key_executor_s {
     p2p_key_worker_t *worker;
     p2p_node_t *node;
@@ -37,6 +36,10 @@ struct p2p_private_key_executor_s {
 
 p2p_private_key_executor_t *p2p_private_key_executor_create(
     p2p_node_t *node, const p2p_blocking_private_key_provider_v4_t *provider);
+/* NULL notify selects explicit owner polling. Non-NULL notify borrows node. */
+p2p_private_key_executor_t *p2p_private_key_executor_create_with_notify(
+    p2p_node_t *node, const p2p_blocking_private_key_provider_v4_t *provider,
+    p2p_key_notify_fn notify);
 int p2p_private_key_executor_submit(p2p_peer_t *peer,
     const uint8_t *payload, size_t payload_len,
     uint8_t next_noise_step, int finish_noise);

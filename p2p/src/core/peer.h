@@ -7,7 +7,6 @@
 #define P2P_PEER_H
 
 #include "types.h"
-#include <CoroNet/turbo_callbacks.h>
 #include <stdbool.h>
 
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
@@ -78,8 +77,9 @@ int p2p_peer_id_cmp(const p2p_peer_t *a, const p2p_peer_t *b);
  */
 int p2p_peer_start_handshake(p2p_peer_t *peer);
 
-int p2p_peer_stream_recv(void *handle, const mem_slice_t *slice, void *peer_ctx);
-void p2p_peer_stream_close(void *handle);
-void p2p_peer_stream_connect(void *handle, int status, void *arg);
+/* Owner-thread transport boundary. Callbacks retain a peer lease. */
+void p2p_peer_transport_connected(p2p_peer_t *peer);
+void p2p_peer_transport_closed(p2p_peer_t *peer, int destroy_peer);
+int p2p_peer_prepare_connect(p2p_peer_t *peer, int *start);
 
 #endif /* P2P_PEER_H */

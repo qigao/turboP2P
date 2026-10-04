@@ -5,7 +5,7 @@
 #ifndef P2P_HANDLERS_H
 #define P2P_HANDLERS_H
 
-#include "../src/internal.h"
+#include "../internal.h"
 
 /* Dispatch incoming messages */
 void p2p_handlers_dispatch(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg);

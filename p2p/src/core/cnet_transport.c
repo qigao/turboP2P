@@ -3,13 +3,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct {
+    size_t length;
+    p2p_send_complete_fn complete;
+    void *context;
+} p2p_cnet_write_t;
+
 typedef struct p2p_cnet_connection_s {
     p2p_connection_t base;
     p2p_cnet_owner_t *owner;
     struct p2p_cnet_connection_s *next;
     cnet_connection handle;
     p2p_cnet_callbacks_t callbacks;
-    size_t *writes;
+    p2p_cnet_write_t *writes;
     size_t write_head;
     size_t write_count;
     size_t pending_bytes;
@@ -123,7 +129,8 @@ static void sweep(p2p_cnet_owner_t *owner) {
     }
 }
 
-static int connection_send(void *handle, const void *data, size_t length) {
+static int connection_send_completed(void *handle, const void *data, size_t length,
+    p2p_send_complete_fn complete, void *context) {
     p2p_cnet_connection_t *connection = handle;
     mem_buffer_t *buffer;
     int status;
@@ -144,10 +151,19 @@ static int connection_send(void *handle, const void *data, size_t length) {
     /* CNet admission never calls the observer inline. */
     index = (connection->write_head + connection->write_count) %
             connection->owner->config.pending_write_limit;
-    connection->writes[index] = length;
+    connection->writes[index] = (p2p_cnet_write_t){length, complete, context};
     connection->write_count++;
     connection->pending_bytes += length;
     return P2P_OK;
+}
+
+static int connection_send(void *handle, const void *data, size_t length) {
+    return connection_send_completed(handle, data, length, NULL, NULL);
+}
+
+static int connection_pause(void *handle, int paused) {
+    p2p_cnet_connection_t *connection = handle;
+    return p2p_cnet_connection_pause(&connection->base, paused);
 }
 
 static void demand(p2p_cnet_connection_t *connection) {
@@ -219,16 +235,20 @@ static void on_receive(void *context, cnet_connection handle,
 
 static void on_send(void *context, cnet_connection handle, size_t length) {
     p2p_cnet_connection_t *connection = context;
+    p2p_cnet_write_t write;
     if (!same_handle(connection->handle, handle) || connection->terminal) return;
     if (!connection->write_count ||
-        connection->writes[connection->write_head] != length) {
+        connection->writes[connection->write_head].length != length) {
         fail(connection, P2P_ERR_PROTOCOL);
         return;
     }
+    write = connection->writes[connection->write_head];
     connection->write_head = (connection->write_head + 1) %
                             connection->owner->config.pending_write_limit;
     connection->write_count--;
     connection->pending_bytes -= length;
+    if (!connection->detached && write.complete)
+        write.complete(write.context, active(connection) ? P2P_OK : P2P_ERR_NETWORK);
     if (active(connection) && connection->callbacks.sent)
         connection->callbacks.sent(&connection->base, length,
                                     connection->callbacks.context);
@@ -255,12 +275,23 @@ static void on_state(void *context, cnet_connection handle,
         connection->base.is_connected = 0;
         connection->ready = 0;
         connection->receive_pending = 0;
-        connection->write_count = 0;
-        connection->pending_bytes = 0;
+
         if (!connection->error && error && error->status != SALTS_OK)
             connection->error = p2p_error(error->status);
         if (!connection->error && state == CNET_CONNECTION_FAILED)
             connection->error = P2P_ERR_NETWORK;
+        /* Detach each entry before invoking it: a terminal may destroy its
+         * peer/connection and suppress every remaining borrowed context. */
+        while (connection->write_count) {
+            p2p_cnet_write_t write = connection->writes[connection->write_head];
+            connection->write_head = (connection->write_head + 1) %
+                connection->owner->config.pending_write_limit;
+            connection->write_count--;
+            connection->pending_bytes -= write.length;
+            if (!connection->detached && write.complete)
+                write.complete(write.context, connection->error ?
+                    connection->error : P2P_ERR_NETWORK);
+        }
         if (!connection->detached && connection->callbacks.closed)
             connection->callbacks.closed(&connection->base, connection->error,
                                            connection->callbacks.context);
@@ -273,7 +304,7 @@ static p2p_cnet_connection_t *allocate_connection(p2p_cnet_owner_t *owner,
     if (owner->connection_count >= owner->config.client.connection_capacity) return NULL;
     connection = calloc(1, sizeof(*connection));
     if (!connection) return NULL;
-    connection->writes = calloc(owner->config.pending_write_limit, sizeof(size_t));
+    connection->writes = calloc(owner->config.pending_write_limit, sizeof(p2p_cnet_write_t));
     if (!connection->writes) { free(connection); return NULL; }
     connection->base.type = type;
     connection->base.is_connected = 1;
@@ -281,6 +312,8 @@ static p2p_cnet_connection_t *allocate_connection(p2p_cnet_owner_t *owner,
     connection->base.ops.close = connection_close;
     connection->base.ops.handle = connection;
     connection->base.ops.destroy = connection_destroy;
+    connection->base.ops.pause = connection_pause;
+    connection->base.ops.send_completed = connection_send_completed;
     connection->owner = owner;
     connection->send_hwm = owner->config.send_hwm_bytes;
     return connection;
@@ -309,7 +342,7 @@ int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
     if (!output) return P2P_ERR_INVALID_ARG;
     *output = NULL;
     if (!config || !config->send_hwm_bytes || !config->pending_write_limit ||
-        config->pending_write_limit > SIZE_MAX / sizeof(size_t) ||
+        config->pending_write_limit > SIZE_MAX / sizeof(p2p_cnet_write_t) ||
         !config->accept_budget || !config->stop_timeout_ms ||
         config->client.tls_io_buffer_bytes) return P2P_ERR_INVALID_ARG;
     owner = calloc(1, sizeof(*owner));
@@ -410,7 +443,7 @@ static void resume_connections(p2p_cnet_owner_t *owner) {
     for (p2p_cnet_connection_t *connection = owner->connections;
          connection; connection = connection->next) {
         if (active(connection) && !connection->paused && connection->paused_buffer) {
-            const uint8_t *bytes = mem_buffer_data(connection->paused_buffer);
+            const uint8_t *bytes = (const uint8_t *)mem_buffer_data(connection->paused_buffer);
             size_t length = mem_buffer_used(connection->paused_buffer);
             connection->paused_offset += deliver(connection,
                 bytes + connection->paused_offset, length - connection->paused_offset);

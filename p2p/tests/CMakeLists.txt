@@ -12,7 +12,7 @@ set(P2P_TESTS test_p2p)
 foreach(test_name ${P2P_TESTS})
   add_executable(${test_name} ${test_name}.c)
 
-  target_link_libraries(${test_name} PRIVATE p2p TurboUtils::Core
+  target_link_libraries(${test_name} PRIVATE p2p Salts::Platform TurboUtils::Core
                                              TurboNet::CoroNet TurboUtils::TinyTest
                                              TurboP2P::NoiseProtocol monocypher uthash)
 

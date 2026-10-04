@@ -41,17 +41,17 @@ p2p_file_t* p2p_file_find(p2p_node_t *node, const char *key) {
 
     if (!node || !key) return NULL;
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     /* Check local files */
     file = node->local_files;
     while (file) {
         if (strcmp(file->filename, key) == 0) {
-            turbo_mutex_unlock(&node->mutex);
+            salts_mutex_unlock(&node->mutex);
             return file;
         }
         file = file->next;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return NULL;
 }
@@ -61,9 +61,9 @@ void p2p_node_add_dht_file(p2p_node_t *node, p2p_file_t *file) {
         return;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     p2p_file_list_add(&node->dht_files, file);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 }
 
 int p2p_node_search_dht_files(p2p_node_t *node, const char *filename,
@@ -75,7 +75,7 @@ int p2p_node_search_dht_files(p2p_node_t *node, const char *filename,
         return -1;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     file = node->dht_files;
     while (file && count < max_results) {
         if (strcmp(file->filename, filename) == 0) {
@@ -83,7 +83,7 @@ int p2p_node_search_dht_files(p2p_node_t *node, const char *filename,
         }
         file = file->next;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return count;
 }
@@ -95,10 +95,10 @@ p2p_file_t *p2p_node_detach_dht_files(p2p_node_t *node) {
         return NULL;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     files = node->dht_files;
     node->dht_files = NULL;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     return files;
 }
