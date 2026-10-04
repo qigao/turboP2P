@@ -75,6 +75,13 @@ function(turbo_p2p_configure_noise_c)
     PRIVATE "${_noise_source}/src"
             "${_noise_source}/src/protocol")
   target_link_libraries(noise_protocol PRIVATE Salts::Platform monocypher)
+  # Noise-C's fingerprint helper uses private SHA-256 routines whose generic
+  # names collide with the crypto SDK. Namespace both definitions and callers
+  # inside this target without changing upstream sources or consumer headers.
+  target_compile_definitions(noise_protocol PRIVATE
+    sha256_reset=turbop2p_noise_sha256_reset
+    sha256_update=turbop2p_noise_sha256_update
+    sha256_finish=turbop2p_noise_sha256_finish)
   if(MSVC)
     target_compile_definitions(noise_protocol PRIVATE WIN32)
     target_compile_options(noise_protocol PRIVATE /wd4244 /wd4267)

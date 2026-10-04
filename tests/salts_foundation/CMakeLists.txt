@@ -114,6 +114,7 @@ add_subdirectory("${TURBOP2P_SOURCE_DIR}/tunnel" tunnel)
 # Compile the P2P security production closure before migrating its network owner.
 include(NoiseC)
 turbo_p2p_configure_noise_c()
+target_link_libraries(test_salts_sha256 PRIVATE TurboP2P::NoiseProtocol)
 add_library(p2p_security STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/crypto/p2p_crypto.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cookie.c"
@@ -202,12 +203,14 @@ add_test(NAME test_p2p_cnet_peer COMMAND test_p2p_cnet_peer)
 set_tests_properties(test_p2p_cnet_peer PROPERTIES TIMEOUT 60)
 
 # Production node network policy, routing handlers and explicit CNet owner.
-# Shared node state and file handlers are real; public loop/configuration stay legacy.
+# Shared node/configuration and file handlers are real; the public loop stays legacy.
 add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/croar" croar)
 add_library(p2p_node_core STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_state.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/file.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_file_api.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_security_api.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_peer_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/handlers_transfer.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/transfer.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/sender.c"
@@ -221,7 +224,7 @@ add_library(p2p_node_core STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia_rpc.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/vivaldi.c")
-target_link_libraries(p2p_node_core PUBLIC p2p_peer_core roaring)
+target_link_libraries(p2p_node_core PUBLIC p2p_peer_core roaring PRIVATE Salts::Crypto)
 if(NOT WIN32)
   target_link_libraries(p2p_node_core PUBLIC m)
 endif()
@@ -235,6 +238,11 @@ set_property(TARGET test_p2p_cnet_files PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_files PRIVATE p2p_node_core Salts::TinyTest)
 add_test(NAME test_p2p_cnet_files COMMAND test_p2p_cnet_files)
 set_tests_properties(test_p2p_cnet_files PROPERTIES TIMEOUT 60)
+add_executable(test_p2p_cnet_security_config "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_security_config.c")
+set_property(TARGET test_p2p_cnet_security_config PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_security_config PRIVATE p2p_node_core Salts::TinyTest)
+add_test(NAME test_p2p_cnet_security_config COMMAND test_p2p_cnet_security_config)
+set_tests_properties(test_p2p_cnet_security_config PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_cnet_node PRIVATE P2P_NODE_TEST_WRAP)
   target_link_options(test_p2p_cnet_node PRIVATE "-Wl,--wrap=cnet_client_stop")

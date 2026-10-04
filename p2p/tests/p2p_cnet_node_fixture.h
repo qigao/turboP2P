@@ -16,7 +16,7 @@
 
 enum { TEST_WAIT_MS = 3000 };
 #ifndef TEST_SEND_BYTES
-#define TEST_SEND_BYTES 8192
+#define TEST_SEND_BYTES (128 * 1024)
 #endif
 typedef struct endpoint_s endpoint_t;
 struct endpoint_s {
@@ -34,8 +34,8 @@ struct endpoint_s {
 };
 typedef struct { endpoint_t client, server; } pair_t;
 
-/* Only credential configuration/provider callbacks are fixtures. Node state,
- * transfer manager, networking and all protocol handlers are production. */
+/* Only credential/key provider callbacks are fixtures. State construction,
+ * security configuration, transfer and network handlers are production. */
 static int verify(void *context, const uint8_t remote_key[32], const uint8_t binding[32],
     const uint8_t *credential, size_t length, uint64_t now_ms,
     p2p_authenticated_identity_v2_t *identity) {
@@ -47,6 +47,16 @@ static int verify(void *context, const uint8_t remote_key[32], const uint8_t bin
         memcmp(remote_key, endpoint->remote->public_key, 32) ||
         memcmp(credential, remote_key, 32)) return P2P_ERR_UNTRUSTED_IDENTITY;
     *identity = endpoint->remote->expected_identity;
+    return P2P_OK;
+}
+static int build_credential(void *context, const uint8_t local_key[32],
+    uint8_t *output, size_t capacity, size_t *length,
+    p2p_authenticated_identity_v2_t *identity) {
+    endpoint_t *endpoint = context;
+    if (capacity < 32) return P2P_ERR_RESOURCE_EXHAUSTED;
+    memcpy(output, local_key, 32);
+    *length = 32;
+    *identity = endpoint->expected_identity;
     return P2P_OK;
 }
 static int public_key(void *context, uint8_t output[32]) {
@@ -69,7 +79,7 @@ static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
     crypto_x25519(output, endpoint->secret, remote);
     return crypto_verify32(output, zero) ? P2P_OK : P2P_ERR_CRYPTO;
 }
-static void init_node(endpoint_t *endpoint, int number, int blocking) {
+static void init_key_node(endpoint_t *endpoint, int number, int blocking) {
     p2p_node_t *node = endpoint->node = p2p_node_state_create("127.0.0.1", 0);
     p2p_blocking_private_key_provider_v4_t provider = {0};
     check_not_null(node);
@@ -79,6 +89,7 @@ static void init_node(endpoint_t *endpoint, int number, int blocking) {
     atomic_init(&endpoint->released, 1);
     endpoint->secret[0] = (uint8_t)number;
     crypto_x25519_public_key(endpoint->public_key, endpoint->secret);
+    memset(&endpoint->expected_identity, number, sizeof(endpoint->expected_identity));
     if (blocking) {
         provider.struct_size = sizeof(provider);
         provider.get_public_key = public_key;
@@ -87,38 +98,35 @@ static void init_node(endpoint_t *endpoint, int number, int blocking) {
         provider.executor_workers = 1;
         provider.executor_capacity = 4;
         provider.operation_timeout_ms = TEST_WAIT_MS;
-        check_equal(P2P_OK, p2p_crypto_identity_from_blocking_provider(
-            &node->crypto.identity, &provider, endpoint->public_key));
-        node->private_key_executor = p2p_private_key_executor_create_with_notify(node, &provider, NULL);
-        check_not_null(node->private_key_executor);
-    } else check_equal(P2P_OK, p2p_crypto_identity_from_secret(&node->crypto.identity, endpoint->secret));
-    memcpy(node->local_credential, endpoint->public_key, 32);
-    node->local_credential_len = 32;
-    memset(&node->local_authenticated_identity, number, sizeof(node->local_authenticated_identity));
-    endpoint->expected_identity = node->local_authenticated_identity;
-    node->security_configured = 1;
-    node->security_config.handshake_timeout_ms = TEST_WAIT_MS;
-    node->security_config.ready_timeout_ms = TEST_WAIT_MS;
-    node->security_config.handshake_frame_limit = P2P_SECURITY_HANDSHAKE_FRAME_MAX;
-    node->security_config.credential_limit = P2P_SECURITY_CREDENTIAL_MAX;
-    node->security_config.send_hwm_bytes = TEST_SEND_BYTES;
-    node->security_config.node_send_budget_bytes = TEST_SEND_BYTES * 4;
-    node->security_config.session_max_age_ms = 60000;
-    node->security_config.session_max_bytes_per_direction = TEST_SEND_BYTES;
-    node->security_config.identity_provider.verify_remote_credential = verify;
-    node->security_config.identity_provider.context = endpoint;
-    memset(node->security_config.network_id_hash, 9, 32);
-    strcpy(node->ip, "127.0.0.1");
-    node->security_config.cookie_gate_limit = 16;
-    node->security_config.cookie_lifetime_ms = TEST_WAIT_MS;
-    node->security_config.cookie_key_rotation_ms = TEST_WAIT_MS * 2;
-    node->security_config.source_admission_burst = 16;
-    node->security_config.source_admission_refill_per_second = 1;
-    node->security_config.source_admission_bucket_limit = 16;
-    memset(node->cookie_master_secret, number, 32);
-    memcpy(node->id, node->local_authenticated_identity.routing_id, sizeof(node->id));
-    vivaldi_init(&node->coord);
-    memcpy(node->kad_dht->routing->local_id.bytes, node->id, sizeof(node->id));
+        check_equal(P2P_OK, p2p_node_set_blocking_private_key_provider_v4(node, &provider));
+        /* Configuration's synchronous ownership self-test is not handshake work. */
+        check_equal(1, atomic_load(&endpoint->calls));
+        atomic_store(&endpoint->calls, 0);
+    } else check_equal(P2P_OK, p2p_node_set_private_key(node, endpoint->secret));
+
+}
+static void init_node(endpoint_t *endpoint, int number, int blocking) {
+    p2p_security_config_v2_t security = {0};
+    init_key_node(endpoint, number, blocking);
+    p2p_node_t *node = endpoint->node;
+    security.struct_size = sizeof(security);
+    security.handshake_timeout_ms = TEST_WAIT_MS;
+    security.ready_timeout_ms = TEST_WAIT_MS;
+    security.send_hwm_bytes = TEST_SEND_BYTES;
+    security.node_send_budget_bytes = TEST_SEND_BYTES * 4;
+    security.session_max_age_ms = 60000;
+    security.session_max_bytes_per_direction = TEST_SEND_BYTES;
+    security.identity_provider.build_local_credential = build_credential;
+    security.identity_provider.verify_remote_credential = verify;
+    security.identity_provider.context = endpoint;
+    memset(security.network_id_hash, 9, 32);
+    security.cookie_gate_limit = 16;
+    security.cookie_lifetime_ms = TEST_WAIT_MS;
+    security.cookie_key_rotation_ms = TEST_WAIT_MS * 2;
+    security.source_admission_burst = 16;
+    security.source_admission_refill_per_second = 1;
+    security.source_admission_bucket_limit = 16;
+    check_equal(P2P_OK, p2p_node_configure_security_v2(node, &security));
 }
 static p2p_cnet_config_t config(size_t receive_bytes) {
     p2p_cnet_config_t value = {0};
@@ -173,16 +181,17 @@ static void on_message(p2p_node_t *node, p2p_peer_t *peer,
     endpoint->received_len = length;
     endpoint->messages++;
 }
-static void init_endpoint(endpoint_t *endpoint, int number, size_t receive_bytes, int blocking) {
+static void start_endpoint(endpoint_t *endpoint, size_t receive_bytes) {
     p2p_cnet_config_t transport = config(receive_bytes);
-    init_node(endpoint, number, blocking);
-    endpoint->node->on_peer_connected = on_connected;
-    endpoint->node->on_peer_disconnected = on_disconnected;
-    endpoint->node->peer_user_data = endpoint;
-    endpoint->node->on_message = on_message;
+    p2p_set_peer_callbacks(endpoint->node, on_connected, on_disconnected, endpoint);
+    p2p_set_message_handler(endpoint->node, on_message, endpoint);
     check_equal(P2P_OK, p2p_node_cnet_create(endpoint->node, &transport, &endpoint->owner));
     check_equal(P2P_OK, p2p_node_cnet_listen(endpoint->owner));
     check_true(endpoint->node->port > 0);
+}
+static void init_endpoint(endpoint_t *endpoint, int number, size_t receive_bytes, int blocking) {
+    init_node(endpoint, number, blocking);
+    start_endpoint(endpoint, receive_bytes);
 }
 static void setup(pair_t *pair, size_t receive_bytes, int blocking) {
     pair->client.remote = &pair->server;

@@ -56,6 +56,23 @@ static int pending_gates(p2p_node_t *node, const char *ip, size_t *total,
 
 static const p2p_node_network_ops_t network_ops = {connect_peer, pending_gates};
 
+static void cookie_status_locked(const p2p_node_t *node, p2p_node_cookie_status_t *output) {
+    const p2p_node_cnet_t *owner = node->network_context;
+    p2p_cnet_admission_stats_t stats;
+    p2p_cnet_admission_stats_locked(owner->admission, &stats);
+    output->active = stats.active;
+    output->challenges_issued = stats.challenges_issued;
+    output->verifications_succeeded = stats.verifications_succeeded;
+}
+
+static void stage_completed_locked(p2p_cnet_admission_stage_t stage,
+    uint64_t started_ms, uint64_t completed_ms, void *context) {
+    p2p_node_cnet_t *owner = context;
+    p2p_node_record_handshake_latency_locked(owner->node, P2P_SECURITY_ROLE_RESPONDER,
+        stage == P2P_CNET_ADMISSION_PREFACE ? P2P_SECURITY_LATENCY_PREFACE : P2P_SECURITY_LATENCY_COOKIE,
+        started_ms, completed_ms);
+}
+
 static int capacity_locked(p2p_node_t *node, const char *ip) {
     p2p_security_rejection_reason_v2_t reason =
         p2p_node_pending_peer_rejection_locked(node, ip);
@@ -151,13 +168,15 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     p2p_node_cnet_t **output) {
     p2p_node_cnet_t *owner;
     p2p_cnet_admission_config_t policy = {0};
-    p2p_cnet_admission_callbacks_t callbacks = {admit, promote, rejected, NULL};
+    p2p_cnet_admission_callbacks_t callbacks = {
+        admit, promote, rejected, NULL, stage_completed_locked};
     int result;
     if (!node || !config || !output) return P2P_ERR_INVALID_ARG;
     *output = NULL;
     if (node->ctx || node->server || node->gossip_timer || node->network_ops || node->network_context ||
         node->peers_table || node->dht_lookups || node->active_cookie_gates ||
         node->reserved_send_capacity_bytes || !node->kad_dht || !node->mutex ||
+        !node->transfers || node->transfers->closing ||
         (node->private_key_executor && p2p_private_key_executor_is_closing(node->private_key_executor)))
         return P2P_ERR_INVALID_STATE;
     if (!node->security_configured) return P2P_ERR_AUTH_REQUIRED;
@@ -166,6 +185,7 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
         !node->security_config.source_admission_bucket_limit ||
         node->security_config.source_admission_bucket_limit > P2P_SECURITY_SOURCE_ADMISSION_BUCKET_LIMIT ||
         node->security_config.cookie_gate_limit > P2P_SECURITY_COOKIE_GATE_LIMIT_MAX ||
+        node->security_config.send_hwm_bytes > config->send_hwm_bytes ||
         node->security_config.node_send_budget_bytes < node->security_config.send_hwm_bytes)
         return P2P_ERR_INVALID_ARG;
     owner = calloc(1, sizeof(*owner));
@@ -181,6 +201,7 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     policy.handshake_timeout_ms = node->security_config.handshake_timeout_ms;
     policy.cookie_lifetime_ms = node->security_config.cookie_lifetime_ms;
     policy.cookie_key_rotation_ms = node->security_config.cookie_key_rotation_ms;
+    policy.status_mutex = &node->mutex;
     memcpy(policy.network_id_hash, node->security_config.network_id_hash, sizeof(policy.network_id_hash));
     memcpy(policy.cookie_master_secret, node->cookie_master_secret, sizeof(policy.cookie_master_secret));
     callbacks.context = owner;
@@ -192,8 +213,11 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
         free(owner);
         return result;
     }
+    salts_mutex_lock(&node->mutex);
     node->network_ops = &network_ops;
     node->network_context = owner;
+    node->query_cookie_status_locked = cookie_status_locked;
+    salts_mutex_unlock(&node->mutex);
     owner->maintenance_ms = salts_monotonic_ms();
     *output = owner;
     return P2P_OK;
@@ -320,6 +344,17 @@ int p2p_node_cnet_destroy(p2p_node_cnet_t *owner) {
     if (result != P2P_OK) return result;
     result = p2p_cnet_owner_destroy(owner->transport);
     if (result != P2P_OK) return result;
+    /* Transfer the final, quiescent counters before releasing their owner.
+     * A concurrent status reader holds this same mutex and cannot observe a
+     * retired query target. No live counter mirror exists during operation. */
+    salts_mutex_lock(&owner->node->mutex);
+    p2p_node_cookie_status_t final_status;
+    cookie_status_locked(owner->node, &final_status);
+    owner->node->active_cookie_gates = final_status.active;
+    owner->node->cookie_challenges_issued = final_status.challenges_issued;
+    owner->node->cookie_verifications_succeeded = final_status.verifications_succeeded;
+    owner->node->query_cookie_status_locked = p2p_node_saved_cookie_status_locked;
+    salts_mutex_unlock(&owner->node->mutex);
     result = p2p_cnet_admission_destroy(owner->admission);
     if (result != P2P_OK) return result;
     owner->node->network_ops = NULL;

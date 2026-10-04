@@ -429,6 +429,11 @@ typedef struct p2p_download_s {
 } p2p_download_t;
 
 typedef struct p2p_node_network_ops_s p2p_node_network_ops_t;
+typedef struct {
+  size_t active;
+  uint64_t challenges_issued;
+  uint64_t verifications_succeeded;
+} p2p_node_cookie_status_t;
 
 struct p2p_node_s {
   char ip[P2P_MAX_IP];
@@ -447,6 +452,11 @@ struct p2p_node_s {
     p2p_identity_t identity;
   } crypto;
   p2p_private_key_executor_t *private_key_executor;
+  /* Constructor-selected factory and status source; no backend inference.
+   * The status binding and its source are protected by node->mutex. */
+  p2p_private_key_executor_t *(*create_private_key_executor)(p2p_node_t *,
+      const p2p_blocking_private_key_provider_v4_t *);
+  void (*query_cookie_status_locked)(const p2p_node_t *, p2p_node_cookie_status_t *);
   p2p_security_config_v2_t security_config;
   p2p_authenticated_identity_v2_t local_authenticated_identity;
   uint8_t local_credential[P2P_SECURITY_CREDENTIAL_MAX];

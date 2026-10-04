@@ -6,6 +6,7 @@
 #include "node.h"
 #include "node_network.h"
 #include "node_state.h"
+#include "../security/p2p_private_key_executor.h"
 #include "../protocol/handlers.h"
 #include "peer.h"
 #include "peer_coronet.h"
@@ -73,6 +74,7 @@ p2p_node_t* p2p_node_create(const char *ip, int port) {
         return NULL;
     }
     node->network_ops = &node_coronet_ops;
+    node->create_private_key_executor = p2p_private_key_executor_create;
     return node;
 }
 

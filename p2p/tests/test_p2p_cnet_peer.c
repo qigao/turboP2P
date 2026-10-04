@@ -209,7 +209,7 @@ static int promote(const cnet_stream_peer *source, const uint8_t preface[44],
 static void setup(pair_t *pair, size_t receive_bytes, int blocking) {
     p2p_cnet_config_t transport = config(receive_bytes);
     p2p_cnet_admission_config_t policy = {0};
-    p2p_cnet_admission_callbacks_t events = {admit, promote, NULL, &pair->server};
+    p2p_cnet_admission_callbacks_t events = {admit, promote, NULL, &pair->server, NULL};
     cnet_stream_peer remote;
     pair->client.remote = &pair->server;
     pair->server.remote = &pair->client;
