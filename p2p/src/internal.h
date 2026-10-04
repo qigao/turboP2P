@@ -37,7 +37,9 @@
 #include "uthash.h"
 #include "crypto/p2p_crypto.h"
 #include "dht/kademlia.h"
-#include <turbo_thread.h>
+#include <salts/thread.h>
+/* Opaque legacy timer; only the CoroNet node owner uses it. */
+typedef struct turbo_native_timer_s turbo_timer_t;
 typedef struct turbo_stream_listener_s turbo_stream_listener_t;
 typedef struct p2p_private_key_executor_s p2p_private_key_executor_t;
 typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
@@ -351,6 +353,10 @@ struct p2p_peer_s {
   p2p_noise_handshake_t *handshake;
   p2p_private_key_operation_t *private_key_operation;
   uint64_t handshake_generation;
+  uint64_t security_send_generation;
+  size_t security_send_bytes;
+  int security_send_action;
+  int processing_input;
   uint8_t remote_public_key[P2P_KEY_SIZE];
   int remote_public_key_ready;
   uint8_t remote_credential[P2P_SECURITY_CREDENTIAL_MAX];
@@ -474,7 +480,7 @@ struct p2p_node_s {
   p2p_dht_lookup_t *dht_lookups;
   p2p_connect_suppression_t *connect_suppressions;
   vivaldi_coord_t coord;
-  turbo_mutex_t mutex;
+  salts_mutex_t mutex;
 };
 
 /* =============================================================================
@@ -551,7 +557,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer);
 void p2p_node_dispatch_message(p2p_node_t *node, p2p_peer_t *peer, p2p_message_t *msg);
 
 void p2p_destroy_clean(p2p_node_t *node);
-void p2p_peer_set_id(p2p_peer_t *peer, const uint8_t *id);
+void p2p_peer_set_id(p2p_peer_t *peer, const p2p_id_t id);
 p2p_file_t* p2p_file_find_by_id(p2p_file_t *list, const uint8_t *id);
 p2p_file_t* p2p_node_find_local_file_by_id(p2p_node_t *node, const uint8_t *id);
 p2p_file_t* p2p_node_find_local_file_by_id_locked(p2p_node_t *node, const uint8_t *id);

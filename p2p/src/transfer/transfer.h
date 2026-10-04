@@ -6,6 +6,7 @@
 #include "bitmap.h"
 
 #include <platform.h>
+#include <turbo_thread.h>
 #include <stdio.h>
 
 /* Compatibility defines for transfer state */

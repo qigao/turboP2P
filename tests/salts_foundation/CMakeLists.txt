@@ -185,3 +185,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(test_p2p_key_worker PRIVATE
     "-Wl,--wrap=salts_threadpool_try_submit_task")
 endif()
+
+# Compile the actual peer, codec and node-bound executor with CNet. Test doubles
+# provide only node policy/events; no peer, crypto or transport implementation.
+add_library(p2p_peer_core STATIC
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/peer.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/peer_cnet.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/message.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_private_key_executor.c")
+target_include_directories(p2p_peer_core PUBLIC "${TURBOP2P_SOURCE_DIR}/vendor/uthash/src")
+target_link_libraries(p2p_peer_core PUBLIC p2p_cnet_transport Salts::Concurrency)
+add_executable(test_p2p_cnet_peer "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_peer.c")
+set_property(TARGET test_p2p_cnet_peer PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_peer PRIVATE p2p_peer_core Salts::TinyTest)
+add_test(NAME test_p2p_cnet_peer COMMAND test_p2p_cnet_peer)
+set_tests_properties(test_p2p_cnet_peer PROPERTIES TIMEOUT 60)

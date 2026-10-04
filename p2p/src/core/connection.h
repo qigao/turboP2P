@@ -10,6 +10,7 @@
 
 /* Forward declarations */
 typedef struct p2p_connection_s p2p_connection_t;
+typedef void (*p2p_send_complete_fn)(void *context, int status);
 
 /* Connection types */
 typedef enum {
@@ -25,6 +26,9 @@ typedef struct {
     void *handle;
     /* Optional asynchronous owner: detach callbacks and reclaim after quiescence. */
     void (*destroy)(void *handle);
+    int (*pause)(void *handle, int paused);
+    int (*send_completed)(void *handle, const void *data, size_t len,
+                          p2p_send_complete_fn complete, void *context);
 } p2p_conn_ops_t;
 
 /* Unified connection structure */
@@ -42,5 +46,13 @@ void p2p_connection_destroy(p2p_connection_t *conn);
 /* Connection operations */
 int p2p_connection_send(p2p_connection_t *conn, const void *data, size_t len);
 void p2p_connection_close(p2p_connection_t *conn);
+int p2p_connection_pause(p2p_connection_t *conn, int paused);
+/* Copies bytes before return. Rejection produces no completion; admission
+ * produces one continuation: CNet waits for the full-write terminal; the
+ * explicit CoroNet adapter preserves its inline admission-based continuation.
+ * Destroy detaches pending completions together with other protocol callbacks.
+ * Context is borrowed until completion or destroy. All calls are owner-thread. */
+int p2p_connection_send_completed(p2p_connection_t *conn, const void *data,
+    size_t len, p2p_send_complete_fn complete, void *context);
 
 #endif /* P2P_CONNECTION_H */

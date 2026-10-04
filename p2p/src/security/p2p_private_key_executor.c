@@ -1,21 +1,7 @@
 #include "p2p_private_key_executor.h"
 #include "../core/peer.h"
 #include "../internal.h"
-#include <CoroNet/turbo_coro_context.h>
 #include <stdlib.h>
-
-static void executor_completion_post(void *arg1, void *arg2) {
-    (void)arg2;
-    /* The node outlives its context. A delayed wake consults its current
-     * executor, never a replaced executor or a freed operation pointer. */
-    p2p_private_key_executor_pump(arg1);
-}
-
-static int executor_notify(void *context) {
-    p2p_node_t *node = context;
-    return coro_post(node->ctx, executor_completion_post, node, NULL) == 0 ?
-        P2P_OK : P2P_ERR_RESOURCE_EXHAUSTED;
-}
 
 static void executor_complete(p2p_key_work_t *work,
     const p2p_key_result_t *result, void *context) {
@@ -23,7 +9,7 @@ static void executor_complete(p2p_key_work_t *work,
     p2p_peer_t *peer = operation->peer;
     p2p_node_t *node = operation->node;
     int was_current = 0;
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (peer->private_key_operation == operation && operation->work == work) {
         peer->private_key_operation = NULL;
         was_current = 1;
@@ -31,21 +17,22 @@ static void executor_complete(p2p_key_work_t *work,
     operation->result = result->status;
     operation->output = result->output;
     operation->output_len = result->output_len;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     p2p_peer_complete_private_key_operation(operation, was_current);
     p2p_peer_release(peer);
     p2p_crypto_wipe(operation, sizeof(*operation));
     free(operation);
 }
 
-p2p_private_key_executor_t *p2p_private_key_executor_create(
-    p2p_node_t *node, const p2p_blocking_private_key_provider_v4_t *provider) {
+p2p_private_key_executor_t *p2p_private_key_executor_create_with_notify(
+    p2p_node_t *node, const p2p_blocking_private_key_provider_v4_t *provider,
+    p2p_key_notify_fn notify) {
     p2p_private_key_executor_t *executor;
     p2p_private_key_executor_status_v4_t status;
     if (!node) return NULL;
     executor = calloc(1, sizeof(*executor));
     if (!executor) return NULL;
-    if (p2p_key_worker_create(provider, executor_notify, node, &executor->worker) != P2P_OK) {
+    if (p2p_key_worker_create(provider, notify, node, &executor->worker) != P2P_OK) {
         free(executor);
         return NULL;
     }
@@ -71,11 +58,11 @@ int p2p_private_key_executor_submit(p2p_peer_t *peer,
     if (p2p_private_key_executor_is_closing(executor)) return P2P_ERR_INVALID_STATE;
     operation = calloc(1, sizeof(*operation));
     if (!operation) return P2P_ERR_NO_MEM;
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     if (p2p_private_key_executor_is_closing(executor) ||
         peer->private_key_operation || !p2p_peer_hold_locked(peer)) {
         executor->rejected++;
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         free(operation);
         return P2P_ERR_RESOURCE_EXHAUSTED;
     }
@@ -93,7 +80,7 @@ int p2p_private_key_executor_submit(p2p_peer_t *peer,
         operation->deadline_ms = p2p_key_work_deadline(operation->work);
         peer->private_key_operation = operation;
     }
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (result != P2P_OK) {
         p2p_peer_release(peer);
         p2p_crypto_wipe(operation, sizeof(*operation));
@@ -106,12 +93,12 @@ void p2p_private_key_executor_cancel_peer(p2p_peer_t *peer) {
     void (*request_cancel)(void *) = NULL;
     void *context = NULL;
     if (!peer || !peer->node) return;
-    turbo_mutex_lock(&peer->node->mutex);
+    salts_mutex_lock(&peer->node->mutex);
     if (peer->private_key_operation && p2p_key_work_cancel(peer->private_key_operation->work)) {
         request_cancel = peer->private_key_operation->executor->provider.request_cancel;
         context = peer->private_key_operation->executor->provider.context;
     }
-    turbo_mutex_unlock(&peer->node->mutex);
+    salts_mutex_unlock(&peer->node->mutex);
     if (request_cancel) request_cancel(context);
 }
 

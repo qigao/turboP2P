@@ -21,6 +21,7 @@
 #include <noise/protocol.h>
 #include "p2p.h"
 #include "internal.h"
+#include "../src/core/peer_coronet.h"
 #include "protocol/message.h"
 #include "security/p2p_cookie.h"
 #include "security/p2p_private_key_executor.h"
@@ -399,7 +400,7 @@ static void test_p2p_security_status_v3_is_atomic_bounded_and_compatible(void) {
                  p2p_node_get_security_status_v3(node, &status_v3));
     check_int_eq(P2P_OK, p2p_test_configure_pinned(nodes, 1));
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     node->security_rejection_counts[P2P_SECURITY_REJECTION_HANDSHAKE_CRYPTO] =
         7U;
     node->security_handshake_latency[P2P_SECURITY_ROLE_INITIATOR]
@@ -420,7 +421,7 @@ static void test_p2p_security_status_v3_is_atomic_bounded_and_compatible(void) {
     node->security_handshake_latency[P2P_SECURITY_ROLE_INITIATOR]
                                     [P2P_SECURITY_LATENCY_NOISE]
                                         .buckets[4] = 1U;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     status_v2.struct_size = sizeof(status_v2);
     check_int_eq(P2P_OK,
@@ -513,11 +514,11 @@ static void test_p2p_security_revalidation_evicts_revoked_session(void) {
     memcpy(peer->channel_binding, channel_binding, sizeof(channel_binding));
     peer->authenticated_identity = identity;
     memcpy(peer->id, identity.routing_id, P2P_HASH_SIZE);
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     p2p_node_add_peer_locked(test_node, peer);
     peer->counted = 1;
     test_node->peer_count++;
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
 
     result.struct_size = sizeof(result);
     check_int_eq(P2P_OK,
@@ -1803,12 +1804,12 @@ void test_p2p_peer_stream_metrics_are_bounded_and_read_only(void) {
     check_false(metrics.is_fresh);
 
     if (sent_ms > 0) {
-        turbo_mutex_lock(&test_node->mutex);
+        salts_mutex_lock(&test_node->mutex);
         peer->is_connected = 1;
         peer->state = P2P_PEER_STATE_CONNECTED;
         peer->outstanding_ping_ms = sent_ms;
         check(p2p_peer_record_rtt_sample_locked(peer, sent_ms, now_ms));
-        turbo_mutex_unlock(&test_node->mutex);
+        salts_mutex_unlock(&test_node->mutex);
 
         check_int_eq(P2P_OK, p2p_peer_get_stream_metrics(peer, &metrics));
         check_uint_eq((uint32_t)(now_ms - sent_ms), metrics.srtt_ms);
@@ -1817,10 +1818,10 @@ void test_p2p_peer_stream_metrics_are_bounded_and_read_only(void) {
         check(metrics.sample_age_ms <= P2P_RTT_METRIC_FRESH_MS);
         check(metrics.is_fresh);
 
-        turbo_mutex_lock(&test_node->mutex);
+        salts_mutex_lock(&test_node->mutex);
         peer->is_connected = 0;
         peer->state = P2P_PEER_STATE_DISCONNECTED;
-        turbo_mutex_unlock(&test_node->mutex);
+        salts_mutex_unlock(&test_node->mutex);
         check_int_eq(P2P_OK, p2p_peer_get_stream_metrics(peer, &metrics));
         check_false(metrics.is_fresh);
     }
@@ -1940,18 +1941,18 @@ void test_p2p_get_peer_info_ex_preserves_ipv6(void) {
     check_not_null(peer);
     peer->is_connected = 1;
 
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     peer_table_add(&test_node->peers_table, peer);
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
 
     check_int_eq(P2P_OK, p2p_get_peer_info_ex(test_node, 0, &info));
     check_str_eq(ipv6, info.ip);
     check_int_eq(9999, info.port);
     check_int_eq(1, info.is_connected);
 
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     peer_table_remove(&test_node->peers_table, ipv6, 9999);
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
     p2p_peer_destroy(peer);
 }
 
@@ -2093,9 +2094,9 @@ static void p2p_test_disconnect_all_peers(p2p_node_t *node) {
     }
 
     for (size_t i = 0; i < count; i++) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         peers[i]->keep_entry = 0;
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         p2p_disconnect_peer(peers[i]);
         p2p_peer_release(peers[i]);
     }
@@ -2109,9 +2110,9 @@ static int p2p_test_peer_table_size(p2p_node_t *node) {
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     count = peer_table_count(node->peers_table);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return count;
 }
 
@@ -2221,9 +2222,9 @@ static int p2p_test_lookup_count(p2p_node_t *node) {
         return 0;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     count = HASH_COUNT(node->dht_lookups);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     return count;
 }
 
@@ -2237,9 +2238,9 @@ static int p2p_test_route_exists(p2p_node_t *node, const char *ip, int port) {
     }
 
     p2p_endpoint_to_id(ip, port, &target);
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     closest = kademlia_find_node(node->kad_dht, &target, KADEMLIA_K);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     if (!closest) {
         return 0;
     }
@@ -2289,10 +2290,10 @@ void test_p2p_authenticated_duplicate_identity_keeps_single_peer(void) {
     check_not_null(peer2);
     memcpy(peer2->id, peer_id, sizeof(peer_id));
 
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     peer2->keep_entry = 1;
     p2p_node_add_peer_locked(test_node, peer2);
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
 
     check_int_eq(2, p2p_test_peer_table_size(test_node));
 
@@ -2305,10 +2306,10 @@ void test_p2p_authenticated_duplicate_identity_keeps_single_peer(void) {
     p2p_peer_release(connected[0]);
     free(connected);
 
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     check_ptr_eq(peer1, p2p_node_find_peer_by_endpoint_locked(test_node, "127.0.0.1", port1 + 1));
     check_null(p2p_node_find_peer_by_endpoint_locked(test_node, "127.0.0.1", port1 + 2));
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
 }
 
 void test_p2p_authenticated_duplicate_identity_uses_deterministic_direction(void) {
@@ -2800,13 +2801,13 @@ void test_p2p_two_nodes_real_connection(void) {
         check(stream_metrics.is_fresh);
         first_sample_count = stream_metrics.sample_count;
 
-        turbo_mutex_lock(&node2->mutex);
+        salts_mutex_lock(&node2->mutex);
         uint64_t probe_now_ms = turbo_hrtime() / 1000000U;
         metrics_peer->outstanding_ping_ms = 0;
         metrics_peer->last_ping_sent_ms = probe_now_ms > P2P_RTT_PROBE_INTERVAL_MS
             ? probe_now_ms - P2P_RTT_PROBE_INTERVAL_MS
             : 0;
-        turbo_mutex_unlock(&node2->mutex);
+        salts_mutex_unlock(&node2->mutex);
 
         check_not_null(node2->gossip_timer);
         if (node2->gossip_timer) {
@@ -2980,7 +2981,7 @@ static void test_p2p_cookie_gate_precedes_peer_allocation_and_expires(void) {
     check(server->reserved_send_capacity_bytes == 0);
     check(server->transport_send_reservations == 0);
 
-    turbo_mutex_lock(&server->mutex);
+    salts_mutex_lock(&server->mutex);
     for (size_t index = 0;
          index < server->security_config.cookie_gate_limit; ++index) {
         if (server->cookie_gates[index].state != P2P_COOKIE_GATE_FREE) {
@@ -2990,7 +2991,7 @@ static void test_p2p_cookie_gate_precedes_peer_allocation_and_expires(void) {
             break;
         }
     }
-    turbo_mutex_unlock(&server->mutex);
+    salts_mutex_unlock(&server->mutex);
 
     check(gate_aged);
     check_not_null(server->gossip_timer);
@@ -3067,9 +3068,9 @@ static void test_p2p_limits_pending_unauthenticated_peers(void) {
         return;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     capacity_available = p2p_node_pending_peer_capacity_available_locked(node);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     check(capacity_available);
 
     for (int i = 0; i < P2P_PENDING_PEER_LIMIT; i++) {
@@ -3080,14 +3081,14 @@ static void test_p2p_limits_pending_unauthenticated_peers(void) {
         }
         peer->state = P2P_PEER_STATE_HANDSHAKING;
         peer->connect_time = turbo_hrtime();
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         p2p_node_add_peer_locked(node, peer);
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     capacity_available = p2p_node_pending_peer_capacity_available_locked(node);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     check_false(capacity_available);
     check_int_eq(P2P_PENDING_PEER_LIMIT, p2p_test_peer_table_size(node));
 
@@ -3103,9 +3104,9 @@ static void test_p2p_limits_pending_peers_per_source_prefix(void) {
         p2p_peer_t *peer = p2p_peer_create(node, "192.0.2.10", 31000 + i);
         check_not_null(peer);
         peer->state = P2P_PEER_STATE_HANDSHAKING;
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         p2p_node_add_peer_locked(node, peer);
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
     for (int i = 0; i < P2P_PENDING_PEER_SOURCE_LIMIT; ++i) {
         char source_ip[P2P_MAX_IP];
@@ -3115,11 +3116,11 @@ static void test_p2p_limits_pending_peers_per_source_prefix(void) {
         peer = p2p_peer_create(node, source_ip, 32000 + i);
         check_not_null(peer);
         peer->state = P2P_PEER_STATE_HANDSHAKING;
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         p2p_node_add_peer_locked(node, peer);
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
     }
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     check_false(p2p_node_pending_peer_source_capacity_available_locked(
         node, "192.0.2.10"));
     check_true(p2p_node_pending_peer_source_capacity_available_locked(
@@ -3129,7 +3130,7 @@ static void test_p2p_limits_pending_peers_per_source_prefix(void) {
     check_true(p2p_node_pending_peer_source_capacity_available_locked(
         node, "2001:db8:1:3::1"));
     check_true(p2p_node_pending_peer_capacity_available_locked(node));
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     p2p_destroy(node);
 }
 
@@ -3142,7 +3143,7 @@ static void test_p2p_rate_limits_inbound_sources_with_bounded_buckets(void) {
     test_node->security_config.source_admission_refill_per_second = 1u;
     test_node->security_config.source_admission_bucket_limit = 2u;
 
-    turbo_mutex_lock(&test_node->mutex);
+    salts_mutex_lock(&test_node->mutex);
     check_int_eq(P2P_OK, p2p_node_source_admission_acquire_locked(
                               test_node, "192.0.2.10", 1000u));
     check_int_eq(P2P_OK, p2p_node_source_admission_acquire_locked(
@@ -3168,7 +3169,7 @@ static void test_p2p_rate_limits_inbound_sources_with_bounded_buckets(void) {
                      test_node, "2001:db8:1:3::1", 2000u));
     check_int_eq(P2P_OK, p2p_node_source_admission_acquire_locked(
                               test_node, "2001:db8:1:3::1", 4000u));
-    turbo_mutex_unlock(&test_node->mutex);
+    salts_mutex_unlock(&test_node->mutex);
     p2p_node_record_security_failure(test_node, P2P_SECURITY_STAGE_PREFACE,
                                      P2P_ERR_PROTOCOL);
     p2p_node_record_security_failure(
@@ -3495,12 +3496,12 @@ void test_p2p_dht_put_replicates_to_connected_peer(void) {
     for (int i = 0; i < 80; i++) {
         coro_context_run(p2p_get_loop(node1), TURBO_RUN_NOWAIT);
         coro_context_run(p2p_get_loop(node2), TURBO_RUN_NOWAIT);
-        turbo_mutex_lock(&node2->mutex);
+        salts_mutex_lock(&node2->mutex);
         if (kademlia_find_value(node2->kad_dht, &kkey, buf, &buf_len) == 0) {
-            turbo_mutex_unlock(&node2->mutex);
+            salts_mutex_unlock(&node2->mutex);
             break;
         }
-        turbo_mutex_unlock(&node2->mutex);
+        salts_mutex_unlock(&node2->mutex);
         buf_len = sizeof(buf);
         turbo_sleep_ms(50);
     }
@@ -3591,9 +3592,9 @@ void test_p2p_dht_put_reaches_discovered_peer(void) {
     for (int i = 0; i < 20; i++) {
         int node2_has_node3 = 0;
 
-        turbo_mutex_lock(&node2->mutex);
+        salts_mutex_lock(&node2->mutex);
         node2_has_node3 = p2p_test_routing_has_endpoint(node2, "127.0.0.1", port3);
-        turbo_mutex_unlock(&node2->mutex);
+        salts_mutex_unlock(&node2->mutex);
         if (node2_has_node3) {
             break;
         }
@@ -3604,9 +3605,9 @@ void test_p2p_dht_put_reaches_discovered_peer(void) {
         turbo_sleep_ms(50);
     }
 
-    turbo_mutex_lock(&node2->mutex);
+    salts_mutex_lock(&node2->mutex);
     check(p2p_test_routing_has_endpoint(node2, "127.0.0.1", port3));
-    turbo_mutex_unlock(&node2->mutex);
+    salts_mutex_unlock(&node2->mutex);
 
     loop1.node = node1;
     loop2.node = node2;
@@ -3623,9 +3624,9 @@ void test_p2p_dht_put_reaches_discovered_peer(void) {
 
     kad_id_from_data(key, strlen(key), &kkey);
     for (int i = 0; i < 40; i++) {
-        turbo_mutex_lock(&node3->mutex);
+        salts_mutex_lock(&node3->mutex);
         ret = kademlia_find_value(node3->kad_dht, &kkey, buf, &buf_len);
-        turbo_mutex_unlock(&node3->mutex);
+        salts_mutex_unlock(&node3->mutex);
         if (ret == 0) {
             found = 1;
             break;
@@ -3711,10 +3712,10 @@ void test_p2p_dht_get_handles_parallel_network_lookups(void) {
     kad_id_from_data(key1, strlen(key1), &kkey1);
     kad_id_from_data(key2, strlen(key2), &kkey2);
 
-    turbo_mutex_lock(&node3->mutex);
+    salts_mutex_lock(&node3->mutex);
     check_int_eq(0, kademlia_store(node3->kad_dht, &kkey1, value1, strlen(value1) + 1));
     check_int_eq(0, kademlia_store(node3->kad_dht, &kkey2, value2, strlen(value2) + 1));
-    turbo_mutex_unlock(&node3->mutex);
+    salts_mutex_unlock(&node3->mutex);
 
     lookup1 = p2p_dht_lookup_start(node1, kkey1.bytes, P2P_MSG_DHT_GET);
     lookup2 = p2p_dht_lookup_start(node1, kkey2.bytes, P2P_MSG_DHT_GET);
@@ -3730,7 +3731,7 @@ void test_p2p_dht_get_handles_parallel_network_lookups(void) {
         coro_context_run(p2p_get_loop(node2), TURBO_RUN_NOWAIT);
         coro_context_run(p2p_get_loop(node3), TURBO_RUN_NOWAIT);
 
-        turbo_mutex_lock(&node1->mutex);
+        salts_mutex_lock(&node1->mutex);
         ret = kademlia_find_value(node1->kad_dht, &kkey1, buf1, &buf1_len);
         if (ret != 0) {
             buf1_len = sizeof(buf1);
@@ -3741,7 +3742,7 @@ void test_p2p_dht_get_handles_parallel_network_lookups(void) {
         } else if (ret == 0) {
             ret = 0;
         }
-        turbo_mutex_unlock(&node1->mutex);
+        salts_mutex_unlock(&node1->mutex);
 
         if (ret == 0) {
             break;
@@ -3752,10 +3753,10 @@ void test_p2p_dht_get_handles_parallel_network_lookups(void) {
     check_str_eq(value1, buf1);
     check_str_eq(value2, buf2);
 
-    turbo_mutex_lock(&node1->mutex);
+    salts_mutex_lock(&node1->mutex);
     check_null(p2p_dht_lookup_find(node1, request_id1));
     check_null(p2p_dht_lookup_find(node1, request_id2));
-    turbo_mutex_unlock(&node1->mutex);
+    salts_mutex_unlock(&node1->mutex);
 
     p2p_test_shutdown_nodes(node1, node2, node3);
     p2p_destroy(node3);
@@ -3802,10 +3803,10 @@ void test_p2p_dht_response_matches_request_id(void) {
     lookup2->active_requests = 1;
     memcpy(lookup2->target, key2.bytes, KADEMLIA_ID_BYTES);
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     HASH_ADD(hh, node->dht_lookups, request_id, sizeof(lookup1->request_id), lookup1);
     HASH_ADD(hh, node->dht_lookups, request_id, sizeof(lookup2->request_id), lookup2);
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     p2p_message_init(&msg1, P2P_MSG_DHT_RESPONSE);
     msg1.header.request_id = 1002;
@@ -3826,24 +3827,24 @@ void test_p2p_dht_response_matches_request_id(void) {
     memcpy(msg2.payload.dht_response.data, value1, strlen(value1) + 1);
 
     check_int_eq(P2P_OK, p2p_handle_dht_response(node, peer, &msg1));
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     check_int_eq(1, HASH_COUNT(node->dht_lookups));
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     check_int_eq(P2P_OK, p2p_handle_dht_response(node, peer, &msg2));
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     check_int_eq(0, HASH_COUNT(node->dht_lookups));
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     check_int_eq(0, kademlia_find_value(node->kad_dht, &key1, buf, &buf_len));
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     check_str_eq(value1, buf);
 
     buf_len = sizeof(buf);
     memset(buf, 0, sizeof(buf));
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     check_int_eq(0, kademlia_find_value(node->kad_dht, &key2, buf, &buf_len));
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
     check_str_eq(value2, buf);
 
     p2p_peer_destroy(peer);
@@ -4352,11 +4353,11 @@ static void test_p2p_blocking_private_key_stale_generation_is_isolated(void) {
                               peer, NULL, 0, 2, 0));
 
     for (index = 0; index < P2P_TEST_PRIVATE_KEY_WAIT_ATTEMPTS; ++index) {
-        turbo_mutex_lock(&node->mutex);
+        salts_mutex_lock(&node->mutex);
         operation = peer->private_key_operation;
         worker_completed =
             operation && p2p_key_work_ready(operation->work);
-        turbo_mutex_unlock(&node->mutex);
+        salts_mutex_unlock(&node->mutex);
         if (worker_completed) {
             break;
         }
@@ -4367,13 +4368,13 @@ static void test_p2p_blocking_private_key_stale_generation_is_isolated(void) {
         goto cleanup;
     }
 
-    turbo_mutex_lock(&node->mutex);
+    salts_mutex_lock(&node->mutex);
     old_handshake = peer->handshake;
     peer->handshake = replacement_handshake;
     replacement_handshake = NULL;
     peer->handshake_generation++;
     replacement_generation = peer->handshake_generation;
-    turbo_mutex_unlock(&node->mutex);
+    salts_mutex_unlock(&node->mutex);
 
     p2p_private_key_executor_pump(node);
     status.struct_size = sizeof(status);

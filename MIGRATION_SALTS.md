@@ -432,3 +432,23 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 实际 peer 的 transport pause/send-terminal、node source policy/计时器、管理 agent/HTTP
 仍待后续迁移。根工程仍明确需要新旧 SDK；依赖继续 latest、re2c 继续共享缓存。回滚
 撤销本阶段即可，不变更公开 API、wire format、credential 或密钥存储格式。
+
+## 第二阶段 L：实际 peer 与 CNet 的握手接线
+
+**HIGH（事实，已修复于 CNet 内部路径）**：原 `peer.c` 在私钥任务开始/结束时将 `conn->ops.handle` 转成 `turbo_stream_t`；Noise 回复和 READY 的发送入队也被当作协议完成。CNet 使用独立句柄和延迟发送终态，这些假设会使状态提前推进，或把错误类型的对象传给 CoroNet。现在生产 `peer.c` 通过连接契约暂停/恢复接收，并在发送终态后推进 Cookie、Noise 步骤及 `ready_sent`。连接拒绝发送不触发完成；失败、关闭或超过当前握手期限的完成不能发布认证成功。
+
+**HIGH（事实，已修复）**：peer 在异步私钥操作时可能已缓存同一批输入的后续帧，仅恢复网络接收不能保证这些字节再次被处理。现在发送完成后先运行实际 peer 缓冲解析，再请求新输入；重入保护防止同步适配器完成时重复解析当前帧。测试控制 READY 的真实 CNet 发送完成，并模拟暂停前已在途的接收，确认缓存的 READY 和加密应用消息在没有新接收事件时也能被消费。认证回调内销毁 peer 时，解析器不会继续修改已经清空的缓冲。
+
+结构与状态归属：
+
+- `peer.c` 保留现有 Noise、凭证校验、READY、应用消息加解密和 peer 引用计数。`peer_coronet.c` 单独承载旧连接建立/接收/关闭回调，`peer_cnet.c` 负责实际 peer 的 CNet 出站连接和 verified-cookie 入站接线。
+- `p2p_conn_ops_t` 增加内部暂停和带完成的发送操作。CNet 的有界 write FIFO 保存长度及借用的完成上下文，成功只在完整写终态交付，关闭对尚未完成的写交付失败；destroy 同时摘除协议和发送完成回调。先出队再调用完成，允许完成中关闭或销毁连接。
+- peer 只允许一个待完成安全帧，记录握手 generation、后续动作和字节数。CNet 保留发送数据副本；peer 保留协议状态。发送失败关闭本代连接，不能重试已经推进 Noise/CipherState 的输出。
+- node-bound 私钥 executor 的创建入口现在显式接收 notifier。CNet 使用 NULL notifier 并由 owner 调用 pump；旧 `coro_post` 通知移至 `p2p_private_key_executor_coronet.c`。两者共享实际 peer lease、generation 校验及完成逻辑。
+- node mutex 的类型及所有初始化、获取、释放、销毁调用迁到 `Salts::Platform`；transfer 自身的旧 mutex 暂留，并显式包含自己的旧线程头文件。peer 的时间读取使用 Salts clock。
+
+选择薄适配器而非复制一套 CNet peer 状态机，是为了让凭证、READY 与消息解码只有一个实现。代价是根工程在迁移期间仍需新旧 SDK，CoroNet adapter 明确保留原有入队即继续的同步契约；它不是 CNet 的隐式后备实现。公开 API、Noise/应用 wire 字节、身份 provider 及签名算法未改变。回滚可撤销本阶段提交，无持久化数据转换。
+
+验证：基础工程首次编译真实 `peer.c`、`peer_cnet.c`、应用消息 codec 与 node-bound executor；新的 `test_p2p_cnet_peer` 包含 13 个场景：双向认证和加密消息、7 字节碎片、双边 v4 executor、凭证拒绝、READY 身份不匹配、销毁中的私钥任务、销毁前摘除 preface 完成、延迟 READY、已缓存尾部、迟到完成、发送入队拒绝、close/send 竞争及认证回调内销毁。节点准入策略、路由/事件通知是测试替身；peer、cookie gate、crypto、executor 和 CNet 均为生产源码。Linux Release 全部 **35/35 CTest 通过**；peer、transport、admission、worker 四个相关套件在 ASan/UBSan 下通过。仍设置 `detect_leaks=0`，不据此声称完成泄漏检测或 SDK 内部 sanitizer 验证。
+
+**MED（事实，剩余范围）**：本阶段没有切换公开 `p2p_create/start/get_loop` 的 node owner，也没有把完整 node 的限流、pending peer 配额、路由和维护循环接到 CNet。旧 CoroNet adapter、完整根工程及跨平台运行仍未验证。新 peer 接线属于未由公开构造器选择的内部路径；后续须接入 node owner 并完成这些验证，才能移除 legacy SDK 和宣布整个 P2P 迁移完成。
