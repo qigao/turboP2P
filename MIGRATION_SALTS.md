@@ -385,3 +385,50 @@ mandatory node policy、坏 preface/proof、promotion/peer 初始化失败、两
 private-key executor completion 和 timer 接到 CNet owner，再迁移管理 agent/HTTP。
 当前 gate API 为内部显式路径，未安装为公开接口，也未改变 `p2p_create/start/get_loop`；
 完整根工程以及 Windows/macOS/Android 运行时尚未验证。
+
+## 第二阶段 K：Salts 私钥 worker 与 owner completion
+
+**HIGH（事实）**：原 executor 同时持有 node/peer、线程池任务与 CoroNet post 引用。
+这使 CNet 无法直接复用阻塞私钥路径；仅替换线程池名称无法解决 worker、owner callback
+与 handshake 的释放顺序。本阶段把任务执行移到 `p2p_key_worker`，现有 node executor
+改为调用它的薄绑定，不保留第二套执行实现。
+
+worker 使用安装 SDK 的 `Salts::Concurrency` task/run/cancel/finalize 合同、Salts 时钟
+和互斥量。总容量包含 queued、running 和尚未由 owner 消费的结果；同一个 handshake
+不能同时执行两个任务。每次提交复制 credential payload，独占借用 handshake，保留
+调用方 generation。worker 只生成 Noise 帧；peer lease、generation 比较、协议推进、
+send admission 和最终 send completion 仍由 owner 负责。
+
+pool terminal 与 owner list 各持有一个 work 引用。finalize 发布结果后，owner 可以先
+处理结果并释放 peer/handshake，pool 引用仍保护尚未返回的通知回调；worker 不再访问
+该 peer/handshake。通知失败只增加计数，不能消费或丢失结果。每次 owner poll 处理数量
+受 operation capacity 限制，回调中递归 poll/stop/destroy 被拒绝。
+
+取消只设置标志，不提前释放 provider 正在使用的对象；适配层在离开 peer 锁后通知
+provider 取消。stop 关闭 admission，取消 queued 任务，等待 running provider 返回，
+随后在 owner 线程处理全部完成结果。provider 仍须遵守既有 v4 deadline/cancel 合同，
+不强杀线程。worker 执行前、执行后及 owner 消费时检查截止时间；迟到成功、取消和停止
+均清除输出，无法推进握手。
+
+旧 node 的 `coro_post` 现在只传递 node 唤醒，不再携带 operation 或 executor 指针。
+迟到唤醒查询 node 当前 executor；旧维护泵仍处理已持有的完成结果。旧 node 的维护周期
+为 5 秒，故不能删除正常唤醒而仅依赖维护计时器。CNet 路径明确选择无通知 callback，
+每轮 owner poll 调用 worker poll。两者共享同一个任务/完成实现，没有 backend 探测或
+运行时 fallback。现有 v4 status 直接读取 worker 的受锁快照；通知失败计数仍保留。
+
+验证范围：新增 13 个 worker 用例覆盖 payload 复制、owner-thread/唯一完成、通知失败、
+64/65 容量（包括未消费结果）、重复 handshake、provider 归属、generation、provider
+错误、取消、排队与迟到截止、queued/running stop、pool admission 失败，以及 owner
+已释放 context 而 pool notifier 尚未退出的交错。后者同时经 ASan/UBSan 检查。
+
+现有真实 CNet cookie/Noise 套件增加两个用例：阻塞私钥 provider 运行时仍可推进 CNet；
+断开后取消任务，迟到 completion 不发送帧。成功路径从 cookie admission 经 worker 生成
+Noise 输出，再经 CNet 完整发送才恢复接收。此套件共 22 个 Linux 用例；peer 协议驱动
+仍是 fixture，不替代实际 peer 的 credential/READY/node 验收。
+
+本地 Release 34/34 CTest 通过；worker 与 CNet transport 的 ASan/UBSan 套件通过，
+`detect_leaks=0` 且安装 SDK 未插桩。旧 node 绑定及旧综合测试已同步源码，但当前缺少
+legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归或跨平台资格通过。
+实际 peer 的 transport pause/send-terminal、node source policy/计时器、管理 agent/HTTP
+仍待后续迁移。根工程仍明确需要新旧 SDK；依赖继续 latest、re2c 继续共享缓存。回滚
+撤销本阶段即可，不变更公开 API、wire format、credential 或密钥存储格式。

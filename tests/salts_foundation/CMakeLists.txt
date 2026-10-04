@@ -117,11 +117,12 @@ turbo_p2p_configure_noise_c()
 add_library(p2p_security STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/crypto/p2p_crypto.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cookie.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_key_worker.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_noise_backend.c")
 target_include_directories(p2p_security PUBLIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src"
   "${TURBOP2P_SOURCE_DIR}/p2p/include")
-target_link_libraries(p2p_security PUBLIC Salts::Core Salts::Platform
+target_link_libraries(p2p_security PUBLIC Salts::Core Salts::Platform Salts::Concurrency
   OpenSSL::Crypto monocypher TurboP2P::NoiseProtocol)
 if(WIN32)
   target_link_libraries(p2p_security PUBLIC ws2_32)
@@ -171,4 +172,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_cnet_admission PRIVATE P2P_ADMISSION_TEST_WRAP)
   target_link_options(test_p2p_cnet_admission PRIVATE
     "-Wl,--wrap=cnet_client_adopt_accepted" "-Wl,--wrap=cnet_send_buffer")
+endif()
+
+add_executable(test_p2p_key_worker
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_key_worker.c")
+set_property(TARGET test_p2p_key_worker PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_key_worker PRIVATE p2p_security Salts::TinyTest)
+add_test(NAME test_p2p_key_worker COMMAND test_p2p_key_worker)
+set_tests_properties(test_p2p_key_worker PROPERTIES TIMEOUT 60)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_p2p_key_worker PRIVATE P2P_KEY_WORKER_TEST_WRAP)
+  target_link_options(test_p2p_key_worker PRIVATE
+    "-Wl,--wrap=salts_threadpool_try_submit_task")
 endif()
