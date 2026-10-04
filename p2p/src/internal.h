@@ -428,10 +428,15 @@ typedef struct p2p_download_s {
   struct p2p_download_s *next;
 } p2p_download_t;
 
+typedef struct p2p_node_network_ops_s p2p_node_network_ops_t;
+
 struct p2p_node_s {
   char ip[P2P_MAX_IP];
   int port;
   uint8_t id[P2P_DHT_KEY_SIZE];
+  const p2p_node_network_ops_t *network_ops;
+  void *network_context;
+  void (*file_message_handler)(p2p_node_t *, p2p_peer_t *, const p2p_message_t *);
   coro_context_t *ctx;
   turbo_stream_listener_t *server;
   p2p_peer_entry_t *peers_table;

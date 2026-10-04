@@ -12,7 +12,7 @@ static turbo_stream_kind_t peer_stream_kind_from_ip(const char *ip) {
 }
 
 
-int p2p_peer_connect(p2p_peer_t *peer) {
+int p2p_peer_connect_coronet(p2p_peer_t *peer) {
     int start = 0;
     int result = p2p_peer_prepare_connect(peer, &start);
     if (result != P2P_OK || !start) return result;

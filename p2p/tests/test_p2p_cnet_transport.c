@@ -594,9 +594,11 @@ static int secure_promote(const cnet_stream_peer *source,
     return P2P_OK;
 }
 
-static void secure_rejected(const cnet_stream_peer *source, int status, void *context) {
+static void secure_rejected(const cnet_stream_peer *source, int status,
+    p2p_cnet_rejection_origin_t origin, void *context) {
     secure_pair_t *pair = context;
     (void)source;
+    (void)origin;
     closed(NULL, status, &pair->server.transport);
 }
 

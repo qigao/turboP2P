@@ -44,26 +44,6 @@ static void p2p_set_manual_connect_suppression_locked(p2p_node_t *node,
     suppression->until_ms = until_ms;
 }
 
-static void p2p_clear_manual_connect_suppression_locked(p2p_node_t *node,
-                                                        const char *ip,
-                                                        int port) {
-    p2p_connect_suppression_t *suppression = NULL;
-    char key[96];
-
-    if (!node || !ip) {
-        return;
-    }
-
-    p2p_endpoint_to_key(key, sizeof(key), ip, port);
-    HASH_FIND_STR(node->connect_suppressions, key, suppression);
-    if (!suppression) {
-        return;
-    }
-
-    HASH_DEL(node->connect_suppressions, suppression);
-    free(suppression);
-}
-
 static void p2p_remove_peer_from_routing_locked(p2p_node_t *node, p2p_peer_t *peer) {
     if (!node || !node->kad_dht || !node->kad_dht->routing || !peer) {
         return;
@@ -143,79 +123,6 @@ static int p2p_send_dht_store_to_connected_peers(p2p_node_t *node,
     free(peers);
 
     return sent;
-}
-
-static p2p_peer_t *p2p_prepare_connect_peer_locked(p2p_node_t *node,
-                                                   const char *ip,
-                                                   int port,
-                                                   int force_retry) {
-    p2p_peer_t *peer = NULL;
-
-    if (!node || !ip) {
-        return NULL;
-    }
-
-    peer = p2p_node_find_peer_by_endpoint_locked(node, ip, port);
-    if (!peer) {
-        return NULL;
-    }
-    peer->keep_entry = 1;
-    if (force_retry) {
-        peer->reconnect_after_ms = 0;
-    }
-
-    return peer;
-}
-
-static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
-                                int force_retry) {
-    p2p_peer_t *existing_peer = NULL;
-    p2p_peer_t *peer = NULL;
-    int added_to_table = 0;
-    int ret = 0;
-
-    if (!node || !ip) {
-        return P2P_ERR_INVALID_ARG;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    if (force_retry) {
-        p2p_clear_manual_connect_suppression_locked(node, ip, port);
-    }
-    peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
-    salts_mutex_unlock(&node->mutex);
-    if (peer) {
-        return p2p_peer_connect(peer);
-    }
-
-    peer = p2p_peer_create(node, ip, port);
-    if (!peer) {
-        return P2P_ERR_NO_MEM;
-    }
-    peer->keep_entry = 1;
-
-    salts_mutex_lock(&node->mutex);
-    existing_peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
-    if (existing_peer) {
-        salts_mutex_unlock(&node->mutex);
-        p2p_peer_destroy(peer);
-        return p2p_peer_connect(existing_peer);
-    }
-    p2p_node_add_peer_locked(node, peer);
-    added_to_table = 1;
-    salts_mutex_unlock(&node->mutex);
-
-    ret = p2p_peer_connect(peer);
-    if (ret != P2P_OK) {
-        if (added_to_table) {
-            salts_mutex_lock(&node->mutex);
-            p2p_node_remove_peer_by_endpoint_locked(node, ip, port);
-            salts_mutex_unlock(&node->mutex);
-        }
-        p2p_peer_destroy(peer);
-        return ret;
-    }
-    return P2P_OK;
 }
 
 static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
@@ -1330,14 +1237,6 @@ int p2p_public_key_from_private_key(const uint8_t secret_key[P2P_KEY_SIZE],
     return P2P_OK;
 }
 
-int p2p_connect(p2p_node_t *node, const char *ip, int port) {
-    return p2p_connect_internal(node, ip, port, 1);
-}
-
-int p2p_connect_candidate(p2p_node_t *node, const char *ip, int port) {
-    return p2p_connect_internal(node, ip, port, 0);
-}
-
 /* =============================================================================
  * Message Handlers
  * ============================================================================= */
@@ -1899,22 +1798,6 @@ int p2p_publish(p2p_node_t *node, const char *topic, const void *data, size_t le
  * Utility implementation
  * ============================================================================= */
 
-int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info) {
-    p2p_node_t *node = NULL;
-
-    if (!peer || !info) return P2P_ERR_INVALID_ARG;
-
-    node = peer->node;
-    if (node) {
-        salts_mutex_lock(&node->mutex);
-    }
-    p2p_peer_fill_info_ex_locked(peer, info);
-    if (node) {
-        salts_mutex_unlock(&node->mutex);
-    }
-    return P2P_OK;
-}
-
 int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
                                 p2p_peer_stream_metrics_t *metrics) {
     p2p_node_t *node = NULL;
@@ -2072,33 +1955,6 @@ int p2p_peer_get_security_info_v2(
     if (node) {
         salts_mutex_unlock(&node->mutex);
     }
-    return P2P_OK;
-}
-
-int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
-                               const void *payload, size_t len) {
-    if (!node || (!payload && len != 0) ||
-        len > P2P_NOISE_MAX_PLAINTEXT_SIZE - 8U) {
-        return P2P_ERR_INVALID_ARG;
-    }
-    p2p_message_t *msg = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
-    if (!msg) return P2P_ERR_NO_MEM;
-
-    p2p_message_init(msg, type);
-    if (len > 0) {
-        memcpy(msg->payload.raw, payload, len);
-        msg->header.payload_len = (uint16_t)len;
-    }
-
-    if (peer) {
-        int ret = p2p_peer_send(peer, msg);
-        free(msg);
-        return ret;
-    }
-
-    /* Broadcast */
-    p2p_node_broadcast(node, msg);
-    free(msg);
     return P2P_OK;
 }
 

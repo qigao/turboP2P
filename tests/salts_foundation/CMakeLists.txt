@@ -200,3 +200,27 @@ set_property(TARGET test_p2p_cnet_peer PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_peer PRIVATE p2p_peer_core Salts::TinyTest)
 add_test(NAME test_p2p_cnet_peer COMMAND test_p2p_cnet_peer)
 set_tests_properties(test_p2p_cnet_peer PROPERTIES TIMEOUT 60)
+
+# Production node network policy, routing handlers and explicit CNet owner.
+# Public constructors and the legacy file-transfer owner remain outside this target.
+add_library(p2p_node_core STATIC
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_network.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_cnet.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/peer_table.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/handlers.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia_rpc.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/vivaldi.c")
+target_link_libraries(p2p_node_core PUBLIC p2p_peer_core)
+if(NOT WIN32)
+  target_link_libraries(p2p_node_core PUBLIC m)
+endif()
+add_executable(test_p2p_cnet_node "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_node.c")
+set_property(TARGET test_p2p_cnet_node PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_node PRIVATE p2p_node_core Salts::TinyTest)
+add_test(NAME test_p2p_cnet_node COMMAND test_p2p_cnet_node)
+set_tests_properties(test_p2p_cnet_node PROPERTIES TIMEOUT 60)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_p2p_cnet_node PRIVATE P2P_NODE_TEST_WRAP)
+  target_link_options(test_p2p_cnet_node PRIVATE "-Wl,--wrap=cnet_client_stop")
+endif()

@@ -118,8 +118,10 @@ static int promote_peer(const cnet_stream_peer *source,
     return P2P_OK;
 }
 
-static void rejected(const cnet_stream_peer *source, int status, void *context) {
+static void rejected(const cnet_stream_peer *source, int status,
+    p2p_cnet_rejection_origin_t origin, void *context) {
     fixture_t *fixture = context;
+    check_true(origin >= P2P_CNET_REJECT_GATE_CAPACITY && origin <= P2P_CNET_REJECT_TRANSPORT);
     check_true(source->port != 0);
     fixture->rejections++;
     fixture->last_error = status;
