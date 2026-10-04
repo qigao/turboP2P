@@ -184,7 +184,7 @@ void p2p_noise_handshake_destroy(p2p_noise_handshake_t *hs);
  */
 int p2p_crypto_random(uint8_t *buf, size_t len);
 
-/** Compute RFC 2104 HMAC-SHA256 through the project crypto boundary. */
+/** Compute RFC 2104 HMAC-SHA256; key_len must fit OpenSSL's int API. */
 int p2p_crypto_hmac_sha256(const uint8_t *key, size_t key_len,
                            const uint8_t *data, size_t data_len,
                            uint8_t output[32]);
@@ -194,7 +194,8 @@ int p2p_crypto_verify(const uint8_t *expected, const uint8_t *actual,
                       size_t len);
 
 /**
- * SHA-256 hash
+ * Legacy internal BLAKE2b-256 helper (despite its historical name).
+ * Do not use this function for SHA-256 digests.
  */
 void p2p_crypto_sha256(const uint8_t *data, size_t len, uint8_t hash[32]);
 

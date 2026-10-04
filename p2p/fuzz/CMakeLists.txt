@@ -16,7 +16,8 @@ target_include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(
   p2p_security_fuzz_support PUBLIC
-  TurboUtils::Core TurboNet::Crypto TurboP2P::NoiseProtocol uthash)
+  TurboUtils::Core TurboNet::CoroNet Salts::Platform OpenSSL::Crypto monocypher
+  TurboP2P::NoiseProtocol uthash)
 if(WIN32)
   target_link_libraries(p2p_security_fuzz_support PUBLIC ws2_32)
 endif()

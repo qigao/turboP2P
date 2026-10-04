@@ -1,12 +1,13 @@
 /*
- * Product platform adapter for the pinned Noise-C state machine.
+ * Product platform adapter for the Noise-C state machine.
  * Only the fixed XX/25519/ChaChaPoly/BLAKE2s profile is enabled.
  */
 
 #include "protocol/internal.h"
 #include "p2p_noise_c_platform.h"
 
-#include <turbo_crypto.h>
+#include <monocypher.h>
+#include <salts/random.h>
 
 #include <string.h>
 
@@ -44,15 +45,14 @@ static int curve25519_generate(NoiseDHState *state,
 
     curve25519_clear_provider(curve);
 
-    if (turbo_crypto_random(curve->private_key, sizeof(curve->private_key)) !=
-        TURBO_CRYPTO_OK) {
+    if (salts_platform_secure_random(curve->private_key,
+                                     sizeof(curve->private_key)) != 0) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
         return NOISE_ERROR_SYSTEM;
     }
-    if (turbo_crypto_x25519_public_key(curve->public_key,
-                                      curve->private_key) != TURBO_CRYPTO_OK ||
-        bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
+    crypto_x25519_public_key(curve->public_key, curve->private_key);
+    if (bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
         return NOISE_ERROR_SYSTEM;
@@ -69,9 +69,8 @@ static int curve25519_set_keypair(NoiseDHState *state,
     int result = NOISE_ERROR_NONE;
 
     curve25519_clear_provider(curve);
-    if (turbo_crypto_x25519_public_key(derived, private_key) !=
-            TURBO_CRYPTO_OK ||
-        !noise_is_equal(derived, public_key, sizeof(derived))) {
+    crypto_x25519_public_key(derived, private_key);
+    if (!noise_is_equal(derived, public_key, sizeof(derived))) {
         result = NOISE_ERROR_INVALID_PUBLIC_KEY;
     } else {
         memcpy(curve->private_key, private_key, sizeof(curve->private_key));
@@ -88,9 +87,8 @@ static int curve25519_set_private(NoiseDHState *state,
 
     curve25519_clear_provider(curve);
     memcpy(curve->private_key, private_key, sizeof(curve->private_key));
-    if (turbo_crypto_x25519_public_key(curve->public_key,
-                                      curve->private_key) != TURBO_CRYPTO_OK ||
-        bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
+    crypto_x25519_public_key(curve->public_key, curve->private_key);
+    if (bytes_are_zero(curve->public_key, sizeof(curve->public_key))) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
         return NOISE_ERROR_INVALID_PRIVATE_KEY;
@@ -138,11 +136,9 @@ static int curve25519_calculate(const NoiseDHState *private_key_state,
             noise_clean(shared_key, 32);
             return NOISE_ERROR_SYSTEM;
         }
-    } else if (turbo_crypto_x25519(shared_key, private_key_state->private_key,
-                                  public_key_state->public_key) !=
-               TURBO_CRYPTO_OK) {
-        noise_clean(shared_key, 32);
-        return NOISE_ERROR_INVALID_PUBLIC_KEY;
+    } else {
+        crypto_x25519(shared_key, private_key_state->private_key,
+                      public_key_state->public_key);
     }
     if (bytes_are_zero(shared_key, 32)) {
         noise_clean(shared_key, 32);

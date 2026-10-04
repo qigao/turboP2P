@@ -14,7 +14,7 @@ foreach(test_name ${P2P_TESTS})
 
   target_link_libraries(${test_name} PRIVATE p2p TurboUtils::Core
                                              TurboNet::CoroNet TurboUtils::TinyTest
-                                             TurboP2P::NoiseProtocol uthash)
+                                             TurboP2P::NoiseProtocol monocypher uthash)
 
   target_include_directories(
     ${test_name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
@@ -30,3 +30,13 @@ foreach(test_name ${P2P_TESTS})
     add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
   endif()
 endforeach()
+
+add_executable(test_p2p_security test_p2p_security.c)
+set_property(TARGET test_p2p_security PROPERTY LINKER_LANGUAGE CXX)
+target_include_directories(test_p2p_security PRIVATE ../src ../include)
+target_link_libraries(test_p2p_security PRIVATE
+  p2p TurboP2P::NoiseProtocol monocypher Salts::TinyTest)
+add_test(NAME test_p2p_security COMMAND test_p2p_security)
+if(TARGET turbo_p2p_copy_runtime_dlls)
+  add_dependencies(test_p2p_security turbo_p2p_copy_runtime_dlls)
+endif()
