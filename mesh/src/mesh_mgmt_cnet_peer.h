@@ -64,6 +64,11 @@ mesh_mgmt_peer_result_t mesh_mgmt_cnet_peer_on_state_v1(
 /** Build and admit a signed targeted frame after establishment. BUSY admits nothing. */
 mesh_mgmt_connection_result_t mesh_mgmt_cnet_peer_send_v1(
     mesh_mgmt_cnet_peer_v1_t *owner, uint8_t kind, const uint8_t *payload, size_t payload_len);
+/**
+ * Abort protocol and request close (already-closing is accepted). If command
+ * admission fails, keep storage and retry close after polling, or stop the
+ * client; destroy still requires the matching terminal observation.
+ */
 mesh_mgmt_peer_result_t mesh_mgmt_cnet_peer_close_v1(mesh_mgmt_cnet_peer_v1_t *owner);
 mesh_mgmt_peer_result_t mesh_mgmt_cnet_peer_destroy_v1(mesh_mgmt_cnet_peer_v1_t *owner);
 

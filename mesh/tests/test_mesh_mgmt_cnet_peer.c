@@ -425,6 +425,18 @@ static void test_close_pending(void) {
   destroy_pair(&pair);
 }
 
+static void test_already_closing(void) {
+  test_pair_t pair;
+  init_pair(&pair, MESH_MGMT_FRAME_MAX, 0);
+  init_protocol(&pair);
+  start_protocol(&pair);
+  check_equal(cnet_close(&pair.sender.client, pair.sender.connection), SALTS_OK);
+  check_equal(mesh_mgmt_cnet_peer_close_v1(&pair.sender.mgmt), MESH_MGMT_PEER_OK);
+  check_true(pair.sender.mgmt.close_requested);
+  check_false(pair.sender.mgmt.peer.connection.dispatcher.session.local_hello_sent);
+  destroy_pair(&pair);
+}
+
 static void test_short_completion(void) {
   test_pair_t pair;
   init_pair(&pair, MESH_MGMT_FRAME_MAX, 0);
@@ -507,6 +519,7 @@ spec("signed management peer over CNet") {
   it("preserves handshake and events across small real TLS read fragments") { test_signed_loopback(7u); }
   it("waits for the matching handle's send completion before accepting input") { test_delayed_completion(); }
   it("settles pending HELLO on close and retains storage until terminal observation") { test_close_pending(); }
+  it("accepts an already admitted caller close while settling the pending write") { test_already_closing(); }
   it("fails a short logical write without committing HELLO") { test_short_completion(); }
   it("rejects an altered signed HELLO before its observer or ACK") { test_rejected_frame(1); }
   it("terminates when the application rejects an authenticated HELLO") { test_rejected_frame(0); }

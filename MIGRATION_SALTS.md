@@ -202,7 +202,8 @@ CNet root 借用 caller-owned client/handle，独占该 handle 的逻辑写。�
 receive/send/terminal 转发给 root；root 不嵌套 poll。callback 接收 loan 复制到固定 16 KiB
 chunk，builder frame 在 admission 内复制到 Salts retained buffer。应用发送遇 BUSY 不入队。
 错误先停止协议并请求异步 close，storage 与 seed 保留到匹配 CLOSED/FAILED，再 destroy/wipe；
-不能在 CNet callbacks 静默前释放或复用对象。使用方式见可运行的
+不能在 CNet callbacks 静默前释放或复用对象。已关闭请求的 EALREADY 视为成功；close command
+admission 失败时调用方在 poll 后重试 close 或 stop client，仍不得提前 destroy。使用方式见可运行的
 `mesh/tests/test_mesh_mgmt_cnet_peer.c`。
 
 仅供旧 loopback 测试使用的 CoroNet 管理 socket adapter 和测试被替换为 CNet signed peer

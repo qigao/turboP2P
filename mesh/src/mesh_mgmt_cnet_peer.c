@@ -35,7 +35,7 @@ static mesh_mgmt_peer_result_t fail_owner(mesh_mgmt_cnet_peer_v1_t *owner) {
   owner->pending_bytes = 0u;
   if (!owner->close_requested && !owner->terminal_observed) {
     int result = cnet_close(owner->client, owner->connection);
-    if (result == SALTS_OK)
+    if (result == SALTS_OK || result == SALTS_EALREADY)
       owner->close_requested = 1;
     else
       owner->last_cnet_status = result;
