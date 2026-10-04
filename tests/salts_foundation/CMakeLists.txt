@@ -54,23 +54,6 @@ target_include_directories(foundation PUBLIC "${mesh_src}")
 target_link_libraries(foundation PUBLIC
   Salts::CSTL Salts::Platform Salts::Crypto Salts::CNet OpenSSL::Crypto monocypher)
 
-# These two vector owners still call P2P/management adapters. Compile-check
-# their new CSTL contracts here; their lifecycle tests require the root build.
-add_library(vector_owners OBJECT
-  "${mesh_src}/mesh_mgmt_endpoint_pool.c"
-  "${mesh_src}/mesh_mgmt_agent_router.c")
-target_include_directories(vector_owners PRIVATE
-  "${mesh_src}" "${TURBOP2P_SOURCE_DIR}/p2p/include")
-target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::Core)
-
-# The runtime's polling consumer no longer includes CoroNet. Its complete
-# lifecycle still requires the legacy constructor and the root mesh build.
-add_library(mgmt_runtime_compile OBJECT "${mesh_src}/mesh_mgmt_agent_runtime.c")
-target_include_directories(mgmt_runtime_compile PRIVATE
-  "${mesh_src}" "${TURBOP2P_SOURCE_DIR}/mesh/include"
-  "${TURBOP2P_SOURCE_DIR}/p2p/include")
-target_link_libraries(mgmt_runtime_compile PRIVATE Salts::CSTL Salts::Platform Salts::Core)
-
 foreach(test_name IN ITEMS
   test_mesh_mgmt_session
   test_mesh_mgmt_transport
@@ -276,4 +259,34 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     "-Wl,--wrap=cnet_client_stop" "-Wl,--wrap=cnet_client_poll")
   target_compile_definitions(test_p2p_cnet_files PRIVATE P2P_FILES_TEST_WRAP)
   target_link_options(test_p2p_cnet_files PRIVATE "-Wl,--wrap=p2p_peer_send")
+endif()
+
+# Real dedicated management composition: no legacy mesh or fake bridge symbols.
+add_library(mgmt_agent_runtime STATIC
+  "${mesh_src}/mesh_mgmt_agent_runtime.c"
+  "${mesh_src}/mesh_mgmt_agent_router.c"
+  "${mesh_src}/mesh_mgmt_endpoint_pool.c"
+  "${mesh_src}/mesh_mgmt_endpoint_record.c"
+  "${mesh_src}/mesh_mgmt_endpoint_publisher.c"
+  "${mesh_src}/mesh_mgmt_service_record.c"
+  "${mesh_src}/mesh_mgmt_service_publisher.c"
+  "${mesh_src}/mesh_mgmt_p2p_adapter.c"
+  "${mesh_src}/mesh_mgmt_p2p_peer.c"
+  "${mesh_src}/mesh_mgmt_p2p_security.c"
+  "${mesh_src}/mesh_mgmt_execution_disabled_responder.c")
+target_link_libraries(mgmt_agent_runtime PUBLIC foundation p2p_node_core)
+# The compatibility entry point must compile too; linking/running shared mesh
+# still requires the complete root build.
+add_library(mgmt_mesh_bridge_compile OBJECT "${mesh_src}/mesh_mgmt_agent_runtime_mesh.c")
+target_include_directories(mgmt_mesh_bridge_compile PRIVATE "${TURBOP2P_SOURCE_DIR}/mesh/include")
+target_link_libraries(mgmt_mesh_bridge_compile PRIVATE mgmt_agent_runtime)
+add_executable(test_mesh_mgmt_cnet_runtime "${mesh_tests}/test_mesh_mgmt_cnet_runtime.c")
+set_property(TARGET test_mesh_mgmt_cnet_runtime PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_cnet_runtime PRIVATE mgmt_agent_runtime Salts::TinyTest)
+add_test(NAME test_mesh_mgmt_cnet_runtime COMMAND test_mesh_mgmt_cnet_runtime)
+set_tests_properties(test_mesh_mgmt_cnet_runtime PROPERTIES TIMEOUT 60)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_mesh_mgmt_cnet_runtime PRIVATE MESH_MGMT_RUNTIME_TEST_WRAP)
+  target_link_options(test_mesh_mgmt_cnet_runtime PRIVATE
+    "-Wl,--wrap=cnet_client_stop" "-Wl,--wrap=p2p_destroy_v2")
 endif()

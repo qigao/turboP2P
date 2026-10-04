@@ -74,6 +74,7 @@ typedef struct {
   mesh_mgmt_endpoint_state_t state;
   uint64_t next_attempt_ms;
   uint64_t connect_deadline_ms;
+  uint64_t expiry_deadline_ms;
   uint32_t transport_failures;
   uint32_t protocol_failures;
   int last_connect_result;
@@ -124,11 +125,22 @@ mesh_mgmt_endpoint_pool_add_static_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
  * Apply an endpoint record only after the caller has verified its MMP envelope,
  * signer authority, mesh scope, epoch and expiry. This boundary never reads
  * raw DHT bytes and a verified record cannot replace a local static endpoint.
+ * v1 requires expiry, now_ms and all subsequent tick/auth/failure times to use
+ * the same clock domain.
  */
 mesh_mgmt_endpoint_pool_result_t
 mesh_mgmt_endpoint_pool_apply_verified_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
                                           const mesh_mgmt_endpoint_record_v1_t *record,
                                           uint64_t now_ms);
+
+/** Apply a signed realtime expiry to a pool driven by monotonic timestamps.
+ * The remaining lifetime is captured once; identical epochs never extend it.
+ * Overflow returns RESOURCE_EXHAUSTED without changing the pool. The original
+ * signed record is retained unchanged in snapshots. */
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_apply_verified_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_endpoint_record_v1_t *record,
+    uint64_t realtime_ms, uint64_t monotonic_ms);
 
 mesh_mgmt_endpoint_pool_result_t
 mesh_mgmt_endpoint_pool_start_v1(mesh_mgmt_endpoint_pool_v1_t *pool);

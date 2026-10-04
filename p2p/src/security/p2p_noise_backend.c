@@ -7,6 +7,7 @@
 #include <noise/protocol.h>
 
 #include <string.h>
+#include <stdlib.h>
 
 static const char P2P_NOISE_PROTOCOL_NAME[] =
     "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -190,6 +191,8 @@ int p2p_noise_backend_write(p2p_noise_backend_handshake_t *handshake,
     NoiseBuffer message_buffer;
     NoiseBuffer payload_buffer;
     NoiseHandshakeState *state;
+    uint8_t *scratch;
+    size_t capacity;
     int error;
 
     if (!handshake || !handshake->state || !output || !out_len ||
@@ -201,15 +204,23 @@ int p2p_noise_backend_write(p2p_noise_backend_handshake_t *handshake,
     if (noise_handshakestate_get_action(state) != NOISE_ACTION_WRITE_MESSAGE) {
         return P2P_ERR_INVALID_STATE;
     }
-    noise_buffer_set_output(message_buffer, output, output_capacity);
+    /* Noise-C's vector backends require aligned words even though this API
+     * accepts byte buffers. Handshake scratch is bounded by the wire limit. */
+    capacity = output_capacity < P2P_NOISE_MAX_FRAME_SIZE
+                   ? output_capacity : P2P_NOISE_MAX_FRAME_SIZE;
+    scratch = malloc(capacity ? capacity : 1u);
+    if (!scratch) return P2P_ERR_NO_MEM;
+    noise_buffer_set_output(message_buffer, scratch, capacity);
     noise_buffer_set_input(payload_buffer, (uint8_t *)payload, payload_len);
     error = noise_handshakestate_write_message(
         state, &message_buffer, payload_len ? &payload_buffer : NULL);
-    if (error != NOISE_ERROR_NONE) {
-        return map_handshake_error(state, error);
+    if (error == NOISE_ERROR_NONE) {
+        memcpy(output, scratch, message_buffer.size);
+        *out_len = message_buffer.size;
     }
-    *out_len = message_buffer.size;
-    return P2P_OK;
+    p2p_crypto_wipe(scratch, capacity);
+    free(scratch);
+    return error == NOISE_ERROR_NONE ? P2P_OK : map_handshake_error(state, error);
 }
 
 int p2p_noise_backend_write_blocking(
@@ -246,6 +257,7 @@ int p2p_noise_backend_read(p2p_noise_backend_handshake_t *handshake,
     NoiseBuffer message_buffer;
     NoiseBuffer payload_buffer;
     NoiseHandshakeState *state;
+    uint8_t *scratch;
     int error;
 
     if (!handshake || !handshake->state || !message || !payload ||
@@ -253,17 +265,25 @@ int p2p_noise_backend_read(p2p_noise_backend_handshake_t *handshake,
         return P2P_ERR_INVALID_ARG;
     }
     *out_payload_len = 0;
+    if (message_len > P2P_NOISE_MAX_FRAME_SIZE)
+        return P2P_ERR_INVALID_ARG;
     state = (NoiseHandshakeState *)handshake->state;
     if (noise_handshakestate_get_action(state) != NOISE_ACTION_READ_MESSAGE) {
         return P2P_ERR_INVALID_STATE;
     }
-    noise_buffer_set_input(message_buffer, (uint8_t *)message, message_len);
+    /* Upstream decrypts and clears its input in place. Own an aligned copy
+     * so the caller's const input and adjacent framing bytes stay intact. */
+    scratch = malloc(message_len ? message_len : 1u);
+    if (!scratch) return P2P_ERR_NO_MEM;
+    memcpy(scratch, message, message_len);
+    noise_buffer_set_input(message_buffer, scratch, message_len);
     noise_buffer_set_output(payload_buffer, payload, payload_capacity);
     error = noise_handshakestate_read_message(state, &message_buffer,
                                               &payload_buffer);
-    if (error != NOISE_ERROR_NONE) {
+    p2p_crypto_wipe(scratch, message_len);
+    free(scratch);
+    if (error != NOISE_ERROR_NONE)
         return map_handshake_error(state, error);
-    }
     *out_payload_len = payload_buffer.size;
     return P2P_OK;
 }
