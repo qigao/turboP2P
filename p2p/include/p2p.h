@@ -379,6 +379,73 @@ CXX_C_API int p2p_poll(p2p_node_t *node);
  */
 CXX_C_API coro_context_t *p2p_get_loop(p2p_node_t *node);
 
+/** Hard bounds for the CNet lifecycle. Initialize, then override as needed.
+ * Command/event capacities must be powers of two; completion_batch_capacity
+ * must not exceed request_capacity. Zero connect/write timeouts disable their
+ * deadlines; stop_timeout_ms must be positive. A zero aggregate buffer bound
+ * uses capacity times the maximum command/event size, as defined by CNet.
+ * send_hwm_bytes must cover the configured security per-peer HWM.
+ */
+typedef struct {
+    size_t struct_size;
+    size_t connection_capacity;
+    size_t command_capacity;
+    size_t request_capacity;
+    size_t completion_batch_capacity;
+    size_t event_capacity;
+    size_t send_hwm_bytes;
+    size_t receive_buffer_bytes;
+    size_t pending_write_limit;
+    size_t accept_budget;
+    size_t command_buffer_bytes;
+    size_t event_buffer_bytes;
+    uint32_t connect_timeout_ms;
+    uint32_t write_timeout_ms;
+    uint32_t stop_timeout_ms;
+} p2p_runtime_config_v2_t;
+
+CXX_C_API int p2p_runtime_config_v2_init(p2p_runtime_config_v2_t *config);
+
+/** Create a CNet node without starting network work. *out_node is NULL on
+ * failure. Configure identity/security and callbacks before starting. All
+ * lifecycle operations and p2p_poll belong to one owner thread. Use the v2
+ * lifecycle exclusively; the legacy context/start/destroy API is separate.
+ * Provider/callback contexts must remain alive until destruction succeeds.
+ */
+CXX_C_API int p2p_create_v2(const char *ip, int port, p2p_node_t **out_node);
+
+/** Attach CNet and start the listener. Config is copied, not borrowed.
+ * Missing security or failure before owner attachment leaves the node ready
+ * for a corrected start. Listener failure is terminal: stop/destroy the node.
+ * If cleanup after listener failure also fails, its error takes precedence.
+ * Repeated start is INVALID_STATE. Drive progress with p2p_poll().
+ */
+CXX_C_API int p2p_start_nonblocking_v2(p2p_node_t *node,
+    const p2p_runtime_config_v2_t *config);
+
+/** Copy the last successfully bound numeric address, including an ephemeral
+ * port selected at start. Owner-thread query; valid until destruction, also
+ * after stop. Before successful start returns INVALID_STATE. A short IP
+ * buffer returns RESOURCE_EXHAUSTED without modifying either output.
+ */
+CXX_C_API int p2p_node_get_listen_address_v2(const p2p_node_t *node,
+    char *ip_out, size_t ip_capacity, int *port_out);
+
+/** Stop is terminal, including before start. From a callback it requests
+ * deferred cleanup; that poll returns any cleanup failure. Outside callbacks
+ * this waits for worker/transport shutdown. Transfer leases or drain timeout
+ * retain storage: release leases and retry on the owner thread. No transfer
+ * completion callbacks run during shutdown. Repeated successful stop is OK.
+ */
+CXX_C_API int p2p_stop_v2(p2p_node_t *node);
+
+/** Stop and destroy, returning P2P_OK only after storage has been released.
+ * NULL is accepted. Callback destruction is rejected without freeing storage.
+ * On failure retain the node and provider/callback contexts, resolve the cause,
+ * and retry. Concurrent node access must end before calling this function.
+ */
+CXX_C_API int p2p_destroy_v2(p2p_node_t *node);
+
 /**
  * Copy this node's stable P2P id.
  * @param node Node

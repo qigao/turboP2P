@@ -1,7 +1,7 @@
 name: Salts foundation regression
 on:
   pull_request:
-    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry, codex/tunnel-cnet, codex/mgmt-cnet, codex/p2p-security, codex/p2p-cnet-admission, codex/p2p-owner-key-worker, codex/p2p-cnet-peer, codex/p2p-cnet-node, codex/p2p-cnet-files, codex/p2p-cnet-security, codex/p2p-cnet-dht]
+    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry, codex/tunnel-cnet, codex/mgmt-cnet, codex/p2p-security, codex/p2p-cnet-admission, codex/p2p-owner-key-worker, codex/p2p-cnet-peer, codex/p2p-cnet-node, codex/p2p-cnet-files, codex/p2p-cnet-security, codex/p2p-cnet-dht, codex/p2p-public-poll]
   push:
     branches: [master]
   workflow_dispatch:
@@ -48,6 +48,6 @@ jobs:
           cmake --build build/p2p-sanitize --parallel 2 --target \
             test_p2p_security test_p2p_cnet_transport test_p2p_cnet_admission \
             test_p2p_key_worker test_p2p_cnet_peer test_p2p_cnet_node \
-            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht
+            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht test_p2p_cnet_lifecycle
           ctest --test-dir build/p2p-sanitize --output-on-failure \
-            -R '^test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht)$'
+            -R '^test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle)$'

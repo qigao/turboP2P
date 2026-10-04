@@ -18,20 +18,31 @@ void p2p_node_saved_cookie_status_locked(const p2p_node_t *node,
 }
 
 p2p_node_t *p2p_node_state_create(const char *ip, int port) {
+    p2p_node_t *node = NULL;
+    (void)p2p_node_state_create_checked(ip, port, &node);
+    return node;
+}
+
+int p2p_node_state_create_checked(const char *ip, int port, p2p_node_t **output) {
     p2p_node_t *node;
-    if (!ip || strlen(ip) >= P2P_MAX_IP || port < 0 || port > UINT16_MAX)
-        return NULL;
+    int result = P2P_ERR_NO_MEM;
+    if (!output) return P2P_ERR_INVALID_ARG;
+    *output = NULL;
+    if (!ip || !ip[0] || strlen(ip) >= P2P_MAX_IP || port < 0 || port > UINT16_MAX)
+        return P2P_ERR_INVALID_ARG;
     node = calloc(1, sizeof(*node));
-    if (!node) return NULL;
+    if (!node) return P2P_ERR_NO_MEM;
     strcpy(node->ip, ip);
     node->port = port;
     vivaldi_init(&node->coord);
     salts_mutex_init(&node->mutex);
-    if (!node->mutex) { free(node); return NULL; }
+    if (!node->mutex) { free(node); return P2P_ERR_NO_MEM; }
     node->kad_dht = kademlia_create(ip, (uint16_t)port);
     if (!node->kad_dht) goto fail;
     memcpy(node->id, node->kad_dht->routing->local_id.bytes, KADEMLIA_ID_BYTES);
-    if (p2p_crypto_generate_identity(&node->crypto.identity) != P2P_OK) goto fail;
+    result = p2p_crypto_generate_identity(&node->crypto.identity);
+    if (result != P2P_OK) goto fail;
+    result = P2P_ERR_NO_MEM;
     node->transfers = calloc(1, sizeof(*node->transfers));
     if (!node->transfers) goto fail;
     p2p_transfer_manager_init(node->transfers);
@@ -39,10 +50,11 @@ p2p_node_t *p2p_node_state_create(const char *ip, int port) {
     node->file_message_handler = p2p_handlers_dispatch_transfer;
     node->create_private_key_executor = create_polled_executor;
     node->query_cookie_status_locked = p2p_node_saved_cookie_status_locked;
-    return node;
+    *output = node;
+    return P2P_OK;
 fail:
     (void)p2p_node_state_destroy(node);
-    return NULL;
+    return result;
 }
 
 void p2p_node_add_file(p2p_node_t *node, p2p_file_t *file) {
@@ -383,7 +395,7 @@ int p2p_node_cleanup_transfers(p2p_node_t *node) {
 int p2p_node_state_destroy(p2p_node_t *node) {
     int result;
     if (!node) return P2P_OK;
-    if (node->ctx || node->server || node->gossip_timer || node->network_context)
+    if (node->ctx || node->server || node->gossip_timer || node->network_context || node->runtime_v2)
         return P2P_ERR_INVALID_STATE;
     result = p2p_node_cleanup_transfers(node);
     if (result != P2P_OK) return result;

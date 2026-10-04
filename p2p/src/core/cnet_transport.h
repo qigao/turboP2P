@@ -37,7 +37,7 @@ typedef int (*p2p_cnet_accept_fn)(p2p_cnet_owner_t *owner,
 /* Internal plaintext TCP owner for the P2P Noise protocol. All calls and
  * callbacks belong to one thread. No implicit backend or TLS fallback.
  * Config bounds are mandatory; TLS storage must be zero. Returns P2P errors.
- * This owner is explicit and is not selected by the legacy node constructors. */
+ * The public v2 lifecycle selects this owner; legacy constructors remain separate. */
 int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
                           p2p_cnet_owner_t **output);
 int p2p_cnet_owner_listen(p2p_cnet_owner_t *owner, const char *host,

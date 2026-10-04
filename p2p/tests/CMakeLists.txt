@@ -53,3 +53,11 @@ foreach(test_name IN ITEMS test_p2p_cnet_transport test_p2p_cnet_admission test_
     add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
   endif()
 endforeach()
+
+add_executable(test_p2p_cnet_lifecycle test_p2p_cnet_lifecycle.c)
+set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
+target_include_directories(test_p2p_cnet_lifecycle PRIVATE ../src ../include)
+target_link_libraries(test_p2p_cnet_lifecycle PRIVATE
+  p2p TurboP2P::NoiseProtocol Salts::CNet Salts::Platform Salts::TinyTest roaring uthash)
+add_test(NAME test_p2p_cnet_lifecycle COMMAND test_p2p_cnet_lifecycle)
+set_tests_properties(test_p2p_cnet_lifecycle PROPERTIES TIMEOUT 60)

@@ -60,6 +60,10 @@ void p2p_cleanup_context(p2p_node_t *node) {
 
 void p2p_destroy_clean(p2p_node_t *node) {
     if (!node) return;
+    if (node->runtime_v2) {
+        TLOG_ERROR("[P2P] CNet nodes require p2p_destroy_v2 with checked retry");
+        return;
+    }
     p2p_cleanup_callbacks(node);
     p2p_cleanup_timers(node);
     p2p_cleanup_server(node);

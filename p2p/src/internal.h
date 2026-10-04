@@ -442,6 +442,7 @@ struct p2p_node_s {
   uint8_t id[P2P_DHT_KEY_SIZE];
   const p2p_node_network_ops_t *network_ops;
   void *network_context;
+  struct p2p_runtime_v2_s *runtime_v2;
   void (*file_message_handler)(p2p_node_t *, p2p_peer_t *, const p2p_message_t *);
   coro_context_t *ctx;
   turbo_stream_listener_t *server;
