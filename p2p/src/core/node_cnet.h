@@ -7,10 +7,10 @@
 
 typedef struct p2p_node_cnet_s p2p_node_cnet_t;
 
-/* @internal @incomplete Public constructors/get_loop and file-transfer owner
+/* @internal @incomplete Public constructors/get_loop and security configuration
  * migration remain separate work. This explicit network owner runs the real
- * node policy, peer protocol, PING/PONG and DHT. A file_message_handler must be
- * attached before file traffic is accepted; absence closes that connection.
+ * node policy, peer protocol, PING/PONG, DHT and file transfers. The shared
+ * node_state constructor attaches the production file-message handler.
  *
  * The caller provides an initialized, security-configured node with mutex/DHT,
  * no legacy context/listener/timer, peers or lookups. The node, credentials,
@@ -23,12 +23,14 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     p2p_node_cnet_t **output);
 int p2p_node_cnet_listen(p2p_node_cnet_t *owner);
 /* Bounded nonblocking turn: expire, pump worker, progress CNet, maintain peers
- * and DHT. The caller supplies scheduling; no background native timer. */
+ * transfers and DHT. The caller supplies scheduling; no background native timer. */
 int p2p_node_cnet_poll(p2p_node_cnet_t *owner);
 /* Callback stop is deferred until poll returns. Stop is terminal, joins the
- * key worker, detaches/destroys peers and cancels lookups before CNet drain.
- * On drain timeout retain owner AND node; retry stop/destroy. Destroy inside a
- * callback is rejected. Stop does not destroy the borrowed executor or node. */
+ * key worker, closes transfers, detaches peers and cancels lookups before drain.
+ * Live transfer leases return INVALID_STATE; retain owner AND node, release the
+ * leases and retry. Drain timeout also retains both for retry. Destroy inside a
+ * callback is rejected. Stop does not destroy the borrowed executor or node.
+ * Transfer shutdown suppresses completion callbacks, matching legacy teardown. */
 int p2p_node_cnet_stop(p2p_node_cnet_t *owner);
 int p2p_node_cnet_destroy(p2p_node_cnet_t *owner);
 int p2p_node_cnet_admission_stats(const p2p_node_cnet_t *owner,

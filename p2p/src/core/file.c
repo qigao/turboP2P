@@ -138,7 +138,7 @@ int p2p_file_download(p2p_node_t *node, p2p_file_t *file, const char *output_pat
  * List Management
  * ============================================================================= */
 
-p2p_file_t* p2p_file_find_by_id(p2p_file_t *list, const p2p_id_t id) {
+p2p_file_t* p2p_file_find_by_id(p2p_file_t *list, const uint8_t *id) {
     p2p_file_t *cur = list;
     while (cur) {
         if (memcmp(cur->id, id, P2P_HASH_SIZE) == 0) {
@@ -168,7 +168,7 @@ int p2p_file_list_add(p2p_file_t **list, p2p_file_t *file) {
     return 0;
 }
 
-int p2p_file_list_remove(p2p_file_t **list, const p2p_id_t id) {
+int p2p_file_list_remove(p2p_file_t **list, const uint8_t *id) {
     if (!list || !*list) return -1;
 
     p2p_file_t *prev = NULL;

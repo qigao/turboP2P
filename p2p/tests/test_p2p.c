@@ -1209,7 +1209,7 @@ void test_p2p_transfer_destroy_waits_for_held_reference(void) {
     check_null(p2p_transfer_find_by_id(&mgr, created->id));
 
     p2p_transfer_release(held);
-    p2p_transfer_manager_destroy(&mgr);
+    check_int_eq(P2P_OK, p2p_transfer_manager_destroy(&mgr));
 }
 
 void test_p2p_transfer_progress_callback_runs_unlocked(void) {
@@ -1229,7 +1229,7 @@ void test_p2p_transfer_progress_callback_runs_unlocked(void) {
     check_int_eq(1, g_transfer_status_callback_count);
 
     p2p_transfer_destroy(&mgr, transfer);
-    p2p_transfer_manager_destroy(&mgr);
+    check_int_eq(P2P_OK, p2p_transfer_manager_destroy(&mgr));
 }
 
 void test_p2p_transfer_complete_callback_runs_unlocked(void) {
@@ -1249,7 +1249,7 @@ void test_p2p_transfer_complete_callback_runs_unlocked(void) {
     check_int_eq(1, g_transfer_complete_callback_count);
 
     p2p_transfer_destroy(&mgr, transfer);
-    p2p_transfer_manager_destroy(&mgr);
+    check_int_eq(P2P_OK, p2p_transfer_manager_destroy(&mgr));
 }
 
 void test_p2p_transfer_cancel_callback_runs_unlocked(void) {
@@ -1272,7 +1272,7 @@ void test_p2p_transfer_cancel_callback_runs_unlocked(void) {
     check_int_eq(1, g_transfer_cancel_callback_count);
 
     p2p_transfer_destroy(&mgr, transfer);
-    p2p_transfer_manager_destroy(&mgr);
+    check_int_eq(P2P_OK, p2p_transfer_manager_destroy(&mgr));
 }
 
 /* =============================================================================

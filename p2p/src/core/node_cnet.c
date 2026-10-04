@@ -1,5 +1,7 @@
 #include "node_cnet.h"
+#include "node_state.h"
 #include "peer_cnet.h"
+#include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
 #include <salts/clock.h>
 #include <stdlib.h>
@@ -251,6 +253,8 @@ int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
         now - owner->maintenance_ms >= P2P_GOSSIP_INTERVAL) {
         owner->maintenance_ms = now;
         p2p_node_maintain_peers(owner->node, now);
+        if (!owner->stopping && owner->node->transfers)
+            p2p_transfer_manager_tick(owner->node->transfers, owner->node);
         if (!owner->stopping) p2p_gossip_start(owner->node);
     }
     owner->busy = 0;
@@ -294,6 +298,10 @@ int p2p_node_cnet_stop(p2p_node_cnet_t *owner) {
     if (owner->busy || owner->stopped) return P2P_OK;
     owner->busy = 1;
     result = p2p_cnet_admission_stop(owner->admission);
+    if (result == P2P_OK) {
+        p2p_private_key_executor_shutdown(owner->node->private_key_executor);
+        result = p2p_node_cleanup_transfers(owner->node);
+    }
     if (result == P2P_OK && !owner->detached) {
         owner->detached = 1;
         detach_node(owner);

@@ -10,6 +10,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stddef.h>
 
 static int p2p_sender_decode_file_hash(
     const char hash[65], uint8_t digest[P2P_SHA256_DIGEST_SIZE]) {
@@ -51,7 +52,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
     file = p2p_node_find_local_file_by_id(node, file_id);
 
     if (!file) {
-        TLOG_WARN("[P2P] FILE_REQUEST for unknown file from {}:{}", peer_info.ip, peer_info.port);
+        TLOG_WARNF("[P2P] FILE_REQUEST for unknown file from {}:{}", peer_info.ip, peer_info.port);
 
         /* Send negative response */
         reply = (p2p_message_t *)calloc(1, sizeof(p2p_message_t));
@@ -68,7 +69,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
         return P2P_ERR_NOT_FOUND;
     }
 
-    TLOG_INFO("[P2P] FILE_REQUEST for '{}' from {}:{}",
+    TLOG_INFOF("[P2P] FILE_REQUEST for '{}' from {}:{}",
              file->filename, peer_info.ip, peer_info.port);
 
     mgr = node->transfers;
@@ -80,7 +81,7 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
         return P2P_ERR_NO_MEM;
     }
 
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
     memcpy(transfer->file_id, file_id, P2P_DHT_KEY_SIZE);
     strncpy(transfer->filepath, file->filepath, sizeof(transfer->filepath) - 1);
     strncpy(transfer->filename, file->filename, sizeof(transfer->filename) - 1);
@@ -89,11 +90,12 @@ int p2p_sender_handle_file_request(p2p_node_t *node, p2p_peer_t *peer,
     transfer->total_chunks = file->num_chunks;
     transfer->remote_id = request_id;
     transfer->peer = peer;
-    ret = p2p_sender_decode_file_hash(file->hash, transfer->file_hash);
+    ret = p2p_transfer_hold_peer_locked(transfer, peer);
+    if (ret == P2P_OK) ret = p2p_sender_decode_file_hash(file->hash, transfer->file_hash);
     if (ret == P2P_OK) {
         transfer->state = P2P_TRANSFER_STATE_ACTIVE;
     }
-    turbo_mutex_unlock(&transfer->mutex);
+    salts_mutex_unlock(&transfer->mutex);
     if (ret != P2P_OK) {
         p2p_transfer_destroy(mgr, transfer);
         return ret;
@@ -149,19 +151,19 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
     /* Find transfer */
     transfer = p2p_transfer_find_upload_by_remote_id(mgr, transfer_id, peer);
     if (!transfer) {
-        TLOG_WARN("[P2P] CHUNK_REQUEST for unknown transfer {} from {}:{}",
+        TLOG_WARNF("[P2P] CHUNK_REQUEST for unknown transfer {} from {}:{}",
                  transfer_id, peer_info.ip, peer_info.port);
         ret = P2P_ERR_NOT_FOUND;
         goto done;
     }
 
-    turbo_mutex_lock(&transfer->mutex);
+    salts_mutex_lock(&transfer->mutex);
 
     /* Open file if not already open */
     if (!transfer->fp) {
         ret = p2p_transfer_open_file_locked(transfer, "rb");
         if (ret != P2P_OK) {
-            TLOG_ERROR("[P2P] Failed to open file for transfer {}", transfer_id);
+            TLOG_ERRORF("[P2P] Failed to open file for transfer {}", transfer_id);
             goto done;
         }
     }
@@ -185,14 +187,14 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
         ret = P2P_ERR_INVALID_ARG;
         goto done;
     }
-    
+
     fseek(transfer->fp, (long)offset, SEEK_SET);
-    
+
     /* Using the msg payload buffer directly to avoid extra copy if possible */
     read_bytes = fread(msg->payload.chunk_data.data, 1, size, transfer->fp);
-    
+
     if (read_bytes != size) {
-        TLOG_ERROR("[P2P] Failed to read chunk {} from disk", chunk_index);
+        TLOG_ERRORF("[P2P] Failed to read chunk {} from disk", chunk_index);
         ret = P2P_ERR_IO;
         goto done;
     }
@@ -200,16 +202,16 @@ int p2p_sender_handle_chunk_request(p2p_node_t *node, p2p_peer_t *peer,
     msg->payload.chunk_data.data_len = (uint16_t)read_bytes;
     p2p_sha256(msg->payload.chunk_data.data, read_bytes,
                msg->payload.chunk_data.chunk_hash);
-    msg->header.payload_len = (uint16_t)(sizeof(p2p_chunk_data_payload_t) - (65536 - 128) + read_bytes);
+    msg->header.payload_len = (uint16_t)(offsetof(p2p_chunk_data_payload_t, data) + read_bytes);
 
-    TLOG_DEBUG("[P2P] Sending chunk {} of transfer {} ({} bytes)", 
+    TLOG_DEBUGF("[P2P] Sending chunk {} of transfer {} ({} bytes)",
               chunk_index + 1, transfer_id, read_bytes);
 
     ret = p2p_peer_send(peer, msg);
 
 done:
     if (transfer) {
-        turbo_mutex_unlock(&transfer->mutex);
+        salts_mutex_unlock(&transfer->mutex);
     }
     if (transfer) {
         p2p_transfer_release(transfer);

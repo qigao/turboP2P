@@ -5,6 +5,7 @@
 
 #include "node.h"
 #include "node_network.h"
+#include "node_state.h"
 #include "../protocol/handlers.h"
 #include "peer.h"
 #include "peer_coronet.h"
@@ -64,156 +65,23 @@ static const p2p_node_network_ops_t node_coronet_ops = {
 };
 
 p2p_node_t* p2p_node_create(const char *ip, int port) {
-    if (!ip) return NULL;
-
-    p2p_node_t *node = (p2p_node_t *)calloc(1, sizeof(p2p_node_t));
+    p2p_node_t *node = p2p_node_state_create(ip, port);
     if (!node) return NULL;
-
-    strncpy(node->ip, ip, sizeof(node->ip) - 1);
-    node->port = port;
-    node->network_ops = &node_coronet_ops;
-    node->file_message_handler = p2p_handlers_dispatch_transfer;
-    vivaldi_init(&node->coord);
-
-    /* Initialize Hash Table for Peers */
-    node->peers_table = NULL;
-    node->peer_count = 0;
-
-    /* Initialize Kademlia DHT */
-    node->kad_dht = kademlia_create(ip, (uint16_t)port);
-    if (!node->kad_dht) {
-        free(node);
-        return NULL;
-    }
-
-    /* Sync local ID from Kademlia instance */
-    memcpy(node->id, node->kad_dht->routing->local_id.bytes, KADEMLIA_ID_BYTES);
-    if (p2p_crypto_generate_identity(&node->crypto.identity) != P2P_OK) {
-        kademlia_destroy(node->kad_dht);
-        free(node);
-        return NULL;
-    }
-
     node->ctx = coro_context_create(NULL);
     if (!node->ctx) {
-        kademlia_destroy(node->kad_dht);
-        free(node);
+        (void)p2p_node_state_destroy(node);
         return NULL;
     }
-
-    /* Initialize node mutex */
-    salts_mutex_init(&node->mutex);
-
-    node->transfers = (p2p_transfer_manager_t *)calloc(1, sizeof(p2p_transfer_manager_t));
-    if (!node->transfers) {
-        salts_mutex_destroy(&node->mutex);
-        coro_context_destroy(node->ctx);
-        kademlia_destroy(node->kad_dht);
-        free(node);
-        return NULL;
-    }
-    p2p_transfer_manager_init(node->transfers);
-
+    node->network_ops = &node_coronet_ops;
     return node;
 }
 
 void p2p_node_destroy(p2p_node_t *node) {
     if (!node) return;
-    
+
     /* Use professional cleanup orchestration from cleanup.c */
     void p2p_destroy_clean(p2p_node_t *node); /* Forward declaration */
     p2p_destroy_clean(node);
-}
-
-/* =============================================================================
- * File Management
- * ============================================================================= */
-
-void p2p_node_add_file(p2p_node_t *node, p2p_file_t *file) {
-    if (!node || !file) return;
-
-    salts_mutex_lock(&node->mutex);
-    file->next_file = node->local_files;
-    node->local_files = file;
-    salts_mutex_unlock(&node->mutex);
-}
-
-void p2p_node_remove_file(p2p_node_t *node, const char *key) {
-    if (!node || !key) return;
-
-    salts_mutex_lock(&node->mutex);
-    p2p_file_t **curr = &node->local_files;
-    while (*curr) {
-        if (strcmp((*curr)->hash, key) == 0) {
-            p2p_file_t *to_remove = *curr;
-            *curr = (*curr)->next_file;
-            p2p_file_free(to_remove);
-            salts_mutex_unlock(&node->mutex);
-            return;
-        }
-        curr = &(*curr)->next_file;
-    }
-    salts_mutex_unlock(&node->mutex);
-}
-
-p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const p2p_id_t id) {
-    p2p_file_t *file = NULL;
-
-    if (!node || !id) {
-        return NULL;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    file = p2p_node_find_local_file_by_id_locked(node, id);
-    salts_mutex_unlock(&node->mutex);
-    return file;
-}
-
-p2p_file_t *p2p_node_find_local_file_by_id_locked(p2p_node_t *node, const p2p_id_t id) {
-    p2p_file_t *file = NULL;
-
-    if (!node || !id) {
-        return NULL;
-    }
-
-    file = node->local_files;
-    while (file) {
-        if (memcmp(file->id, id, P2P_HASH_SIZE) == 0) {
-            return file;
-        }
-        file = file->next_file;
-    }
-    return NULL;
-}
-
-p2p_file_t *p2p_node_detach_local_files(p2p_node_t *node) {
-    p2p_file_t *files = NULL;
-
-    if (!node) {
-        return NULL;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    files = node->local_files;
-    node->local_files = NULL;
-    salts_mutex_unlock(&node->mutex);
-
-    return files;
-}
-
-p2p_download_t *p2p_node_detach_downloads(p2p_node_t *node) {
-    p2p_download_t *downloads = NULL;
-
-    if (!node) {
-        return NULL;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    downloads = node->downloads;
-    node->downloads = NULL;
-    salts_mutex_unlock(&node->mutex);
-
-    return downloads;
 }
 
 /* =============================================================================
@@ -652,7 +520,7 @@ CXX_C_API int p2p_node_start_server(p2p_node_t *node) {
     node->gossip_timer = turbo_timer_create(p2p_get_loop(node));
     if (node->gossip_timer) {
         turbo_timer_set_data(node->gossip_timer, node);
-        turbo_timer_start(node->gossip_timer, node_maintenance_cb, 
+        turbo_timer_start(node->gossip_timer, node_maintenance_cb,
                           P2P_GOSSIP_INTERVAL, P2P_GOSSIP_INTERVAL);
     }
 
@@ -764,123 +632,3 @@ static turbo_stream_t *node_take_expired_cookie_stream_locked(
 /* =============================================================================
  * Pub/Sub operations
  * ============================================================================= */
-
-static p2p_topic_t *node_find_topic_locked(p2p_node_t *node, const char *name) {
-    p2p_topic_t *curr = NULL;
-
-    if (!node || !name) {
-        return NULL;
-    }
-
-    curr = node->topics;
-    while (curr) {
-        if (strcmp(curr->name, name) == 0) {
-            return curr;
-        }
-        curr = curr->next_topic;
-    }
-
-    return NULL;
-}
-
-static p2p_topic_t *node_find_or_create_topic_locked(p2p_node_t *node, const char *name) {
-    p2p_topic_t *topic = NULL;
-
-    if (!node || !name) {
-        return NULL;
-    }
-
-    topic = node_find_topic_locked(node, name);
-    if (topic) {
-        return topic;
-    }
-
-    topic = (p2p_topic_t *)calloc(1, sizeof(p2p_topic_t));
-    if (!topic) {
-        return NULL;
-    }
-
-    strncpy(topic->name, name, sizeof(topic->name) - 1);
-    topic->next_topic = node->topics;
-    node->topics = topic;
-
-    return topic;
-}
-
-void p2p_topic_destroy(p2p_topic_t *topic) {
-    if (!topic) return;
-    if (topic->subscribers) free(topic->subscribers);
-    free(topic);
-}
-
-p2p_topic_t *p2p_topic_find(p2p_node_t *node, const char *name) {
-    p2p_topic_t *topic = NULL;
-
-    if (!node || !name) return NULL;
-
-    salts_mutex_lock(&node->mutex);
-    topic = node_find_topic_locked(node, name);
-    salts_mutex_unlock(&node->mutex);
-
-    return topic;
-}
-
-p2p_topic_t *p2p_topic_find_or_create(p2p_node_t *node, const char *name) {
-    p2p_topic_t *topic = NULL;
-
-    if (!node || !name) return NULL;
-
-    salts_mutex_lock(&node->mutex);
-    topic = node_find_or_create_topic_locked(node, name);
-    salts_mutex_unlock(&node->mutex);
-
-    return topic;
-}
-
-int p2p_topic_exists(p2p_node_t *node, const char *name) {
-    int exists = 0;
-
-    if (!node || !name) {
-        return 0;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    exists = node_find_topic_locked(node, name) != NULL;
-    salts_mutex_unlock(&node->mutex);
-
-    return exists;
-}
-
-int p2p_node_remove_topic(p2p_node_t *node, const char *name) {
-    if (!node || !name) return P2P_ERR_INVALID_ARG;
-
-    salts_mutex_lock(&node->mutex);
-    p2p_topic_t **curr = &node->topics;
-    while (*curr) {
-        if (strcmp((*curr)->name, name) == 0) {
-            p2p_topic_t *to_remove = *curr;
-            *curr = (*curr)->next_topic;
-            salts_mutex_unlock(&node->mutex);
-            p2p_topic_destroy(to_remove);
-            return P2P_OK;
-        }
-        curr = &(*curr)->next_topic;
-    }
-    salts_mutex_unlock(&node->mutex);
-    return P2P_ERR_NOT_FOUND;
-}
-
-p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node) {
-    p2p_topic_t *topics = NULL;
-
-    if (!node) {
-        return NULL;
-    }
-
-    salts_mutex_lock(&node->mutex);
-    topics = node->topics;
-    node->topics = NULL;
-    salts_mutex_unlock(&node->mutex);
-
-    return topics;
-}
