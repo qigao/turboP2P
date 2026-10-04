@@ -331,3 +331,57 @@ executor 或 timer 验收。新 owner 已纳入根 target，但 `p2p_create/star
 通过，无源码更改。SDK 快照仍为 Salts 1.8.15 / SaltsUtils 4.1.17；CI 持续恢复 latest，re2c
 继续使用共享 vcpkg-cache。`ASAN_OPTIONS=detect_leaks=0`，预编译 SDK 未插桩，不声称泄漏
 或 SDK 内部 sanitizer 验证。
+
+## 第二阶段 J：CNet cookie admission 与 peer 交接
+
+**HIGH（事实）**：旧 `node_cookie_gate_recv()` 把每次 receive 的长度约束为当前报文
+剩余长度，TCP 把 cookie response 与首个 Noise frame 合并时会被拒绝。旧路径也未区分
+challenge 的 send admission 与完整发送。新内部 `p2p_cnet_admission` 消费精确的报文
+前缀，在校验 cookie 和收到 challenge 完整 send terminal 两者同时成立后交接；其余字节
+由 CNet transport 保留并送给新 peer。当前公开 node 入口仍走旧路径，此阶段不声称已经
+修复所有产品入口；原协议报文、cookie MAC 和 Noise 算法未变。
+
+```mermaid
+stateDiagram-v2
+    [*] --> Preface
+    Preface --> Proof: 校验网络并提交 challenge
+    Proof --> Verified: cookie 有效
+    Verified --> Peer: challenge 已完整发送
+    Preface --> Closed: 错误或超时
+    Proof --> Closed: 错误或超时
+    Verified --> Closed: 超时或停止
+```
+
+admission 在启动时分配固定 gate 数组；每次 accept 的扫描为 O(gate_limit)，gate 本身
+不在热路径分配。全局 gate 数与 IPv4 地址 / IPv6 /64 的 pending gate 数均显式限额。
+创建时必须提供 node admission 和 promotion 回调：前者仍负责来源速率、拒绝列表和
+node 总 pending peer 配额，后者在创建 peer 前重新检查配额；当前 gate 在这次检查前
+已经退出 pending 计数，避免把同一连接同时算作 gate 和 peer。新组件不复制这些跨
+cookie/peer 的 node 事实源，也不以 gate 配额替代它们。cookie 通过只证明响应有效，
+不是 identity/credential 认证或 READY。
+
+截止时间从 accept 开始，分片不延长时间；owner 必须每轮（包括空闲轮）调用 expire。
+报文处理和交接也检查该截止时间。proof 早于本地 send terminal 时暂停接收，最多保留
+transport 已有的一块有界尾部。发送队列拒绝、错误网络、坏 MAC、peer quota 或初始化
+失败均终止连接；释放 gate 前先撤销它的 callbacks，迟到 terminal 不会访问复用的 slot。
+新 peer 的 receive/closed descriptor 完整安装后才调用其 connected 初始化入口。
+
+关闭顺序为 admission stop → CNet owner stop/destroy → admission destroy。第一步关闭
+未提升连接并清除 secret，但保留 listener 的 accept context；drain 期间新 accept 明确
+拒绝。已提升 peer 仍由 node 管理。回调内递归 stop/destroy/expire 被拒绝，防止 hook
+在当前栈上释放 admission。回滚撤销本阶段即可，无数据转换。
+
+原 transport cookie/Noise 联调已删除临时 gate，改用这份生产 admission；peer/Noise
+驱动仍是 fixture。新 admission 测试为 16 个 Linux 用例，覆盖配额和重用、IPv6 /64、
+mandatory node policy、坏 preface/proof、promotion/peer 初始化失败、两阶段静默超时、
+延迟 send terminal、停止后迟到 completion、challenge 入队失败，以及 owner stop 阻止 handoff 后的 peer context 清理。故障注入仅在测试
+链接器 wrap 中，生产源码无测试开关。root test target 同步增加 admission 用例。
+
+本地完整 Release 为 33/33 CTest 通过；一个已有 mesh 测试产物缺少执行权限，恢复权限
+后单独重跑通过。ASan/UBSan 检查 P2P security/transport/admission 三个相关套件；仍使用
+`detect_leaks=0`，预编译 SDK 未插桩。依赖继续消费 latest，re2c 继续来自 vcpkg-cache。
+
+后续仍需把 node 的 source rate/pending-peer 事实源、实际 peer credential/READY、
+private-key executor completion 和 timer 接到 CNet owner，再迁移管理 agent/HTTP。
+当前 gate API 为内部显式路径，未安装为公开接口，也未改变 `p2p_create/start/get_loop`；
+完整根工程以及 Windows/macOS/Android 运行时尚未验证。
