@@ -96,8 +96,16 @@ struct tunnel_proxy_conn_s {
     int target_port;
     int is_udp;
 
-    /* Underlying CoroNet stream */
-    turbo_stream_t *stream;
+    /* CNet value handle; the observer's storage survives asynchronous close. */
+    cnet_connection connection;
+    tunnel_proxy_conn_t *next;
+    int terminal;
+    int close_requested;
+    int close_admitted;
+    int destroy_requested;
+    int receive_pending;
+    size_t handshake_write_bytes;
+    proxy_handshake_state_t next_handshake_state;
 
     /* Callbacks */
     tunnel_proxy_connect_cb connect_cb;
@@ -140,7 +148,11 @@ TUNNEL_INTERNAL tunnel_proxy_t* tunnel_proxy_create(
  * Closes all connections.
  * @param proxy Proxy handle
  */
-TUNNEL_INTERNAL void tunnel_proxy_destroy(tunnel_proxy_t *proxy);
+TUNNEL_INTERNAL int tunnel_proxy_destroy(tunnel_proxy_t *proxy);
+/* Single-owner nonblocking progress. Reclaims destroyed observers after poll. */
+TUNNEL_INTERNAL int tunnel_proxy_poll(tunnel_proxy_t *proxy);
+TUNNEL_INTERNAL int tunnel_proxy_start(tunnel_proxy_t *proxy);
+TUNNEL_INTERNAL int tunnel_proxy_stop(tunnel_proxy_t *proxy);
 
 /**
  * Update proxy configuration
@@ -189,8 +201,7 @@ TUNNEL_INTERNAL tunnel_proxy_conn_t* tunnel_proxy_connect_tcp(
 /**
  * Create UDP association through proxy
  *
- * For SOCKS5: Uses UDP ASSOCIATE
- * For others: Encapsulates UDP in TCP
+ * UDP transport is not implemented; returns NULL without admitting TCP work.
  *
  * @param proxy Proxy handle
  * @param connect_cb Connection established callback
@@ -212,7 +223,7 @@ TUNNEL_INTERNAL tunnel_proxy_conn_t* tunnel_proxy_connect_udp(
  * @param conn Connection handle
  * @param data Data to send
  * @param len Data length
- * @return TUNNEL_OK on success
+ * @return TUNNEL_OK for bounded asynchronous admission; completion is owned by CNet.
  */
 TUNNEL_INTERNAL int tunnel_proxy_send(
     tunnel_proxy_conn_t *conn,
@@ -315,11 +326,6 @@ TUNNEL_INTERNAL int tunnel_socks5_parse_connect_response(const uint8_t *data, si
                                                            tunnel_endpoint_t *bind_addr);
 
 /* SOCKS5 */
-TUNNEL_INTERNAL int tunnel_socks5_handshake(tunnel_proxy_conn_t *conn);
-TUNNEL_INTERNAL int tunnel_socks5_authenticate(tunnel_proxy_conn_t *conn);
-TUNNEL_INTERNAL int tunnel_socks5_connect(tunnel_proxy_conn_t *conn,
-                                           const char *host, int port);
-TUNNEL_INTERNAL int tunnel_socks5_udp_associate(tunnel_proxy_conn_t *conn);
 TUNNEL_INTERNAL int tunnel_socks5_wrap_udp(tunnel_proxy_conn_t *conn,
                                             const tunnel_endpoint_t *dst,
                                             const uint8_t *data, size_t len,
@@ -331,35 +337,11 @@ TUNNEL_INTERNAL int tunnel_http_build_connect_request(const char *host, int port
                                                         const char *password,
                                                         uint8_t *buf, size_t *len,
                                                         size_t buf_size);
-TUNNEL_INTERNAL int tunnel_http_connect(tunnel_proxy_conn_t *conn,
-                                         const char *host, int port);
+/* Bounded parser: TIMEOUT means incomplete, consumed excludes tunnel payload. */
+TUNNEL_INTERNAL int tunnel_http_parse_response_frame(
+    const uint8_t *data, size_t len, size_t *consumed);
 TUNNEL_INTERNAL int tunnel_http_parse_response(tunnel_proxy_conn_t *conn,
                                                 const uint8_t *data, size_t len);
 
-/* Shadowsocks */
-TUNNEL_INTERNAL int tunnel_shadowsocks_init_cipher(tunnel_proxy_t *proxy);
-TUNNEL_INTERNAL int tunnel_shadowsocks_encrypt(tunnel_proxy_conn_t *conn,
-                                                const uint8_t *plain, size_t plain_len,
-                                                uint8_t *cipher, size_t *cipher_len);
-TUNNEL_INTERNAL int tunnel_shadowsocks_decrypt(tunnel_proxy_conn_t *conn,
-                                                const uint8_t *cipher, size_t cipher_len,
-                                                uint8_t *plain, size_t *plain_len);
-TUNNEL_INTERNAL int tunnel_shadowsocks_write_header(tunnel_proxy_conn_t *conn,
-                                                     const char *host, int port,
-                                                     uint8_t *out, size_t *out_len);
-
-/* VMess */
-TUNNEL_INTERNAL int tunnel_vmess_handshake(tunnel_proxy_conn_t *conn,
-                                            const char *host, int port);
-TUNNEL_INTERNAL int tunnel_vmess_encrypt(tunnel_proxy_conn_t *conn,
-                                          const uint8_t *plain, size_t plain_len,
-                                          uint8_t *cipher, size_t *cipher_len);
-TUNNEL_INTERNAL int tunnel_vmess_decrypt(tunnel_proxy_conn_t *conn,
-                                          const uint8_t *cipher, size_t cipher_len,
-                                          uint8_t *plain, size_t *plain_len);
-
-/* Trojan */
-TUNNEL_INTERNAL int tunnel_trojan_handshake(tunnel_proxy_conn_t *conn,
-                                             const char *host, int port);
 
 #endif /* TUNNEL_PROXY_H */

@@ -18,7 +18,7 @@ It runs entirely in userspace, providing a lightweight TCP/IP stack implementati
     *   Direct TCP (`TUNNEL_PROXY_NONE`)
     *   Shadowsocks, VMess, and Trojan are represented in public configuration but are not implemented as proxy transports yet.
 *   **UDP Support**: UDP sessions exist, but SOCKS5 UDP ASSOCIATE and full-cone NAT are not complete.
-*   **High Performance**: Zero-copy packet path where possible, built on top of `TurboNet::CoroNet` (libuv + CoroNet).
+*   **High Performance**: Zero-copy packet path where possible, built on top of `Salts::CNet` over NativeIO.
 
 ## Implementation Status
 
@@ -26,14 +26,14 @@ This document describes the current implementation. Planned API surface is calle
 
 | Area | Current status |
 | --- | --- |
-| Event loop | `tunnel_run()` and non-blocking `tunnel_poll()` drive TUN polling plus a `CoroNet` coroutine context. `tunnel_poll()` currently ignores its reserved timeout parameter. |
+| Event loop | `tunnel_run()` and non-blocking `tunnel_poll()` drive TUN polling plus one caller-owned `CNet` client. `tunnel_poll()` currently ignores its reserved timeout parameter. |
 | TCP proxying | SOCKS5 CONNECT, HTTP CONNECT, and direct TCP are implemented. |
-| UDP proxying | UDP session tracking exists; native SOCKS5 UDP ASSOCIATE and full-cone NAT still need transport completion. |
+| UDP proxying | UDP relay modes return `TUNNEL_ERR_NOT_SUPPORTED`; packet mode and local session bookkeeping remain available. SOCKS5 UDP wire helpers do not provide a relay transport. |
 | IPv6 | IPv6 header parsing exists. End-to-end IPv6 NAT, routing, and packet generation are incomplete. |
 | Routing rules | `tunnel_create()` and `tunnel_set_routes()` apply IP include/exclude ranges. Domain rules fail with `TUNNEL_ERR_NOT_SUPPORTED` until a trusted domain-to-flow identity is available. |
 | Config files | `tunnel_create_from_file()` supports the existing simple key-value parser. YAML string parsing remains a placeholder. |
 | Fake DNS | `tunnel_config_t.dns.fake_dns_range` and the persisted `dns.fake_dns_range` key control the FakeDNS CIDR when FakeDNS is enabled; default remains `198.18.0.0/15`. |
-| Shadowsocks / VMess / Trojan | Configuration fields exist; proxy handshakes and data transforms are not implemented. |
+| Shadowsocks / VMess / Trojan | Configuration fields remain for ABI stability; creation/reconfiguration rejects these transports. |
 
 ## Architecture
 
@@ -118,7 +118,7 @@ The core logic that maps raw IP tuples to proxy client objects. It handles:
 *   LRU eviction for max session limits.
 
 ### 4. Proxy Adapters (`src/proxy`)
-Protocol implementations that wrap the underlying `CoroNet` streams.
+Protocol implementations that wrap generation-checked `CNet` TCP/TLS connections.
 *   **SOCKS5**: Authenticates and sends CONNECT commands.
 *   **HTTP**: Sends `CONNECT host:port HTTP/1.1`.
 *   **Direct**: Opens a direct TCP stream to the target.
@@ -172,8 +172,21 @@ Future MagicDNS work:
 
 ## Threading Model
 
-TurboNet Tunnel is designed to be single-threaded (per instance) or event-driven, leveraging `CoroNet` on top of the project event loop.
+TurboNet Tunnel is designed to be single-threaded (per instance) or event-driven, with one caller-driven `CNet` owner per proxy.
 
 *   **Non-blocking I/O**: All socket and TUN operations are non-blocking.
-*   **Event Loop**: `tunnel_poll()` or `tunnel_run()` drives TUN polling and the `CoroNet` coroutine context.
-*   **Concurrency**: User acts as the driver; explicitly calling the currently non-blocking `tunnel_poll` allows integration into existing application loops (e.g., game engines or UI threads). The timeout parameter is reserved until TUN and CoroNet waits share one wake mechanism.
+*   **Event Loop**: `tunnel_poll()` or `tunnel_run()` drives TUN polling and the proxy's `CNet` client.
+*   **Concurrency**: User acts as the driver; explicitly calling the currently non-blocking `tunnel_poll` allows integration into existing application loops (e.g., game engines or UI threads). The timeout parameter is reserved until TUN and NativeIO waits share one wake mechanism.
+
+
+## CNet transport ownership（迁移阶段 F）
+
+代理独占一个 CNet client；`tunnel_poll()` 在拥有者线程推进，禁止递归 poll。连接 observer 保留到 CLOSED/FAILED；session 销毁立即撤销应用回调和 user_data，内存由 poll 返回后的有界列表扫描回收。`tunnel_stop()` 先释放 session，再排空并销毁 client；重启重新初始化同一代理的 client。回调内 stop/destroy 延后到本轮 poll 返回，避免仍在执行的 session 调用栈访问已释放对象。底层排空失败时保留拥有者并报告错误，禁止强行释放仍被 CNet 引用的内存。
+
+握手写入成功入队只表示 admission；对应的 `on_send` 才提交下一协议阶段并请求响应读取。SOCKS5 greeting/auth/CONNECT 和 HTTP CONNECT 均处理任意分片；CONNECT 响应同包尾部作为借用数据交付。HTTP 头最多 4096 字节，扫描依据长度，不要求 NUL。应用发送复制一次到 Salts retained buffer，再由 CNet 持有到写入终态；应用原始缓冲区可在 admission 返回后释放或修改。session 的 ACK、序号和发送计数只在发送/暂存 admission 成功后提交；flush 失败保留原缓冲区。
+
+TLS 使用 CNet 可复用的验证 profile；CA、SNI 在初始化时消费，活动连接持有独立引用。`tls_verify=0` 配合 TLS 返回 NOT_SUPPORTED；`tunnel_config_init()` 和 HTTPS URL 解析默认启用验证。新配置先验证字符串、端口和信任材料，再关闭旧连接并提交配置，旧握手不会读取新凭据。SS/VMess/Trojan、direct TCP 上配置 TLS，以及 UDP relay 均明确拒绝，不创建无功能连接。
+
+硬上限：连接/observer 为 `TUNNEL_MAX_SESSIONS`（65536），命令和事件队列各 256，NativeIO 请求为连接上限的 4 倍；单次发送/接收 65536 字节，TLS I/O 使用 CNet 最低容量。连接、写入和 TLS 握手期限为 30 秒，读取期限使用 session_timeout（0 采用既有 300 秒默认值）。这些值集中在代理创建入口，失败不切换网络后端。
+
+`test_proxy_cnet` 使用真实 loopback TCP/TLS 与私有 CA，经过生产 `tunnel_poll()` 和 NAT/session SYN 路径。测试不打开特权 TUN 接口，因此 Linux TUN 系统配置、Windows/macOS 运行和完整 IPv6 TUN 转发仍须平台集成验证。

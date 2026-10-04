@@ -1,6 +1,6 @@
 # Salts / SaltsUtils 分阶段迁移
 
-已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
+已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由、tunnel 产品 TCP/TLS 调用方。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
 
 ## 审查发现
 
@@ -157,3 +157,21 @@ owner 契约：所有操作及 policy/application/retire callbacks 串行且禁�
 撤销本阶段不涉及 wire 格式或数据转换。完整根工程、Windows/macOS、多核 owner qualification，以及 P2P/tunnel/HTTP 产品调用方仍需迁移和验证；此阶段没有移除全部 legacy SDK。
 
 本阶段本地 Release 与 ASan/UBSan 均为 18/18 CTest 通过，使用 Salts 1.8.15 / SaltsUtils 4.1.17 发布包验证快照；依赖仍 floating/latest。sanitizer 设置 detect_leaks=0，不声称完成泄漏检测。re2c 延续共享 vcpkg-cache，无 bootstrap。
+
+## 第二阶段 F：tunnel 产品 TCP/TLS 调用方
+
+**HIGH（事实，已修复）**：旧 HTTP CONNECT 用 `strstr` 扫描非 NUL 的网络缓冲区；不足 12 字节的分片被误判为参数错误。SOCKS5 CONNECT 按 IPv4 固定最短长度等待，短 domain reply 无法完成；两种 CONNECT 的同包业务数据都会被丢弃。现在长度有界解析、按 ATYP 确定 SOCKS5 帧长、保留响应尾部数据，并正确生成 IPv6 SOCKS5 地址与 HTTP authority。
+
+**HIGH（事实，已修复）**：旧关闭路径立即销毁 stream/connection，不能满足 CNet 异步 observer 生命周期。代理现在拥有真实 CNet client 和有上限的 observer 列表；session 销毁先撤销回调，CNet CLOSED/FAILED 后才在 poll 返回时释放连接。队列满时保留 close 请求并由 owner 重试；stop/destroy 排空 client，回调内 tunnel stop/destroy 延后到 poll 返回。底层未静默时保留拥有者并记录错误，不释放仍被网络层引用的内存。
+
+**HIGH（事实，已修复）**：旧 TLS 仅设置 SNI，未使用 `tls_ca_file`；未实现的 UDP 路径返回 TCP 连接或伪成功。现在使用验证证书和主机名的 CNet TLS profile，CA/SNI 初始化后不借用 caller 字符串；无效 trust 替换不会关闭原连接。TLS 禁止验证关闭，SS/VMess/Trojan 在创建/更新时明确拒绝；UDP relay 返回 NOT_SUPPORTED，不伪装为 TCP CONNECT。公开结构/函数签名保持稳定；默认 tls_verify=1，不提供旧网络 backend fallback。
+
+**HIGH（事实，已修复）**：session 曾在发送 admission 失败或暂存溢出时推进 ACK/序号/统计，flush 失败仍清空缓冲区。现在 admission 成功后才提交本地状态，失败保留待发送数据。TCP ISN 使用 Salts Platform 系统安全随机源，失败关闭 session，无 rand fallback。
+
+实际 `tunnel_run/tunnel_poll` 调用 CNet，整套 tunnel target 改链 Salts::Core/Platform/CNet；线程、时钟、日志、字符串和 TinyTest 改用已发布 API。旧 CoroNet context、stream 和无功能协议流程已移除。一个 client 使用明确的 NativeIO 平台后端、65536 连接/observer、256 命令/事件及有界收发；具体期限、关闭顺序和兼容性见 [tunnel 设计](tunnel/TUNNEL_DESIGN.md#cnet-transport-ownership迁移阶段-f)。配置更新先验证，再关闭已有连接，避免旧握手读到新凭据；不改变 wire 格式或持久化数据。
+
+验证：focused CMake 编译完整 tunnel 共享库和生产源码，原有 6 组 tunnel 回归迁到新版 TinyTest。新增 `test_proxy_cnet` 经过真实 loopback TCP/TLS、生产 tunnel_poll 和 NAT SYN/session 路径，覆盖私有 CA/SNI、主机名错误、TLS query、分片/同包 payload、SOCKS5 auth/domain reply、HTTP 拒绝/超长头、回调内销毁/停止、创建后立即取消、热更新、命令容量耗尽、暂存/flush admission 失败、明确 UDP 拒绝与 IPv6 请求编码。sanitizer 发现旧 DNS 测试的未对齐 uint32_t 读取，改为字节比较。
+
+本地 Release 25/25、ASan/UBSan 25/25 CTest 通过，验证快照 Salts 1.8.15 / SaltsUtils 4.1.17；依赖继续 floating/latest。ASan 设置 detect_leaks=0，发布的 SDK 二进制未重新插桩，不声称完成泄漏或 SDK 内部 sanitizer 验证。CI 使用 latest 包和共享 vcpkg-cache re2c，不增加 pin 或 bootstrap。
+
+此阶段完成 tunnel 的 TCP/TLS 产品路径，未验证特权 TUN 系统配置、Windows/macOS 运行和完整 IPv6 TUN 转发；UDP/SS/VMess/Trojan 仍不提供传输。P2P、安全/维护协程、管理传输与 HTTP 产品 owner、完整根工程仍需后续迁移，暂不移除根工程 legacy SDK。

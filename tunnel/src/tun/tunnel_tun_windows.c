@@ -9,6 +9,7 @@
 #ifdef _WIN32
 #include <Windows.h>
 #include "tunnel_tun.h"
+#include "../stack/tunnel_ip_stack.h"
 #include "../core/tunnel_types.h"
 #include "../stack/tunnel_ip_stack.h"
 #include <stdlib.h>
@@ -16,7 +17,7 @@
 #include <stdio.h>
 #include <objbase.h>
 #include <fmt.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 /* Wintun API typedefs */
 typedef void *WINTUN_ADAPTER_HANDLE;

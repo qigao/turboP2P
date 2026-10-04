@@ -10,7 +10,7 @@ include(SaltsDependencies)
 find_package(OpenSSL REQUIRED)
 
 # Compile real production sources against installed SDKs without admitting a
-# second network runtime. Full product transport tests stay in the normal root build.
+# second network runtime. The complete migrated tunnel target is also built below.
 set(mesh_src "${TURBOP2P_SOURCE_DIR}/mesh/src")
 set(mesh_tests "${TURBOP2P_SOURCE_DIR}/mesh/tests")
 add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/monocypher" monocypher)
@@ -86,3 +86,8 @@ foreach(test_name IN ITEMS test_mesh_stream_cnet test_mesh_stream_cnet_bind test
   add_test(NAME ${test_name} COMMAND ${test_name})
   set_tests_properties(${test_name} PROPERTIES TIMEOUT 60)
 endforeach()
+
+# Compile the complete tunnel product path, including platform TUN sources.
+set(BUILD_TESTS ON)
+set(BUILD_EXAMPLES OFF)
+add_subdirectory("${TURBOP2P_SOURCE_DIR}/tunnel" tunnel)

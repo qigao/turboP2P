@@ -78,22 +78,6 @@ static int tunnel_route_config_apply(tunnel_t *tunnel, const tunnel_route_config
     return TUNNEL_OK;
 }
 
-static int tunnel_poll_coro_context(coro_context_t *ctx)
-{
-    turbo_loop_t *native_loop;
-
-    if (!ctx) {
-        return 0;
-    }
-
-    native_loop = (turbo_loop_t *)coro_context_native_loop(ctx);
-    if (native_loop) {
-        turbo_loop_poll(native_loop, 0, 0);
-    }
-
-    return coro_context_run(ctx, TURBO_RUN_NOWAIT);
-}
-
 static void tunnel_destroy_allocated(tunnel_t *tunnel, int stop_running)
 {
     if (!tunnel) return;
@@ -103,17 +87,19 @@ static void tunnel_destroy_allocated(tunnel_t *tunnel, int stop_running)
     }
 
     tunnel_fake_dns_destroy(tunnel->fake_dns);
-    tunnel_proxy_destroy(tunnel->proxy);
+    tunnel->fake_dns = NULL;
     tunnel_nat_destroy(tunnel->nat);
+    tunnel->nat = NULL;
+    if (tunnel_proxy_destroy(tunnel->proxy) != TUNNEL_OK) {
+        TLOG_ERROR("CNet teardown is not quiescent; tunnel ownership retained");
+        return;
+    }
     tunnel_tun_destroy(tunnel->tun);
 
     tunnel_route_rules_free(tunnel->include_rules);
     tunnel_route_rules_free(tunnel->exclude_rules);
 
-    if (tunnel->ctx) {
-        coro_context_destroy(tunnel->ctx);
-    }
-    turbo_mutex_destroy(&tunnel->mutex);
+    salts_mutex_destroy(&tunnel->mutex);
     free(tunnel);
 }
 
@@ -160,7 +146,9 @@ void tunnel_shutdown(void)
 
 tunnel_t* tunnel_create(const tunnel_config_t *config)
 {
-    if (!config) return NULL;
+    if (!config || (config->mode != TUNNEL_MODE_PROXY && config->mode != TUNNEL_MODE_PACKET) ||
+        config->session_timeout < 0 || (unsigned)config->session_timeout > UINT32_MAX / 1000u)
+        return NULL;
 
     tunnel_t *tunnel = calloc(1, sizeof(tunnel_t));
     if (!tunnel) return NULL;
@@ -168,20 +156,8 @@ tunnel_t* tunnel_create(const tunnel_config_t *config)
     /* Copy configuration */
     memcpy(&tunnel->config, config, sizeof(tunnel_config_t));
 
-    if (config->mode != TUNNEL_MODE_PACKET) {
-        tunnel->ctx = coro_context_create(NULL);
-        if (!tunnel->ctx) {
-            free(tunnel);
-            return NULL;
-        }
-    }
-
-    /* Initialize mutex */
-    turbo_mutex_init(&tunnel->mutex);
+    salts_mutex_init(&tunnel->mutex);
     if (!tunnel->mutex) {
-        if (tunnel->ctx) {
-            coro_context_destroy(tunnel->ctx);
-        }
         free(tunnel);
         return NULL;
     }
@@ -256,6 +232,10 @@ tunnel_t* tunnel_create_from_yaml(const char *config_yaml)
 
 void tunnel_destroy(tunnel_t *tunnel)
 {
+    if (tunnel && tunnel->polling) {
+        tunnel->destroy_requested = 1;
+        return;
+    }
     tunnel_destroy_allocated(tunnel, 1);
 }
 
@@ -292,7 +272,7 @@ static void tunnel_process_tcp_packet(tunnel_t *tunnel, tunnel_packet_t *pkt)
             return;
         }
 
-        TLOG_DEBUG("New TCP session {}:{} -> {}:{}",
+        TLOG_DEBUGF("New TCP session {}:{} -> {}:{}",
                          tunnel_session_get_src_addr(session),
                          tunnel_session_get_src_port(session),
                          tunnel_session_get_dst_addr(session),
@@ -323,7 +303,7 @@ static void tunnel_process_tcp_packet(tunnel_t *tunnel, tunnel_packet_t *pkt)
         int ret = tunnel_session_tcp_data(session, pkt->tcp.seq,
                                            pkt->payload, pkt->payload_len);
         if (ret != TUNNEL_OK) {
-            TLOG_DEBUG("TCP data error: {}", ret);
+            TLOG_DEBUGF("TCP data error: {}", ret);
         }
     }
 }
@@ -336,7 +316,7 @@ static void tunnel_process_udp_packet(tunnel_t *tunnel, tunnel_packet_t *pkt)
                                            pkt->payload, pkt->payload_len);
     if (ret != TUNNEL_OK) {
         tunnel->stats.connect_errors++;
-        TLOG_DEBUG("UDP datagram error: {}", ret);
+        TLOG_DEBUGF("UDP datagram error: {}", ret);
     }
 }
 
@@ -375,7 +355,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
 {
     int should_tunnel = 1;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
 
     /* Check exclude rules first */
     tunnel_route_rule_t *rule = tunnel->exclude_rules;
@@ -392,14 +372,14 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
     }
 
     if (!should_tunnel) {
-        turbo_mutex_unlock(&tunnel->mutex);
+        salts_mutex_unlock(&tunnel->mutex);
         return 0;  /* Excluded */
     }
 
     /* Check include rules */
     rule = tunnel->include_rules;
     if (!rule) {
-        turbo_mutex_unlock(&tunnel->mutex);
+        salts_mutex_unlock(&tunnel->mutex);
         return 1;  /* No include rules = tunnel all */
     }
 
@@ -416,7 +396,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
         rule = rule->next;
     }
 
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
     return should_tunnel;
 }
 
@@ -459,7 +439,7 @@ int tunnel_handle_tun_packet(tunnel_t *tunnel, const uint8_t *data, size_t len)
         const char *domain = tunnel_fake_dns_get_domain(tunnel->fake_dns, pkt.ip.dst.addr.v4);
         if (domain) {
             /* Store domain for session */
-            TLOG_DEBUG("Resolved fake IP to domain: {}", domain);
+            TLOG_DEBUGF("Resolved fake IP to domain: {}", domain);
         }
     }
 
@@ -502,10 +482,10 @@ static void tunnel_run_maintenance(tunnel_t *tunnel)
         return;
     }
 
-    now_ms = turbo_hrtime() / 1000000;
+    now_ms = salts_monotonic_ms();
 
     if (now_ms - tunnel->last_session_maintenance_ms >= 1000) {
-        tcp_timeout = tunnel->config.session_timeout * 1000;
+        tcp_timeout = (uint32_t)tunnel->config.session_timeout * 1000u;
         udp_timeout = TUNNEL_UDP_TIMEOUT_MS;
         if (tcp_timeout == 0) {
             tcp_timeout = TUNNEL_SESSION_TIMEOUT_MS;
@@ -513,7 +493,7 @@ static void tunnel_run_maintenance(tunnel_t *tunnel)
 
         expired = tunnel_nat_evict_expired(tunnel->nat, tcp_timeout, udp_timeout);
         if (expired > 0) {
-            TLOG_DEBUG("Expired {} sessions", expired);
+            TLOG_DEBUGF("Expired {} sessions", expired);
             tunnel->stats.timeout_errors += expired;
         }
 
@@ -547,34 +527,37 @@ int tunnel_start(tunnel_t *tunnel)
     if (!tunnel) return TUNNEL_ERR_INVALID_ARG;
     if (tunnel->running) return TUNNEL_OK;
 
+    int ret = tunnel_proxy_start(tunnel->proxy);
+    if (ret != TUNNEL_OK) return ret;
+
     /* Open TUN device */
-    int ret = tunnel_tun_open(tunnel->tun);
+    ret = tunnel_tun_open(tunnel->tun);
     if (ret != TUNNEL_OK) {
-        TLOG_ERROR("Failed to open TUN device: {}", ret);
+        TLOG_ERRORF("Failed to open TUN device: {}", ret);
         return ret;
     }
 
     /* Configure TUN device */
     ret = tunnel_tun_configure(tunnel->tun);
     if (ret != TUNNEL_OK) {
-        TLOG_ERROR("Failed to configure TUN device: {}", ret);
+        TLOG_ERRORF("Failed to configure TUN device: {}", ret);
         tunnel_tun_close(tunnel->tun);
         return ret;
     }
 
-    TLOG_INFO("TUN device {} opened", tunnel_tun_get_name(tunnel->tun));
+    TLOG_INFOF("TUN device {} opened", tunnel_tun_get_name(tunnel->tun));
 
     /* Start TUN polling */
     ret = tunnel_tun_start(tunnel->tun);
     if (ret != TUNNEL_OK) {
-        TLOG_ERROR("Failed to start TUN polling: {}", ret);
+        TLOG_ERRORF("Failed to start TUN polling: {}", ret);
         tunnel_tun_close(tunnel->tun);
         return ret;
     }
 
     /* Set TUN read callback */
     tunnel_tun_set_read_cb(tunnel->tun, on_tun_read);
-    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->start_time = salts_monotonic_ms();
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
     tunnel->running = 1;
@@ -587,7 +570,10 @@ int tunnel_start(tunnel_t *tunnel)
 void tunnel_stop(tunnel_t *tunnel)
 {
     if (!tunnel || !tunnel->running) return;
-
+    if (tunnel->polling) {
+        tunnel->stopping = 1;
+        return;
+    }
     tunnel->stopping = 1;
 
     /* Stop TUN */
@@ -596,6 +582,8 @@ void tunnel_stop(tunnel_t *tunnel)
 
     /* Close all sessions */
     tunnel_nat_clear(tunnel->nat);
+    if (tunnel_proxy_stop(tunnel->proxy) != TUNNEL_OK)
+        TLOG_ERROR("CNet stop is not quiescent; transport ownership retained");
 
     tunnel->running = 0;
     tunnel->stopping = 0;
@@ -605,9 +593,6 @@ void tunnel_stop(tunnel_t *tunnel)
 
 int tunnel_run(tunnel_t *tunnel)
 {
-    int coro_active;
-    int tun_active;
-
     if (!tunnel) return TUNNEL_ERR_INVALID_ARG;
 
     if (!tunnel->running) {
@@ -617,31 +602,31 @@ int tunnel_run(tunnel_t *tunnel)
         }
     }
 
-    /* Run event loop */
     while (tunnel->running && !tunnel->stopping) {
-        tun_active = tunnel_tun_poll(tunnel->tun);
-        coro_active = tunnel_poll_coro_context(tunnel->ctx);
-        tunnel_run_maintenance(tunnel);
-
-        if (!tun_active && !coro_active) {
-            turbo_sleep_ms(1);
-        }
+        int active = tunnel_poll(tunnel, 0);
+        if (active < 0) return active;
+        if (!active) salts_sleep_ms(1);
     }
-
     return TUNNEL_OK;
 }
 
 int tunnel_poll(tunnel_t *tunnel, int timeout_ms)
 {
-    int active;
-
+    int active, network_active;
     if (!tunnel || !tunnel->running) return 0;
-
+    if (tunnel->polling) return TUNNEL_ERR_INVALID_ARG;
     (void)timeout_ms;
+    tunnel->polling = 1;
     active = tunnel_tun_poll(tunnel->tun);
-    active += tunnel_poll_coro_context(tunnel->ctx);
-    tunnel_run_maintenance(tunnel);
-    return active;
+    network_active = tunnel_proxy_poll(tunnel->proxy);
+    if (!tunnel->destroy_requested && !tunnel->stopping) tunnel_run_maintenance(tunnel);
+    tunnel->polling = 0;
+    if (tunnel->destroy_requested) {
+        tunnel_destroy_allocated(tunnel, 1);
+        return TUNNEL_ERR_CLOSED;
+    }
+    if (tunnel->stopping) tunnel_stop(tunnel);
+    return network_active < 0 ? network_active : active + network_active;
 }
 
 int tunnel_write_packet(tunnel_t *tunnel, const uint8_t *data, size_t len)
@@ -714,7 +699,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
         return ret;
     }
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     tunnel_route_rule_t *old_include = tunnel->include_rules;
     tunnel_route_rule_t *old_exclude = tunnel->exclude_rules;
     tunnel->include_rules = parsed.include_rules;
@@ -722,7 +707,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
     tunnel->config.route = *route;
     tunnel_route_rules_free(old_include);
     tunnel_route_rules_free(old_exclude);
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -735,9 +720,9 @@ int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats)
 {
     if (!tunnel || !stats) return TUNNEL_ERR_INVALID_ARG;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     memcpy(stats, &tunnel->stats, sizeof(tunnel_stats_t));
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -746,12 +731,12 @@ void tunnel_reset_stats(tunnel_t *tunnel)
 {
     if (!tunnel) return;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     memset(&tunnel->stats, 0, sizeof(tunnel_stats_t));
-    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->start_time = salts_monotonic_ms();
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 }
 
 /* =============================================================================
@@ -882,6 +867,7 @@ void tunnel_config_init(tunnel_config_t *config)
     config->tun.mtu = 1500;
     config->mode = TUNNEL_MODE_PROXY;
     config->udp_mode = TUNNEL_UDP_OVER_TCP;
+    config->proxy.tls_verify = 1;
     config->tcp_keep_alive = 60;
     config->session_timeout = 300;
     config->log_level = 2;  /* INFO */

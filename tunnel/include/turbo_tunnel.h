@@ -10,42 +10,11 @@
  * - Implemented proxy protocols: SOCKS5 CONNECT, HTTP CONNECT, direct TCP
  * - TCP support and partial UDP session plumbing
  * - NAT session management with connection tracking
- * - Packet processing via CoroNet streams
+ * - Packet processing via CNet TCP/TLS
  * - Cross-platform (Linux, macOS, Windows, Android, iOS)
  *
- * Architecture:
- * ┌─────────────────────────────────────────────────────────────────┐
- * │                        Application                              │
- * │                            │                                    │
- * │                      ┌─────▼─────┐                              │
- * │                      │    TUN    │  (Virtual Network Device)    │
- * │                      └─────┬─────┘                              │
- * │                            │ IP Packets                         │
- * │                      ┌─────▼─────┐                              │
- * │                      │  IP Stack │  (Lightweight TCP/UDP)       │
- * │                      └─────┬─────┘                              │
- * │                            │ Sessions                           │
- * │                      ┌─────▼─────┐                              │
- * │                      │    NAT    │  (Connection Tracking)       │
- * │                      └─────┬─────┘                              │
- * │                            │                                    │
- * │         ┌──────────────────┼──────────────────┐                 │
- * │         ▼                  ▼                  ▼                 │
- * │   ┌──────────┐      ┌──────────┐       ┌──────────┐            │
- * │   │  SOCKS5  │      │   HTTP   │       │  Direct  │            │
- * │   │  Client  │      │  CONNECT │       │   TCP    │            │
- * │   └────┬─────┘      └────┬─────┘       └────┬─────┘            │
- * │        └─────────────────┼─────────────────┘                   │
- * │                          │                                      │
- * │                    ┌─────▼─────┐                                │
- * │                    │ CoroNet   │  (TCP/TLS streams)             │
- * │                    └─────┬─────┘                                │
- * │                          │                                      │
- * └──────────────────────────┼──────────────────────────────────────┘
- *                            │
- *                      ┌─────▼─────┐
- *                      │  Network  │
- *                      └───────────┘
+ * Each proxy owns one caller-driven CNet loop. Poll and transport operations
+ * run on the same thread; callbacks may close sessions or request destruction.
  */
 
 #ifndef TURBO_TUNNEL_H
@@ -54,6 +23,15 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <platform.h>
+#if defined(_WIN32) && !defined(TUNNEL_STATIC)
+# ifdef TUNNEL_BUILDING_LIBRARY
+#  define TUNNEL_API __declspec(dllexport)
+# else
+#  define TUNNEL_API __declspec(dllimport)
+# endif
+#else
+# define TUNNEL_API
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -106,7 +84,7 @@ typedef enum {
 
 typedef enum {
     TUNNEL_UDP_DISABLED = 0,        /* UDP not tunneled */
-    TUNNEL_UDP_OVER_TCP,            /* UDP encapsulated in TCP */
+    TUNNEL_UDP_OVER_TCP,            /* Reserved; proxy relay returns NOT_SUPPORTED */
     TUNNEL_UDP_NATIVE,              /* Native UDP mode (transport incomplete) */
     TUNNEL_UDP_FULLCONE,            /* Full cone NAT mode (transport incomplete) */
 } tunnel_udp_mode_t;
@@ -166,7 +144,7 @@ typedef struct {
     /* TLS settings (for secure proxies) */
     int use_tls;                    /* Enable TLS */
     const char *tls_sni;            /* TLS SNI hostname (NULL for auto) */
-    int tls_verify;                 /* Verify server certificate */
+    int tls_verify;                 /* Must be 1 when use_tls is enabled */
     const char *tls_ca_file;        /* Custom CA file (NULL for system) */
 
     /* Protocol-specific settings */
@@ -298,27 +276,27 @@ typedef void (*tunnel_traffic_cb)(tunnel_t *tunnel, int direction,
  * Initialize tunnel library
  * Call once at application startup.
  */
-CXX_C_API int tunnel_init(void);
+TUNNEL_API int tunnel_init(void);
 
 /**
  * Shutdown tunnel library
  * Call once at application exit.
  */
-CXX_C_API void tunnel_shutdown(void);
+TUNNEL_API void tunnel_shutdown(void);
 
 /**
  * Create a tunnel instance
  * @param config Tunnel configuration
  * @return Tunnel handle or NULL on error
  */
-CXX_C_API tunnel_t* tunnel_create(const tunnel_config_t *config);
+TUNNEL_API tunnel_t* tunnel_create(const tunnel_config_t *config);
 
 /**
  * Create tunnel from key-value config file
  * @param config_path Path to config file
  * @return Tunnel handle or NULL on error
  */
-CXX_C_API tunnel_t* tunnel_create_from_file(const char *config_path);
+TUNNEL_API tunnel_t* tunnel_create_from_file(const char *config_path);
 
 /**
  * Create tunnel from YAML config string
@@ -326,14 +304,16 @@ CXX_C_API tunnel_t* tunnel_create_from_file(const char *config_path);
  * @param config_yaml YAML config string
  * @return Tunnel handle or NULL on error
  */
-CXX_C_API tunnel_t* tunnel_create_from_yaml(const char *config_yaml);
+TUNNEL_API tunnel_t* tunnel_create_from_yaml(const char *config_yaml);
 
 /**
  * Destroy tunnel instance
  * Closes TUN device and all sessions.
+ * From a poll callback, destruction completes after that poll returns.
+ * The caller must discard the handle immediately after requesting destruction.
  * @param tunnel Tunnel handle
  */
-CXX_C_API void tunnel_destroy(tunnel_t *tunnel);
+TUNNEL_API void tunnel_destroy(tunnel_t *tunnel);
 
 /* =============================================================================
  * Control API
@@ -345,14 +325,15 @@ CXX_C_API void tunnel_destroy(tunnel_t *tunnel);
  * @param tunnel Tunnel handle
  * @return TUNNEL_OK on success
  */
-CXX_C_API int tunnel_start(tunnel_t *tunnel);
+TUNNEL_API int tunnel_start(tunnel_t *tunnel);
 
 /**
  * Stop the tunnel
- * Closes all sessions but keeps TUN device open.
+ * Closes sessions and TUN, drains the CNet owner; tunnel_start may restart it.
+ * From a poll callback, teardown is deferred until that poll returns.
  * @param tunnel Tunnel handle
  */
-CXX_C_API void tunnel_stop(tunnel_t *tunnel);
+TUNNEL_API void tunnel_stop(tunnel_t *tunnel);
 
 /**
  * Run tunnel event loop (blocking)
@@ -360,15 +341,16 @@ CXX_C_API void tunnel_stop(tunnel_t *tunnel);
  * @param tunnel Tunnel handle
  * @return TUNNEL_OK on clean exit
  */
-CXX_C_API int tunnel_run(tunnel_t *tunnel);
+TUNNEL_API int tunnel_run(tunnel_t *tunnel);
 
 /**
  * Run single iteration of event loop (non-blocking)
  * @param tunnel Tunnel handle
  * @param timeout_ms Reserved; currently ignored and the call is non-blocking
- * @return Number of events processed
+ * @return Number of events processed, or a negative tunnel error.
+ * TUNNEL_ERR_CLOSED means a callback requested destruction; the handle is invalid.
  */
-CXX_C_API int tunnel_poll(tunnel_t *tunnel, int timeout_ms);
+TUNNEL_API int tunnel_poll(tunnel_t *tunnel, int timeout_ms);
 
 /**
  * Write packet to TUN device (inject into network stack)
@@ -379,7 +361,7 @@ CXX_C_API int tunnel_poll(tunnel_t *tunnel, int timeout_ms);
  * @param len Packet length
  * @return TUNNEL_OK on success
  */
-CXX_C_API int tunnel_write_packet(tunnel_t *tunnel, const uint8_t *data, size_t len);
+TUNNEL_API int tunnel_write_packet(tunnel_t *tunnel, const uint8_t *data, size_t len);
 
 /* =============================================================================
  * Configuration API
@@ -391,7 +373,7 @@ CXX_C_API int tunnel_write_packet(tunnel_t *tunnel, const uint8_t *data, size_t 
  * @param callback Log callback function
  * @param user_data User context passed to callback
  */
-CXX_C_API void tunnel_set_log_callback(tunnel_t *tunnel,
+TUNNEL_API void tunnel_set_log_callback(tunnel_t *tunnel,
                                          tunnel_log_cb callback,
                                          void *user_data);
 
@@ -401,7 +383,7 @@ CXX_C_API void tunnel_set_log_callback(tunnel_t *tunnel,
  * @param callback Session callback function
  * @param user_data User context passed to callback
  */
-CXX_C_API void tunnel_set_session_callback(tunnel_t *tunnel,
+TUNNEL_API void tunnel_set_session_callback(tunnel_t *tunnel,
                                              tunnel_session_cb callback,
                                              void *user_data);
 
@@ -411,7 +393,7 @@ CXX_C_API void tunnel_set_session_callback(tunnel_t *tunnel,
  * @param callback Traffic callback function
  * @param user_data User context passed to callback
  */
-CXX_C_API void tunnel_set_traffic_callback(tunnel_t *tunnel,
+TUNNEL_API void tunnel_set_traffic_callback(tunnel_t *tunnel,
                                              tunnel_traffic_cb callback,
                                              void *user_data);
 
@@ -421,7 +403,7 @@ CXX_C_API void tunnel_set_traffic_callback(tunnel_t *tunnel,
  * @param proxy New proxy configuration
  * @return TUNNEL_OK on success
  */
-CXX_C_API int tunnel_set_proxy(tunnel_t *tunnel, const tunnel_proxy_config_t *proxy);
+TUNNEL_API int tunnel_set_proxy(tunnel_t *tunnel, const tunnel_proxy_config_t *proxy);
 
 /**
  * Update routing rules (hot reload)
@@ -429,7 +411,7 @@ CXX_C_API int tunnel_set_proxy(tunnel_t *tunnel, const tunnel_proxy_config_t *pr
  * @param route New routing configuration
  * @return TUNNEL_OK on success
  */
-CXX_C_API int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route);
+TUNNEL_API int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route);
 
 /* =============================================================================
  * Statistics API
@@ -441,13 +423,13 @@ CXX_C_API int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *r
  * @param stats Output statistics structure
  * @return TUNNEL_OK on success
  */
-CXX_C_API int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats);
+TUNNEL_API int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats);
 
 /**
  * Reset statistics counters
  * @param tunnel Tunnel handle
  */
-CXX_C_API void tunnel_reset_stats(tunnel_t *tunnel);
+TUNNEL_API void tunnel_reset_stats(tunnel_t *tunnel);
 
 /* =============================================================================
  * Session API
@@ -458,7 +440,7 @@ CXX_C_API void tunnel_reset_stats(tunnel_t *tunnel);
  * @param tunnel Tunnel handle
  * @return Number of active sessions
  */
-CXX_C_API int tunnel_get_session_count(tunnel_t *tunnel);
+TUNNEL_API int tunnel_get_session_count(tunnel_t *tunnel);
 
 /**
  * Iterate over active sessions
@@ -466,26 +448,26 @@ CXX_C_API int tunnel_get_session_count(tunnel_t *tunnel);
  * @param callback Called for each session (return 0 to continue, non-zero to stop)
  * @param user_data User context
  */
-CXX_C_API void tunnel_foreach_session(tunnel_t *tunnel,
+TUNNEL_API void tunnel_foreach_session(tunnel_t *tunnel,
                                         int (*callback)(tunnel_session_t*, void*),
                                         void *user_data);
 
 /**
  * Get session information
  */
-CXX_C_API const char* tunnel_session_get_src_addr(tunnel_session_t *session);
-CXX_C_API int tunnel_session_get_src_port(tunnel_session_t *session);
-CXX_C_API const char* tunnel_session_get_dst_addr(tunnel_session_t *session);
-CXX_C_API int tunnel_session_get_dst_port(tunnel_session_t *session);
-CXX_C_API tunnel_session_state_t tunnel_session_get_state(tunnel_session_t *session);
-CXX_C_API uint64_t tunnel_session_get_bytes_rx(tunnel_session_t *session);
-CXX_C_API uint64_t tunnel_session_get_bytes_tx(tunnel_session_t *session);
+TUNNEL_API const char* tunnel_session_get_src_addr(tunnel_session_t *session);
+TUNNEL_API int tunnel_session_get_src_port(tunnel_session_t *session);
+TUNNEL_API const char* tunnel_session_get_dst_addr(tunnel_session_t *session);
+TUNNEL_API int tunnel_session_get_dst_port(tunnel_session_t *session);
+TUNNEL_API tunnel_session_state_t tunnel_session_get_state(tunnel_session_t *session);
+TUNNEL_API uint64_t tunnel_session_get_bytes_rx(tunnel_session_t *session);
+TUNNEL_API uint64_t tunnel_session_get_bytes_tx(tunnel_session_t *session);
 
 /**
  * Close a specific session
  * @param session Session handle
  */
-CXX_C_API void tunnel_session_close(tunnel_session_t *session);
+TUNNEL_API void tunnel_session_close(tunnel_session_t *session);
 
 /* =============================================================================
  * Utility API
@@ -496,19 +478,19 @@ CXX_C_API void tunnel_session_close(tunnel_session_t *session);
  * @param error Error code
  * @return Human-readable error string
  */
-CXX_C_API const char* tunnel_error_string(tunnel_error_t error);
+TUNNEL_API const char* tunnel_error_string(tunnel_error_t error);
 
 /**
  * Get library version
  * @return Version string (e.g., "1.0.0")
  */
-CXX_C_API const char* tunnel_version(void);
+TUNNEL_API const char* tunnel_version(void);
 
 /**
  * Initialize default configuration
  * @param config Configuration structure to initialize
  */
-CXX_C_API void tunnel_config_init(tunnel_config_t *config);
+TUNNEL_API void tunnel_config_init(tunnel_config_t *config);
 
 #ifdef __cplusplus
 }
