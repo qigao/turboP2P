@@ -424,6 +424,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
     int ret = P2P_OK;
     int transfer_locked = 0;
     int complete_now = 0;
+    int next_request_ret = P2P_OK;
     uint32_t total_chunks = 0;
     uint8_t actual_chunk_hash[P2P_SHA256_DIGEST_SIZE];
 
@@ -567,16 +568,26 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
             msg->payload.chunk_request.transfer_id = transfer->id;
             msg->payload.chunk_request.chunk_index = next;
             msg->header.payload_len = sizeof(p2p_chunk_request_payload_t);
-            if (p2p_peer_send(source, msg) != P2P_OK) {
+            next_request_ret = p2p_peer_send(source, msg);
+            if (next_request_ret != P2P_OK) {
                 p2p_transfer_remove_in_flight_locked(transfer, next);
                 p2p_transfer_source_failed_locked(transfer, source);
             }
             free(msg);
+            if (next_request_ret != P2P_OK) break;
         } else {
             p2p_transfer_remove_in_flight_locked(transfer, next);
             p2p_transfer_source_failed_locked(transfer, source);
+            next_request_ret = P2P_ERR_NO_MEM;
             break;
         }
+    }
+    salts_mutex_unlock(&transfer->mutex);
+    transfer_locked = 0;
+    if (next_request_ret != P2P_OK) {
+        ret = next_request_ret;
+        p2p_transfer_complete(transfer, 0, "Failed to request next chunk");
+        p2p_receiver_send_source_acks(transfer, 0);
     }
 
 done:

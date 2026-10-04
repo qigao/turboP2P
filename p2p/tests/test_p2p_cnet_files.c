@@ -167,6 +167,34 @@ static void test_peer_disconnect(void) {
     teardown_files(&fixture);
 }
 
+#ifdef P2P_FILES_TEST_WRAP
+static int fail_chunk_request_at, chunk_request_calls;
+int __real_p2p_peer_send(p2p_peer_t *, const p2p_message_t *);
+int __wrap_p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *message) {
+    if (fail_chunk_request_at && message->header.type == P2P_MSG_CHUNK_REQUEST &&
+        ++chunk_request_calls == fail_chunk_request_at)
+        return P2P_ERR_RESOURCE_EXHAUSTED;
+    return __real_p2p_peer_send(peer, message);
+}
+static void test_request_backpressure(void) {
+    file_fixture_t fixture = {0};
+    setup_files(&fixture, FILE_TEST_BYTES);
+    chunk_request_calls = 0;
+    fail_chunk_request_at = 2;
+    start_download(&fixture);
+    wait_complete(&fixture);
+    fail_chunk_request_at = 0;
+    check_equal(0, fixture.success);
+    check_equal(2, chunk_request_calls);
+    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    while (fixture.pair.server.node->transfers->count && salts_monotonic_ms() < deadline)
+        pump(&fixture.pair);
+    check_equal(0u, fixture.pair.server.node->transfers->count);
+    check_equal(1, fixture.completed);
+    teardown_files(&fixture);
+}
+#endif
+
 spec("P2P file transfer over production CNet nodes") {
     it("downloads and seeds nine chunks plus a tail through fragmented CNet reads") { test_file_roundtrip(FILE_TEST_BYTES, 0); }
     it("reuses in-flight slots across parallel request windows and releases uploads on ACK") { test_file_roundtrip(FILE_TEST_BYTES, 1); }
@@ -177,4 +205,7 @@ spec("P2P file transfer over production CNet nodes") {
     it("closes pending transfers before releasing their peers") { test_pending_stop(); }
     it("retains manager and node until a detached transfer lease is released") { test_live_transfer_lease(); }
     it("keeps an upload peer alive after disconnect until transfer teardown") { test_peer_disconnect(); }
+#ifdef P2P_FILES_TEST_WRAP
+    it("reports request backpressure once and releases the upload through a negative ACK") { test_request_backpressure(); }
+#endif
 }
