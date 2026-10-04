@@ -30,6 +30,7 @@ typedef enum {
   MESH_MGMT_AGENT_RUNTIME_READY = 1,
   MESH_MGMT_AGENT_RUNTIME_RUNNING = 2,
   MESH_MGMT_AGENT_RUNTIME_STOPPED = 3,
+  MESH_MGMT_AGENT_RUNTIME_STOPPING = 4,
 } mesh_mgmt_agent_runtime_state_t;
 
 typedef struct {
@@ -137,15 +138,34 @@ typedef struct {
   int last_p2p_result;
   uint8_t in_api;
   uint8_t owns_node;
+  p2p_runtime_config_v2_t p2p_config;
+  const struct mesh_mgmt_agent_mesh_ops_s *mesh_ops;
 } mesh_mgmt_agent_runtime_v1_t;
 
+/** Compatibility entry point: dedicated mode uses CNet v2 defaults and
+ * requires a nonzero port; shared mode uses the real mesh callback bridge. */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
                                 const mesh_mgmt_agent_runtime_config_v1_t *config);
 
 /**
+ * Dedicated CNet composition without a mesh link dependency. shared_mesh must
+ * be NULL. Port zero requests an ephemeral listener, queryable through
+ * p2p_node_get_listen_address_v2() after start. Initialize p2p_config with
+ * p2p_runtime_config_v2_init(); its contents are copied, and network limits are
+ * checked by start. Templates and callback contexts remain borrowed until
+ * destroy_v2 succeeds, including failed init/start cleanup in STOPPING state.
+ */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_agent_runtime_config_v1_t *config,
+    const p2p_runtime_config_v2_t *p2p_config);
+
+/**
  * Dedicated mode installs callbacks and binds its listener. Shared mode
  * attaches to mesh before mesh_start(); the caller starts the mesh afterward.
+ * Failure after callback installation is terminal: STOPPED on successful
+ * cleanup, STOPPING otherwise. Destroy before initializing again.
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
@@ -292,11 +312,20 @@ mesh_mgmt_agent_runtime_send_execution_disabled_from_event_v1(
 /**
  * Stop management work. Dedicated mode disconnects peers and destroys its P2P
  * node. Shared mode detaches MMP without disconnecting mesh peers or destroying
- * the borrowed node. A stopped runtime cannot be restarted.
+ * the borrowed node. READY may be stopped, STOPPED is idempotent, and a stopped
+ * runtime cannot be restarted. Failure leaves STOPPING with the node, provider
+ * and composition storage intact for retry. last_p2p_result preserves a P2P
+ * cleanup error. Lifecycle calls inside runtime/router callbacks are rejected.
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_stop_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
+/** Stop and release; only success permits freeing runtime/templates/contexts.
+ * NULL is accepted. Failure preserves storage and may be retried. */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_destroy_v2(mesh_mgmt_agent_runtime_v1_t *runtime);
+
+/** @deprecated Use destroy_v2 and check its result. Failure retains storage. */
 void mesh_mgmt_agent_runtime_destroy_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
 #ifdef __cplusplus

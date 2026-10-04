@@ -429,7 +429,7 @@ static int address_to_host(const mesh_mgmt_service_announcement_v1_t *announceme
                 MESH_MGMT_SERVICE_VIRTUAL_IP_MAX) == NULL) {
     return 0;
   }
-  return output[0] != '\\0';
+  return output[0] != '\0';
 }
 
 mesh_mgmt_service_record_result_t

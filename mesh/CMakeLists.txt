@@ -1113,7 +1113,7 @@ add_library(mesh_mgmt_endpoint_publisher STATIC
 target_include_directories(mesh_mgmt_endpoint_publisher PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_endpoint_publisher PUBLIC
-  mesh_mgmt_endpoint_record mesh_mgmt_peer_signer TurboP2P::P2P TurboUtils::Core)
+  mesh_mgmt_endpoint_record mesh_mgmt_peer_signer TurboP2P::P2P Salts::Platform)
 set_property(TARGET mesh_mgmt_endpoint_publisher PROPERTY FOLDER "mesh/internal")
 
 # Validated signer and connected-peer DHT push boundary for RPC virtual service
@@ -1124,20 +1124,22 @@ add_library(mesh_mgmt_service_publisher STATIC
 target_include_directories(mesh_mgmt_service_publisher PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_service_publisher PUBLIC
-  mesh_mgmt_service_record mesh_mgmt_peer_signer TurboP2P::P2P TurboUtils::Core)
+  mesh_mgmt_service_record mesh_mgmt_peer_signer TurboP2P::P2P Salts::Platform)
 set_property(TARGET mesh_mgmt_service_publisher PROPERTY FOLDER "mesh/internal")
 
 # Dedicated mesh-agent composition root. It owns a private P2P listener, the
 # MMP callback router and bounded endpoint reconnect state on one event loop.
 add_library(mesh_mgmt_agent_runtime STATIC
   src/mesh_mgmt_agent_runtime.c
+  src/mesh_mgmt_agent_runtime_mesh.c
+  src/mesh_mgmt_agent_runtime_internal.h
   src/mesh_mgmt_agent_runtime.h)
 target_include_directories(mesh_mgmt_agent_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_agent_runtime PUBLIC
   mesh_mgmt_agent_router mesh_mgmt_endpoint_publisher mesh_mgmt_p2p_security
   mesh_mgmt_service_publisher
-  TurboNet::CoroNet)
+  Salts::Platform)
 set_property(TARGET mesh_mgmt_agent_runtime PROPERTY FOLDER "mesh/internal")
 
 # Length-first framing for future reliable byte-stream transports. This codec

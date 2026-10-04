@@ -876,13 +876,11 @@ static void meshd_management_stop(void) {
         g_execution_node_configured = 0;
     }
 #endif
-    if (g_management_runtime.state == MESH_MGMT_AGENT_RUNTIME_RUNNING) {
-        if (mesh_mgmt_agent_runtime_stop_v1(&g_management_runtime) !=
-            MESH_MGMT_AGENT_RUNTIME_OK) {
-            fprintf(stderr, "Failed to stop shared management runtime\n");
-        }
+    if (mesh_mgmt_agent_runtime_destroy_v2(&g_management_runtime) !=
+        MESH_MGMT_AGENT_RUNTIME_OK) {
+        fprintf(stderr, "Failed to destroy shared management runtime; retaining contexts\n");
+        return;
     }
-    mesh_mgmt_agent_runtime_destroy_v1(&g_management_runtime);
     meshd_management_reset();
 }
 
@@ -902,6 +900,11 @@ static int meshd_management_start(mesh_network_t *mesh,
     mesh_mgmt_execution_node_config_v1_t node_execution_config;
 #endif
 
+    if (g_management_runtime.state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED ||
+        g_management_runtime.node) {
+        fprintf(stderr, "Previous management runtime still owns borrowed contexts\n");
+        return -1;
+    }
     meshd_management_reset();
     if (!mesh_node_config_management_enabled(config)) {
         return 0;
@@ -1139,14 +1142,18 @@ static int meshd_management_start(mesh_network_t *mesh,
     return 0;
 
 failed:
-    mesh_mgmt_agent_runtime_destroy_v1(&g_management_runtime);
+    if (mesh_mgmt_agent_runtime_destroy_v2(&g_management_runtime) !=
+        MESH_MGMT_AGENT_RUNTIME_OK) {
+        fprintf(stderr, "Failed to clean management initialization; retaining contexts\n");
+    }
     mesh_mgmt_crypto_wipe(&certificate, sizeof(certificate));
     mesh_mgmt_crypto_wipe(transport_peer_id, sizeof(transport_peer_id));
     mesh_mgmt_crypto_wipe(management_public_key, sizeof(management_public_key));
     mesh_mgmt_crypto_wipe(issuer_hash, sizeof(issuer_hash));
     mesh_mgmt_crypto_wipe(execution_grant_issuer_key,
                           sizeof(execution_grant_issuer_key));
-    meshd_management_reset();
+    if (g_management_runtime.state == MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED)
+        meshd_management_reset();
     return -1;
 }
 

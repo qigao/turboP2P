@@ -260,7 +260,7 @@ static int address_to_host(const mesh_mgmt_endpoint_announcement_v1_t *announcem
   if (inet_ntop(family, announcement->address, output, MESH_MGMT_ENDPOINT_HOST_MAX) == NULL) {
     return 0;
   }
-  return output[0] != '\\0';
+  return output[0] != '\0';
 }
 
 mesh_mgmt_endpoint_record_result_t

@@ -589,3 +589,28 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 本地 Linux Release 完整 **40/40**，十套 ASan/UBSan **10/10** 通过；`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`，`detect_leaks=0`，发布 SDK 未插桩。Release 与 sanitizer 首跑各一个构建产物因权限为 644 未启动，恢复执行权限后分别全套重跑通过。三个本次实现/测试编译单元通过 `-Wall -Wextra -Werror`。CI 将新生命周期套件加入强制 sanitizer gate；SDK 继续浮动 latest，re2c 使用共享 vcpkg-cache。复验命令沿用阶段 P，sanitizer 正则与 target 列表新增 `test_p2p_cnet_lifecycle`。
 
 **MED（事实，剩余范围）**：mesh/管理 runtime 的构造与释放调用方仍使用旧生命周期，后续须同步处理失败时 provider/context 的保留，不能只替换函数名。交互客户端的跨线程 post/阻塞循环/停止整合、完整 root、旧 adapter 和跨平台运行尚未完成；阶段 P 的 Pub/Sub、异步 DHT 和阶段 N 文件限制继续有效。本阶段不改变既有已发布入口的后端，也未移除 legacy SDK。回滚需让新增 API 的消费者与本阶段一起撤销，无用户数据或 wire 迁移。
+
+## 第二阶段 S：独立管理 runtime 的 CNet 组合与可重试清理
+
+**HIGH（事实，已修复）**：管理 runtime 原先在 `p2p_destroy()` 之后无条件清除 node/provider/context；CNet 排空超时或 transfer lease 尚未释放时不能这样处理。本阶段把 dedicated 模式改为公开 CNet v2 生命周期，新增有结果的 `mesh_mgmt_agent_runtime_destroy_v2`。停止先冻结 endpoint pool，再停止/摘除 router，最后 checked destroy node；只有节点真正销毁后才能释放其余组件。初始化失败同样走此清理边界，清理错误优先返回，原组件错误保存在对应 last-result 字段。
+
+| 状态/入口 | 结果与所有权 |
+| --- | --- |
+| `init_v2` | 显式 dedicated CNet 配置，拒绝 shared_mesh；复制 network options/bootstrap，借用 signer/dispatch/context。端口零可查询实际监听端口。 |
+| `init_v1` | 旧签名保留，dedicated 使用 CNet 默认参数且仍要求非零端口；shared 使用真实 mesh bridge。 |
+| start 失败 | callback 安装前无副作用失败保持 READY；安装后失败进入终止清理，成功为 STOPPED，失败为 STOPPING，不能重启。 |
+| stop | READY/RUNNING/STOPPING 可终止或重试；STOPPED 幂等。失败保留 node/provider、router storage、pool、publisher 和借用上下文。 |
+| destroy | NULL/未初始化可清理；只有 OK 才允许释放 runtime/template/context。旧 void wrapper 也保留失败状态，新调用方必须检查 v2 返回值。 |
+| 回调/线程 | 同一 owner 线程；runtime 操作中或 router callback depth 非零时拒绝生命周期重入。外部直接 p2p_poll 推进时也保护 router 回调。最终销毁前结束所有 node 状态读取。 |
+
+为使独立管理组件能真实链接，旧 `init_v1` 的 mesh 引用移到单独编译单元；它把真实借用节点和静态 attach/detach ops 交给组合核心。dedicated `init_v2` 不依赖整个 legacy mesh，shared 不替换为测试桩，也没有探测或失败切换。相比把 mesh 私有结构搬进管理层，此方式保留 mesh 的唯一状态归属，增加两个初始化时选定的桥接函数指针。runtime/pool 是内部按值结构，本次增加状态/配置字段，必须与调用方一起重新编译，不提供跨旧二进制 ABI。meshd 清理改为检查返回值，失败保留全局借用模板和上下文，拒绝覆盖尚存活的 runtime。
+
+**MED（事实，已修复）**：原 runtime 用单调时间驱动 endpoint pool，却将签名记录的实时过期时间直接拿来比较。本阶段新增 pool 的 `apply_verified_v2(real, mono)`，在验签后将剩余寿命换算为单调截止时间；溢出不提交，重复相同 epoch 不延长截止时间，原始签名记录及快照不改写。tick、认证与重连继续使用单调时钟；旧 pool v1 保持同一时钟域的原契约。endpoint/service publisher 的默认时钟和随机数迁移到 Salts，两个记录格式化函数的多字符 `'\\0'` 常量修正为零字符。
+
+**HIGH（事实，已修复）**：首次管理会话 UBSan 在 Noise-C BLAKE2s 握手哈希中报告未对齐 word 读取；上游 reader 还会解密并清除传入缓冲区，而本项目接口声明其输入为 const。Noise backend 的握手 read/write 现在各自拥有对齐的、有界临时缓冲区，成功才复制输出，退出擦除后释放；输入不再被改写。每次握手操作增加一次至多 Noise wire 上限的分配/复制，正常节点仍受现有 4096 字节 handshake 配置上限约束；应用数据帧路径不变。无加密算法、上游源码、wire 或磁盘格式变化。已有 provider 回归增加只读输入保持断言，真实管理证书握手验证本次修复；没有禁用 alignment sanitizer。
+
+验证：`test_mesh_mgmt_cnet_runtime` 链接生产 node、router、peer adapter、证书 provider、endpoint pool、publisher 和协议状态机，取代原来三个管理源文件的 compile-only gate。十一种 Linux 场景覆盖真实双节点认证/分片/重连、服务与 endpoint DHT 发布、服务记录篡改拒绝、成员策略拒绝、外部 node polling 的回调重入、时钟域/重复 epoch/溢出、初始化失败与 READY stop、非法启动、监听冲突、transfer lease、排空超时、部分初始化清理失败及监听失败后的排空失败。Linux linker wrap 只注入 stop/destroy 错误，网络与认证均为真实实现。共享签名身份 fixture 从旧 adapter 测试提取，避免两套证书配置漂移。
+
+十个本次实现/测试编译单元通过 `-Wall -Wextra -Werror`，diff 与 workflow YAML 检查通过。本地最终 Release **41/41**，P2P 加管理 runtime 的 ASan/UBSan **11/11**；`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`，`ASAN_OPTIONS=detect_leaks=0`，发布 SDK 未插桩。首次 sanitizer 在上述 Noise-C 对齐问题处失败，修复后重跑。新 suite 加入根测试清单与 CI sanitizer gate，SDK 保持 latest 浮动，re2c 仍来自共享 vcpkg-cache action。复验命令沿用阶段 P；本阶段 sanitizer target/正则再加入 `test_mesh_mgmt_cnet_runtime`，本地 SDK 快照与最新 CI 的实际版本分别记录在 PR 中。
+
+**MED（事实，剩余范围）**：真实 shared mesh 网络仍使用 legacy 生命周期；本阶段仅编译其兼容入口，没有把 shared mesh、meshd、旧 adapter 测试或完整 root 宣称为已运行验证。交互客户端 post/阻塞循环、完整 root 的旧 SDK、跨平台运行以及阶段 P/N 的既有范围仍待迁移。回滚时须同时撤回 dedicated 调用方和新 checked destructor，并重新编译内部结构消费者；数据和 wire 不需要迁移。保留堆叠草稿，直到上层调用方与完整工程验证完成。

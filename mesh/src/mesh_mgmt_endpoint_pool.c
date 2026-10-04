@@ -274,10 +274,10 @@ mesh_mgmt_endpoint_pool_add_static_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
   return MESH_MGMT_ENDPOINT_POOL_OK;
 }
 
-mesh_mgmt_endpoint_pool_result_t
-mesh_mgmt_endpoint_pool_apply_verified_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
-                                          const mesh_mgmt_endpoint_record_v1_t *record,
-                                          uint64_t now_ms) {
+static mesh_mgmt_endpoint_pool_result_t pool_apply_verified(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_endpoint_record_v1_t *record,
+    uint64_t now_ms, uint64_t expiry_deadline_ms) {
   mesh_mgmt_endpoint_entry_v1_t *entry;
 
   if (!pool || !record || record->source != MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD ||
@@ -309,8 +309,30 @@ mesh_mgmt_endpoint_pool_apply_verified_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
     pool->count++;
   }
   assign_record(entry, record);
+  entry->expiry_deadline_ms = expiry_deadline_ms;
   pool->last_error = MESH_MGMT_ENDPOINT_POOL_OK;
   return MESH_MGMT_ENDPOINT_POOL_OK;
+}
+
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_apply_verified_v1(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_endpoint_record_v1_t *record, uint64_t now_ms) {
+  return pool_apply_verified(pool, record, now_ms, record ? record->expires_at_ms : 0u);
+}
+
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_apply_verified_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_endpoint_record_v1_t *record,
+    uint64_t realtime_ms, uint64_t monotonic_ms) {
+  uint64_t remaining;
+  if (!record)
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+  if (record->expires_at_ms <= realtime_ms)
+    return MESH_MGMT_ENDPOINT_POOL_EXPIRED;
+  remaining = record->expires_at_ms - realtime_ms;
+  if (monotonic_ms > UINT64_MAX - remaining)
+    return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+  return pool_apply_verified(pool, record, realtime_ms, monotonic_ms + remaining);
 }
 
 mesh_mgmt_endpoint_pool_result_t
@@ -346,7 +368,7 @@ mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_tick_v1(mesh_mgmt_endpo
     if (!entry || !entry->occupied)
       continue;
     if (entry->record.source == MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD &&
-        entry->record.expires_at_ms <= now_ms) {
+        entry->expiry_deadline_ms <= now_ms) {
       if (entry->state == MESH_MGMT_ENDPOINT_ACTIVE)
         entry->retire_on_close = 1u;
       else
@@ -404,7 +426,7 @@ mesh_mgmt_endpoint_pool_mark_authenticated_v1(mesh_mgmt_endpoint_pool_v1_t *pool
   if (!entry)
     return MESH_MGMT_ENDPOINT_POOL_NOT_FOUND;
   if (entry->record.source == MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD &&
-      entry->record.expires_at_ms <= now_ms)
+      entry->expiry_deadline_ms <= now_ms)
     return MESH_MGMT_ENDPOINT_POOL_EXPIRED;
   entry->state = MESH_MGMT_ENDPOINT_ACTIVE;
   entry->next_attempt_ms = 0u;

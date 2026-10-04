@@ -589,7 +589,7 @@ static void test_provider_handshake(int blocking, int cancelled, int error) {
     p2p_identity_t first = {0}, second = {0};
     p2p_noise_handshake_t initiator = {0}, responder = {0};
     p2p_crypto_session_t send = {0}, receive = {0};
-    uint8_t message[256], output[256];
+    uint8_t message[256], output[256], saved_message[256];
     uint8_t zero[32] = {0};
     size_t length = 0, plaintext_length = 0;
     const uint8_t payload[] = "provider roundtrip";
@@ -616,9 +616,13 @@ static void test_provider_handshake(int blocking, int cancelled, int error) {
     check_equal(P2P_OK, p2p_noise_init_initiator(&initiator, &first, NULL));
     check_equal(P2P_OK, p2p_noise_init_responder(&responder, &second));
     check_equal(P2P_OK, p2p_noise_write_message(&initiator, message, &length, sizeof(message)));
+    memcpy(saved_message, message, length);
     check_equal(P2P_OK, p2p_noise_read_message(&responder, message, length));
+    check_equal(saved_message, message, length);
     check_equal(P2P_OK, p2p_noise_write_message(&responder, message, &length, sizeof(message)));
+    memcpy(saved_message, message, length);
     check_equal(P2P_OK, p2p_noise_read_message(&initiator, message, length));
+    check_equal(saved_message, message, length);
     result = blocking ? p2p_noise_write_message_with_payload_blocking(
         &initiator, NULL, 0, 12345, &cancel, message, &length, sizeof(message)) :
         p2p_noise_write_message(&initiator, message, &length, sizeof(message));
@@ -635,7 +639,9 @@ static void test_provider_handshake(int blocking, int cancelled, int error) {
     }
     check_equal(P2P_OK, result);
     check_equal(1U, provider.calls);
+    memcpy(saved_message, message, length);
     check_equal(P2P_OK, p2p_noise_read_message(&responder, message, length));
+    check_equal(saved_message, message, length);
     check_equal(P2P_OK, p2p_noise_split(&initiator, &send));
     check_equal(P2P_OK, p2p_noise_split(&responder, &receive));
     check_equal(provider.public_key, responder.remote_static_public, 32);

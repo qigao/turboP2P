@@ -1,7 +1,7 @@
 #include "mesh_mgmt_agent_runtime.h"
 
 #include "mesh_mgmt_crypto.h"
-#include "mesh_mgmt_mesh_bridge.h"
+#include "mesh_mgmt_agent_runtime_internal.h"
 
 #include <salts/clock.h>
 
@@ -86,24 +86,72 @@ static void runtime_peer_closed(void *context, p2p_peer_t *peer,
     runtime->on_peer_closed(runtime->callback_context, peer, remote_transport_peer_id, reason);
 }
 
+static int runtime_is_busy(const mesh_mgmt_agent_runtime_v1_t *runtime) {
+  return runtime->in_api || runtime->router.callback_depth != 0u ||
+         runtime->endpoint_pool.in_api || runtime->endpoint_publisher.in_api ||
+         runtime->service_publisher.in_api;
+}
+
+/* Call only after the owned node is gone and the shared router is detached. */
 static void runtime_release_initialized(mesh_mgmt_agent_runtime_v1_t *runtime) {
   mesh_mgmt_service_publisher_destroy_v1(&runtime->service_publisher);
   mesh_mgmt_endpoint_publisher_destroy_v1(&runtime->endpoint_publisher);
   mesh_mgmt_endpoint_pool_destroy_v1(&runtime->endpoint_pool);
   mesh_mgmt_agent_router_destroy_v1(&runtime->router);
-  if (runtime->node && runtime->owns_node) {
-    p2p_destroy(runtime->node);
-  }
-  mesh_mgmt_p2p_security_provider_destroy_v2(
-      &runtime->p2p_security_provider);
-  runtime->node = NULL;
-  runtime->shared_mesh = NULL;
-  runtime->owns_node = 0u;
+  mesh_mgmt_p2p_security_provider_destroy_v2(&runtime->p2p_security_provider);
 }
 
-mesh_mgmt_agent_runtime_result_t
-mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
-                                const mesh_mgmt_agent_runtime_config_v1_t *config) {
+static mesh_mgmt_agent_runtime_result_t runtime_stop_initialized(
+    mesh_mgmt_agent_runtime_v1_t *runtime) {
+  runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPING;
+  mesh_mgmt_endpoint_pool_stop_v1(&runtime->endpoint_pool);
+  if (runtime->router.state == MESH_MGMT_AGENT_ROUTER_INSTALLED) {
+    runtime->last_router_result = runtime->shared_mesh
+        ? runtime->mesh_ops->detach(runtime->shared_mesh, &runtime->router)
+        : mesh_mgmt_agent_router_stop_v1(&runtime->router);
+    if (runtime->last_router_result != MESH_MGMT_AGENT_ROUTER_OK)
+      return MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED;
+  }
+  if (runtime->node && runtime->owns_node) {
+    runtime->last_p2p_result = p2p_destroy_v2(runtime->node);
+    if (runtime->last_p2p_result != P2P_OK)
+      return MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
+  }
+  runtime->node = NULL;
+  runtime->shared_mesh = NULL;
+  runtime->mesh_ops = NULL;
+  runtime->owns_node = 0u;
+  runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPED;
+  return MESH_MGMT_AGENT_RUNTIME_OK;
+}
+
+static mesh_mgmt_agent_runtime_result_t runtime_init_failed(
+    mesh_mgmt_agent_runtime_v1_t *runtime, mesh_mgmt_agent_runtime_result_t cause) {
+  int p2p_cause = runtime->last_p2p_result;
+  mesh_mgmt_agent_runtime_result_t cleanup = runtime_stop_initialized(runtime);
+  if (cleanup != MESH_MGMT_AGENT_RUNTIME_OK)
+    return runtime_fail(runtime, cleanup);
+  runtime_release_initialized(runtime);
+  runtime->state = MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED;
+  runtime->last_p2p_result = p2p_cause;
+  return runtime_fail(runtime, cause);
+}
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_agent_runtime_config_v1_t *config,
+    const p2p_runtime_config_v2_t *p2p_config) {
+  if (!config || config->shared_mesh || !p2p_config ||
+      p2p_config->struct_size != sizeof(*p2p_config))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  return mesh_mgmt_agent_runtime_init_bound(runtime, config, p2p_config, NULL);
+}
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_agent_runtime_config_v1_t *config,
+    const p2p_runtime_config_v2_t *p2p_config,
+    const mesh_mgmt_agent_mesh_binding_t *binding) {
   mesh_mgmt_agent_router_config_v1_t router_config;
   mesh_mgmt_endpoint_pool_config_v1_t endpoint_config;
   mesh_mgmt_p2p_security_config_v2_t security_config;
@@ -115,10 +163,12 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
   shared_mode = config->shared_mesh != NULL;
   if ((!shared_mode &&
-       (!runtime_host_is_valid(config->listen_host) || config->listen_port == 0u ||
-        !config->p2p_private_key)) ||
+       (!runtime_host_is_valid(config->listen_host) || !config->p2p_private_key ||
+        !p2p_config || p2p_config->struct_size != sizeof(*p2p_config))) ||
       (shared_mode &&
-       (config->listen_host || config->listen_port != 0u || config->p2p_private_key ||
+       (!binding || !binding->node || !binding->ops ||
+        !binding->ops->attach || !binding->ops->detach || config->listen_host ||
+        config->listen_port != 0u || config->p2p_private_key ||
         config->bootstrap_count != 0u ||
         config->p2p_minimum_principal_epoch != 0u ||
         config->p2p_required_remote_roles != 0u ||
@@ -135,13 +185,15 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
       config->bootstrap_count > config->endpoint_capacity ||
       (config->bootstrap_count > 0u && !config->bootstraps))
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
-  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED || runtime->node ||
+  if (runtime_is_busy(runtime) ||
+      runtime->state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED || runtime->node ||
       runtime->router.slots.data || runtime->endpoint_pool.entries.data ||
       runtime->endpoint_publisher.state != MESH_MGMT_ENDPOINT_PUBLISHER_UNINITIALIZED ||
       runtime->service_publisher.state != MESH_MGMT_SERVICE_PUBLISHER_UNINITIALIZED)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
 
   memset(runtime, 0, sizeof(*runtime));
+  runtime->in_api = 1u;
   runtime->last_p2p_result = P2P_OK;
   runtime->last_router_result = MESH_MGMT_AGENT_ROUTER_OK;
   runtime->last_endpoint_result = MESH_MGMT_ENDPOINT_POOL_OK;
@@ -151,23 +203,18 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
   runtime->last_service_publisher_result = MESH_MGMT_SERVICE_PUBLISHER_OK;
   if (shared_mode) {
     runtime->shared_mesh = config->shared_mesh;
-    runtime->node = mesh_mgmt_mesh_borrow_p2p_node_v1(config->shared_mesh);
-    if (!runtime->node) {
-      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
-      return runtime->last_error;
-    }
+    runtime->node = binding->node;
+    runtime->mesh_ops = binding->ops;
   } else {
+    runtime->p2p_config = *p2p_config;
     runtime->owns_node = 1u;
-    runtime->node = p2p_create(config->listen_host, (int)config->listen_port);
-    if (!runtime->node) {
-      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
-      return runtime->last_error;
-    }
+    runtime->last_p2p_result = p2p_create_v2(
+        config->listen_host, (int)config->listen_port, &runtime->node);
+    if (runtime->last_p2p_result != P2P_OK)
+      return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
     runtime->last_p2p_result = p2p_node_set_private_key(runtime->node, config->p2p_private_key);
     if (runtime->last_p2p_result != P2P_OK) {
-      runtime_release_initialized(runtime);
-      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
-      return runtime->last_error;
+      return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
     }
     memset(&security_config, 0, sizeof(security_config));
     security_config.local_certificate =
@@ -196,9 +243,7 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
           runtime->node, &p2p_security_config);
     }
     if (runtime->last_p2p_result != P2P_OK) {
-      runtime_release_initialized(runtime);
-      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
-      return runtime->last_error;
+      return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
     }
   }
 
@@ -223,27 +268,21 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
   router_config.callback_context = runtime;
   runtime->last_router_result = mesh_mgmt_agent_router_init_v1(&runtime->router, &router_config);
   if (runtime->last_router_result != MESH_MGMT_AGENT_ROUTER_OK) {
-    runtime_release_initialized(runtime);
-    runtime->last_error = MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED;
-    return runtime->last_error;
+    return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED);
   }
 
   runtime->last_publisher_result = mesh_mgmt_endpoint_publisher_init_v1(
       &runtime->endpoint_publisher, runtime->node, config->signer_template,
       config->first_endpoint_record_epoch);
   if (runtime->last_publisher_result != MESH_MGMT_ENDPOINT_PUBLISHER_OK) {
-    runtime_release_initialized(runtime);
-    runtime->last_error = MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED;
-    return runtime->last_error;
+    return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED);
   }
 
   runtime->last_service_publisher_result = mesh_mgmt_service_publisher_init_v1(
       &runtime->service_publisher, runtime->node, config->signer_template,
       config->first_service_record_epoch);
   if (runtime->last_service_publisher_result != MESH_MGMT_SERVICE_PUBLISHER_OK) {
-    runtime_release_initialized(runtime);
-    runtime->last_error = MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED;
-    return runtime->last_error;
+    return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED);
   }
 
   if (config->allocate_record_epoch &&
@@ -253,9 +292,7 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
        mesh_mgmt_service_publisher_set_epoch_allocator_v1(
            &runtime->service_publisher, config->allocate_record_epoch,
            config->record_epoch_context) != MESH_MGMT_SERVICE_PUBLISHER_OK)) {
-    runtime_release_initialized(runtime);
-    runtime->last_error = MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED;
-    return runtime->last_error;
+    return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED);
   }
 
   memset(&endpoint_config, 0, sizeof(endpoint_config));
@@ -270,53 +307,51 @@ mesh_mgmt_agent_runtime_init_v1(mesh_mgmt_agent_runtime_v1_t *runtime,
   runtime->last_endpoint_result =
       mesh_mgmt_endpoint_pool_init_v1(&runtime->endpoint_pool, &endpoint_config);
   if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK) {
-    runtime_release_initialized(runtime);
-    runtime->last_error = MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED;
-    return runtime->last_error;
+    return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
   }
   for (index = 0u; index < config->bootstrap_count; index++) {
     const mesh_mgmt_agent_bootstrap_v1_t *bootstrap = &config->bootstraps[index];
     runtime->last_endpoint_result = mesh_mgmt_endpoint_pool_add_static_v1(
         &runtime->endpoint_pool, bootstrap->transport_peer_id, bootstrap->host, bootstrap->port);
     if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK) {
-      runtime_release_initialized(runtime);
-      runtime->last_error = MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED;
-      return runtime->last_error;
+      return runtime_init_failed(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
     }
   }
   runtime->state = MESH_MGMT_AGENT_RUNTIME_READY;
-  runtime->last_error = MESH_MGMT_AGENT_RUNTIME_OK;
-  return MESH_MGMT_AGENT_RUNTIME_OK;
+  return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }
 
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (!runtime)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
-  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_READY || runtime->in_api || !runtime->node)
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_READY || runtime_is_busy(runtime) || !runtime->node)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
 
   runtime->in_api = 1u;
   runtime->last_router_result =
       runtime->shared_mesh
-          ? mesh_mgmt_mesh_router_attach_v1(runtime->shared_mesh, &runtime->router)
+          ? runtime->mesh_ops->attach(runtime->shared_mesh, &runtime->router)
           : mesh_mgmt_agent_router_install_v1(&runtime->router);
   if (runtime->last_router_result != MESH_MGMT_AGENT_ROUTER_OK)
     return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED);
   runtime->last_endpoint_result = mesh_mgmt_endpoint_pool_start_v1(&runtime->endpoint_pool);
   if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK) {
-    if (runtime->shared_mesh)
-      (void)mesh_mgmt_mesh_router_detach_v1(runtime->shared_mesh, &runtime->router);
-    else
-      (void)mesh_mgmt_agent_router_stop_v1(&runtime->router);
-    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
+    mesh_mgmt_agent_runtime_result_t cleanup = runtime_stop_initialized(runtime);
+    return runtime_fail(runtime, cleanup == MESH_MGMT_AGENT_RUNTIME_OK
+        ? MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED : cleanup);
   }
   if (runtime->owns_node) {
-    runtime->last_p2p_result = p2p_start_nonblocking(runtime->node);
+    runtime->last_p2p_result = p2p_start_nonblocking_v2(runtime->node, &runtime->p2p_config);
     if (runtime->last_p2p_result != P2P_OK) {
-      mesh_mgmt_endpoint_pool_stop_v1(&runtime->endpoint_pool);
-      runtime->last_router_result = mesh_mgmt_agent_router_stop_v1(&runtime->router);
-      return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
+      /* Every runtime start attempt is terminal on failure; v2 node startup
+       * may already have entered draining, so do not advertise READY. */
+      int start_result = runtime->last_p2p_result;
+      mesh_mgmt_agent_runtime_result_t cleanup = runtime_stop_initialized(runtime);
+      if (cleanup == MESH_MGMT_AGENT_RUNTIME_OK)
+        runtime->last_p2p_result = start_result;
+      return runtime_fail(runtime, cleanup == MESH_MGMT_AGENT_RUNTIME_OK
+          ? MESH_MGMT_AGENT_RUNTIME_P2P_FAILED : cleanup);
     }
   }
   runtime->state = MESH_MGMT_AGENT_RUNTIME_RUNNING;
@@ -393,7 +428,8 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_apply_endpoint_frame_v1
     return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_RECORD_FAILED);
   }
   runtime->last_endpoint_result =
-      mesh_mgmt_endpoint_pool_apply_verified_v1(&runtime->endpoint_pool, &record, input->now_ms);
+      mesh_mgmt_endpoint_pool_apply_verified_v2(
+          &runtime->endpoint_pool, &record, input->now_ms, salts_monotonic_ms());
   mesh_mgmt_crypto_wipe(&record, sizeof(record));
   if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK)
     return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
@@ -585,34 +621,33 @@ mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_stop_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (!runtime)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
-  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING || runtime->in_api || !runtime->node)
+  if (runtime_is_busy(runtime) ||
+      runtime->state == MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
-
   runtime->in_api = 1u;
-  mesh_mgmt_endpoint_pool_stop_v1(&runtime->endpoint_pool);
-  runtime->last_router_result =
-      runtime->shared_mesh
-          ? mesh_mgmt_mesh_router_detach_v1(runtime->shared_mesh, &runtime->router)
-          : mesh_mgmt_agent_router_stop_v1(&runtime->router);
-  if (runtime->last_router_result != MESH_MGMT_AGENT_ROUTER_OK)
-    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED);
-  if (runtime->owns_node)
-    p2p_destroy(runtime->node);
-  runtime->node = NULL;
-  runtime->shared_mesh = NULL;
-  runtime->owns_node = 0u;
-  runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPED;
-  return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
+  return runtime_fail(runtime, runtime_stop_initialized(runtime));
+}
+
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_destroy_v2(mesh_mgmt_agent_runtime_v1_t *runtime) {
+  mesh_mgmt_agent_runtime_result_t result;
+  if (!runtime)
+    return MESH_MGMT_AGENT_RUNTIME_OK;
+  if (runtime_is_busy(runtime))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  runtime->in_api = 1u;
+  result = runtime_stop_initialized(runtime);
+  if (result != MESH_MGMT_AGENT_RUNTIME_OK)
+    return runtime_fail(runtime, result);
+  runtime_release_initialized(runtime);
+  mesh_mgmt_crypto_wipe(runtime, sizeof(*runtime));
+  return MESH_MGMT_AGENT_RUNTIME_OK;
 }
 
 void mesh_mgmt_agent_runtime_destroy_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
-  if (!runtime || runtime->in_api)
-    return;
-  if (runtime->state == MESH_MGMT_AGENT_RUNTIME_RUNNING &&
-      mesh_mgmt_agent_runtime_stop_v1(runtime) != MESH_MGMT_AGENT_RUNTIME_OK)
-    return;
-  runtime_release_initialized(runtime);
-  mesh_mgmt_crypto_wipe(runtime, sizeof(*runtime));
+  /* Compatibility entry point: the checked function preserves all storage
+   * on failure. New owners must consume its result before freeing borrows. */
+  (void)mesh_mgmt_agent_runtime_destroy_v2(runtime);
 }
 
 mesh_mgmt_execution_consumer_result_t

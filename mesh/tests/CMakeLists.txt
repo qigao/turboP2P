@@ -79,6 +79,7 @@ set(MESH_TEST_SOURCES
     test_mesh_mgmt_transport.c
     test_mesh_mgmt_p2p_security.c
     test_mesh_mgmt_p2p_adapter.c
+    test_mesh_mgmt_cnet_runtime.c
     test_mesh_mgmt_endpoint_pool.c
     test_mesh_mgmt_endpoint_record.c
     test_mesh_mgmt_service_record.c
@@ -442,6 +443,13 @@ foreach(test_source ${MESH_TEST_SOURCES})
     if(test_name STREQUAL "test_mesh_mgmt_p2p_security")
         list(APPEND extra_test_libs mesh_mgmt_p2p_security)
     endif()
+    if(test_name STREQUAL "test_mesh_mgmt_cnet_runtime")
+        list(APPEND extra_test_libs mesh_mgmt_agent_runtime Salts::CNet)
+        target_include_directories(${test_name} PRIVATE
+            "${PROJECT_SOURCE_DIR}/p2p/src"
+            "${PROJECT_SOURCE_DIR}/vendor/uthash/src"
+            "${PROJECT_SOURCE_DIR}/vendor/croar")
+    endif()
     if(test_name STREQUAL "test_mesh_mgmt_p2p_adapter")
         list(APPEND extra_test_libs mesh_mgmt_agent_runtime)
         if(WIN32)
@@ -514,7 +522,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
 
     set(test_framework TurboUtils::TinyTest)
-    if(test_name MATCHES "^test_mesh_(mgmt_cnet_peer|mgmt_cnet_tls_policy|mgmt_transport|mgmt_session|mgmt_peer_signer|mgmt_crypto|stream_bind|stream_cnet_bind|stream_cnet_channel|stream_cnet_registry|stream_registry|stream_channel|control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
+    if(test_name MATCHES "^test_mesh_(mgmt_cnet_runtime|mgmt_cnet_peer|mgmt_cnet_tls_policy|mgmt_transport|mgmt_session|mgmt_peer_signer|mgmt_crypto|stream_bind|stream_cnet_bind|stream_cnet_channel|stream_cnet_registry|stream_registry|stream_channel|control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
         set(test_framework Salts::TinyTest)
         # Direct headers must resolve to the same runtime as the selected SDK.
         target_include_directories(${test_name} BEFORE PRIVATE "$ENV{SALTS_ROOT}/include")

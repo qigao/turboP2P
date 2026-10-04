@@ -73,7 +73,7 @@ int mesh_mgmt_p2p_security_provider_init_v2(
 
 /**
  * Atomically replace the remote epoch/role/revocation snapshot. Call only on
- * the owning CoroNet thread, then call p2p_node_revalidate_security_v2() before
+ * the owning network owner thread, then call p2p_node_revalidate_security_v2() before
  * processing more peer traffic. The issuer key and Mesh ID are immutable for
  * the provider lifetime and require a coordinated node restart to rotate.
  */

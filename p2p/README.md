@@ -45,7 +45,7 @@ validate a source-IP-bound HMAC cookie. Cookie keys rotate every five minutes,
 current/previous 10-second buckets are accepted, and the verified cookie is
 included in the Noise prologue.
 
-After an identity provider installs a newer trust snapshot on the CoroNet owner
+After an identity provider installs a newer trust snapshot on the network owner
 thread, call `p2p_node_revalidate_security_v2()`. Existing credentials are
 verified again without holding the node mutex; rejected or identity-changing
 sessions are disconnected and must complete a fresh Noise handshake. The Mesh
@@ -118,6 +118,15 @@ Do not mix the v2 lifecycle with legacy `p2p_start`, `p2p_start_nonblocking` or
 `p2p_destroy`. The v2 node exposes no CoroNet context. The legacy mesh constructors
 and interactive client's CoroNet post/stop integration are still being migrated;
 the full root build continues to require those legacy SDKs.
+
+Dedicated Mesh management uses `mesh_mgmt_agent_runtime_init_v2(runtime,
+config, p2p_config)` with an explicitly initialized CNet configuration; its
+legacy `init_v1` entry point also selects CNet defaults in dedicated mode.
+Shared mesh mode keeps the existing mesh bridge. A failed stop/init/start
+cleanup retains the entire composition in `STOPPING`. Check
+`mesh_mgmt_agent_runtime_destroy_v2()` before releasing templates or callback
+contexts; the old void destructor cannot report success. Management lifecycle
+reentry from callbacks is rejected, including callbacks driven by shared mesh.
 
 ## Legacy CoroNet quick start
 
