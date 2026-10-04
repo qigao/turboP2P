@@ -636,7 +636,7 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
     {
         p2p_cnet_admission_config_t gate_policy = {0};
         p2p_cnet_admission_callbacks_t gate_events = {
-            secure_admit, secure_promote, secure_rejected, &pair};
+            secure_admit, secure_promote, secure_rejected, &pair, NULL};
         gate_policy.gate_limit = gate_policy.source_limit = 4;
         gate_policy.peer_send_hwm_bytes = TEST_BUFFER_SIZE;
         gate_policy.handshake_timeout_ms = TEST_DEADLINE_MS;

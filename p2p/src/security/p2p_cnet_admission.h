@@ -3,6 +3,7 @@
 
 #include "../core/cnet_transport.h"
 #include "p2p_cookie.h"
+#include <salts/thread.h>
 
 typedef struct p2p_cnet_admission_s p2p_cnet_admission_t;
 
@@ -24,7 +25,13 @@ typedef struct {
     uint32_t cookie_key_rotation_ms;
     uint8_t network_id_hash[32];
     uint8_t cookie_master_secret[P2P_COOKIE_SECRET_SIZE];
+    /* Optional borrowed mutex for an enclosing node-atomic status snapshot.
+     * NULL selects an admission-owned mutex. Must outlive admission destroy. */
+    salts_mutex_t *status_mutex;
 } p2p_cnet_admission_config_t;
+
+typedef enum { P2P_CNET_ADMISSION_PREFACE, P2P_CNET_ADMISSION_COOKIE }
+    p2p_cnet_admission_stage_t;
 
 typedef struct {
     /* Mandatory node policy: apply rate/denylist and total pending-peer limits
@@ -47,6 +54,10 @@ typedef struct {
     void (*rejected)(const cnet_stream_peer *source, int status,
         p2p_cnet_rejection_origin_t origin, void *context);
     void *context;
+    /* Internal observation only, under the status mutex: no I/O, callbacks or
+     * reentry. Cookie timing ends when valid proof is received, before handoff. */
+    void (*stage_completed_locked)(p2p_cnet_admission_stage_t stage,
+        uint64_t started_ms, uint64_t completed_ms, void *context);
 } p2p_cnet_admission_callbacks_t;
 
 typedef struct {
@@ -55,6 +66,8 @@ typedef struct {
     uint64_t challenges_completed;
     uint64_t promoted;
     uint64_t rejected;
+    uint64_t challenges_issued;
+    uint64_t verifications_succeeded;
 } p2p_cnet_admission_stats_t;
 
 /* Internal bounded ingress component, explicitly attached to one CNet owner.
@@ -79,6 +92,10 @@ int p2p_cnet_admission_stop(p2p_cnet_admission_t *admission);
 int p2p_cnet_admission_destroy(p2p_cnet_admission_t *admission);
 int p2p_cnet_admission_stats(const p2p_cnet_admission_t *admission,
                             p2p_cnet_admission_stats_t *output);
+/* Caller holds the configured status_mutex. The ordinary accessor above is
+ * thread-safe while admission is alive; neither accessor mutates state. */
+void p2p_cnet_admission_stats_locked(const p2p_cnet_admission_t *admission,
+    p2p_cnet_admission_stats_t *output);
 /* Read-only owner-thread query, valid inside admission callbacks. NULL source
  * queries only the total; a source uses the same IPv4/IPv6 /64 gate policy. */
 int p2p_cnet_admission_pending(const p2p_cnet_admission_t *admission,

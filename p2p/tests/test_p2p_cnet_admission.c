@@ -140,7 +140,7 @@ static int accept_peer(p2p_cnet_owner_t *owner, p2p_connection_t *connection,
 
 static void setup(fixture_t *fixture, size_t gates, size_t sources) {
     p2p_cnet_config_t config = transport_config();
-    p2p_cnet_admission_callbacks_t events = {admit, promote_peer, rejected, fixture};
+    p2p_cnet_admission_callbacks_t events = {admit, promote_peer, rejected, fixture, NULL};
     fixture->policy.gate_limit = gates;
     fixture->policy.source_limit = sources;
     fixture->policy.peer_send_hwm_bytes = TEST_BUFFER_BYTES;

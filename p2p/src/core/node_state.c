@@ -5,6 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+static p2p_private_key_executor_t *create_polled_executor(p2p_node_t *node,
+    const p2p_blocking_private_key_provider_v4_t *provider) {
+    return p2p_private_key_executor_create_with_notify(node, provider, NULL);
+}
+
+void p2p_node_saved_cookie_status_locked(const p2p_node_t *node,
+    p2p_node_cookie_status_t *status) {
+    status->active = node->active_cookie_gates;
+    status->challenges_issued = node->cookie_challenges_issued;
+    status->verifications_succeeded = node->cookie_verifications_succeeded;
+}
+
 p2p_node_t *p2p_node_state_create(const char *ip, int port) {
     p2p_node_t *node;
     if (!ip || strlen(ip) >= P2P_MAX_IP || port < 0 || port > UINT16_MAX)
@@ -25,6 +37,8 @@ p2p_node_t *p2p_node_state_create(const char *ip, int port) {
     p2p_transfer_manager_init(node->transfers);
     if (!node->transfers->mutex) { free(node->transfers); node->transfers = NULL; goto fail; }
     node->file_message_handler = p2p_handlers_dispatch_transfer;
+    node->create_private_key_executor = create_polled_executor;
+    node->query_cookie_status_locked = p2p_node_saved_cookie_status_locked;
     return node;
 fail:
     (void)p2p_node_state_destroy(node);

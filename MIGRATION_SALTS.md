@@ -492,3 +492,23 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 验证：`test_p2p_cnet_files` 十个场景通过生产构造器、认证、加密编码器和真实 CNet loopback，覆盖九个整块加尾块、并行窗口复用、4093 字节接收分片、空文件、对象不存在、源文件注册后变更、completion 中 stop、pending stop、摘表后的 transfer 引用阻挡 destroy、upload peer 断开后延迟释放，以及 ACK 回收上传与下载后注册为 seed；额外通过一次发送拒绝注入验证背压失败只通知一次并释放上传。原 node 的十五个场景改用共享 constructor/destructor，只有安全配置和凭证 provider 仍为 fixture。Linux Release **37/37**；files/node/peer/transport/admission/worker 六套 ASan/UBSan 通过（`detect_leaks=0`，发布 SDK 未插桩）。本次九个已编译修改源码通过 `-Wall -Wextra -Werror`；旧 root 测试的 manager destroy 调用同步检查错误，但未运行 legacy 套件。
 
 **MED（事实，剩余范围）**：公开 create/start/get_loop、安全配置、状态查询和完整根工程仍未切换；Windows/macOS 运行未验证。既有 pause/resume 持久化占位逻辑、目录下载、完整多源切换/超时策略和同步文件 I/O 未在本阶段完成或全面验证；不能把这些算作已实现功能。文件 transfer 的 streaming SHA-256 仍使用仓库既有实现，本阶段 H 的 Salts Crypto 迁移覆盖不包含该实现。后续需要迁移这些遗留能力并统一公开循环契约。内部 CNet 入口继续标注 `@internal @incomplete`，未接入公开构造器。公开 API、配置和磁盘/wire 格式不变；回滚本阶段提交即可退回阶段 M，不需要迁移用户数据。依赖仍浮动 latest，re2c 仍来自共享 vcpkg-cache action。
+
+## 第二阶段 O：共享安全配置、信任更新与状态查询
+
+**MED（事实，已修复）**：阻塞私钥配置原来直接调用 CoroNet notifier factory，node security status 读取旧 gate 数组对应的计数；CNet fixture 因此只能直接填写身份与配置字段，无法证明公开配置入口可用。本阶段把安全/身份/provider/trust API 提取为 `p2p_security_api.c`，把 callbacks、disconnect、peer 查询提取为 `p2p_peer_api.c`，不再把事件循环或阻塞 DHT 查询一起链接。原公开签名、结构布局、默认值、凭证和 Noise wire 不变。
+
+构造器显式绑定 executor factory：共享 node state 选择 owner polling；旧 node constructor 附加 CoroNet context 后选择 CoroNet notifier。配置入口不探测 context、不推断后端，也没有失败后换实现的路径。provider 的所有权自检仍同步执行；候选 identity/executor 验证成功后才替换旧状态，失败保留旧 identity/executor。已配置安全策略、存在 peer 表或附加网络 owner 时拒绝再次设置身份。CNet owner 在创建时校验自身发送上限能容纳已配置的 peer HWM，并拒绝重用已停止、transfer manager 已释放的 node。
+
+状态归属与线程契约：
+
+- admission 保存唯一的活动 gate、challenge admission、challenge write completion、cookie verification 和 promotion 计数，区分验证成功与后续 peer 晋升成功。公开状态中的 issued 按发送 admission 成功计数，verified 按有效 proof 计数，保持既有语义。
+- admission 可显式借用 node mutex，独立使用时则拥有自己的 status mutex；所有统计写入均持此锁。node 的 v2/v3 getter 在同一 node mutex 下调用只读 cookie 查询，因此保留 v3 允许非 owner 线程读取的契约。查询不扫描 gate 数组或推进状态。
+- PREFACE/COOKIE 完成事件在相同状态锁内更新 node 的既有 responder latency accumulator；Noise/READY 沿用 peer 的生产记录。观察函数仅更新统计，不做 I/O、不调用用户代码、不再次加锁。其他 admission 回调在状态锁外调用，避免锁递归。
+- CNet owner 绑定实时查询源；stop 后仍可读取已停止 admission。destroy 在同一 node mutex 内保存最终、已静止的计数并切回 node 存储，再释放 admission。运行期间不维护第二份可变计数。并发 reader 不得越过 node 本身的销毁边界。
+- pinned trust 更新和 revalidation 在 owner 线程执行。保留身份一致的会话；撤销或身份变化通过同一个公开 disconnect 路径关闭会话、摘除路由并抑制自动重连。provider context 继续由调用者持有至 node 销毁。
+
+选择构造期 factory 与只读状态绑定，是为了共享一处配置验证和信任更新逻辑。把 `ctx == NULL` 当后端标志会使未初始化节点误入 polling 路径；复制 CNet 专用配置 API 则会使默认值、拒绝原因和密钥生命周期漂移。代价是两个内部函数指针和每次 admission 统计事件的一次状态锁。统计复杂度为 O(1)，v3 固定矩阵复制有界；原有信任列表/peer 快照的容量及复杂度不变。
+
+验证：新增 `test_p2p_cnet_security_config` 八个场景覆盖配置/provider 失败回滚、blocking executor 保留与替换、真实 pinned 双节点握手、同步 opaque provider、阻塞 provider 的 worker 状态与消息发送、保留/撤销 trust、身份变化断开、transport HWM 不匹配拒绝，以及独立 Salts thread 在握手和 owner destroy 期间读取 node-atomic 状态、停止后最终统计与禁止重启。原 node/file 套件改用真实公开密钥、安全配置和 callback 注册 API，只有凭证/key provider 回调仍是 fixture；容量遵循公开配置的最小合法值。Linux 38 项 CTest 回归通过（本地三个程序的执行权限丢失导致未启动，恢复权限后补跑通过）；security-config/files/node/peer/transport/admission/worker 七套 ASan/UBSan 通过（`detect_leaks=0`，发布 SDK 未插桩）。本次九个已编译修改源码通过 `-Wall -Wextra -Werror`。
+
+**MED（事实，剩余范围）**：公开 create/start/get_loop 仍返回/驱动 CoroNet，阻塞 DHT get、完整 root、旧 adapter 和跨平台运行尚未验证或切换；本阶段 N 列出的文件持久化/目录/完整多源策略仍未完成。内部 CNet owner 继续标为 `@internal @incomplete`，不宣称公开产品已全量切换。回滚本阶段提交即可回到 N；没有 wire、配置或用户数据迁移。Salts/SaltsUtils 继续消费 latest released packages，re2c 继续使用共享 vcpkg-cache action。
