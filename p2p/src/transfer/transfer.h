@@ -5,8 +5,8 @@
 #include "sha256.h"
 #include "bitmap.h"
 
-#include <platform.h>
-#include <turbo_thread.h>
+#include <salts/clock.h>
+#include <salts/thread.h>
 #include <stdio.h>
 
 /* Compatibility defines for transfer state */
@@ -82,6 +82,10 @@ typedef struct p2p_transfer_s {
     void *user_data;
 
     p2p_peer_t *peer;                         /* Primary peer (single-source) */
+    /* One lease per distinct peer protects all role pointers through disconnect.
+     * Borrowed role pointers below never own an additional reference. */
+    p2p_peer_t *held_peers[P2P_MAX_SOURCES];
+    uint8_t held_peer_count;
 
     /* Bounded FILE_GET response arbitration */
     p2p_peer_t *request_peers[P2P_MAX_SOURCES];
@@ -108,7 +112,7 @@ typedef struct p2p_transfer_s {
     uint8_t parallel_enabled;                 /* Enable parallel requests */
     uint8_t destroying;
     uint32_t ref_count;
-    turbo_mutex_t mutex;
+    salts_mutex_t mutex;
 
     struct p2p_transfer_s *next;
 } p2p_transfer_t;
@@ -117,11 +121,20 @@ struct p2p_transfer_manager_s {
     p2p_transfer_t *active;
     uint32_t count;
     uint32_t next_id;
-    turbo_mutex_t mutex;
+    size_t outstanding_refs;
+    int closing;
+    salts_mutex_t mutex;
 };
 
 void p2p_transfer_manager_init(p2p_transfer_manager_t *mgr);
-void p2p_transfer_manager_destroy(p2p_transfer_manager_t *mgr);
+/* Owner-thread shutdown closes admission. Live transfer leases return
+ * INVALID_STATE and retain the manager; release and retry before freeing it.
+ * create/destroy/tick and shutdown run on that owner; cross-thread status
+ * lookups require an external node lifetime lease and must quiesce first. */
+int p2p_transfer_manager_destroy(p2p_transfer_manager_t *mgr);
+/* Caller holds transfer->mutex. Lock order: transfer then peer's node;
+ * manager lookup uses manager then transfer, with no node lock nested there. */
+int p2p_transfer_hold_peer_locked(p2p_transfer_t *transfer, p2p_peer_t *peer);
 
 p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_dir_t dir);
 void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer);

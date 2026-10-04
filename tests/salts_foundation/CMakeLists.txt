@@ -202,8 +202,18 @@ add_test(NAME test_p2p_cnet_peer COMMAND test_p2p_cnet_peer)
 set_tests_properties(test_p2p_cnet_peer PROPERTIES TIMEOUT 60)
 
 # Production node network policy, routing handlers and explicit CNet owner.
-# Public constructors and the legacy file-transfer owner remain outside this target.
+# Shared node state and file handlers are real; public loop/configuration stay legacy.
+add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/croar" croar)
 add_library(p2p_node_core STATIC
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_state.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/file.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_file_api.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/handlers_transfer.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/transfer.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/sender.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/receiver.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/bitmap.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/transfer/sha256.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_network.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_cnet.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/peer_table.c"
@@ -211,7 +221,7 @@ add_library(p2p_node_core STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/dht/kademlia_rpc.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/vivaldi.c")
-target_link_libraries(p2p_node_core PUBLIC p2p_peer_core)
+target_link_libraries(p2p_node_core PUBLIC p2p_peer_core roaring)
 if(NOT WIN32)
   target_link_libraries(p2p_node_core PUBLIC m)
 endif()
@@ -220,6 +230,11 @@ set_property(TARGET test_p2p_cnet_node PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_node PRIVATE p2p_node_core Salts::TinyTest)
 add_test(NAME test_p2p_cnet_node COMMAND test_p2p_cnet_node)
 set_tests_properties(test_p2p_cnet_node PROPERTIES TIMEOUT 60)
+add_executable(test_p2p_cnet_files "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_files.c")
+set_property(TARGET test_p2p_cnet_files PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_files PRIVATE p2p_node_core Salts::TinyTest)
+add_test(NAME test_p2p_cnet_files COMMAND test_p2p_cnet_files)
+set_tests_properties(test_p2p_cnet_files PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_cnet_node PRIVATE P2P_NODE_TEST_WRAP)
   target_link_options(test_p2p_cnet_node PRIVATE "-Wl,--wrap=cnet_client_stop")

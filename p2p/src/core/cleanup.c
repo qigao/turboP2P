@@ -4,6 +4,8 @@
  */
 
 #include "../internal.h"
+#include "node_state.h"
+#include <tlog.h>
 #include "../transfer/transfer.h"
 #include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_coro_context.h>
@@ -15,7 +17,7 @@
 
 void p2p_cleanup_callbacks(p2p_node_t *node) {
     if (!node) return;
-    
+
     /* Clear callbacks to prevent re-entry during cleanup */
     node->on_peer_connected = NULL;
     node->on_peer_disconnected = NULL;
@@ -24,7 +26,7 @@ void p2p_cleanup_callbacks(p2p_node_t *node) {
 
 void p2p_cleanup_timers(p2p_node_t *node) {
     if (!node) return;
-    
+
     if (node->gossip_timer) {
         turbo_timer_stop(node->gossip_timer);
         turbo_timer_destroy(node->gossip_timer);
@@ -32,31 +34,9 @@ void p2p_cleanup_timers(p2p_node_t *node) {
     }
 }
 
-void p2p_cleanup_peers(p2p_node_t *node) {
-    if (!node || !node->peers_table) return;
-    
-    /* Detach table from node first to prevent re-entry from callbacks */
-    salts_mutex_lock(&node->mutex);
-    p2p_peer_entry_t *table = node->peers_table;
-    node->peers_table = NULL;
-    node->peer_count = 0;
-    salts_mutex_unlock(&node->mutex);
-    
-    p2p_peer_entry_t *curr, *tmp;
-    HASH_ITER(hh, table, curr, tmp) {
-        /* Disconnect and free peer through professional lifecycle */
-        if (curr->peer) {
-            p2p_peer_destroy(curr->peer);
-        }
-        /* Remove from table entry and free the wrapper */
-        HASH_DEL(table, curr);
-        free(curr);
-    }
-}
-
 void p2p_cleanup_server(p2p_node_t *node) {
     if (!node || !node->server) return;
-    
+
     p2p_node_stop_server(node);
 }
 
@@ -74,160 +54,20 @@ void p2p_cleanup_context(p2p_node_t *node) {
     node->ctx = NULL;
 }
 
-void p2p_cleanup_topics(p2p_node_t *node) {
-    p2p_topic_t *topic = NULL;
-
-    if (!node) return;
-
-    topic = p2p_node_detach_topics(node);
-
-    while (topic) {
-        p2p_topic_t *next = topic->next_topic;
-        p2p_topic_destroy(topic);
-        topic = next;
-    }
-}
-
-void p2p_cleanup_files(p2p_node_t *node) {
-    p2p_file_t *file = NULL;
-
-    if (!node) return;
-
-    /* 1. Clear DHT files first (some may be local aliases) */
-    file = p2p_node_detach_dht_files(node);
-    while (file) {
-        p2p_file_t *next = file->next;
-        /* Only free if it's not a local file (local files are freed below) */
-        if (!file->is_local) {
-            p2p_file_free(file);
-        }
-        file = next;
-    }
-
-    /* 2. Free all local files */
-    file = p2p_node_detach_local_files(node);
-    while (file) {
-        p2p_file_t *next = file->next_file;
-        p2p_file_free(file);
-        file = next;
-    }
-}
-
-void p2p_cleanup_downloads(p2p_node_t *node) {
-    p2p_download_t *download = NULL;
-
-    if (!node) return;
-
-    download = p2p_node_detach_downloads(node);
-    while (download) {
-        p2p_download_t *next = download->next;
-
-        if (download->fp) {
-            fclose(download->fp);
-        }
-
-        free(download);
-        download = next;
-    }
-}
-
-void p2p_cleanup_transfers(p2p_node_t *node) {
-    p2p_transfer_manager_t *mgr = NULL;
-
-    if (!node || !node->transfers) {
-        return;
-    }
-
-    mgr = node->transfers;
-    node->transfers = NULL;
-    p2p_transfer_manager_destroy(mgr);
-    free(mgr);
-}
-
-void p2p_cleanup_lookup(p2p_node_t *node) {
-    p2p_dht_lookup_t *lookup = NULL;
-    p2p_dht_lookup_t *tmp = NULL;
-
-    if (!node || !node->dht_lookups) return;
-
-    HASH_ITER(hh, node->dht_lookups, lookup, tmp) {
-        HASH_DEL(node->dht_lookups, lookup);
-        if (lookup->cleanup && lookup->user_data) {
-            lookup->cleanup(lookup->user_data);
-        }
-        free(lookup);
-    }
-    node->dht_lookups = NULL;
-}
-
-static void p2p_cleanup_connect_suppressions(p2p_node_t *node) {
-    p2p_connect_suppression_t *suppression = NULL;
-    p2p_connect_suppression_t *tmp = NULL;
-
-    if (!node || !node->connect_suppressions) {
-        return;
-    }
-
-    HASH_ITER(hh, node->connect_suppressions, suppression, tmp) {
-        HASH_DEL(node->connect_suppressions, suppression);
-        free(suppression);
-    }
-    node->connect_suppressions = NULL;
-}
-
-void p2p_cleanup_dht(p2p_node_t *node) {
-    if (!node || !node->kad_dht) return;
-    
-    /* Professional Kademlia cleanup */
-    kademlia_destroy(node->kad_dht);
-    node->kad_dht = NULL;
-}
-
 /* =============================================================================
  * Main Cleanup Orchestration
  * ============================================================================= */
 
 void p2p_destroy_clean(p2p_node_t *node) {
     if (!node) return;
-    
     p2p_cleanup_callbacks(node);
     p2p_cleanup_timers(node);
     p2p_cleanup_server(node);
     p2p_node_cleanup_cookie_gates(node);
-    if (node->private_key_executor) {
-        p2p_private_key_executor_shutdown(node->private_key_executor);
-    }
+    p2p_private_key_executor_shutdown(node->private_key_executor);
     p2p_cleanup_peers(node);
-    p2p_cleanup_topics(node);
-    p2p_cleanup_files(node);
-    p2p_cleanup_downloads(node);
-    p2p_cleanup_transfers(node);
-    p2p_cleanup_lookup(node);
-    p2p_cleanup_connect_suppressions(node);
-    p2p_cleanup_dht(node);
     p2p_cleanup_context(node);
-
-    p2p_private_key_executor_destroy(node->private_key_executor);
-    node->private_key_executor = NULL;
-
-    if (node->pinned_trusted_keys) {
-        p2p_crypto_wipe(node->pinned_trusted_keys,
-                        node->pinned_trusted_key_count * P2P_KEY_SIZE);
-        free(node->pinned_trusted_keys);
-        node->pinned_trusted_keys = NULL;
-        node->pinned_trusted_key_count = 0;
-    }
-    p2p_crypto_wipe(&node->crypto.identity, sizeof(node->crypto.identity));
-    p2p_crypto_wipe(node->local_credential, sizeof(node->local_credential));
-    p2p_crypto_wipe(&node->local_authenticated_identity,
-                    sizeof(node->local_authenticated_identity));
-    p2p_crypto_wipe(node->source_admission_buckets,
-                    sizeof(node->source_admission_buckets));
-    p2p_crypto_wipe(node->cookie_master_secret,
-                    sizeof(node->cookie_master_secret));
-    p2p_crypto_wipe(node->cookie_gates, sizeof(node->cookie_gates));
-    p2p_crypto_wipe(&node->security_config, sizeof(node->security_config));
-    
-    salts_mutex_destroy(&node->mutex);
-    free(node);
+    node->network_ops = NULL;
+    if (p2p_node_state_destroy(node) != P2P_OK)
+        TLOG_ERROR("[P2P] node destruction requires released transfer leases");
 }

@@ -472,3 +472,23 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 验证范围：新增 `test_p2p_cnet_node` 的 15 个 Linux 场景，覆盖双向认证/加密消息、监听端口学习、DHT 查询与唯一 cleanup、7 字节分片和双边私钥 worker、回调 stop、工作中取消、stale 清理、截止边界、发送预算、gate/peer 共享来源配额、凭证拒绝、保留端点容量、交叉连接去重、直接断开回收与 drain 超时后重试。仅 node 构造/凭证 provider 是 fixture；网络策略、协议和存储实现都是生产源码。Linux Release 全套 **36/36** 通过；node/peer/transport/admission/worker 五个套件通过 ASan/UBSan（`detect_leaks=0`，安装 SDK 未插桩）。本次编译覆盖的修改源码通过 `-Wall -Wextra -Werror` 语法检查。
 
 **MED（事实，剩余范围）**：公开 create/start/get_loop 和安全配置入口仍走旧生命周期；完整文件传输、旧 adapter、根工程以及 Windows/macOS 运行尚未验证。CNet ingress 统计通过内部 admission snapshot 读取，尚未接入 public node status 中的旧 gate/延迟统计字段。不能把本阶段当作完整产品 owner 切换或全量迁移完成。根工程仍需 legacy SDK；依赖持续浮动 latest，re2c 持续使用共享 vcpkg-cache action。后续需要完成公共循环契约、node 构造/配置/状态查询及 transfer 生命周期的共同迁移，再移除旧依赖。
+
+## 第二阶段 N：共享 node 状态与 CNet 文件传输
+
+**HIGH（事实，已修复）**：transfer 的 primary/request/source peer 原来只存裸指针，断开后 peer 可被回收；manager 原来无视尚未释放的 transfer 查询引用直接销毁对象和 mutex。现在每个 transfer 对至多八个不同 peer 各持有一次引用，manager 记录包括已摘表 transfer 在内的借出引用。停止关闭 admission；存在引用时返回 `P2P_ERR_INVALID_STATE` 并保留 manager/node，释放后在同一 owner 线程重试。引用最后释放时先清理 transfer 的文件、bitmap 和 peer，再释放 manager 的计数，避免清理期间 node 提前销毁。
+
+选择共享 `node_state` 构造/销毁与文件 registry、topic、DHT 状态，而非为 CNet 复制 constructor 或把整个 legacy API 链入测试。公开 legacy constructor 先创建共享状态，再显式附加 CoroNet；CNet fixture 使用相同状态 constructor。`p2p_file_api` 提取原 put/get/get_async 实现，两个 owner 共享真实 sender/receiver/FILE_ACK handler。transfer 的 mutex、时钟、格式化日志改用已发布 Salts API；bitmap 继续复用已有 vendored croar，没有新增外部依赖。
+
+状态与失败边界：
+
+- node 拥有 identity、mutex、DHT、文件和 transfer manager；CNet owner 借用 node。transfer 的角色指针均借用它自身持有的 peer 引用。lookup 顺序为 manager→transfer，peer 查询/持有为 transfer→node，不嵌套三层锁。
+- create/destroy/tick/stop 属于 owner 线程；跨线程只读查询须由调用者保证 node 存活，并在最终 shutdown 前退出。manager 的锁不能替代外层 node 生命周期契约。
+- CNet stop 先关闭新工作、等待私钥 worker，清理 transfer，随后摘除 peer/lookup 并排空 transport。回调 stop 延迟至当前 poll 退出，确保文件 handler 先释放引用；shutdown 不调用 transfer completion，保持旧销毁语义。drain 或引用未完成均保留对象供重试。
+- 共享 state destroy 要求 network owner 已销毁，拒绝仍带 legacy context/listener/timer 或 CNet context 的 node。旧 void destroy 记录未释放 transfer 引用并保留 node；调用方仍须遵守 owner/quiescence 契约，不能从正在执行的 legacy 回调销毁节点。
+- CNet 维护周期调用既有 transfer tick；文件 I/O 和哈希仍为同步工作，阻塞影响与原实现相同，本阶段未引入异步磁盘调度。
+
+**HIGH（事实，已修复）**：真实文件回归发现发送端用 `sizeof(payload)` 推导 CHUNK_DATA 长度时包含尾部 padding，现有规范编码器因此拒绝发送；改用编码器要求的 `offsetof(data)`，wire 编码保持不变。空文件打开时块数重算为零的问题按既有单块约定修复。多源 in-flight 添加统一使用与移除一致的紧凑数组，下一块达到总块数时停止调度，块数计算避免加法溢出。接收端保留请求内容摘要为事实源，拒绝不匹配的元数据；完成/失败回调只进入一次终态，后续无效来源不会终止已经有效启动的下载。
+
+验证：`test_p2p_cnet_files` 九个场景通过生产构造器、认证、加密编码器和真实 CNet loopback，覆盖九个整块加尾块、并行窗口复用、4093 字节接收分片、空文件、对象不存在、源文件注册后变更、completion 中 stop、pending stop、摘表后的 transfer 引用阻挡 destroy、upload peer 断开后延迟释放，以及 ACK 回收上传与下载后注册为 seed。原 node 的十五个场景改用共享 constructor/destructor，只有安全配置和凭证 provider 仍为 fixture。Linux Release **37/37**；files/node/peer/transport/admission/worker 六套 ASan/UBSan 通过（`detect_leaks=0`，发布 SDK 未插桩）。本次九个已编译修改源码通过 `-Wall -Wextra -Werror`；旧 root 测试的 manager destroy 调用同步检查错误，但未运行 legacy 套件。
+
+**MED（事实，剩余范围）**：公开 create/start/get_loop、安全配置、状态查询和完整根工程仍未切换；Windows/macOS 运行未验证。既有 pause/resume 持久化占位逻辑、目录下载、完整多源切换/超时策略和同步文件 I/O 未在本阶段完成或全面验证；不能把这些算作已实现功能。文件 transfer 的 streaming SHA-256 仍使用仓库既有实现，本阶段 H 的 Salts Crypto 迁移覆盖不包含该实现。后续需要迁移这些遗留能力并统一公开循环契约。内部 CNet 入口继续标注 `@internal @incomplete`，未接入公开构造器。公开 API、配置和磁盘/wire 格式不变；回滚本阶段提交即可退回阶段 M，不需要迁移用户数据。依赖仍浮动 latest，re2c 仍来自共享 vcpkg-cache action。
