@@ -65,6 +65,22 @@ mesh_stream_channel_result_t mesh_stream_channel_init_v1(
     const mesh_stream_transport_config_v1_t *config, const mesh_stream_transport_io_v1_t *io,
     mesh_stream_transport_event_fn on_event, void *event_context);
 
+/** Explicit callback-driven channel. io.send must be NULL and send_async is
+ * required; there is no synchronous fallback. Feed borrowed receive bytes;
+ * pump_once is unavailable. Backend ownership follows transport_init_async. */
+mesh_stream_channel_result_t mesh_stream_channel_init_async_v1(
+    mesh_stream_channel_v1_t *channel, const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config, const mesh_stream_transport_io_v1_t *io,
+    mesh_stream_transport_async_send_fn send_async,
+    mesh_stream_transport_event_fn on_event, void *event_context);
+
+/** Complete only the matching admission and pending control token. A stale or
+ * duplicate terminal leaves the live channel untouched. A matching error or
+ * short write releases owned storage while preserving terminal diagnostics. */
+mesh_stream_channel_result_t mesh_stream_channel_complete_send_v1(
+    mesh_stream_channel_v1_t *channel, uint64_t admission_generation, uint64_t token,
+    int io_result, size_t sent_bytes, size_t *out_frames);
+
 /** Release channel-owned memory and return to UNINITIALIZED. */
 void mesh_stream_channel_destroy_v1(mesh_stream_channel_v1_t *channel);
 

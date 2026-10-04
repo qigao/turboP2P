@@ -1,6 +1,6 @@
 # Salts / SaltsUtils 分阶段迁移
 
-已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
+已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
 
 ## 审查发现
 
@@ -106,3 +106,24 @@ flowchart TD
 回滚可撤销本阶段提交，不涉及数据或报文转换。尚未验证完整根工程及 Windows/macOS；P2P、tunnel、HTTP owner 和完整 channel 接线仍待后续阶段。
 
 本地发布包快照：Salts 1.8.15 / SaltsUtils 4.1.17（仅记录验证输入，不限制 consumer 版本）。Release 14/14 CTest、ASan/UBSan 14/14 通过；最后新增 exporter 错配测试后的 sanitizer 绑定回归亦通过。当前环境仍设置 `ASAN_OPTIONS=detect_leaks=0`，不声称完成泄漏检测。
+
+
+## 第二阶段 D：授权后的 CNet receiver channel
+
+`mesh_stream_channel_init_async_v1` 与 `mesh_stream_channel_complete_send_v1` 将现有 generation、资源释放和终态诊断契约接到异步 transport。同步入口保留原行为，async 必须有 admission callback 且 `io.send == NULL`；不能调用同步 pump，也不能自动回退。过期 admission 或 send token 在进入通用失败清理前被拒绝，不会销毁仍在使用的 receive window 或取消较新的 pending control。
+
+CNet adapter 的 `mesh_stream_cnet_channel_v1_t` 借用已完成绑定的对象、client 和精确 slot/generation，拥有一个 channel。init、feed、matching terminal，以及 buffered-frame 的应用回调和 control send 均检查活 TLS 1.3/exporter、TTL、身份和 stream/generation。授权失效先 REVOKED 并释放 window，再清除绑定；传输终态错误保留诊断和已消费帧统计，清除绑定。旧 handle、旧 admission 和旧 token 不推进新 channel，也不能关闭新连接的授权。
+
+**HIGH（事实，已处理）**：ACCEPT 成功的 terminal 可能排队下一份 WINDOW_UPDATE。只有匹配当前 pending token 的终态才可提交；不能把旧 ACCEPT 回调当成下一次控制帧成功。终态处理会 drain 已缓冲的 DATA，因此调用方须在处理回调前捕获 token，并保持连接的专属 write FIFO。每份 control 使用独立 retained buffer；入队后立即释放调用方引用，CNet 持有至逻辑 write 完成。
+
+**MED（事实，显式 owner 契约）**：当前 CNet `max_send_bytes` / `read_timeout_ms` 在 client 创建时确定，没有逐连接 HWM/timeout setter。channel 的 policy callbacks 必须应用或验证创建该 client 的实际配置，不得成功 no-op。真实测试由创建 client 的同一配置给出验证，HWM 或 timeout 不匹配即失败。adapter 不提交 receive demand，也不替调用方关闭 borrowed handle；owner 一次请求一个 receive，pending control 期间暂停后续 demand，早到的字节仅使用 `max_frame_size` 窗口。调用路径见可运行的 `mesh/tests/test_mesh_stream_cnet_channel.c` 与共享 `mesh_stream_cnet_fixture.h`。
+
+本阶段把 transport/channel/registry 的纯核心拆为内部 `mesh_stream_transport_core`，CNet target 直接链接它；原 `mesh_stream_transport` target 保留 CoroNet adapter 和 transitive core 符号，现有 CoroNet 调用方不变。通用 channel 的既有七个 lifecycle 测试迁至 Salts TinyTest，并加入显式 async、拒绝混合 IO、禁止同步 pump 和 obsolete terminal 保护；原绑定回归共享 fixture 后继续执行。
+
+真实 TLS 测试先执行 INIT/ACCEPT/CONFIRM，再传输 OPEN/DATA。测试延迟 owner 对实际 CNet `on_send` 的 settlement，验证 ACCEPT 前不 ACTIVE、WINDOW_UPDATE 前 receive_limit 不增加，且对端控制帧解码正确。还覆盖一次 TLS write 中的 OPEN/DATA 有界缓冲、取消 pending control、授权撤销后不交付 DATA、完成时 TTL 过期、短 terminal、stale handle/admission/token，pending control 期间窗口溢出立即失败，以及同一 CNet client 上的关闭→重新连接→重新绑定，确认旧回调不能操作新 channel。
+
+取消不能撤回已经写入网络的字节；清除授权后 owner 必须关闭连接，确保旧 grant 不再接受新的 DATA。应用回调不能重入 adapter。所有对象在 callbacks 静默前禁止销毁或重用。撤销本阶段提交无需数据转换或 wire-protocol 变更。
+
+完整根工程、Windows/macOS、registry 的 CNet 接线及 P2P/tunnel/HTTP owner 仍待后续验证；此阶段只完成独立 receiver channel 路径。
+
+本阶段本地 Release 16/16 CTest、ASan/UBSan 16/16 通过，使用 Salts 1.8.15 / SaltsUtils 4.1.17 发布包快照；consumer 不限制版本。sanitizer 仍设 `detect_leaks=0`，不声称完成泄漏检测。CI 延续 latest Packages 与共享 vcpkg-cache/re2c。

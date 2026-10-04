@@ -23,6 +23,8 @@ add_library(foundation STATIC
   "${mesh_src}/mesh_stream_codec.c"
   "${mesh_src}/mesh_stream_session.c"
   "${mesh_src}/mesh_stream_transport.c"
+  "${mesh_src}/mesh_stream_channel.c"
+  "${mesh_src}/mesh_stream_registry.c"
   "${mesh_src}/mesh_stream_data.c"
   "${mesh_src}/mesh_stream_multisource.c"
   "${mesh_src}/mesh_stream_source_selector.c"
@@ -48,6 +50,7 @@ target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::C
 foreach(test_name IN ITEMS
   test_mesh_mgmt_crypto
   test_mesh_stream_bind
+  test_mesh_stream_channel
   test_mesh_control_outbox
   test_mesh_stream_transport
   test_mesh_stream_data
@@ -68,22 +71,17 @@ set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
 add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
 
-add_executable(test_mesh_stream_cnet "${mesh_tests}/test_mesh_stream_cnet.c")
-set_property(TARGET test_mesh_stream_cnet PROPERTY LINKER_LANGUAGE CXX)
-target_link_libraries(test_mesh_stream_cnet PRIVATE foundation Salts::TinyTest Salts::CNet)
-target_compile_definitions(test_mesh_stream_cnet PRIVATE
-  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/cnet-server-cert.pem"
-  MESH_TEST_TLS_CA_FILE="${mesh_tests}/data/cnet-ca-cert.pem"
-  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/cnet-server-key.pem")
-add_test(NAME test_mesh_stream_cnet COMMAND test_mesh_stream_cnet)
-set_tests_properties(test_mesh_stream_cnet PROPERTIES TIMEOUT 30)
-
-add_executable(test_mesh_stream_cnet_bind "${mesh_tests}/test_mesh_stream_cnet_bind.c")
-set_property(TARGET test_mesh_stream_cnet_bind PROPERTY LINKER_LANGUAGE CXX)
-target_link_libraries(test_mesh_stream_cnet_bind PRIVATE foundation Salts::TinyTest OpenSSL::SSL)
-target_compile_definitions(test_mesh_stream_cnet_bind PRIVATE
-  MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/cnet-server-cert.pem"
-  MESH_TEST_TLS_CA_FILE="${mesh_tests}/data/cnet-ca-cert.pem"
-  MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/cnet-server-key.pem")
-add_test(NAME test_mesh_stream_cnet_bind COMMAND test_mesh_stream_cnet_bind)
-set_tests_properties(test_mesh_stream_cnet_bind PROPERTIES TIMEOUT 60)
+foreach(test_name IN ITEMS test_mesh_stream_cnet test_mesh_stream_cnet_bind test_mesh_stream_cnet_channel)
+  add_executable(${test_name} "${mesh_tests}/${test_name}.c")
+  set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
+  target_link_libraries(${test_name} PRIVATE foundation Salts::TinyTest Salts::CNet)
+  if(NOT test_name STREQUAL "test_mesh_stream_cnet")
+    target_link_libraries(${test_name} PRIVATE OpenSSL::SSL)
+  endif()
+  target_compile_definitions(${test_name} PRIVATE
+    MESH_TEST_TLS_CERT_FILE="${mesh_tests}/data/cnet-server-cert.pem"
+    MESH_TEST_TLS_CA_FILE="${mesh_tests}/data/cnet-ca-cert.pem"
+    MESH_TEST_TLS_KEY_FILE="${mesh_tests}/data/cnet-server-key.pem")
+  add_test(NAME ${test_name} COMMAND ${test_name})
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT 60)
+endforeach()

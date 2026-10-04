@@ -65,9 +65,10 @@ channel_finish_transport_call(mesh_stream_channel_v1_t *channel,
   return MESH_STREAM_CHANNEL_TRANSPORT_ERROR;
 }
 
-mesh_stream_channel_result_t mesh_stream_channel_init_v1(
+static mesh_stream_channel_result_t channel_init(
     mesh_stream_channel_v1_t *channel, const mesh_stream_channel_admission_v1_t *admission,
     const mesh_stream_transport_config_v1_t *config, const mesh_stream_transport_io_v1_t *io,
+    mesh_stream_transport_async_send_fn send_async,
     mesh_stream_transport_event_fn on_event, void *event_context) {
   mesh_stream_transport_result_t transport_result;
 
@@ -78,8 +79,10 @@ mesh_stream_channel_result_t mesh_stream_channel_init_v1(
 
   memset(channel, 0, sizeof(*channel));
   channel->admission = *admission;
-  transport_result =
-      mesh_stream_transport_init_v1(&channel->transport, config, io, on_event, event_context);
+  transport_result = send_async
+      ? mesh_stream_transport_init_async_v1(&channel->transport, config, io, send_async,
+                                             on_event, event_context)
+      : mesh_stream_transport_init_v1(&channel->transport, config, io, on_event, event_context);
   channel->last_transport_result = transport_result;
   if (transport_result != MESH_STREAM_TRANSPORT_OK) {
     channel->last_session_result = channel->transport.last_session_result;
@@ -90,6 +93,43 @@ mesh_stream_channel_result_t mesh_stream_channel_init_v1(
   }
   channel->state = MESH_STREAM_CHANNEL_READY;
   return MESH_STREAM_CHANNEL_OK;
+}
+
+mesh_stream_channel_result_t mesh_stream_channel_init_v1(
+    mesh_stream_channel_v1_t *channel, const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config, const mesh_stream_transport_io_v1_t *io,
+    mesh_stream_transport_event_fn on_event, void *event_context) {
+  return channel_init(channel, admission, config, io, NULL, on_event, event_context);
+}
+
+mesh_stream_channel_result_t mesh_stream_channel_init_async_v1(
+    mesh_stream_channel_v1_t *channel, const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config, const mesh_stream_transport_io_v1_t *io,
+    mesh_stream_transport_async_send_fn send_async,
+    mesh_stream_transport_event_fn on_event, void *event_context) {
+  if (!send_async)
+    return MESH_STREAM_CHANNEL_INVALID_ARG;
+  return channel_init(channel, admission, config, io, send_async, on_event, event_context);
+}
+
+mesh_stream_channel_result_t mesh_stream_channel_complete_send_v1(
+    mesh_stream_channel_v1_t *channel, uint64_t admission_generation, uint64_t token,
+    int io_result, size_t sent_bytes, size_t *out_frames) {
+  mesh_stream_channel_result_t result;
+  if (!out_frames)
+    return MESH_STREAM_CHANNEL_INVALID_ARG;
+  *out_frames = 0u;
+  result = channel_validate_operation(channel, admission_generation);
+  if (result != MESH_STREAM_CHANNEL_OK)
+    return result;
+  /* Reject obsolete terminals before the generic error path can release the
+   * live receive window or cancel a newer pending control. */
+  if (channel->state != MESH_STREAM_CHANNEL_READY || !channel->transport.send_async ||
+      !channel->transport.send_pending || token != channel->transport.pending_send_token)
+    return MESH_STREAM_CHANNEL_INVALID_STATE;
+  return channel_finish_transport_call(channel,
+      mesh_stream_transport_complete_send_v1(&channel->transport, token, io_result,
+                                              sent_bytes, out_frames));
 }
 
 void mesh_stream_channel_destroy_v1(mesh_stream_channel_v1_t *channel) {
@@ -131,6 +171,8 @@ mesh_stream_channel_result_t mesh_stream_channel_pump_once_v1(mesh_stream_channe
   if (validation_result != MESH_STREAM_CHANNEL_OK)
     return validation_result;
   if (channel->state != MESH_STREAM_CHANNEL_READY)
+    return MESH_STREAM_CHANNEL_INVALID_STATE;
+  if (channel->transport.send_async)
     return MESH_STREAM_CHANNEL_INVALID_STATE;
   transport_result = mesh_stream_transport_pump_once_v1(&channel->transport, out_frames);
   return channel_finish_transport_call(channel, transport_result);

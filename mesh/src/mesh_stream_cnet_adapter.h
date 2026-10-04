@@ -84,6 +84,66 @@ int mesh_stream_cnet_bind_authorizes_v1(
     const mesh_stream_cnet_bind_v1_t *bind,
     const mesh_stream_channel_admission_v1_t *admission, uint64_t now_ms);
 
+/** Authenticated receiver channel on the exact borrowed binding connection.
+ * Zero-initialize before init.
+ * The embedding event-loop owner routes receive bytes and logical send
+ * terminals here. It must serialize all calls, keep the binding/client/policy
+ * context alive, and must not reenter from application callbacks.
+ *
+ * The policy IO contains only set_send_hwm/set_receive_timeout/context. These
+ * callbacks must apply or verify the actual policy used to create the CNet
+ * client; CNet has no per-connection setters for these fields. Mismatch must
+ * fail, never silently accept an unenforced limit.
+ *
+ * Request one receive at a time. Pause further demand while send_pending is
+ * set; already received bytes use the transport's max_frame_size bound. All
+ * connection writes belong to this receiver, with one pending control. Capture
+ * its token before calling complete_send (which can queue the next control).
+ * CNet guarantees one on_send per logical write; do not mix unregistered writes.
+ *
+ * This adapter does not submit receive demand or close the borrowed handle.
+ * Close/revoke here before cnet_close, and again on CLOSED/FAILED. After a
+ * terminal error, close the connection and quiesce callbacks before destroy or
+ * reusing any binding/client/channel object. Never call the nested channel
+ * directly: its generic entry points do not perform the TLS authorization gate.
+ */
+typedef struct {
+  mesh_stream_channel_v1_t channel;
+  mesh_stream_cnet_bind_v1_t *binding;
+  cnet_client *client;
+  cnet_connection connection;
+  mesh_stream_transport_io_v1_t policy;
+  mesh_stream_transport_event_fn on_event;
+  void *event_context;
+} mesh_stream_cnet_channel_v1_t;
+
+mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_cnet_bind_v1_t *binding,
+    const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
+    mesh_stream_transport_event_fn on_event, void *event_context);
+
+mesh_stream_channel_result_t mesh_stream_cnet_channel_feed_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, cnet_connection connection,
+    uint64_t admission_generation, const uint8_t *bytes, size_t len,
+    uint64_t now_ms, size_t *out_frames);
+
+mesh_stream_channel_result_t mesh_stream_cnet_channel_complete_send_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, cnet_connection connection,
+    uint64_t admission_generation, uint64_t token, int status, size_t bytes,
+    uint64_t now_ms, size_t *out_frames);
+
+/** Idempotent matching-lifetime shutdown. Revokes binding authorization before
+ * the caller submits close; obsolete connection/generation cannot touch it. */
+mesh_stream_channel_result_t mesh_stream_cnet_channel_close_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, cnet_connection connection,
+    uint64_t admission_generation, uint64_t now_ms);
+
+/** Quiesce CNet callbacks and close the adapter first. Frees channel storage;
+ * never closes/destroys the borrowed client or replacement binding. */
+void mesh_stream_cnet_channel_destroy_v1(mesh_stream_cnet_channel_v1_t *adapter);
+
 #ifdef __cplusplus
 }
 #endif
