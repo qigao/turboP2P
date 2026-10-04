@@ -243,3 +243,13 @@ Third-party source and license details are recorded in
 ## License
 
 See the LICENSE file in the repository root.
+
+## Salts migration status
+
+The internal `core/cnet_transport.h` owner now provides bounded TCP admission,
+retained FIFO sends, receive pause/handoff, and deferred observer destruction.
+The standalone foundation build tests it with the production cookie codec and
+Noise crypto over loopback. This is an explicit transport owner: the public
+node/peer/executor lifecycle still uses the legacy node until its migration is
+complete. See [the staged migration record](../MIGRATION_SALTS.md) for validation
+and remaining integration scope.

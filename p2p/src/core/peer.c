@@ -4,7 +4,6 @@
 #include "../security/p2p_cookie.h"
 #include "../security/p2p_private_key_executor.h"
 #include <CoroNet/turbo_stream.h>
-#include <turbo_error.h>
 #include <tlog.h>
 #include <platform.h>
 #include <stdlib.h>
@@ -448,7 +447,7 @@ static int peer_send_raw(p2p_peer_t *peer, const uint8_t *data, size_t len) {
     if (!peer || !peer->conn) return P2P_ERR_NETWORK;
     result = p2p_connection_send(peer->conn, data, len);
     if (result == 0) return P2P_OK;
-    return result == TURBO_ENOBUFS ? P2P_ERR_RESOURCE_EXHAUSTED
+    return result == P2P_ERR_RESOURCE_EXHAUSTED ? P2P_ERR_RESOURCE_EXHAUSTED
                                   : P2P_ERR_NETWORK;
 }
 

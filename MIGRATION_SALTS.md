@@ -275,3 +275,59 @@ ASan 使用 `detect_leaks=0`；预编译 SDK 未重新插桩，不声称泄漏�
 完整根工程和 Windows/macOS 尚待验证。下一步仍需把 cookie gate 到 peer 的 observer
 生命周期、worker completion、timer、异步关闭及管理 agent owner 一起迁移。回滚撤销本阶段
 提交即可，不涉及数据或协议转换。
+
+## 第二阶段 I：P2P CNet transport owner 与延迟回收
+
+**HIGH（迁移约束，已实现）**：原 `p2p_connection_destroy()` 的立即 free 契约不能用于
+仍持有 CNet observer 的连接。通用 connection 现在支持显式 owner destroy hook；CNet
+实现先撤销 application callbacks 和逻辑 admission，保留 observer 到 CLOSED/FAILED 或
+完成 stop，且仅在 CNet progress 返回后 sweep。通用 close 先改变逻辑状态，避免重入重复
+close。原 CoroNet 构造函数移至 `connection_coronet.c`，仅服务尚未迁移的 node；CNet 由
+`p2p_cnet_owner_create/connect/listen` 显式选择，不检测 backend、不自动 fallback。
+
+新增内部 owner 实际持有 CNet client/listener、generation handle 和连接列表；配置显式给出
+NativeIO backend、connection/command/request/event、发送字节、pending write 数量、接收、
+accept batch 和 stop 期限等硬边界。此 owner 只提供 P2P Noise 所需的明文 TCP transport；
+TLS 配置在创建时拒绝，不改变前期 MMP 的 TLS 1.3 policy。
+
+发送在 admission 内复制借用数据到 Salts retained buffer，记录有界 FIFO 的逻辑长度，
+完整 on_send 才扣减 pending bytes 并通知 completion；失败 admission 不改变计数。
+发送总字节与 write 个数双重限流，HWM 不可降到 outstanding bytes 以下或超过 owner 上限。
+通用 send vtable 统一返回 P2P 错误，旧 CoroNet adapter 在边界转换错误；peer 的既有
+背压关闭语义保持不变。协议调用方仍须等待其 send completion 后发布 readiness，不能
+用本层的 admission 成功替代 HELLO/Noise/READY 已发送事实。
+
+接收每次只请求一个 demand。consumer 返回 consumed prefix，剩余字节投递给当前的
+callback descriptor；cookie gate 可以在 callback 内切换为 peer，无须改变 CNet observer。
+暂停时最多保存一个 receive buffer 的剩余字节，恢复只在后续 owner poll 投递，已提交的
+read 即使晚到也不丢失。未暂停/关闭却零消费、超量消费、错误 consumer 返回和短逻辑完成
+会终止连接。所有回调检查 slot/generation。
+
+close command 遇 ENOBUFS 保留存储，在 progress 前后重试；其他 close admission 错误
+停止整个 owner。stop 在 callback 内只提交意图，poll 返回后实际 drain；嵌套 poll/destroy
+明确拒绝。stop 超时仍保留 owner，后续 stop/destroy 可重试。listener 必须先 close 再 destroy，
+client 必须达到 quiescence 后 destroy。已 stopped 的 owner 不重启。
+
+设计选择：将异步生命周期放在独立 owner，而非由 peer 持有 observer 后在旧 destroy 路径
+立即释放；这允许随后把 cookie slot、peer、worker completion 和 node timer 接入同一 owner。
+代价是 terminal connection 在显式 destroy 前占用一个受上限约束的 owner slot，且本层 poll
+是非阻塞接口，完整运行循环仍由后续 node 阶段提供。回滚撤销本阶段即可，不转换数据。
+
+验证：focused CMake 编译通用 connection 和实际 CNet owner，独立测试不链接 CoroNet。
+20 个 Linux 用例经过真实 loopback，覆盖 FIFO/借用 builder 重用、字节与条目上限、暂停尾部、
+已 admission 的 read、callback destroy/stop、拒绝 consumer/accept、零进度、pending write
+关闭与重连、取消 connect、cookie 响应与首个 Noise frame 合并发送、7 字节分片、暂停
+handoff，以及坏 cookie 在 Noise 创建前被拒绝。Linux 链接器 wrap 仅用于测试，注入 close
+容量失败/其他错误、send admission 拒绝、过期 generation、短 completion 和 stop 超时。
+生产代码没有故障开关或模拟网络。
+
+cookie/Noise 联调用的是生产 codec 和 crypto，但 gate/peer 驱动属于测试 fixture；它验证
+transport 交接与字节保留，不替代完整 node 的 source admission、credential policy、READY、
+executor 或 timer 验收。新 owner 已纳入根 target，但 `p2p_create/start/get_loop` 仍走旧 node。
+完整 node/peer/executor、管理 agent/HTTP 接线、根工程及 Windows/macOS 尚待后续迁移和验证。
+
+本地 Release 32/32、ASan/UBSan 32/32 CTest 通过；最后的关闭错误改动另在两种构建下
+重跑 20 个连接用例通过。一个 sanitizer tunnel 测试产物缺少执行权限，恢复产物权限后重跑
+通过，无源码更改。SDK 快照仍为 Salts 1.8.15 / SaltsUtils 4.1.17；CI 持续恢复 latest，re2c
+继续使用共享 vcpkg-cache。`ASAN_OPTIONS=detect_leaks=0`，预编译 SDK 未插桩，不声称泄漏
+或 SDK 内部 sanitizer 验证。
