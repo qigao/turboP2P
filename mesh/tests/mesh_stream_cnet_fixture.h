@@ -59,6 +59,7 @@ typedef struct {
   int accepted;
   mesh_stream_bind_store_v1_t store;
   mesh_stream_bind_ticket_v1_t ticket;
+  mesh_stream_registry_v1_t registry;
   uint64_t now;
   test_peer_kind_t peer_kind;
 } test_pair_t;
@@ -109,9 +110,13 @@ static void receive_tls12(test_owner_t *owner, const cnet_receive_view *view) {
     owner->failed = 1;
 }
 
+static mesh_stream_channel_v1_t *owner_channel(test_owner_t *owner) {
+  return mesh_stream_cnet_channel_borrow_v1(&owner->channel);
+}
+
 static void request_channel_receive(test_owner_t *owner) {
-  if (owner->receive_pending || owner->channel.channel.state != MESH_STREAM_CHANNEL_READY ||
-      owner->channel.channel.transport.send_pending)
+  if (!owner_channel(owner) || owner->receive_pending || owner_channel(owner)->state != MESH_STREAM_CHANNEL_READY ||
+      owner_channel(owner)->transport.send_pending)
     return;
   if (cnet_receive(&owner->client, owner->connection, 1u) != SALTS_OK) {
     owner->failed = 1;
@@ -144,9 +149,9 @@ static void on_state(void *user, cnet_connection connection, cnet_connection_sta
     }
   } else if (state == CNET_CONNECTION_CLOSED || state == CNET_CONNECTION_FAILED) {
     owner->terminal = 1;
-    if (owner->channel.channel.state != MESH_STREAM_CHANNEL_UNINITIALIZED)
+    if (owner_channel(owner) && owner_channel(owner)->state != MESH_STREAM_CHANNEL_UNINITIALIZED)
       (void)mesh_stream_cnet_channel_close_v1(&owner->channel, connection,
-          owner->channel.channel.admission.generation, salts_monotonic_ms());
+          owner_channel(owner)->admission.generation, salts_monotonic_ms());
     if (owner->bind.state != MESH_STREAM_CNET_UNINITIALIZED)
       owner->settle_result = mesh_stream_cnet_bind_abort_v1(
           &owner->bind, connection, salts_monotonic_ms());
@@ -167,8 +172,9 @@ static void on_send(void *user, cnet_connection connection, size_t bytes) {
   }
   if (owner->application_sender)
     return;
-  if (owner->channel.channel.state != MESH_STREAM_CHANNEL_UNINITIALIZED) {
-    mesh_stream_transport_v1_t *transport = &owner->channel.channel.transport;
+  if (!owner_channel(owner)) { owner->failed = 1; return; }
+  if (owner_channel(owner)->state != MESH_STREAM_CHANNEL_UNINITIALIZED) {
+    mesh_stream_transport_v1_t *transport = &owner_channel(owner)->transport;
     size_t frames = 0u;
     uint64_t token = transport->pending_send_token;
     if (owner->hold_terminal && transport->send_pending) {
@@ -179,10 +185,10 @@ static void on_send(void *user, cnet_connection connection, size_t bytes) {
       return;
     }
     owner->settle_result = mesh_stream_cnet_channel_complete_send_v1(&owner->channel,
-        connection, owner->channel.channel.admission.generation, token, SALTS_OK,
+        connection, owner_channel(owner)->admission.generation, token, SALTS_OK,
         bytes, salts_monotonic_ms(), &frames);
     if (owner->settle_result != owner->expected_channel_result &&
-        !(owner->channel.channel.state != MESH_STREAM_CHANNEL_READY &&
+        !(owner_channel(owner)->state != MESH_STREAM_CHANNEL_READY &&
           owner->settle_result == MESH_STREAM_CHANNEL_INVALID_STATE))
       owner->failed = 1;
     if (owner->settle_result == MESH_STREAM_CHANNEL_OK)
@@ -205,29 +211,29 @@ static void on_receive(void *user, cnet_connection connection, const cnet_receiv
     receive_tls12(owner, view);
     return;
   }
-  if (!same_connection(connection, owner->connection) || !view ||
+  if (!owner_channel(owner) || !same_connection(connection, owner->connection) || !view ||
       view->kind != CNET_MESSAGE_BYTES || !view->data ||
-      (owner->channel.channel.state == MESH_STREAM_CHANNEL_UNINITIALIZED &&
+      (owner_channel(owner)->state == MESH_STREAM_CHANNEL_UNINITIALIZED &&
        view->size > sizeof(owner->received) - owner->received_size)) {
     owner->failed = 1;
     return;
   }
   if (view->size == 0u)
     return;
-  if (owner->channel.channel.state != MESH_STREAM_CHANNEL_UNINITIALIZED) {
+  if (owner_channel(owner)->state != MESH_STREAM_CHANNEL_UNINITIALIZED) {
     size_t frames = 0u;
     owner->receive_pending = 0;
     owner->settle_result = mesh_stream_cnet_channel_feed_v1(&owner->channel, connection,
-        owner->channel.channel.admission.generation, view->data, view->size,
+        owner_channel(owner)->admission.generation, view->data, view->size,
         salts_monotonic_ms(), &frames);
     if (owner->settle_result != owner->expected_channel_result) {
       owner->failed = 1;
       return;
     }
-    if (owner->channel.channel.transport.send_pending) {
-      if (owner->channel.channel.transport.session.state == MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND)
+    if (owner_channel(owner)->transport.send_pending) {
+      if (owner_channel(owner)->transport.session.state == MESH_STREAM_SESSION_AWAIT_ACCEPT_SEND)
         owner->accept_pending_seen = 1;
-      owner->credit_while_pending = owner->channel.channel.transport.session.receive_limit;
+      owner->credit_while_pending = owner_channel(owner)->transport.session.receive_limit;
     }
     request_channel_receive(owner);
     return;
@@ -369,6 +375,7 @@ static void destroy_pair(test_pair_t *pair) {
     SSL_free(owners[i]->tls12_peer);
     owners[i]->tls12_peer = NULL;
   }
+  mesh_stream_registry_destroy_v1(&pair->registry);
   mesh_stream_bind_store_destroy_v1(&pair->store);
   if (pair->listener.impl) {
     check_equal(cnet_listener_close(&pair->listener), SALTS_OK);

@@ -2,7 +2,7 @@
 #define TURBO_P2P_MESH_STREAM_CNET_ADAPTER_H
 
 #include "mesh_stream_bind.h"
-#include "mesh_stream_channel.h"
+#include "mesh_stream_registry.h"
 #include <cnet/cnet.h>
 
 #ifdef __cplusplus
@@ -108,7 +108,11 @@ int mesh_stream_cnet_bind_authorizes_v1(
  * directly: its generic entry points do not perform the TLS authorization gate.
  */
 typedef struct {
+  /* Used only in standalone mode. Registered mode leaves this zero and
+   * resolves the unique registry-owned storage through its generation handle. */
   mesh_stream_channel_v1_t channel;
+  mesh_stream_registry_v1_t *registry;
+  mesh_stream_channel_handle_v1_t registry_handle;
   mesh_stream_cnet_bind_v1_t *binding;
   cnet_client *client;
   cnet_connection connection;
@@ -123,6 +127,28 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
     const mesh_stream_transport_config_v1_t *config,
     const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
     mesh_stream_transport_event_fn on_event, void *event_context);
+
+/** Register one authenticated receiver in the bounded registry. The registry
+ * owns channel storage; this route and all borrowed binding/policy contexts
+ * must outlive retirement. Calls remain serialized and nonreentrant.
+ * Registry close/revoke/destroy retires binding authorization immediately.
+ * Route receive/send only through this adapter, never generic registry data IO.
+ * Stop/quiesce callbacks before releasing its slot, destroying the registry,
+ * or reusing the route. The registry object itself must outlive this route.
+ * Quota/duplicate/config failures do not consume a slot or retire the binding.
+ * out_handle must not alias the route's internal registry_handle field. */
+mesh_stream_registry_result_t mesh_stream_cnet_channel_register_v1(
+    mesh_stream_cnet_channel_v1_t *adapter, mesh_stream_registry_v1_t *registry,
+    mesh_stream_cnet_bind_v1_t *binding, const mesh_stream_channel_admission_v1_t *admission,
+    const mesh_stream_transport_config_v1_t *config,
+    const mesh_stream_transport_io_v1_t *policy, uint64_t now_ms,
+    mesh_stream_transport_event_fn on_event, void *event_context,
+    mesh_stream_channel_handle_v1_t *out_handle);
+
+/** Internal owner-call inspection only. NULL if the registered handle retired
+ * and was released or the registry storage was destroyed. Do not retain it. */
+mesh_stream_channel_v1_t *mesh_stream_cnet_channel_borrow_v1(
+    const mesh_stream_cnet_channel_v1_t *adapter);
 
 mesh_stream_channel_result_t mesh_stream_cnet_channel_feed_v1(
     mesh_stream_cnet_channel_v1_t *adapter, cnet_connection connection,
@@ -140,8 +166,10 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_close_v1(
     mesh_stream_cnet_channel_v1_t *adapter, cnet_connection connection,
     uint64_t admission_generation, uint64_t now_ms);
 
-/** Quiesce CNet callbacks and close the adapter first. Frees channel storage;
- * never closes/destroys the borrowed client or replacement binding. */
+/** Quiesce CNet callbacks first. Standalone mode frees channel storage;
+ * registered mode retires the slot (explicit registry release remains required).
+ * A stale route cannot touch a reused slot or replacement binding. Never closes
+ * or destroys the borrowed client. */
 void mesh_stream_cnet_channel_destroy_v1(mesh_stream_cnet_channel_v1_t *adapter);
 
 #ifdef __cplusplus
