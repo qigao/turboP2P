@@ -5,6 +5,7 @@
 /* Private shared constructor; owns mutex, DHT, identity and transfer manager.
  * An explicit network owner must be attached before starting network work. */
 p2p_node_t *p2p_node_state_create(const char *ip, int port);
+int p2p_node_state_create_checked(const char *ip, int port, p2p_node_t **output);
 /* Network owner must be destroyed first. Retains node and manager on live
  * transfer leases; release them and retry on the same owner thread. */
 int p2p_node_state_destroy(p2p_node_t *node);

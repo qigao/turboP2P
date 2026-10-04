@@ -508,6 +508,7 @@ CXX_C_API int p2p_node_start_server(p2p_node_t *node) {
     turbo_stream_kind_t kind;
 
     if (!node || node->server) return P2P_ERR_INVALID_ARG;
+    if (!node->ctx || node->runtime_v2) return P2P_ERR_INVALID_STATE;
     if (!node->security_configured) return P2P_ERR_AUTH_REQUIRED;
 
     if (node_build_sockaddr(node->ip, node->port, &addr) != 0) {

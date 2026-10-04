@@ -561,3 +561,31 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 管理 runtime 增加独立生产源码编译 target，在 Salts SDK 下不包含 CoroNet；对象符号确认使用 `p2p_poll`/`salts_monotonic_ms`。它只是编译检查，不是完整管理生命周期运行测试。七个覆盖本次 API、调用方和 fixture 的编译单元通过 `-Wall -Wextra -Werror`。九套 ASan/UBSan 在遇错即停模式下 **9/9** 通过（`detect_leaks=0`，发布 SDK 未插桩）。本地完整 Release 首跑两个构建产物因执行权限为 644 未启动；恢复权限后完整重跑 **39/39** 通过。latest SDK 版本与远端结果以本 PR 的 CI 记录为准；复验命令沿用阶段 P。
 
 **MED（事实，剩余范围）**：完整 mesh/root、旧 CoroNet adapter 与跨平台运行尚未验证，公开构造器和阻塞 start 仍未迁到 CNet；阶段 P 的 Pub/Sub、异步 DHT 和阶段 N 文件限制继续有效。CNet owner 保留内部未完成迁移标记。后续需要提供兼容的构造/启动/停止与 post 契约，再移除旧 SDK。撤销本阶段可回到 P，但使用新 symbol 的调用方必须一起回滚；不涉及用户数据或 wire 转换。Salts/SaltsUtils 继续使用 latest released packages，re2c 继续使用共享 vcpkg-cache action。
+
+## 第二阶段 R：公开 CNet 生命周期与可重试销毁
+
+**HIGH（事实，v2 契约已补齐）**：旧 `void p2p_destroy()` 无法向调用方返回排空超时或尚有 transfer lease。CNet stop/destroy 在这些情况下必须保留 node、owner 和 provider/callback context。直接替换旧 void 实现会使调用方无法判断是否可以释放这些借用上下文（推论，依据上述返回类型与已验证的保留语义）。本阶段提供完整的公开 v2 生命周期，调用方只有收到 destroy 的 `P2P_OK` 才能释放借用上下文。
+
+新增入口：`p2p_create_v2`、`p2p_runtime_config_v2_init`、`p2p_start_nonblocking_v2`、`p2p_node_get_listen_address_v2`、`p2p_stop_v2` 和 `p2p_destroy_v2`。节点继续使用上一阶段 `p2p_poll` 以及共享的身份、安全配置、状态、peer、消息、DHT 和文件 API。新构造器显式选择 CNet；没有后端探测、失败切换、第二套协议实现或后台调度线程。旧构造器及阻塞 start/get_loop 保留给尚未迁移的调用方；生命周期不可混用。
+
+选择版本化、返回错误码的入口，是为了把可重试销毁变成调用方可判断的契约。更改原 void 函数返回类型会破坏公开接口；仅在旧函数里记录错误仍不能让管理 runtime 安全释放 provider。新接口增加 C symbols 和一个不透明 node 内部的常量大小生命周期对象；现有公开结构布局、旧函数签名、wire 与磁盘格式不变。使用新入口必须链接新版库，不能搭配旧二进制。
+
+| 阶段/事件 | 状态归属与失败结果 |
+| --- | --- |
+| create | 共享 state 拥有 identity、mutex、DHT、文件和 transfer manager；v2 生命周期拥有 state，并在 start 后拥有 CNet owner。输出只在构造全部成功后发布。共享 checked constructor 区分 INVALID_ARG、NO_MEM 和身份生成错误；旧指针构造器仍将失败表示为 NULL。 |
+| configure/start | 先通过既有 API 配置身份、信任和回调，再附加 CNet。缺安全策略、无效 options 或附加前初始化失败可更正后重试；节点身份与缓存保留。options 同步复制，无借用配置指针。 |
+| listener failure | owner 已附加后，监听失败立即请求 terminal stop。若清理失败，返回清理错误并保留 owner/node；否则返回监听错误。两者均不可重启，调用方继续 stop/destroy。 |
+| poll | 在同一个 owner 线程、回调外调用；回调同步执行。native accept、worker、transfer 和 DHT 维护复用原生产路径。不存在对总返回时间的严格保证，用户回调及同步文件 I/O 仍可能阻塞。 |
+| stop | 包括尚未 start 的节点，stop 一律终止后续 start。CNet 回调内请求延迟到 poll 退出后执行，最终错误由 poll 返回；回调外等待真实 worker/transport shutdown。缓存/状态保留，shutdown 不发送 transfer completion。 |
+| destroy | 回调内或生命周期重入返回 INVALID_STATE。live lease 或 drain timeout 保留对象供修正后重试；销毁 CNet owner 成功后再销毁 state，state 尚不能释放时恢复生命周期归属。只有最终成功才释放 lifecycle/node。 |
+| address query | 返回上一次成功绑定的数值地址和实际端口，支持端口零；停止后仍可读。尚未成功监听返回 INVALID_STATE；容量不足不改写两个输出。 |
+
+配置给出明确的连接、command/request/event、completion batch、接收、发送 HWM、pending write、accept 和超时上限；aggregate command/event 字节预算也可调整。初始化值选定 128 连接、256 command/event、512 request、64 completion batch、64 KiB 接收、1 MiB HWM、8 pending writes、16 accept budget、各 8 MiB aggregate buffer 及 5 秒 connect/write/stop。它们是可覆盖的初值，不是容量资格或性能结论。Windows 选择 IOCP，Linux/Android 选择 epoll，其他支持的平台选择 kqueue；P2P 仍使用现有 Noise 明文 TCP transport，不在这里叠加 TLS。
+
+所有 lifecycle/progress 操作都属于一个 owner 线程。并发只读 security status 仍遵循既有 node mutex 契约，最终 destroy 前必须结束所有并发读取。内部 state destructor 拒绝绕过 v2 ownership；旧 CoroNet start 拒绝 v2/无 context 节点，旧 cleanup 对 v2 节点记录错误并保持状态，要求调用方使用有结果的 destroy。CNet owner 现在由完整公开生命周期拥有，私有头不再把公共构造器接入标为未完成；这不代表旧调用方或其他功能已全部迁移。
+
+验证：新增 `test_p2p_cnet_lifecycle`，Linux foundation 十二个场景覆盖未启动节点、terminal stop、禁止混用、安全/配置错误后更正启动、监听冲突、监听失败后的清理超时、双向认证和七字节分片消息、DHT 复制、真实多块文件、认证/文件回调内 stop 和拒绝 destroy、已摘表 transfer lease 阻挡销毁、未启动节点的 lease 保留、内存/身份构造失败与 drain 超时后重试。网络、认证、消息、DHT 与文件操作使用公开 API；只有 lease 管理断言访问内部结构，故障注入使用 Linux linker wrap。新测试也加入根工程，但 root 仍未验证；共享库根测试不启用静态链接故障注入。
+
+本地 Linux Release 完整 **40/40**，十套 ASan/UBSan **10/10** 通过；`UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`，`detect_leaks=0`，发布 SDK 未插桩。Release 与 sanitizer 首跑各一个构建产物因权限为 644 未启动，恢复执行权限后分别全套重跑通过。三个本次实现/测试编译单元通过 `-Wall -Wextra -Werror`。CI 将新生命周期套件加入强制 sanitizer gate；SDK 继续浮动 latest，re2c 使用共享 vcpkg-cache。复验命令沿用阶段 P，sanitizer 正则与 target 列表新增 `test_p2p_cnet_lifecycle`。
+
+**MED（事实，剩余范围）**：mesh/管理 runtime 的构造与释放调用方仍使用旧生命周期，后续须同步处理失败时 provider/context 的保留，不能只替换函数名。交互客户端的跨线程 post/阻塞循环/停止整合、完整 root、旧 adapter 和跨平台运行尚未完成；阶段 P 的 Pub/Sub、异步 DHT 和阶段 N 文件限制继续有效。本阶段不改变既有已发布入口的后端，也未移除 legacy SDK。回滚需让新增 API 的消费者与本阶段一起撤销，无用户数据或 wire 迁移。

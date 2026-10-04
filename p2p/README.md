@@ -91,7 +91,35 @@ Their exact dependency contract, build/test presets, fuzz limits, corpus and
 artifact commands are documented in
 [`NOISE_IDENTITY_DESIGN.md`](NOISE_IDENTITY_DESIGN.md).
 
-## Quick Start
+## CNet lifecycle (v2)
+
+The v2 lifecycle uses CNet with the existing Noise protocol. It shares the
+security, peer, message, DHT and file APIs with the legacy node. Lifecycle calls
+and `p2p_poll()` belong to one owner thread; no background loop is created.
+
+| Step | API | Ownership and result |
+| --- | --- | --- |
+| Create | `p2p_create_v2(ip, port, &node)` | Returns a configured-address node with no network owner; output is NULL on failure. |
+| Configure | Existing identity/security and callback APIs | Load the stable identity and explicit peer trust before starting. Provider contexts remain borrowed until destruction succeeds. |
+| Start | `p2p_runtime_config_v2_init(&config)`, then `p2p_start_nonblocking_v2(node, &config)` | Defaults are explicit hard bounds that can be overridden. Options are copied. Security HWM must fit the runtime HWM. |
+| Query address | `p2p_node_get_listen_address_v2(node, ip, capacity, &port)` | Reports the last successfully bound address, including the actual port when created with port zero. |
+| Progress | `p2p_poll(node)` | Run outside callbacks on the owner thread and check its P2P error result. Application scheduling supplies idle waits. |
+| Stop | `p2p_stop_v2(node)` | Terminal even before start. Callback requests are deferred to poll exit; poll reports cleanup errors. |
+| Destroy | `p2p_destroy_v2(node)` | Only P2P_OK means the pointer is released. On failure retain the node and its callback/provider contexts, resolve the cause and retry. |
+
+A missing security policy or rejected options before owner attachment permit a
+corrected start. Listener failure is terminal; shutdown failure takes precedence
+over the listener error. Live transfer leases must be released before retrying
+stop/destroy, and transport drain timeout also retains ownership. Destruction
+from a callback is rejected. Successful stop leaves cached data/status readable;
+it does not permit restart. End concurrent readers before final destruction.
+
+Do not mix the v2 lifecycle with legacy `p2p_start`, `p2p_start_nonblocking` or
+`p2p_destroy`. The v2 node exposes no CoroNet context. The legacy mesh constructors
+and interactive client's CoroNet post/stop integration are still being migrated;
+the full root build continues to require those legacy SDKs.
+
+## Legacy CoroNet quick start
 
 ```c
 #include <p2p.h>
@@ -136,9 +164,8 @@ int main(void) {
 }
 ```
 
-For a custom event loop (non-blocking), use `p2p_start_nonblocking()` plus
-`p2p_get_loop()` and drive it with `coro_context_run()` — the mesh module does
-exactly this from `mesh_poll()`.
+For a custom event loop (non-blocking), use `p2p_start_nonblocking()` and check
+each `p2p_poll()` result. The mesh module uses this public polling contract.
 
 ## DHT
 
