@@ -22,18 +22,21 @@ foreach(test_source ${TUNNEL_TEST_SOURCES})
         ${test_source}
         $<TARGET_OBJECTS:tunnel_objs>)
 
+    target_compile_definitions(${test_name} PRIVATE TUNNEL_STATIC)
     target_include_directories(${test_name}
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include
                 ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 
     target_link_libraries(${test_name}
-        PRIVATE TurboUtils::Core
-                TurboNet::CoroNet
-                TurboUtils::TinyTest)
+        PRIVATE Salts::Core
+                Salts::Platform Salts::CNet
+                Salts::TinyTest)
 
     if(WIN32)
         target_link_libraries(${test_name} PRIVATE ws2_32)
     endif()
+
+    set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
 
     # Set folder for IDE organization
     set_target_properties(${test_name} PROPERTIES
@@ -47,3 +50,17 @@ foreach(test_source ${TUNNEL_TEST_SOURCES})
         add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
     endif()
 endforeach()
+
+add_executable(test_proxy_cnet test_proxy_cnet.c $<TARGET_OBJECTS:tunnel_objs>)
+target_include_directories(test_proxy_cnet PRIVATE ../include ../src)
+target_compile_definitions(test_proxy_cnet PRIVATE TUNNEL_STATIC
+  TUNNEL_TEST_TLS_CERT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/../../mesh/tests/data/cnet-server-cert.pem"
+  TUNNEL_TEST_TLS_KEY_FILE="${CMAKE_CURRENT_SOURCE_DIR}/../../mesh/tests/data/cnet-server-key.pem"
+  TUNNEL_TEST_TLS_CA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/../../mesh/tests/data/cnet-ca-cert.pem")
+target_link_libraries(test_proxy_cnet PRIVATE Salts::Core Salts::Platform Salts::CNet Salts::TinyTest)
+set_target_properties(test_proxy_cnet PROPERTIES LINKER_LANGUAGE CXX FOLDER "tunnel/tests")
+add_test(NAME test_proxy_cnet COMMAND test_proxy_cnet)
+set_tests_properties(test_proxy_cnet PROPERTIES TIMEOUT 60)
+if(TARGET turbo_p2p_copy_runtime_dlls)
+  add_dependencies(test_proxy_cnet turbo_p2p_copy_runtime_dlls)
+endif()

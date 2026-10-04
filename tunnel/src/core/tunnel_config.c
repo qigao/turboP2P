@@ -479,7 +479,7 @@ int tunnel_config_to_string(const tunnel_config_t *config, char *buf, size_t buf
   const char *proxy_types[] = {"none", "socks5", "http", "shadowsocks", "vmess", "trojan"};
   const char *udp_modes[] = {"disabled", "tcp", "native", "fullcone"};
 
-  tstr_t text = tstr_format(
+  tstr text = tstr_format(
       "# Tunnel Configuration\n"
       "tun.name = {}\n"
       "tun.ipv4 = {}\n"
@@ -499,7 +499,7 @@ int tunnel_config_to_string(const tunnel_config_t *config, char *buf, size_t buf
     return TUNNEL_ERR_NO_MEMORY;
   }
 
-  tstr_t updated = tstr_append_format(
+  tstr updated = tstr_append_format(
       text,
       "\n"
       "udp.mode = {}\n"
@@ -542,6 +542,7 @@ int tunnel_config_parse_proxy_url(const char *url, tunnel_proxy_config_t *proxy)
     return TUNNEL_ERR_INVALID_ARG;
 
   memset(proxy, 0, sizeof(*proxy));
+  proxy->tls_verify = 1;
 
   /* Parse scheme */
   const char *p = url;

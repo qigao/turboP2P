@@ -3,7 +3,7 @@
  * @brief Session lifecycle management implementation
  *
  * Manages session lifecycle and integrates with proxy connections
- * using CoroNet streams via the tunnel_proxy abstraction.
+ * using CNet via the tunnel_proxy abstraction.
  */
 
 #include "tunnel_session.h"
@@ -25,13 +25,7 @@
 
 static uint64_t get_time_ms(void)
 {
-#ifdef _WIN32
-    return GetTickCount64();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
+    return salts_monotonic_ms();
 }
 
 /* =============================================================================
@@ -135,7 +129,6 @@ void tunnel_session_destroy(tunnel_session_t *session)
 
     /* Close and destroy proxy connection */
     if (session->proxy_conn) {
-        tunnel_proxy_conn_close(session->proxy_conn);
         tunnel_proxy_conn_destroy(session->proxy_conn);
         session->proxy_conn = NULL;
     }
@@ -195,7 +188,7 @@ static void on_proxy_connect(tunnel_proxy_conn_t *conn, int status, void *user_d
     if (!session || !session->tunnel) return;
 
     if (status != TUNNEL_OK) {
-        TLOG_DEBUG("Proxy connect failed for session, status={}", status);
+        TLOG_DEBUGF("Proxy connect failed for session, status={}", status);
         session->state = TUNNEL_SESSION_ERROR;
         session->tcp.state = TUNNEL_TCP_CLOSED;
 
@@ -215,7 +208,13 @@ static void on_proxy_connect(tunnel_proxy_conn_t *conn, int status, void *user_d
 
     /* Flush any buffered data */
     if (session->send_len > 0) {
-        tunnel_proxy_send(session->proxy_conn, session->send_buf, session->send_len);
+        int result = tunnel_proxy_send(conn, session->send_buf, session->send_len);
+        if (result != TUNNEL_OK) {
+            session->state = TUNNEL_SESSION_ERROR;
+            tunnel_proxy_conn_close(conn);
+            tunnel_session_send_rst(session);
+            return;
+        }
         session->send_len = 0;
     }
 }
@@ -347,7 +346,10 @@ tunnel_session_t* tunnel_session_tcp_syn(tunnel_t *tunnel,
     session->state = TUNNEL_SESSION_CONNECTING;
     session->tcp.state = TUNNEL_TCP_SYN_RECEIVED;
     session->tcp.seq_remote = seq;
-    session->tcp.seq_local = (uint32_t)rand();  /* Random ISN */
+    if (salts_platform_secure_random(&session->tcp.seq_local, sizeof(session->tcp.seq_local)) != SALTS_OK) {
+        tunnel_session_destroy(session);
+        return NULL;
+    }
 
     /* Resolve target host */
     char target_host[256];
@@ -368,7 +370,7 @@ tunnel_session_t* tunnel_session_tcp_syn(tunnel_t *tunnel,
         tunnel_endpoint_to_string(dst, target_host, sizeof(target_host));
     }
 
-    TLOG_DEBUG("TCP SYN: connecting to {}:{} via proxy", target_host, target_port);
+    TLOG_DEBUGF("TCP SYN: connecting to {}:{} via proxy", target_host, target_port);
 
     /* Create proxy connection */
     session->proxy_conn = tunnel_proxy_connect_tcp(
@@ -398,37 +400,24 @@ int tunnel_session_tcp_data(tunnel_session_t *session, uint32_t seq,
 {
     if (!session || !data) return TUNNEL_ERR_INVALID_ARG;
 
-    /* Update activity */
-    tunnel_session_touch(session);
+    if (len > UINT32_MAX) return TUNNEL_ERR_INVALID_ARG;
+    if (session->state == TUNNEL_SESSION_ESTABLISHED && session->proxy_conn) {
+        int result = tunnel_proxy_send(session->proxy_conn, data, len);
+        if (result != TUNNEL_OK) return result;
+    } else if (session->state == TUNNEL_SESSION_CONNECTING) {
+        if (len > session->send_cap - session->send_len) return TUNNEL_ERR_NO_MEMORY;
+        memcpy(session->send_buf + session->send_len, data, len);
+        session->send_len += len;
+    } else return TUNNEL_ERR_INVALID_ARG;
 
-    /* Update traffic counters */
+    /* Commit local sequence/accounting only after bounded admission succeeds. */
+    tunnel_session_touch(session);
     session->bytes_tx += len;
     session->packets_tx++;
-
-    /* Update TCP sequence tracking */
     session->tcp.seq_remote = seq + (uint32_t)len;
     session->tcp.ack_local = session->tcp.seq_remote;
-
-    /* Forward to proxy if established */
-    if (session->state == TUNNEL_SESSION_ESTABLISHED && session->proxy_conn) {
-        int ret = tunnel_proxy_send(session->proxy_conn, data, len);
-
-        /* Send ACK to client */
-        tunnel_session_send_ack(session);
-
-        return ret;
-    }
-
-    /* Buffer data if still connecting */
-    if (session->state == TUNNEL_SESSION_CONNECTING) {
-        if (session->send_len + len <= session->send_cap) {
-            memcpy(session->send_buf + session->send_len, data, len);
-            session->send_len += len;
-        }
-        return TUNNEL_OK;
-    }
-
-    return TUNNEL_ERR_INVALID_ARG;
+    if (session->state == TUNNEL_SESSION_ESTABLISHED) tunnel_session_send_ack(session);
+    return TUNNEL_OK;
 }
 
 int tunnel_session_tcp_ack(tunnel_session_t *session, uint32_t ack, uint16_t window)
@@ -513,6 +502,9 @@ int tunnel_session_udp_datagram(tunnel_t *tunnel,
                                  const uint8_t *data, size_t len)
 {
     if (!tunnel || !src || !dst || !data) return TUNNEL_ERR_INVALID_ARG;
+
+    if (tunnel->config.mode == TUNNEL_MODE_PROXY &&
+        tunnel->config.udp_mode != TUNNEL_UDP_DISABLED) return TUNNEL_ERR_NOT_SUPPORTED;
 
     tunnel_session_key_t key;
     memset(&key, 0, sizeof(key));
@@ -629,17 +621,12 @@ int tunnel_session_send_to_tun(tunnel_session_t *session,
 
 size_t tunnel_session_flush(tunnel_session_t *session)
 {
-    if (!session) return 0;
-
-    /* Send buffered data to proxy */
-    if (session->send_len > 0 && session->proxy_conn &&
-        session->state == TUNNEL_SESSION_ESTABLISHED) {
-        tunnel_proxy_send(session->proxy_conn, session->send_buf, session->send_len);
-    }
-
+    if (!session || !session->send_len || !session->proxy_conn ||
+        session->state != TUNNEL_SESSION_ESTABLISHED) return 0;
+    if (tunnel_proxy_send(session->proxy_conn, session->send_buf, session->send_len) != TUNNEL_OK)
+        return 0;
     size_t flushed = session->send_len;
     session->send_len = 0;
-
     return flushed;
 }
 
@@ -651,7 +638,7 @@ int tunnel_session_expire_check(tunnel_t *tunnel)
 {
     if (!tunnel || !tunnel->nat) return 0;
 
-    uint32_t tcp_timeout = tunnel->config.session_timeout * 1000;
+    uint32_t tcp_timeout = (uint32_t)tunnel->config.session_timeout * 1000u;
     uint32_t udp_timeout = TUNNEL_UDP_TIMEOUT_MS;
 
     return tunnel_nat_evict_expired(tunnel->nat, tcp_timeout, udp_timeout);

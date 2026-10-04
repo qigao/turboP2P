@@ -88,24 +88,6 @@ int tunnel_socks5_parse_greeting_response(const uint8_t *data, size_t len, uint8
  * SOCKS5 Handshake
  * ============================================================================= */
 
-int tunnel_socks5_handshake(tunnel_proxy_conn_t *conn) {
-  if (!conn)
-    return TUNNEL_ERR_INVALID_ARG;
-
-  /* Build and send greeting */
-  uint8_t buf[4];
-  size_t len;
-
-  if (tunnel_socks5_build_greeting(conn, buf, &len) != TUNNEL_OK) {
-    return TUNNEL_ERR_PROXY_CONNECT;
-  }
-
-  /* TODO: Send via async_client and wait for response */
-  (void)buf;
-  (void)len;
-
-  return TUNNEL_OK;
-}
 
 /* =============================================================================
  * SOCKS5 Authentication - Build Request
@@ -156,23 +138,6 @@ int tunnel_socks5_parse_auth_response(const uint8_t *data, size_t len) {
  * SOCKS5 Authenticate
  * ============================================================================= */
 
-int tunnel_socks5_authenticate(tunnel_proxy_conn_t *conn) {
-  if (!conn || !conn->proxy)
-    return TUNNEL_ERR_INVALID_ARG;
-
-  uint8_t buf[515]; /* 1 + 1 + 255 + 1 + 255 = 513 max */
-  size_t len;
-
-  if (tunnel_socks5_build_auth_request(conn->proxy, buf, &len) != TUNNEL_OK) {
-    return TUNNEL_ERR_PROXY_AUTH;
-  }
-
-  /* TODO: Send via async_client and wait for response */
-  (void)buf;
-  (void)len;
-
-  return TUNNEL_OK;
-}
 
 /* =============================================================================
  * SOCKS5 Connect - Build Request
@@ -180,7 +145,7 @@ int tunnel_socks5_authenticate(tunnel_proxy_conn_t *conn) {
 
 int tunnel_socks5_build_connect_request(const char *host, int port, int use_domain, uint8_t *buf,
                                         size_t *len) {
-  if (!host || !buf || !len)
+  if (!host || !host[0] || !buf || !len || port < 1 || port > UINT16_MAX)
     return TUNNEL_ERR_INVALID_ARG;
 
   buf[0] = SOCKS5_VERSION;
@@ -189,7 +154,12 @@ int tunnel_socks5_build_connect_request(const char *host, int port, int use_doma
 
   size_t offset = 3;
 
-  if (use_domain) {
+  struct in6_addr ipv6;
+  if (inet_pton(AF_INET6, host, &ipv6) == 1) {
+    buf[offset++] = SOCKS5_ATYP_IPV6;
+    memcpy(buf + offset, &ipv6, sizeof(ipv6));
+    offset += sizeof(ipv6);
+  } else if (use_domain) {
     /* Domain name */
     size_t host_len = strlen(host);
     if (host_len > 255) {
@@ -204,15 +174,10 @@ int tunnel_socks5_build_connect_request(const char *host, int port, int use_doma
     /* IPv4 address */
     buf[offset++] = SOCKS5_ATYP_IPV4;
 
-    unsigned int a, b, c, d;
-    if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) != 4) {
-      return TUNNEL_ERR_INVALID_ARG;
-    }
-
-    buf[offset++] = (uint8_t)a;
-    buf[offset++] = (uint8_t)b;
-    buf[offset++] = (uint8_t)c;
-    buf[offset++] = (uint8_t)d;
+    struct in_addr ipv4;
+    if (inet_pton(AF_INET, host, &ipv4) != 1) return TUNNEL_ERR_INVALID_ARG;
+    memcpy(buf + offset, &ipv4, sizeof(ipv4));
+    offset += sizeof(ipv4);
   }
 
   /* Port (network byte order) */
@@ -229,13 +194,17 @@ int tunnel_socks5_build_connect_request(const char *host, int port, int use_doma
 
 int tunnel_socks5_parse_connect_response(const uint8_t *data, size_t len, uint8_t *rep,
                                          tunnel_endpoint_t *bind_addr) {
-  if (!data || !rep || len < 10) {
+  if (!data || !rep || len < 4) {
     return TUNNEL_ERR_INVALID_ARG;
   }
 
-  if (data[0] != SOCKS5_VERSION) {
-    return TUNNEL_ERR_PROXY_CONNECT;
-  }
+  if (data[0] != SOCKS5_VERSION || data[2] != 0u) return TUNNEL_ERR_PROXY_CONNECT;
+  size_t required;
+  if (data[3] == SOCKS5_ATYP_IPV4) required = 10u;
+  else if (data[3] == SOCKS5_ATYP_IPV6) required = 22u;
+  else if (data[3] == SOCKS5_ATYP_DOMAIN && len >= 5u && data[4]) required = 7u + data[4];
+  else return TUNNEL_ERR_PROXY_CONNECT;
+  if (len < required) return TUNNEL_ERR_INVALID_ARG;
 
   *rep = data[1];
 
@@ -266,30 +235,6 @@ int tunnel_socks5_parse_connect_response(const uint8_t *data, size_t len, uint8_
  * SOCKS5 Connect
  * ============================================================================= */
 
-int tunnel_socks5_connect(tunnel_proxy_conn_t *conn, const char *host, int port) {
-  if (!conn || !host)
-    return TUNNEL_ERR_INVALID_ARG;
-
-  /* Determine if host is an IP or domain */
-  int is_ip = 0;
-  unsigned int a, b, c, d;
-  if (sscanf(host, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-    is_ip = 1;
-  }
-
-  uint8_t buf[263]; /* 4 + 1 + 255 + 2 = 262 max for domain */
-  size_t len;
-
-  if (tunnel_socks5_build_connect_request(host, port, !is_ip, buf, &len) != TUNNEL_OK) {
-    return TUNNEL_ERR_PROXY_CONNECT;
-  }
-
-  /* TODO: Send via async_client and wait for response */
-  (void)buf;
-  (void)len;
-
-  return TUNNEL_OK;
-}
 
 /* =============================================================================
  * SOCKS5 UDP Associate - Build Request
@@ -320,23 +265,6 @@ int tunnel_socks5_build_udp_associate_request(uint8_t *buf, size_t *len) {
  * SOCKS5 UDP Associate
  * ============================================================================= */
 
-int tunnel_socks5_udp_associate(tunnel_proxy_conn_t *conn) {
-  if (!conn)
-    return TUNNEL_ERR_INVALID_ARG;
-
-  uint8_t buf[10];
-  size_t len;
-
-  if (tunnel_socks5_build_udp_associate_request(buf, &len) != TUNNEL_OK) {
-    return TUNNEL_ERR_PROXY_CONNECT;
-  }
-
-  /* TODO: Send via async_client and wait for response */
-  (void)buf;
-  (void)len;
-
-  return TUNNEL_OK;
-}
 
 /* =============================================================================
  * SOCKS5 UDP Wrap/Unwrap

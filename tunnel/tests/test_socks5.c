@@ -124,10 +124,10 @@ void test_socks5_greeting_no_auth(void)
     uint8_t methods[] = {SOCKS5_AUTH_NONE};
     size_t len = build_socks5_greeting(buf, 1, methods);
 
-    check_int_eq(3, len);
-    check_uint_eq(SOCKS5_VERSION, buf[0]);
-    check_uint_eq(1, buf[1]);
-    check_uint_eq(SOCKS5_AUTH_NONE, buf[2]);
+    check_equal(3, len);
+    check_equal(SOCKS5_VERSION, buf[0]);
+    check_equal(1, buf[1]);
+    check_equal(SOCKS5_AUTH_NONE, buf[2]);
 }
 
 void test_socks5_greeting_with_userpass(void)
@@ -136,9 +136,9 @@ void test_socks5_greeting_with_userpass(void)
     uint8_t methods[] = {SOCKS5_AUTH_NONE, SOCKS5_AUTH_USERPASS};
     size_t len = build_socks5_greeting(buf, 2, methods);
 
-    check_int_eq(4, len);
-    check_uint_eq(SOCKS5_VERSION, buf[0]);
-    check_uint_eq(2, buf[1]);
+    check_equal(4, len);
+    check_equal(SOCKS5_VERSION, buf[0]);
+    check_equal(2, buf[1]);
 }
 
 void test_socks5_greeting_response_parse(void)
@@ -146,8 +146,8 @@ void test_socks5_greeting_response_parse(void)
     uint8_t response[2];
     build_socks5_greeting_response(response, SOCKS5_AUTH_NONE);
 
-    check_uint_eq(SOCKS5_VERSION, response[0]);
-    check_uint_eq(SOCKS5_AUTH_NONE, response[1]);
+    check_equal(SOCKS5_VERSION, response[0]);
+    check_equal(SOCKS5_AUTH_NONE, response[1]);
 }
 
 void test_socks5_greeting_response_no_acceptable(void)
@@ -155,8 +155,8 @@ void test_socks5_greeting_response_no_acceptable(void)
     uint8_t response[2];
     build_socks5_greeting_response(response, SOCKS5_AUTH_NOACCEPTABLE);
 
-    check_uint_eq(SOCKS5_VERSION, response[0]);
-    check_uint_eq(SOCKS5_AUTH_NOACCEPTABLE, response[1]);
+    check_equal(SOCKS5_VERSION, response[0]);
+    check_equal(SOCKS5_AUTH_NOACCEPTABLE, response[1]);
 }
 
 /* =============================================================================
@@ -171,21 +171,21 @@ void test_socks5_connect_ipv4(void)
 
     size_t len = build_socks5_connect_request_ipv4(buf, ip, port);
 
-    check_int_eq(10, len);
-    check_uint_eq(SOCKS5_VERSION, buf[0]);
-    check_uint_eq(SOCKS5_CMD_CONNECT, buf[1]);
-    check_uint_eq(0x00, buf[2]);  /* Reserved */
-    check_uint_eq(SOCKS5_ATYP_IPV4, buf[3]);
+    check_equal(10, len);
+    check_equal(SOCKS5_VERSION, buf[0]);
+    check_equal(SOCKS5_CMD_CONNECT, buf[1]);
+    check_equal(0x00, buf[2]);  /* Reserved */
+    check_equal(SOCKS5_ATYP_IPV4, buf[3]);
 
     /* Verify IP */
     uint32_t parsed_ip;
     memcpy(&parsed_ip, &buf[4], 4);
-    check_int_eq(ip, parsed_ip);
+    check_equal(ip, parsed_ip);
 
     /* Verify port */
     uint16_t parsed_port;
     memcpy(&parsed_port, &buf[8], 2);
-    check_int_eq(htons(port), parsed_port);
+    check_equal(htons(port), parsed_port);
 }
 
 void test_socks5_connect_domain(void)
@@ -196,12 +196,12 @@ void test_socks5_connect_domain(void)
 
     size_t len = build_socks5_connect_request_domain(buf, domain, port);
 
-    check_int_eq(7 + strlen(domain), len);
-    check_uint_eq(SOCKS5_VERSION, buf[0]);
-    check_uint_eq(SOCKS5_CMD_CONNECT, buf[1]);
-    check_uint_eq(SOCKS5_ATYP_DOMAIN, buf[3]);
-    check_int_eq(strlen(domain), buf[4]);
-    check_mem_eq(domain, &buf[5], strlen(domain));
+    check_equal(7 + strlen(domain), len);
+    check_equal(SOCKS5_VERSION, buf[0]);
+    check_equal(SOCKS5_CMD_CONNECT, buf[1]);
+    check_equal(SOCKS5_ATYP_DOMAIN, buf[3]);
+    check_equal(strlen(domain), buf[4]);
+    check_equal(domain, &buf[5], strlen(domain));
 }
 
 void test_socks5_connect_domain_long(void)
@@ -214,8 +214,8 @@ void test_socks5_connect_domain_long(void)
 
     size_t len = build_socks5_connect_request_domain(buf, domain, 443);
 
-    check_int_eq(7 + strlen(domain), len);
-    check_int_eq(strlen(domain), buf[4]);
+    check_equal(7 + strlen(domain), len);
+    check_equal(strlen(domain), buf[4]);
 }
 
 /* =============================================================================
@@ -230,10 +230,10 @@ void test_socks5_connect_response_success(void)
 
     size_t len = build_socks5_connect_response(buf, SOCKS5_REP_SUCCESS, bind_ip, bind_port);
 
-    check_int_eq(10, len);
-    check_uint_eq(SOCKS5_VERSION, buf[0]);
-    check_uint_eq(SOCKS5_REP_SUCCESS, buf[1]);
-    check_uint_eq(SOCKS5_ATYP_IPV4, buf[3]);
+    check_equal(10, len);
+    check_equal(SOCKS5_VERSION, buf[0]);
+    check_equal(SOCKS5_REP_SUCCESS, buf[1]);
+    check_equal(SOCKS5_ATYP_IPV4, buf[3]);
 }
 
 void test_socks5_connect_response_errors(void)
@@ -242,15 +242,15 @@ void test_socks5_connect_response_errors(void)
 
     /* Connection refused */
     build_socks5_connect_response(buf, SOCKS5_REP_CONN_REFUSED, 0, 0);
-    check_uint_eq(SOCKS5_REP_CONN_REFUSED, buf[1]);
+    check_equal(SOCKS5_REP_CONN_REFUSED, buf[1]);
 
     /* Network unreachable */
     build_socks5_connect_response(buf, SOCKS5_REP_NETWORK_UNREACHABLE, 0, 0);
-    check_uint_eq(SOCKS5_REP_NETWORK_UNREACHABLE, buf[1]);
+    check_equal(SOCKS5_REP_NETWORK_UNREACHABLE, buf[1]);
 
     /* Host unreachable */
     build_socks5_connect_response(buf, SOCKS5_REP_HOST_UNREACHABLE, 0, 0);
-    check_uint_eq(SOCKS5_REP_HOST_UNREACHABLE, buf[1]);
+    check_equal(SOCKS5_REP_HOST_UNREACHABLE, buf[1]);
 }
 
 /* =============================================================================
@@ -266,14 +266,14 @@ void test_socks5_udp_header_build(void)
 
     size_t len = build_socks5_udp_header(buf, ip, port, data, sizeof(data));
 
-    check_int_eq(10 + sizeof(data), len);
-    check_uint_eq(0x00, buf[0]);  /* Reserved */
-    check_uint_eq(0x00, buf[1]);  /* Reserved */
-    check_uint_eq(0x00, buf[2]);  /* Frag = 0 */
-    check_uint_eq(SOCKS5_ATYP_IPV4, buf[3]);
+    check_equal(10 + sizeof(data), len);
+    check_equal(0x00, buf[0]);  /* Reserved */
+    check_equal(0x00, buf[1]);  /* Reserved */
+    check_equal(0x00, buf[2]);  /* Frag = 0 */
+    check_equal(SOCKS5_ATYP_IPV4, buf[3]);
 
     /* Verify data is at the end */
-    check_mem_eq(data, &buf[10], sizeof(data));
+    check_equal(data, &buf[10], sizeof(data));
 }
 
 void test_socks5_udp_header_parse(void)
@@ -286,18 +286,18 @@ void test_socks5_udp_header_parse(void)
     build_socks5_udp_header(buf, ip, port, data, sizeof(data));
 
     /* Parse the header */
-    check_uint_eq(0x00, buf[0]);  /* RSV */
-    check_uint_eq(0x00, buf[1]);  /* RSV */
-    check_uint_eq(0x00, buf[2]);  /* FRAG */
-    check_uint_eq(SOCKS5_ATYP_IPV4, buf[3]);
+    check_equal(0x00, buf[0]);  /* RSV */
+    check_equal(0x00, buf[1]);  /* RSV */
+    check_equal(0x00, buf[2]);  /* FRAG */
+    check_equal(SOCKS5_ATYP_IPV4, buf[3]);
 
     uint32_t parsed_ip;
     memcpy(&parsed_ip, &buf[4], 4);
-    check_int_eq(ip, parsed_ip);
+    check_equal(ip, parsed_ip);
 
     uint16_t parsed_port;
     memcpy(&parsed_port, &buf[8], 2);
-    check_int_eq(htons(port), parsed_port);
+    check_equal(htons(port), parsed_port);
 }
 
 /* =============================================================================
@@ -333,12 +333,12 @@ void test_socks5_userpass_request(void)
 
     size_t len = build_socks5_userpass_request(buf, user, pass);
 
-    check_int_eq(3 + strlen(user) + strlen(pass), len);
-    check_uint_eq(0x01, buf[0]);  /* Auth version */
-    check_int_eq(strlen(user), buf[1]);
-    check_mem_eq(user, &buf[2], strlen(user));
-    check_int_eq(strlen(pass), buf[2 + strlen(user)]);
-    check_mem_eq(pass, &buf[3 + strlen(user)], strlen(pass));
+    check_equal(3 + strlen(user) + strlen(pass), len);
+    check_equal(0x01, buf[0]);  /* Auth version */
+    check_equal(strlen(user), buf[1]);
+    check_equal(user, &buf[2], strlen(user));
+    check_equal(strlen(pass), buf[2 + strlen(user)]);
+    check_equal(pass, &buf[3 + strlen(user)], strlen(pass));
 }
 
 void test_socks5_userpass_response_success(void)
@@ -346,8 +346,8 @@ void test_socks5_userpass_response_success(void)
     uint8_t buf[2];
     build_socks5_userpass_response(buf, 0x00);
 
-    check_uint_eq(0x01, buf[0]);
-    check_uint_eq(0x00, buf[1]);  /* Success */
+    check_equal(0x01, buf[0]);
+    check_equal(0x00, buf[1]);  /* Success */
 }
 
 void test_socks5_userpass_response_failure(void)
@@ -355,8 +355,8 @@ void test_socks5_userpass_response_failure(void)
     uint8_t buf[2];
     build_socks5_userpass_response(buf, 0x01);
 
-    check_uint_eq(0x01, buf[0]);
-    check_uint_eq(0x01, buf[1]);  /* Failure */
+    check_equal(0x01, buf[0]);
+    check_equal(0x01, buf[1]);  /* Failure */
 }
 
 /* =============================================================================
@@ -371,12 +371,12 @@ void test_socks5_full_handshake_no_auth(void)
     /* Step 1: Client sends greeting */
     uint8_t methods[] = {SOCKS5_AUTH_NONE};
     client_send.len = build_socks5_greeting(client_send.buffer, 1, methods);
-    check_int_eq(3, client_send.len);
+    check_equal(3, client_send.len);
 
     /* Step 2: Server responds with selected method */
     server_send.len = build_socks5_greeting_response(server_send.buffer, SOCKS5_AUTH_NONE);
-    check_int_eq(2, server_send.len);
-    check_uint_eq(SOCKS5_AUTH_NONE, server_send.buffer[1]);
+    check_equal(2, server_send.len);
+    check_equal(SOCKS5_AUTH_NONE, server_send.buffer[1]);
 
     /* Step 3: Client sends connect request */
     client_send.len = build_socks5_connect_request_domain(
@@ -386,7 +386,7 @@ void test_socks5_full_handshake_no_auth(void)
     /* Step 4: Server responds with success */
     server_send.len = build_socks5_connect_response(
         server_send.buffer, SOCKS5_REP_SUCCESS, htonl(0x0a000001), 12345);
-    check_uint_eq(SOCKS5_REP_SUCCESS, server_send.buffer[1]);
+    check_equal(SOCKS5_REP_SUCCESS, server_send.buffer[1]);
 
     /* After this, data flows directly */
 }
@@ -402,14 +402,14 @@ void test_socks5_full_handshake_with_auth(void)
 
     /* Step 2: Server requires username/password */
     server_send.len = build_socks5_greeting_response(server_send.buffer, SOCKS5_AUTH_USERPASS);
-    check_uint_eq(SOCKS5_AUTH_USERPASS, server_send.buffer[1]);
+    check_equal(SOCKS5_AUTH_USERPASS, server_send.buffer[1]);
 
     /* Step 3: Client sends credentials */
     client_send.len = build_socks5_userpass_request(client_send.buffer, "user", "pass");
 
     /* Step 4: Server accepts auth */
     server_send.len = build_socks5_userpass_response(server_send.buffer, 0x00);
-    check_uint_eq(0x00, server_send.buffer[1]);
+    check_equal(0x00, server_send.buffer[1]);
 
     /* Step 5: Client sends connect request */
     client_send.len = build_socks5_connect_request_ipv4(
@@ -418,7 +418,7 @@ void test_socks5_full_handshake_with_auth(void)
     /* Step 6: Server responds success */
     server_send.len = build_socks5_connect_response(
         server_send.buffer, SOCKS5_REP_SUCCESS, 0, 0);
-    check_uint_eq(SOCKS5_REP_SUCCESS, server_send.buffer[1]);
+    check_equal(SOCKS5_REP_SUCCESS, server_send.buffer[1]);
 }
 
 /* =============================================================================
@@ -444,8 +444,8 @@ void test_socks5_atyp_ipv6(void)
     buf[20] = 0x00;
     buf[21] = 0x50;  /* Port 80 */
 
-    check_uint_eq(SOCKS5_ATYP_IPV6, buf[3]);
-    check_mem_eq(ipv6, &buf[4], 16);
+    check_equal(SOCKS5_ATYP_IPV6, buf[3]);
+    check_equal(ipv6, &buf[4], 16);
 }
 
 /* =============================================================================
@@ -470,7 +470,7 @@ void test_socks5_invalid_command(void)
     /* Server would respond with CMD_NOT_SUPPORTED */
     uint8_t response[10];
     build_socks5_connect_response(response, SOCKS5_REP_CMD_NOT_SUPPORTED, 0, 0);
-    check_uint_eq(SOCKS5_REP_CMD_NOT_SUPPORTED, response[1]);
+    check_equal(SOCKS5_REP_CMD_NOT_SUPPORTED, response[1]);
 }
 
 void test_socks5_invalid_atyp(void)
@@ -484,7 +484,7 @@ void test_socks5_invalid_atyp(void)
     /* Server would respond with ATYP_NOT_SUPPORTED */
     uint8_t response[10];
     build_socks5_connect_response(response, SOCKS5_REP_ATYP_NOT_SUPPORTED, 0, 0);
-    check_uint_eq(SOCKS5_REP_ATYP_NOT_SUPPORTED, response[1]);
+    check_equal(SOCKS5_REP_ATYP_NOT_SUPPORTED, response[1]);
 }
 
 spec("socks5 protocol") {

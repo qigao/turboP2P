@@ -9,6 +9,7 @@
 #include "../src/nat/tunnel_nat.h"
 #include <string.h>
 #include <stdlib.h>
+#include "../src/proxy/tunnel_proxy.h"
 
 /* Mock tunnel */
 static tunnel_t *mock_tunnel = NULL;
@@ -16,11 +17,9 @@ static tunnel_t *mock_tunnel = NULL;
 void setUp(void)
 {
     mock_tunnel = (tunnel_t *)calloc(1, sizeof(tunnel_t));
-    mock_tunnel->ctx = coro_context_create(NULL);
     mock_tunnel->nat = tunnel_nat_create(mock_tunnel);
-    mock_tunnel->proxy = (tunnel_proxy_t *)calloc(1, sizeof(tunnel_proxy_t));
-    mock_tunnel->proxy->tunnel = mock_tunnel;
-    mock_tunnel->proxy->type = TUNNEL_PROXY_NONE; /* Direct */
+    tunnel_proxy_config_t config = {0};
+    mock_tunnel->proxy = tunnel_proxy_create(mock_tunnel, &config);
 }
 
 void tearDown(void)
@@ -29,11 +28,8 @@ void tearDown(void)
         if (mock_tunnel->nat) {
             tunnel_nat_destroy(mock_tunnel->nat);
         }
-        if (mock_tunnel->ctx) {
-            coro_context_destroy(mock_tunnel->ctx);
-        }
         if (mock_tunnel->proxy) {
-            free(mock_tunnel->proxy);
+            tunnel_proxy_destroy(mock_tunnel->proxy);
         }
         free(mock_tunnel);
         mock_tunnel = NULL;
@@ -85,13 +81,13 @@ void test_session_create(void)
     check_not_null(session);
 
     /* Verify key is copied */
-    check_int_eq(0, tunnel_session_key_compare(&key, &session->key));
+    check_equal(0, tunnel_session_key_compare(&key, &session->key));
 
     /* Verify initial state */
-    check_int_eq(TUNNEL_SESSION_INIT, session->state);
-    check_int_eq(0, session->bytes_rx);
-    check_int_eq(0, session->bytes_tx);
-    check_ptr_eq(mock_tunnel, session->tunnel);
+    check_equal(TUNNEL_SESSION_INIT, session->state);
+    check_equal(0, session->bytes_rx);
+    check_equal(0, session->bytes_tx);
+    check_true((mock_tunnel) == (session->tunnel));
 
     tunnel_session_destroy(session);
 }
@@ -107,13 +103,13 @@ void test_session_create_multiple(void)
         check_not_null(sessions[i]);
     }
 
-    check_int_eq(10, tunnel_session_count(mock_tunnel));
+    check_equal(10, tunnel_session_count(mock_tunnel));
 
     for (int i = 0; i < 10; i++) {
         tunnel_session_destroy(sessions[i]);
     }
 
-    check_int_eq(0, tunnel_session_count(mock_tunnel));
+    check_equal(0, tunnel_session_count(mock_tunnel));
 }
 
 /* =============================================================================
@@ -130,7 +126,7 @@ void test_session_find(void)
 
     tunnel_session_t *found = tunnel_session_find(mock_tunnel, &key);
     check_not_null(found);
-    check_ptr_eq(created, found);
+    check_true((created) == (found));
 
     tunnel_session_destroy(created);
 }
@@ -156,8 +152,8 @@ void test_session_find_or_create_existing(void)
     tunnel_session_t *found = tunnel_session_find_or_create(mock_tunnel, &key, &was_created);
 
     check_not_null(found);
-    check_ptr_eq(created, found);
-    check_int_eq(0, was_created);
+    check_true((created) == (found));
+    check_equal(0, was_created);
 
     tunnel_session_destroy(created);
 }
@@ -171,7 +167,7 @@ void test_session_find_or_create_new(void)
     tunnel_session_t *session = tunnel_session_find_or_create(mock_tunnel, &key, &was_created);
 
     check_not_null(session);
-    check_int_eq(1, was_created);
+    check_equal(1, was_created);
 
     tunnel_session_destroy(session);
 }
@@ -187,18 +183,18 @@ void test_session_state_transitions(void)
 
     tunnel_session_t *session = tunnel_session_create(mock_tunnel, &key);
 
-    check_int_eq(TUNNEL_SESSION_INIT, tunnel_session_get_state(session));
+    check_equal(TUNNEL_SESSION_INIT, tunnel_session_get_state(session));
 
     tunnel_session_set_state(session, TUNNEL_SESSION_CONNECTING);
-    check_int_eq(TUNNEL_SESSION_CONNECTING, tunnel_session_get_state(session));
+    check_equal(TUNNEL_SESSION_CONNECTING, tunnel_session_get_state(session));
 
     tunnel_session_set_state(session, TUNNEL_SESSION_ESTABLISHED);
-    check_int_eq(TUNNEL_SESSION_ESTABLISHED, tunnel_session_get_state(session));
-    check_int_eq(1, tunnel_session_is_established(session));
+    check_equal(TUNNEL_SESSION_ESTABLISHED, tunnel_session_get_state(session));
+    check_equal(1, tunnel_session_is_established(session));
 
     tunnel_session_set_state(session, TUNNEL_SESSION_CLOSING);
-    check_int_eq(TUNNEL_SESSION_CLOSING, tunnel_session_get_state(session));
-    check_int_eq(0, tunnel_session_is_established(session));
+    check_equal(TUNNEL_SESSION_CLOSING, tunnel_session_get_state(session));
+    check_equal(0, tunnel_session_is_established(session));
 
     tunnel_session_destroy(session);
 }
@@ -224,10 +220,10 @@ void test_session_tcp_syn(void)
     check_not_null(session);
 
     /* Should be in SYN_RECEIVED state */
-    check_int_eq(TUNNEL_TCP_SYN_RECEIVED, tunnel_session_tcp_get_state(session));
+    check_equal(TUNNEL_TCP_SYN_RECEIVED, tunnel_session_tcp_get_state(session));
 
     /* Verify sequence tracking */
-    check_int_eq(1000, session->tcp.seq_remote);
+    check_equal(1000, session->tcp.seq_remote);
 
     tunnel_session_destroy(session);
 }
@@ -244,7 +240,7 @@ void test_session_tcp_data(void)
 
     const uint8_t data[] = "Hello, World!";
     int ret = tunnel_session_tcp_data(session, 1000, data, sizeof(data) - 1);
-    check_int_eq(TUNNEL_OK, ret);
+    check_equal(TUNNEL_OK, ret);
 
     /* Verify traffic counters - buffered data counts as sent when eventually flushed */
     /* Wait, the current implementation only updates bytes_tx (sent to proxy) not bytes_rx (recv from TUN) in tcp_data? */
@@ -252,7 +248,7 @@ void test_session_tcp_data(void)
     /* But since we are CONNECTING, it buffers. It implies we accepted the data from TUN. */
     /* So logically it matches. */
     /* session->send_len should be data len */
-    check_int_eq(sizeof(data) - 1, session->send_len);
+    check_equal(sizeof(data) - 1, session->send_len);
 
     tunnel_session_destroy(session);
 }
@@ -267,10 +263,10 @@ void test_session_tcp_ack(void)
     session->tcp.window = 32768;
 
     int ret = tunnel_session_tcp_ack(session, 5100, 65535);
-    check_int_eq(TUNNEL_OK, ret);
+    check_equal(TUNNEL_OK, ret);
 
     /* Window should be updated */
-    check_int_eq(65535, session->tcp.window);
+    check_equal(65535, session->tcp.window);
 
     tunnel_session_destroy(session);
 }
@@ -285,10 +281,10 @@ void test_session_tcp_fin(void)
     session->tcp.seq_remote = 2000;
 
     int ret = tunnel_session_tcp_fin(session, 2000);
-    check_int_eq(TUNNEL_OK, ret);
+    check_equal(TUNNEL_OK, ret);
 
     /* Should transition to LAST_ACK as it immediately closes both sides in this implementation */
-    check_int_eq(TUNNEL_TCP_LAST_ACK, tunnel_session_tcp_get_state(session));
+    check_equal(TUNNEL_TCP_LAST_ACK, tunnel_session_tcp_get_state(session));
 
     tunnel_session_destroy(session);
 }
@@ -302,11 +298,11 @@ void test_session_tcp_rst(void)
     session->tcp.state = TUNNEL_TCP_ESTABLISHED;
 
     int ret = tunnel_session_tcp_rst(session);
-    check_int_eq(TUNNEL_OK, ret);
+    check_equal(TUNNEL_OK, ret);
 
     /* Should immediately close */
-    check_int_eq(TUNNEL_TCP_CLOSED, tunnel_session_tcp_get_state(session));
-    check_int_eq(TUNNEL_SESSION_CLOSED, tunnel_session_get_state(session));
+    check_equal(TUNNEL_TCP_CLOSED, tunnel_session_tcp_get_state(session));
+    check_equal(TUNNEL_SESSION_CLOSED, tunnel_session_get_state(session));
 
     tunnel_session_destroy(session);
 }
@@ -330,7 +326,7 @@ void test_session_udp_datagram(void)
 
     const uint8_t dns_query[] = {0x00, 0x01, 0x01, 0x00, 0x00, 0x01};
     int ret = tunnel_session_udp_datagram(mock_tunnel, &src, &dst, dns_query, sizeof(dns_query));
-    check_int_eq(TUNNEL_OK, ret);
+    check_equal(TUNNEL_OK, ret);
 
     /* Session should be created */
     tunnel_session_key_t key;
@@ -343,7 +339,7 @@ void test_session_udp_datagram(void)
     check_not_null(session);
 
     /* Should be immediately established (no handshake for UDP) */
-    check_int_eq(TUNNEL_SESSION_ESTABLISHED, tunnel_session_get_state(session));
+    check_equal(TUNNEL_SESSION_ESTABLISHED, tunnel_session_get_state(session));
 
     tunnel_session_destroy(session);
 }
@@ -368,9 +364,9 @@ void test_session_count_by_protocol(void)
         tunnel_session_create(mock_tunnel, &key);
     }
 
-    check_int_eq(5, tunnel_session_count(mock_tunnel));
-    check_int_eq(3, tunnel_session_tcp_count(mock_tunnel));
-    check_int_eq(2, tunnel_session_udp_count(mock_tunnel));
+    check_equal(5, tunnel_session_count(mock_tunnel));
+    check_equal(3, tunnel_session_tcp_count(mock_tunnel));
+    check_equal(2, tunnel_session_udp_count(mock_tunnel));
 }
 
 /* =============================================================================
@@ -438,7 +434,7 @@ void test_session_domain(void)
 
     /* Set domain */
     tunnel_session_set_domain(session, "example.com");
-    check_str_eq("example.com", tunnel_session_get_domain(session));
+    check_equal("example.com", tunnel_session_get_domain(session));
 
     /* Domain should be copied, not just referenced */
     const char *domain = tunnel_session_get_domain(session);
@@ -499,7 +495,7 @@ void test_session_foreach(void)
     int count = 0;
     tunnel_session_foreach(mock_tunnel, count_callback, &count);
 
-    check_int_eq(5, count);
+    check_equal(5, count);
 }
 
 void test_session_foreach_early_stop(void)
@@ -514,7 +510,7 @@ void test_session_foreach_early_stop(void)
     int count = 0;
     tunnel_session_foreach(mock_tunnel, stop_at_3_callback, &count);
 
-    check_int_eq(3, count);
+    check_equal(3, count);
 }
 
 spec("tunnel session") {

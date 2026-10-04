@@ -166,8 +166,8 @@ char *tunnel_session_key_format(const tunnel_session_key_t *key, char *buf, size
     fmt(dst_ip, sizeof(dst_ip), "{}.{}.{}.{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF,
         (ip >> 8) & 0xFF, ip & 0xFF);
   } else {
-    fmt(src_ip, sizeof(src_ip), "[IPv6]");
-    fmt(dst_ip, sizeof(dst_ip), "[IPv6]");
+    snprintf(src_ip, sizeof(src_ip), "%s", "[IPv6]");
+    snprintf(dst_ip, sizeof(dst_ip), "%s", "[IPv6]");
   }
 
   fmt(buf, len, "{}:{} -> {}:{} [{}]", src_ip, key->src.port, dst_ip, key->dst.port,

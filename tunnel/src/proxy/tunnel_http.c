@@ -62,9 +62,14 @@ static size_t base64_encode(const uint8_t *src, size_t src_len, char *dst, size_
 int tunnel_http_build_connect_request(const char *host, int port, const char *username,
                                       const char *password, uint8_t *buf, size_t *len,
                                       size_t buf_size) {
-  if (!host || !buf || !len)
+  if (!host || !host[0] || !buf || !len || port < 1 || port > UINT16_MAX)
     return TUNNEL_ERR_INVALID_ARG;
 
+  char authority[512];
+  for (const unsigned char *p = (const unsigned char *)host; *p; ++p)
+    if (*p <= ' ' || *p == 127u || strchr("/@?#[]", *p)) return TUNNEL_ERR_INVALID_ARG;
+  int count = snprintf(authority, sizeof(authority), strchr(host, ':') ? "[%s]:%d" : "%s:%d", host, port);
+  if (count < 0 || (size_t)count >= sizeof(authority)) return TUNNEL_ERR_INVALID_ARG;
   char auth_header[512] = "";
 
   /* Build Basic auth header if credentials provided */
@@ -87,14 +92,14 @@ int tunnel_http_build_connect_request(const char *host, int port, const char *us
   }
 
   /* Build CONNECT request */
-  tstr_t request = tstr_format(
-      "CONNECT {}:{} HTTP/1.1\r\n"
-      "Host: {}:{}\r\n"
+  tstr request = tstr_format(
+      "CONNECT {} HTTP/1.1\r\n"
+      "Host: {}\r\n"
       "{}"
       "User-Agent: TurboTunnel/1.0\r\n"
       "Proxy-Connection: Keep-Alive\r\n"
       "\r\n",
-      host, port, host, port, auth_header);
+      authority, authority, auth_header);
   if (!request) {
     return TUNNEL_ERR_NO_MEMORY;
   }
@@ -115,173 +120,33 @@ int tunnel_http_build_connect_request(const char *host, int port, const char *us
  * HTTP Response Parsing
  * ============================================================================= */
 
-typedef struct {
-  int status_code;
-  char status_text[64];
-  int content_length;
-  int chunked;
-  int keep_alive;
-  size_t header_len;
-} http_response_t;
-
-static int parse_status_line(const char *line, http_response_t *resp) {
-  /* HTTP/1.x XXX Status Text */
-  if (strncmp(line, "HTTP/1.", 7) != 0) {
+int tunnel_http_parse_response_frame(const uint8_t *data, size_t len, size_t *consumed) {
+  size_t header_end = 0, line_end = 0;
+  int status;
+  if (!data || !consumed) return TUNNEL_ERR_INVALID_ARG;
+  *consumed = 0;
+  for (size_t i = 0; i + 3u < len; ++i) {
+    if (!memcmp(data + i, "\r\n\r\n", 4u)) { header_end = i + 4u; break; }
+  }
+  if (!header_end) return TUNNEL_ERR_TIMEOUT;
+  for (size_t i = 0; i + 1u < header_end; ++i) {
+    if (data[i] == '\r' && data[i + 1u] == '\n') { line_end = i; break; }
+  }
+  if (line_end < 12u || memcmp(data, "HTTP/1.", 7u) ||
+      (data[7] != '0' && data[7] != '1') || data[8] != ' ' ||
+      data[9] < '0' || data[9] > '9' || data[10] < '0' || data[10] > '9' ||
+      data[11] < '0' || data[11] > '9' || (line_end > 12u && data[12] != ' '))
     return TUNNEL_ERR_PROXY_CONNECT;
-  }
-
-  const char *p = line + 9; /* Skip "HTTP/1.X " */
-  while (*p == ' ')
-    p++;
-
-  /* Parse status code */
-  resp->status_code = atoi(p);
-  if (resp->status_code < 100 || resp->status_code > 599) {
-    return TUNNEL_ERR_PROXY_CONNECT;
-  }
-
-  /* Skip to status text */
-  while (*p && *p != ' ')
-    p++;
-  while (*p == ' ')
-    p++;
-
-  /* Copy status text */
-  size_t i = 0;
-  while (*p && *p != '\r' && *p != '\n' && i < sizeof(resp->status_text) - 1) {
-    resp->status_text[i++] = *p++;
-  }
-  resp->status_text[i] = '\0';
-
+  status = (data[9] - '0') * 100 + (data[10] - '0') * 10 + data[11] - '0';
+  if (status != 200) return status == 407 ? TUNNEL_ERR_PROXY_AUTH : TUNNEL_ERR_PROXY_REFUSED;
+  *consumed = header_end;
   return TUNNEL_OK;
 }
-
-static void parse_header_line(const char *line, http_response_t *resp) {
-  /* Content-Length */
-  if (strncasecmp(line, "Content-Length:", 15) == 0) {
-    resp->content_length = atoi(line + 15);
-  }
-
-  /* Transfer-Encoding: chunked */
-  if (strncasecmp(line, "Transfer-Encoding:", 18) == 0) {
-    const char *p = line + 18;
-    while (*p == ' ')
-      p++;
-    if (strncasecmp(p, "chunked", 7) == 0) {
-      resp->chunked = 1;
-    }
-  }
-
-  /* Connection/Proxy-Connection */
-  if (strncasecmp(line, "Connection:", 11) == 0 ||
-      strncasecmp(line, "Proxy-Connection:", 17) == 0) {
-    const char *p = strchr(line, ':') + 1;
-    while (*p == ' ')
-      p++;
-    if (strncasecmp(p, "keep-alive", 10) == 0) {
-      resp->keep_alive = 1;
-    }
-  }
-}
-
-/* =============================================================================
- * HTTP CONNECT - Parse Response
- * ============================================================================= */
 
 int tunnel_http_parse_response(tunnel_proxy_conn_t *conn, const uint8_t *data, size_t len) {
-  if (!conn || !data || len < 12) {
-    return TUNNEL_ERR_INVALID_ARG;
-  }
-
-  /* Find end of headers (\r\n\r\n) */
-  const char *headers_end = NULL;
-  for (size_t i = 0; i + 3 < len; i++) {
-    if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n') {
-      headers_end = (const char *)&data[i + 4];
-      break;
-    }
-  }
-
-  if (!headers_end) {
-    /* Headers incomplete, need more data */
-    return TUNNEL_ERR_TIMEOUT; /* Signal incomplete */
-  }
-
-  http_response_t resp;
-  memset(&resp, 0, sizeof(resp));
-  resp.header_len = headers_end - (const char *)data;
-
-  /* Parse response line by line */
-  const char *line_start = (const char *)data;
-  const char *line_end;
-  int first_line = 1;
-
-  while (line_start < headers_end) {
-    line_end = strstr(line_start, "\r\n");
-    if (!line_end || line_end >= headers_end) {
-      break;
-    }
-
-    /* Temporarily null-terminate the line */
-    size_t line_len = line_end - line_start;
-    char line_buf[1024];
-    if (line_len >= sizeof(line_buf)) {
-      line_len = sizeof(line_buf) - 1;
-    }
-    memcpy(line_buf, line_start, line_len);
-    line_buf[line_len] = '\0';
-
-    if (first_line) {
-      int ret = parse_status_line(line_buf, &resp);
-      if (ret != TUNNEL_OK) {
-        return ret;
-      }
-      first_line = 0;
-    } else {
-      parse_header_line(line_buf, &resp);
-    }
-
-    line_start = line_end + 2;
-  }
-
-  /* Check for success (200 OK) */
-  if (resp.status_code != 200) {
-    if (resp.status_code == 407) {
-      return TUNNEL_ERR_PROXY_AUTH;
-    }
-    return TUNNEL_ERR_PROXY_REFUSED;
-  }
-
-  return TUNNEL_OK;
-}
-
-/* =============================================================================
- * HTTP CONNECT Full Flow
- * ============================================================================= */
-
-int tunnel_http_connect(tunnel_proxy_conn_t *conn, const char *host, int port) {
-  if (!conn || !conn->proxy || !host) {
-    return TUNNEL_ERR_INVALID_ARG;
-  }
-
-  tunnel_proxy_t *proxy = conn->proxy;
-
-  /* Build CONNECT request */
-  uint8_t buf[2048];
-  size_t len;
-
-  int ret = tunnel_http_build_connect_request(host, port, proxy->username, proxy->password, buf,
-                                              &len, sizeof(buf));
-
-  if (ret != TUNNEL_OK) {
-    return ret;
-  }
-
-  /* TODO: Send via async_client and wait for response */
-  (void)buf;
-  (void)len;
-
-  return TUNNEL_OK;
+  size_t consumed;
+  if (!conn) return TUNNEL_ERR_INVALID_ARG;
+  return tunnel_http_parse_response_frame(data, len, &consumed);
 }
 
 /* =============================================================================

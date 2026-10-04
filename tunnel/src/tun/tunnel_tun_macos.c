@@ -9,6 +9,7 @@
 #if defined(__APPLE__) && defined(__MACH__)
 
 #include "tunnel_tun.h"
+#include "../stack/tunnel_ip_stack.h"
 #include "../core/tunnel_types.h"
 #include <stdlib.h>
 #include <string.h>

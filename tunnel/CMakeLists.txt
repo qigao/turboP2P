@@ -29,20 +29,21 @@ set(TUNNEL_LIB_SOURCES
     include/turbo_tunnel.h)
 
 # Build object library (for internal tests)
-add_library(tunnel_objs STATIC ${TUNNEL_LIB_SOURCES})
-target_compile_definitions(tunnel_objs PRIVATE SHARED_CXX)
+add_library(tunnel_objs OBJECT ${TUNNEL_LIB_SOURCES})
+target_compile_definitions(tunnel_objs PRIVATE TUNNEL_BUILDING_LIBRARY)
 target_include_directories(
   tunnel_objs
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
          $<INSTALL_INTERFACE:include>
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(tunnel_objs PUBLIC TurboUtils::Core TurboNet::CoroNet)
+target_link_libraries(tunnel_objs PUBLIC Salts::Core Salts::Platform Salts::CNet)
 if(WIN32)
   target_link_libraries(tunnel_objs PUBLIC ws2_32)
 endif()
 set_target_properties(
   tunnel_objs
-  PROPERTIES VERSION 1.0.0
+  PROPERTIES POSITION_INDEPENDENT_CODE ON
+  VERSION 1.0.0
   FOLDER "tunnel"
              SOVERSION 1 )
 # Build as shared library (DLL on Windows)
@@ -50,7 +51,7 @@ add_library(tunnel SHARED $<TARGET_OBJECTS:tunnel_objs>)
 add_library(TurboP2P::Tunnel ALIAS tunnel)
 
 # Define export macros for DLL
-target_compile_definitions(tunnel PRIVATE SHARED_CXX)
+target_compile_definitions(tunnel PRIVATE TUNNEL_BUILDING_LIBRARY)
 
 # Include directories (must be after add_library) Include directories (must be
 # after add_library)
@@ -61,12 +62,13 @@ target_include_directories(
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Link libraries
-target_link_libraries(tunnel PUBLIC TurboUtils::Core TurboNet::CoroNet)
+target_link_libraries(tunnel PUBLIC Salts::Core Salts::Platform Salts::CNet)
 if(WIN32)
   target_link_libraries(tunnel PUBLIC ws2_32)
 endif()
 
 set_property(TARGET tunnel PROPERTY FOLDER "tunnel")
+set_property(TARGET tunnel PROPERTY LINKER_LANGUAGE CXX)
 set_target_properties(
   tunnel
   PROPERTIES VERSION 1.0.0

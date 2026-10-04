@@ -42,7 +42,7 @@ include(Sanitizers)
 
 include(SaltsDependencies)
 
-# CoroNet and aggregate parser/HTTP providers remain until phases 2 and 3.
+# P2P, management and aggregate HTTP providers still require legacy SDKs.
 find_package(TurboUtils REQUIRED PATHS ${TURBO_UTILS_ROOT})
 find_package(TurboParser CONFIG REQUIRED PATHS "${TURBOPARSER_ROOT}")
 find_package(TurboNet REQUIRED PATHS ${TURBO_NET_ROOT})
@@ -69,7 +69,9 @@ if(WIN32 AND (BUILD_TESTS OR BUILD_EXAMPLES))
   set(_turbo_p2p_runtime_dlls
       $<TARGET_FILE:TurboNet::CoroNet>
       $<TARGET_FILE:TurboNet::Ice>
-      $<TARGET_FILE:TurboUtils::Core>)
+      $<TARGET_FILE:TurboUtils::Core>
+      $<TARGET_FILE:Salts::Core>
+      $<TARGET_FILE:Salts::CNet>)
   if(TARGET TurboHttp::Iris)
     list(APPEND _turbo_p2p_runtime_dlls $<TARGET_FILE:TurboHttp::Iris>)
   endif()

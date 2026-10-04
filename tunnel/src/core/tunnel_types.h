@@ -7,9 +7,9 @@
 #define TUNNEL_TYPES_H
 
 #include "turbo_tunnel.h"
-#include <CoroNet/turbo_coro_context.h>
-#include <CoroNet/turbo_stream.h>
-#include <turbo_thread.h>
+#include <cnet/cnet.h>
+#include <salts/thread.h>
+#include <salts/clock.h>
 #include <fmt.h>
 
 /* =============================================================================
@@ -214,9 +214,13 @@ struct tunnel_proxy_s {
         } trojan;
     };
 
-    /* Connection pool */
-    turbo_stream_t *pool[8];
-    int pool_count;
+    /* One progress owner; observers live until terminal callbacks are drained. */
+    cnet_tls_client tls_client;
+    cnet_client client;
+    tunnel_proxy_conn_t *connections;
+    size_t connection_count;
+    int polling;
+    int stop_requested;
 
     /* Back-reference */
     tunnel_t *tunnel;
@@ -325,7 +329,8 @@ struct tunnel_s {
     tunnel_route_rule_t *include_rules;
     tunnel_route_rule_t *exclude_rules;
 
-    coro_context_t *ctx;
+    int polling;
+    int destroy_requested;
 
     /* Callbacks */
     tunnel_log_cb log_cb;
@@ -346,7 +351,7 @@ struct tunnel_s {
     int stopping;
 
     /* Thread safety */
-    turbo_mutex_t mutex;
+    salts_mutex_t mutex;
 };
 
 /* =============================================================================
