@@ -12,6 +12,8 @@ extern "C" {
 
 typedef enum {
   MESH_MGMT_CONNECTION_OK = 0,
+  MESH_MGMT_CONNECTION_PENDING = 1,
+  MESH_MGMT_CONNECTION_BUSY = 2,
   MESH_MGMT_CONNECTION_INVALID_ARG = -1,
   MESH_MGMT_CONNECTION_INVALID_STATE = -2,
   MESH_MGMT_CONNECTION_INVALID_FRAME = -3,
@@ -61,12 +63,22 @@ typedef struct {
   mesh_mgmt_dispatch_stage_t last_dispatch_stage;
   int last_event_result;
   int in_event_callback;
+  uint8_t pending_send_kind;
 } mesh_mgmt_connection_v1_t;
 
 /** Initialize a zero-initialized connection over caller-owned secure IO. */
 mesh_mgmt_connection_result_t
 mesh_mgmt_connection_init_v1(mesh_mgmt_connection_v1_t *connection,
                              const mesh_mgmt_connection_config_v1_t *config);
+
+/** Async init ignores config.io and uses the explicitly supplied async IO. */
+mesh_mgmt_connection_result_t mesh_mgmt_connection_init_async_v1(
+    mesh_mgmt_connection_v1_t *connection, const mesh_mgmt_connection_config_v1_t *config,
+    const mesh_mgmt_transport_async_io_v1_t *io);
+
+/** Complete an admitted write; only a successful matching HELLO/ACK marks it sent. */
+mesh_mgmt_connection_result_t mesh_mgmt_connection_complete_send_v1(
+    mesh_mgmt_connection_v1_t *connection, uint64_t token, int success, size_t bytes);
 
 /** Destroy owned protocol state. The IO context/socket is never destroyed. */
 void mesh_mgmt_connection_destroy_v1(mesh_mgmt_connection_v1_t *connection);
@@ -76,22 +88,23 @@ mesh_mgmt_connection_result_t mesh_mgmt_connection_abort_v1(mesh_mgmt_connection
 
 /**
  * Receive, authenticate and synchronously deliver one frame, then commit its
- * borrowed transport receipt. Any failure makes the connection terminal.
+ * borrowed transport receipt. Async PENDING/BUSY preserve the connection;
+ * pumping is paused until the pending write completes. Failures are terminal.
  */
 mesh_mgmt_connection_result_t
 mesh_mgmt_connection_pump_once_v1(mesh_mgmt_connection_v1_t *connection, uint64_t now_ms);
 
-/** Send HELLO, then commit the local HELLO-sent state. */
+/** Send HELLO; async admission returns PENDING and marks sent only on completion. */
 mesh_mgmt_connection_result_t
 mesh_mgmt_connection_send_hello_v1(mesh_mgmt_connection_v1_t *connection, const uint8_t *frame,
                                    size_t frame_len);
 
-/** Send HELLO_ACK, then commit the local acknowledgement state. */
+/** Send HELLO_ACK; async admission marks acknowledged only on completion. */
 mesh_mgmt_connection_result_t
 mesh_mgmt_connection_send_hello_ack_v1(mesh_mgmt_connection_v1_t *connection, const uint8_t *frame,
                                        size_t frame_len);
 
-/** Send a non-handshake frame after the session is established. */
+/** Send after establishment. Async PENDING admits a write; BUSY admits nothing. */
 mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_v1_t *connection,
                                                            const uint8_t *frame, size_t frame_len);
 

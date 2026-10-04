@@ -91,7 +91,7 @@ int mesh_mgmt_peer_signer_build_ack_v1(void *context, const mesh_mgmt_hello_ack_
                                        const uint8_t **out_frame, size_t *out_frame_len);
 
 /**
- * Build one signed targeted MMP frame after the local HELLO and ACK have been
+ * Build one signed targeted observer/RPC frame after the local HELLO and ACK have been
  * built. Feature and typed-payload authorization remain the connection's
  * responsibility.
  */

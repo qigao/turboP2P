@@ -12,6 +12,8 @@ extern "C" {
 
 typedef enum {
   MESH_MGMT_TRANSPORT_OK = 0,
+  MESH_MGMT_TRANSPORT_PENDING = 1,
+  MESH_MGMT_TRANSPORT_BUSY = 2,
   MESH_MGMT_TRANSPORT_INVALID_ARG = -1,
   MESH_MGMT_TRANSPORT_INVALID_STATE = -2,
   MESH_MGMT_TRANSPORT_INVALID_FRAME = -3,
@@ -30,6 +32,21 @@ typedef struct {
   mesh_mgmt_transport_release_fn release;
   mesh_mgmt_transport_send_fn send;
 } mesh_mgmt_transport_io_v1_t;
+
+/**
+ * Explicit asynchronous IO. recv returns PENDING with NULL/zero when empty.
+ * send must copy/retain bytes before returning OK (admission); it must not
+ * deliver completion inline. Exactly one write may be pending. The owner must
+ * later complete its token, or abort on close/failure. No backend detection.
+ */
+typedef int (*mesh_mgmt_transport_admit_fn)(void *context, const uint8_t *bytes,
+                                            size_t len, uint64_t token);
+typedef struct {
+  void *context;
+  mesh_mgmt_transport_recv_fn recv;
+  mesh_mgmt_transport_release_fn release;
+  mesh_mgmt_transport_admit_fn send;
+} mesh_mgmt_transport_async_io_v1_t;
 
 /**
  * A complete frame borrowed from the transport's fixed buffer. It remains
@@ -55,6 +72,11 @@ typedef struct {
   int initialized;
   int frame_ready;
   int terminal;
+  mesh_mgmt_transport_admit_fn admit;
+  uint64_t next_send_token;
+  uint64_t pending_send_token;
+  size_t pending_send_bytes;
+  int asynchronous;
 } mesh_mgmt_transport_v1_t;
 
 /**
@@ -66,10 +88,25 @@ typedef struct {
 mesh_mgmt_transport_result_t mesh_mgmt_transport_init_v1(mesh_mgmt_transport_v1_t *transport,
                                                          const mesh_mgmt_transport_io_v1_t *io);
 
+/** Initialize explicitly asynchronous IO; synchronous init retains its contract. */
+mesh_mgmt_transport_result_t mesh_mgmt_transport_init_async_v1(
+    mesh_mgmt_transport_v1_t *transport, const mesh_mgmt_transport_async_io_v1_t *io);
+
+/**
+ * Complete the single admitted write. A stale/duplicate token returns
+ * INVALID_STATE without consuming the current write. Matching failure or
+ * a short completion is terminal. bytes is the full logical write size.
+ */
+mesh_mgmt_transport_result_t mesh_mgmt_transport_complete_send_v1(
+    mesh_mgmt_transport_v1_t *transport, uint64_t token, int success, size_t bytes);
+
+/** Abort outstanding IO/protocol receipts without destroying the caller's IO. */
+mesh_mgmt_transport_result_t mesh_mgmt_transport_abort_v1(mesh_mgmt_transport_v1_t *transport);
+
 /** Release any retained recv chunk. The IO context itself is never destroyed. */
 void mesh_mgmt_transport_destroy_v1(mesh_mgmt_transport_v1_t *transport);
 
-/** Receive and structurally validate exactly one MMP frame. */
+/** Receive one frame; async IO returns PENDING while incomplete, preserving bytes. */
 mesh_mgmt_transport_result_t
 mesh_mgmt_transport_receive_v1(mesh_mgmt_transport_v1_t *transport,
                                mesh_mgmt_transport_receipt_v1_t *out_receipt);
@@ -79,7 +116,7 @@ mesh_mgmt_transport_result_t
 mesh_mgmt_transport_commit_v1(mesh_mgmt_transport_v1_t *transport,
                               const mesh_mgmt_transport_receipt_v1_t *receipt);
 
-/** Structurally validate and send one complete MMP frame. */
+/** Send one frame. Async admission returns PENDING; an occupied write returns BUSY. */
 mesh_mgmt_transport_result_t mesh_mgmt_transport_send_v1(mesh_mgmt_transport_v1_t *transport,
                                                          const uint8_t *frame, size_t frame_len);
 

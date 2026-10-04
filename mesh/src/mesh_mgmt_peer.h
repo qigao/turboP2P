@@ -13,6 +13,7 @@ extern "C" {
 
 typedef enum {
   MESH_MGMT_PEER_OK = 0,
+  MESH_MGMT_PEER_PENDING = 1,
   MESH_MGMT_PEER_INVALID_ARG = -1,
   MESH_MGMT_PEER_INVALID_STATE = -2,
   MESH_MGMT_PEER_BUILD_FAILED = -3,
@@ -27,14 +28,15 @@ typedef enum {
 
 /**
  * Build a signed HELLO frame. The returned frame remains builder-owned and is
- * borrowed only for the synchronous send performed before this call returns.
+ * borrowed only through send admission before start/pump returns. Async IO
+ * must copy or retain it before returning; the builder may then reuse it.
  */
 typedef int (*mesh_mgmt_peer_build_hello_fn)(void *context, const uint8_t **out_frame,
                                              size_t *out_frame_len);
 
 /**
  * Build a signed HELLO_ACK from the accepted negotiation result. The returned
- * frame has the same synchronous borrowed lifetime as build_hello output.
+ * frame has the same admission-only borrowed lifetime as build_hello output.
  */
 typedef int (*mesh_mgmt_peer_build_ack_fn)(void *context, const mesh_mgmt_hello_ack_v1_t *ack,
                                            const uint8_t **out_frame, size_t *out_frame_len);
@@ -71,9 +73,21 @@ typedef struct {
 mesh_mgmt_peer_result_t mesh_mgmt_peer_init_v1(mesh_mgmt_peer_v1_t *peer,
                                                const mesh_mgmt_peer_config_v1_t *config);
 
+/** Explicit async init; builders' borrowed frames are copied by IO admission. */
+mesh_mgmt_peer_result_t mesh_mgmt_peer_init_async_v1(
+    mesh_mgmt_peer_v1_t *peer, const mesh_mgmt_peer_config_v1_t *config,
+    const mesh_mgmt_transport_async_io_v1_t *io);
+
+/** Complete an admitted write and propagate connection failures to the peer. */
+mesh_mgmt_peer_result_t mesh_mgmt_peer_complete_send_v1(
+    mesh_mgmt_peer_v1_t *peer, uint64_t token, int success, size_t bytes);
+
+/** Mark the peer and its protocol transport terminal after close/local failure. */
+mesh_mgmt_peer_result_t mesh_mgmt_peer_abort_v1(mesh_mgmt_peer_v1_t *peer);
+
 void mesh_mgmt_peer_destroy_v1(mesh_mgmt_peer_v1_t *peer);
 
-/** Validate, then synchronously send, the local HELLO exactly once. */
+/** Admit the local HELLO exactly once. Async PENDING does not mark it sent. */
 mesh_mgmt_peer_result_t mesh_mgmt_peer_start_v1(mesh_mgmt_peer_v1_t *peer, uint64_t now_ms);
 
 /**

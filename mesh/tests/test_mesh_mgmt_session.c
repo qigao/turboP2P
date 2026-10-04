@@ -46,9 +46,9 @@ static void prepare_context(test_context_t *context) {
   size_t certificate_len = 0;
 
   memset(context, 0, sizeof(*context));
-  check_int_eq(mesh_mgmt_ed25519_public_from_private(ROOT_PRIVATE_KEY, context->root_public_key),
+  check_equal(mesh_mgmt_ed25519_public_from_private(ROOT_PRIVATE_KEY, context->root_public_key),
                MESH_MGMT_CRYPTO_OK);
-  check_int_eq(
+  check_equal(
       mesh_mgmt_ed25519_public_from_private(REMOTE_PRIVATE_KEY, context->remote_public_key),
       MESH_MGMT_CRYPTO_OK);
   fill_bytes(context->mesh_id_hash, 32, 0x20);
@@ -66,11 +66,11 @@ static void prepare_context(test_context_t *context) {
   context->claims.expires_at_ms = 3000;
   context->claims.serial = TEST_CERT_SERIAL;
   context->claims.principal_epoch = TEST_PRINCIPAL_EPOCH;
-  check_int_eq(mesh_mgmt_certificate_issue_v1(&context->claims, ROOT_PRIVATE_KEY,
+  check_equal(mesh_mgmt_certificate_issue_v1(&context->claims, ROOT_PRIVATE_KEY,
                                               context->certificate, sizeof(context->certificate),
                                               &certificate_len),
                MESH_MGMT_IDENTITY_OK);
-  check_size_eq(certificate_len, MESH_MGMT_CERTIFICATE_V1_SIZE);
+  check_equal(certificate_len, MESH_MGMT_CERTIFICATE_V1_SIZE);
 
   context->hello.major = MESH_MGMT_MAJOR_V1;
   context->hello.min_minor = MESH_MGMT_MINOR_V1;
@@ -80,7 +80,7 @@ static void prepare_context(test_context_t *context) {
   memcpy(context->hello.build_version, "1.2.3-test", 10);
   context->hello.build_version_len = 10;
   memcpy(context->hello.certificate, context->certificate, sizeof(context->certificate));
-  check_int_eq(
+  check_equal(
       mesh_mgmt_blake2b_256(context->root_public_key, 32, context->hello.issuer_chain_hash),
       MESH_MGMT_CRYPTO_OK);
   context->hello.principal_type = MESH_MGMT_PRINCIPAL_NODE;
@@ -110,10 +110,10 @@ static void prepare_context(test_context_t *context) {
 static size_t encode_hello_payload(const test_context_t *context,
                                    uint8_t output[MESH_MGMT_HELLO_V1_MAX_SIZE]) {
   size_t output_len = 0;
-  check_int_eq(
+  check_equal(
       mesh_mgmt_hello_encode_v1(&context->hello, output, MESH_MGMT_HELLO_V1_MAX_SIZE, &output_len),
       MESH_MGMT_SESSION_OK);
-  check_size_eq(output_len, 593);
+  check_equal(output_len, 593);
   return output_len;
 }
 
@@ -146,7 +146,7 @@ static size_t sign_remote_frame_values(const test_context_t *context, uint8_t ki
   input.header.issued_at_ms = 1400;
   input.header.expires_at_ms = 1600;
   input.header.certificate_serial = certificate_serial;
-  check_int_eq(mesh_mgmt_envelope_sign_v1(&input, output, MESH_MGMT_FRAME_MAX, &output_len),
+  check_equal(mesh_mgmt_envelope_sign_v1(&input, output, MESH_MGMT_FRAME_MAX, &output_len),
                MESH_MGMT_ENVELOPE_OK);
   return output_len;
 }
@@ -160,7 +160,7 @@ static size_t sign_remote_frame(const test_context_t *context, uint8_t kind, con
 
 static void verify_frame(const uint8_t *frame, size_t frame_len,
                          mesh_mgmt_verified_envelope_v1_t *verified) {
-  check_int_eq(mesh_mgmt_envelope_verify_v1(frame, frame_len, verified), MESH_MGMT_ENVELOPE_OK);
+  check_equal(mesh_mgmt_envelope_verify_v1(frame, frame_len, verified), MESH_MGMT_ENVELOPE_OK);
 }
 
 static void accept_valid_hello(test_context_t *context, mesh_mgmt_session_v1_t *session,
@@ -171,7 +171,7 @@ static void accept_valid_hello(test_context_t *context, mesh_mgmt_session_v1_t *
   size_t hello_frame_len = sign_remote_frame(context, MESH_MGMT_KIND_HELLO, hello_payload,
                                              hello_payload_len, TEST_CERT_SERIAL, hello_frame);
 
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(session, hello_frame, hello_frame_len,
+  check_equal(mesh_mgmt_session_accept_hello_v1(session, hello_frame, hello_frame_len,
                                                  context->transport_peer_id, TEST_NOW_MS, ack),
                MESH_MGMT_SESSION_OK);
 }
@@ -184,22 +184,22 @@ static void test_certificate_verifies_direct_trust_binding(void) {
   uint16_t expected_field_id = 1;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
+  check_equal(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
                                                context.root_public_key, context.mesh_id_hash,
                                                TEST_NOW_MS, &certificate),
                MESH_MGMT_IDENTITY_OK);
-  check_uint_eq(certificate.principal_type, MESH_MGMT_PRINCIPAL_NODE);
-  check_mem_eq(certificate.management_key, context.remote_public_key, 32);
-  check_mem_eq(certificate.transport_peer_id, context.transport_peer_id, 32);
-  check_mem_eq(certificate.managed_node_id, context.managed_node_id, 32);
-  check_hex64_eq(certificate.serial, TEST_CERT_SERIAL);
-  check_hex64_eq(certificate.principal_epoch, TEST_PRINCIPAL_EPOCH);
+  check_equal(certificate.principal_type, MESH_MGMT_PRINCIPAL_NODE);
+  check_equal(certificate.management_key, context.remote_public_key, 32);
+  check_equal(certificate.transport_peer_id, context.transport_peer_id, 32);
+  check_equal(certificate.managed_node_id, context.managed_node_id, 32);
+  check_equal(certificate.serial, TEST_CERT_SERIAL);
+  check_equal(certificate.principal_epoch, TEST_PRINCIPAL_EPOCH);
   mesh_mgmt_tlv_reader_init(&reader, context.certificate, sizeof(context.certificate));
   while (mesh_mgmt_tlv_reader_next(&reader, &field) == 1) {
-    check_uint_eq(field.field_id, expected_field_id);
+    check_equal(field.field_id, expected_field_id);
     expected_field_id++;
   }
-  check_uint_eq(expected_field_id, 15);
+  check_equal(expected_field_id, 15);
 }
 
 static void test_certificate_rejects_tamper_expiry_and_missing_node_binding(void) {
@@ -212,23 +212,23 @@ static void test_certificate_rejects_tamper_expiry_and_missing_node_binding(void
   prepare_context(&context);
   memcpy(tampered, context.certificate, sizeof(tampered));
   tampered[sizeof(tampered) - 1u] ^= 1u;
-  check_int_eq(mesh_mgmt_certificate_verify_v1(tampered, sizeof(tampered), context.root_public_key,
+  check_equal(mesh_mgmt_certificate_verify_v1(tampered, sizeof(tampered), context.root_public_key,
                                                context.mesh_id_hash, TEST_NOW_MS, &certificate),
                MESH_MGMT_IDENTITY_AUTH_FAILED);
-  check_int_eq(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
+  check_equal(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
                                                context.root_public_key, context.mesh_id_hash, 3000,
                                                &certificate),
                MESH_MGMT_IDENTITY_EXPIRED);
-  check_int_eq(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
+  check_equal(mesh_mgmt_certificate_verify_v1(context.certificate, sizeof(context.certificate),
                                                context.remote_public_key, context.mesh_id_hash,
                                                TEST_NOW_MS, &certificate),
                MESH_MGMT_IDENTITY_AUTH_FAILED);
 
   memset(context.claims.transport_peer_id, 0, 32);
-  check_int_eq(mesh_mgmt_certificate_issue_v1(&context.claims, ROOT_PRIVATE_KEY, output,
+  check_equal(mesh_mgmt_certificate_issue_v1(&context.claims, ROOT_PRIVATE_KEY, output,
                                               sizeof(output), &output_len),
                MESH_MGMT_IDENTITY_INVALID_SCHEMA);
-  check_size_eq(output_len, 0);
+  check_equal(output_len, 0);
 }
 
 static void test_session_establishes_only_after_mutual_ack(void) {
@@ -242,39 +242,39 @@ static void test_session_establishes_only_after_mutual_ack(void) {
   size_t ack_frame_len = 0;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_PROBE),
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_PROBE),
                MESH_MGMT_SESSION_NOT_ESTABLISHED);
-  check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
   accept_valid_hello(&context, &session, &ack);
-  check_int_eq(session.state, MESH_MGMT_SESSION_NEGOTIATING);
-  check_uint_eq(ack.selected_minor, MESH_MGMT_MINOR_V1);
-  check_hex64_eq(ack.features, MESH_MGMT_FEATURE_MEMBERSHIP);
-  check_uint_eq(ack.max_frame, 12000);
-  check_uint_eq(ack.max_digest_entries, 64);
-  check_uint_eq(ack.max_delta_batch, 32);
-  check_mem_eq(ack.peer_connection_id, context.remote_connection_id, 16);
-  check_mem_eq(ack.channel_binding, context.session_config.channel_binding,
+  check_equal(session.state, MESH_MGMT_SESSION_NEGOTIATING);
+  check_equal(ack.selected_minor, MESH_MGMT_MINOR_V1);
+  check_equal(ack.features, MESH_MGMT_FEATURE_MEMBERSHIP);
+  check_equal(ack.max_frame, 12000);
+  check_equal(ack.max_digest_entries, 64);
+  check_equal(ack.max_delta_batch, 32);
+  check_equal(ack.peer_connection_id, context.remote_connection_id, 16);
+  check_equal(ack.channel_binding, context.session_config.channel_binding,
                sizeof(ack.channel_binding));
-  check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
-  check_int_eq(session.state, MESH_MGMT_SESSION_NEGOTIATING);
+  check_equal(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(session.state, MESH_MGMT_SESSION_NEGOTIATING);
 
   memcpy(ack.peer_connection_id, context.session_config.connection_id, 16);
-  check_int_eq(
+  check_equal(
       mesh_mgmt_hello_ack_encode_v1(&ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
       MESH_MGMT_SESSION_OK);
   ack_frame_len = sign_remote_frame(&context, MESH_MGMT_KIND_HELLO_ACK, ack_payload,
                                     ack_payload_len, TEST_CERT_SERIAL, ack_frame);
   verify_frame(ack_frame, ack_frame_len, &verified);
-  check_int_eq(
+  check_equal(
       mesh_mgmt_session_accept_hello_ack_v1(&session, ack_frame, ack_frame_len, TEST_NOW_MS),
       MESH_MGMT_SESSION_OK);
-  check_int_eq(session.state, MESH_MGMT_SESSION_ESTABLISHED);
-  check_int_eq(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_PROBE),
+  check_equal(session.state, MESH_MGMT_SESSION_ESTABLISHED);
+  check_equal(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_PROBE),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_COMMAND_REQUEST),
+  check_equal(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_COMMAND_REQUEST),
                MESH_MGMT_SESSION_UNSUPPORTED_FEATURE);
-  check_int_eq(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_ERROR),
+  check_equal(mesh_mgmt_session_authorize_kind_v1(&session, MESH_MGMT_KIND_ERROR),
                MESH_MGMT_SESSION_OK);
 }
 
@@ -290,35 +290,35 @@ static void test_session_rejects_transport_and_header_binding_mismatch(void) {
   size_t frame_len = 0;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
   payload_len = encode_hello_payload(&context, payload);
   frame_len = sign_remote_frame(&context, MESH_MGMT_KIND_HELLO, payload, payload_len,
                                 TEST_CERT_SERIAL, frame);
   verify_frame(frame, frame_len, &verified);
   fill_bytes(wrong_transport, 32, 0xee);
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len, wrong_transport,
+  check_equal(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len, wrong_transport,
                                                  TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
-  check_mem_eq(session.remote_certificate.management_key, (uint8_t[32]){0}, 32);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.remote_certificate.management_key, (uint8_t[32]){0}, 32);
 
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
   frame_len = sign_remote_frame(&context, MESH_MGMT_KIND_HELLO, payload, payload_len,
                                 TEST_CERT_SERIAL + 1u, frame);
   verify_frame(frame, frame_len, &verified);
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
+  check_equal(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
                                                  context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_HELLO, payload, payload_len,
                                        TEST_CERT_SERIAL, 0u, 0x10, MESH_MGMT_KIND_HELLO,
                                        MESH_MGMT_KIND_HELLO, frame);
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
+  check_equal(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
                                                  context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
 static void test_session_rejects_cross_noise_session_replay(void) {
@@ -340,35 +340,35 @@ static void test_session_rejects_cross_noise_session_replay(void) {
       &context, MESH_MGMT_KIND_HELLO, hello_payload, hello_payload_len,
       TEST_CERT_SERIAL, hello_frame);
   context.session_config.channel_binding[0] ^= 1u;
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(
+  check_equal(mesh_mgmt_session_accept_hello_v1(
                    &session, hello_frame, hello_frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session),
+  check_equal(mesh_mgmt_session_mark_hello_sent_v1(&session),
                MESH_MGMT_SESSION_OK);
   accept_valid_hello(&context, &session, &ack);
-  check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session),
+  check_equal(mesh_mgmt_session_mark_ack_sent_v1(&session),
                MESH_MGMT_SESSION_OK);
   memcpy(ack.peer_connection_id, context.session_config.connection_id,
          sizeof(ack.peer_connection_id));
   ack.channel_binding[0] ^= 1u;
-  check_int_eq(mesh_mgmt_hello_ack_encode_v1(
+  check_equal(mesh_mgmt_hello_ack_encode_v1(
                    &ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
                MESH_MGMT_SESSION_OK);
   ack_frame_len = sign_remote_frame(
       &context, MESH_MGMT_KIND_HELLO_ACK, ack_payload, ack_payload_len,
       TEST_CERT_SERIAL, ack_frame);
-  check_int_eq(mesh_mgmt_session_accept_hello_ack_v1(
+  check_equal(mesh_mgmt_session_accept_hello_ack_v1(
                    &session, ack_frame, ack_frame_len, TEST_NOW_MS),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
 static void test_session_rejects_pre_binding_hello_schema(void) {
@@ -386,13 +386,13 @@ static void test_session_rejects_pre_binding_hello_schema(void) {
   hello_frame_len = sign_remote_frame(
       &context, MESH_MGMT_KIND_HELLO, hello_payload, hello_payload_len,
       TEST_CERT_SERIAL, hello_frame);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config),
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config),
                MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(
+  check_equal(mesh_mgmt_session_accept_hello_v1(
                    &session, hello_frame, hello_frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_INVALID_SCHEMA);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
 static void test_session_rejects_raw_frame_without_valid_envelope_signature(void) {
@@ -405,16 +405,16 @@ static void test_session_rejects_raw_frame_without_valid_envelope_signature(void
   size_t frame_len = 0;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
   payload_len = encode_hello_payload(&context, payload);
   frame_len = sign_remote_frame(&context, MESH_MGMT_KIND_HELLO, payload, payload_len,
                                 TEST_CERT_SERIAL, frame);
   frame[frame_len - 1u] ^= 1u;
-  check_int_eq(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
+  check_equal(mesh_mgmt_session_accept_hello_v1(&session, frame, frame_len,
                                                  context.transport_peer_id, TEST_NOW_MS, &ack),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
-  check_mem_eq(session.remote_certificate.management_key, (uint8_t[32]){0}, 32);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.remote_certificate.management_key, (uint8_t[32]){0}, 32);
 }
 
 static void test_session_rejects_downgraded_ack(void) {
@@ -428,20 +428,20 @@ static void test_session_rejects_downgraded_ack(void) {
   size_t frame_len = 0;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
   accept_valid_hello(&context, &session, &ack);
-  check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
   memcpy(ack.peer_connection_id, context.session_config.connection_id, 16);
   ack.features = 0;
-  check_int_eq(mesh_mgmt_hello_ack_encode_v1(&ack, payload, sizeof(payload), &payload_len),
+  check_equal(mesh_mgmt_hello_ack_encode_v1(&ack, payload, sizeof(payload), &payload_len),
                MESH_MGMT_SESSION_OK);
   frame_len = sign_remote_frame(&context, MESH_MGMT_KIND_HELLO_ACK, payload, payload_len,
                                 TEST_CERT_SERIAL, frame);
   verify_frame(frame, frame_len, &verified);
-  check_int_eq(mesh_mgmt_session_accept_hello_ack_v1(&session, frame, frame_len, TEST_NOW_MS),
+  check_equal(mesh_mgmt_session_accept_hello_ack_v1(&session, frame, frame_len, TEST_NOW_MS),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
 static void test_session_rejects_ack_from_changed_origin_session(void) {
@@ -454,19 +454,19 @@ static void test_session_rejects_ack_from_changed_origin_session(void) {
   size_t frame_len = 0;
 
   prepare_context(&context);
-  check_int_eq(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
-  check_int_eq(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_init_v1(&session, &context.session_config), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_mark_hello_sent_v1(&session), MESH_MGMT_SESSION_OK);
   accept_valid_hello(&context, &session, &ack);
-  check_int_eq(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
+  check_equal(mesh_mgmt_session_mark_ack_sent_v1(&session), MESH_MGMT_SESSION_OK);
   memcpy(ack.peer_connection_id, context.session_config.connection_id, 16);
-  check_int_eq(mesh_mgmt_hello_ack_encode_v1(&ack, payload, sizeof(payload), &payload_len),
+  check_equal(mesh_mgmt_hello_ack_encode_v1(&ack, payload, sizeof(payload), &payload_len),
                MESH_MGMT_SESSION_OK);
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_HELLO_ACK, payload, payload_len,
                                        TEST_CERT_SERIAL, 3u, 0x11, MESH_MGMT_KIND_HELLO_ACK,
                                        MESH_MGMT_KIND_HELLO_ACK, frame);
-  check_int_eq(mesh_mgmt_session_accept_hello_ack_v1(&session, frame, frame_len, TEST_NOW_MS),
+  check_equal(mesh_mgmt_session_accept_hello_ack_v1(&session, frame, frame_len, TEST_NOW_MS),
                MESH_MGMT_SESSION_AUTH_FAILED);
-  check_int_eq(session.state, MESH_MGMT_SESSION_FAILED);
+  check_equal(session.state, MESH_MGMT_SESSION_FAILED);
 }
 
 static void establish_dispatcher(test_context_t *context, mesh_mgmt_dispatcher_v1_t *dispatcher) {
@@ -488,31 +488,31 @@ static void establish_dispatcher(test_context_t *context, mesh_mgmt_dispatcher_v
   config.session = context->session_config;
   config.replay.capacity = 4u;
   config.replay.ttl_ms = 100u;
-  check_int_eq(mesh_mgmt_dispatcher_init_v1(dispatcher, &config, &stage), MESH_MGMT_DISPATCH_OK);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_REPLAY);
-  check_int_eq(mesh_mgmt_dispatcher_mark_hello_sent_v1(dispatcher, &stage), MESH_MGMT_DISPATCH_OK);
+  check_equal(mesh_mgmt_dispatcher_init_v1(dispatcher, &config, &stage), MESH_MGMT_DISPATCH_OK);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_REPLAY);
+  check_equal(mesh_mgmt_dispatcher_mark_hello_sent_v1(dispatcher, &stage), MESH_MGMT_DISPATCH_OK);
 
   hello_payload_len = encode_hello_payload(context, hello_payload);
   frame_len = sign_remote_frame(context, MESH_MGMT_KIND_HELLO, hello_payload, hello_payload_len,
                                 TEST_CERT_SERIAL, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(dispatcher, frame, frame_len,
                                                context->transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(event.type, MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
-  check_int_eq(mesh_mgmt_dispatcher_mark_ack_sent_v1(dispatcher, &stage), MESH_MGMT_DISPATCH_OK);
+  check_equal(event.type, MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
+  check_equal(mesh_mgmt_dispatcher_mark_ack_sent_v1(dispatcher, &stage), MESH_MGMT_DISPATCH_OK);
 
   memcpy(event.hello_ack.peer_connection_id, context->session_config.connection_id, 16);
-  check_int_eq(mesh_mgmt_hello_ack_encode_v1(&event.hello_ack, ack_payload, sizeof(ack_payload),
+  check_equal(mesh_mgmt_hello_ack_encode_v1(&event.hello_ack, ack_payload, sizeof(ack_payload),
                                              &ack_payload_len),
                MESH_MGMT_SESSION_OK);
   frame_len = sign_remote_frame(context, MESH_MGMT_KIND_HELLO_ACK, ack_payload, ack_payload_len,
                                 TEST_CERT_SERIAL, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(dispatcher, frame, frame_len,
                                                context->transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(event.type, MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
+  check_equal(event.type, MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
   check_true(dispatcher->replay.bound);
 }
 
@@ -527,53 +527,53 @@ static void test_dispatcher_owns_verify_session_replay_and_typed_order(void) {
   establish_dispatcher(&context, &dispatcher);
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL,
                                        3u, 0x10, 16u, 0x51, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
-  check_int_eq(event.type, MESH_MGMT_DISPATCH_EVENT_MEMBERSHIP);
-  check_int_eq(event.kind, MESH_MGMT_KIND_PROBE);
-  check_size_eq(event.envelope.frame.payload_len, 0u);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_equal(event.type, MESH_MGMT_DISPATCH_EVENT_MEMBERSHIP);
+  check_equal(event.kind, MESH_MGMT_KIND_PROBE);
+  check_equal(event.envelope.frame.payload_len, 0u);
 
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_REPLAYED);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_REPLAY);
-  check_hex64_eq(dispatcher.replay.last_sequence, 16u);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_REPLAY);
+  check_equal(dispatcher.replay.last_sequence, 16u);
 
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_STREAM_TICKET_REQUEST, NULL, 0u,
                                        TEST_CERT_SERIAL, 3u, 0x10, 17u, 0x52, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
-  check_int_eq(event.type, MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_REQUEST);
-  check_int_eq(event.kind, MESH_MGMT_KIND_STREAM_TICKET_REQUEST);
-  check_hex64_eq(dispatcher.replay.last_sequence, 17u);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_equal(event.type, MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_REQUEST);
+  check_equal(event.kind, MESH_MGMT_KIND_STREAM_TICKET_REQUEST);
+  check_equal(dispatcher.replay.last_sequence, 17u);
 
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_STREAM_TICKET_ISSUED, NULL, 0u,
                                        TEST_CERT_SERIAL, 3u, 0x10, 18u, 0x53, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
-  check_int_eq(event.type, MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_ISSUED);
-  check_int_eq(event.kind, MESH_MGMT_KIND_STREAM_TICKET_ISSUED);
-  check_hex64_eq(dispatcher.replay.last_sequence, 18u);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_equal(event.type, MESH_MGMT_DISPATCH_EVENT_STREAM_TICKET_ISSUED);
+  check_equal(event.kind, MESH_MGMT_KIND_STREAM_TICKET_ISSUED);
+  check_equal(dispatcher.replay.last_sequence, 18u);
 
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL,
                                        3u, 0x10, 19u, 0x54, frame);
   frame[frame_len - 1u] ^= 1u;
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_AUTH_FAILED);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_ENVELOPE);
-  check_hex64_eq(dispatcher.replay.last_sequence, 18u);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_ENVELOPE);
+  check_equal(dispatcher.replay.last_sequence, 18u);
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
@@ -589,20 +589,20 @@ static void test_dispatcher_rejects_unnegotiated_stream_ticket_without_replay(vo
   dispatcher.session.negotiated.features &= ~MESH_MGMT_FEATURE_STREAM_TICKET;
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_STREAM_TICKET_REQUEST, NULL, 0u,
                                        TEST_CERT_SERIAL, 3u, 0x10, 20u, 0x61, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_UNSUPPORTED_FEATURE);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
   check_false(dispatcher.replay.has_sequence);
 
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL,
                                        3u, 0x10, 20u, 0x61, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  check_equal(dispatcher.replay.last_sequence, 20u);
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
@@ -617,20 +617,20 @@ static void test_dispatcher_rejects_side_effect_without_consuming_replay(void) {
   establish_dispatcher(&context, &dispatcher);
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_COMMAND_REQUEST, NULL, 0u,
                                        TEST_CERT_SERIAL, 3u, 0x10, 20u, 0x61, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
   check_false(dispatcher.replay.has_sequence);
 
   frame_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL,
                                        3u, 0x10, 20u, 0x61, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
+  check_equal(mesh_mgmt_dispatcher_receive_v1(&dispatcher, frame, frame_len,
                                                context.transport_peer_id, TEST_NOW_MS, &event,
                                                &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  check_equal(dispatcher.replay.last_sequence, 20u);
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
@@ -663,7 +663,7 @@ static void make_execution_command(
   grant->max_limits.stderr_bytes = 64u;
   grant->not_before_ms = 1400u;
   grant->expires_at_ms = 1600u;
-  check_int_eq(mesh_mgmt_execution_grant_sign_v1(grant, ROOT_PRIVATE_KEY),
+  check_equal(mesh_mgmt_execution_grant_sign_v1(grant, ROOT_PRIVATE_KEY),
                MESH_MGMT_EXECUTION_WIRE_OK);
 
   memset(request, 0, sizeof(*request));
@@ -705,58 +705,58 @@ static void test_dispatcher_emits_typed_execution_shadow_without_side_effect(voi
          context.root_public_key,
          sizeof(dispatcher.node_execution_grant_issuer_key));
   make_execution_command(&context, &grant, &request);
-  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+  check_equal(mesh_mgmt_execution_command_request_encode_v1(
                    &grant, &request, payload, sizeof(payload), &payload_len),
                MESH_MGMT_EXECUTION_WIRE_OK);
   frame_len = sign_remote_frame_values(
       &context, MESH_MGMT_KIND_COMMAND_REQUEST, payload, payload_len,
       TEST_CERT_SERIAL, 3u, 0x10u, 20u, 0x61u, frame);
 
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
-  check_int_eq(
+  check_equal(stage, MESH_MGMT_DISPATCH_STAGE_TYPED_DISPATCH);
+  check_equal(
       event.type,
       MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW);
-  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
-  check_int_eq(mesh_mgmt_execution_shadow_command_from_event_v1(
+  check_equal(dispatcher.replay.last_sequence, 20u);
+  check_equal(mesh_mgmt_execution_shadow_command_from_event_v1(
                    &dispatcher, &event, TEST_NOW_MS, &command),
                MESH_MGMT_EXECUTION_CONSUMER_OK);
-  check_mem_eq(command.request.command_id, request.command_id,
+  check_equal(command.request.command_id, request.command_id,
                sizeof(request.command_id));
-  check_mem_eq(command.grant.grant_id, grant.grant_id,
+  check_equal(command.grant.grant_id, grant.grant_id,
                sizeof(grant.grant_id));
-  check_mem_eq(command.reply_node_id,
+  check_equal(command.reply_node_id,
                event.envelope.header.origin_node_id,
                sizeof(command.reply_node_id));
 
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_REPLAYED);
   grant.signature[0] ^= 1u;
-  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+  check_equal(mesh_mgmt_execution_command_request_encode_v1(
                    &grant, &request, payload, sizeof(payload), &payload_len),
                MESH_MGMT_EXECUTION_WIRE_OK);
   frame_len = sign_remote_frame_values(
       &context, MESH_MGMT_KIND_COMMAND_REQUEST, payload, payload_len,
       TEST_CERT_SERIAL, 3u, 0x10u, 21u, 0x62u, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_AUTH_FAILED);
-  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  check_equal(dispatcher.replay.last_sequence, 20u);
 
   frame_len = sign_remote_frame_values(
       &context, MESH_MGMT_KIND_PROBE, NULL, 0u, TEST_CERT_SERIAL, 3u,
       0x10u, 21u, 0x62u, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_hex64_eq(dispatcher.replay.last_sequence, 21u);
+  check_equal(dispatcher.replay.last_sequence, 21u);
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
@@ -784,44 +784,44 @@ static void test_dispatcher_emits_owned_execution_status_response(void) {
   fill_bytes(status.request_digest, sizeof(status.request_digest), 0x51u);
   memcpy(status.responder_node_id, context.managed_node_id,
          sizeof(status.responder_node_id));
-  check_int_eq(mesh_mgmt_execution_command_status_encode_v1(
+  check_equal(mesh_mgmt_execution_command_status_encode_v1(
                    &status, payload, sizeof(payload), &payload_len),
                MESH_MGMT_EXECUTION_WIRE_OK);
   frame_len = sign_remote_frame_values(
       &context, MESH_MGMT_KIND_COMMAND_STATUS, payload, payload_len,
       TEST_CERT_SERIAL, 3u, 0x10u, 20u, 0x71u, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_OK);
-  check_int_eq(event.type,
+  check_equal(event.type,
                MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW);
-  check_int_eq(mesh_mgmt_execution_response_from_event_v1(
+  check_equal(mesh_mgmt_execution_response_from_event_v1(
                    &dispatcher, &event, &response),
                MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK);
-  check_int_eq(response.kind, MESH_MGMT_KIND_COMMAND_STATUS);
-  check_int_eq(response.status.code, MESH_MGMT_EXECUTION_STATUS_BUSY);
+  check_equal(response.kind, MESH_MGMT_KIND_COMMAND_STATUS);
+  check_equal(response.status.code, MESH_MGMT_EXECUTION_STATUS_BUSY);
   check_true(mesh_mgmt_execution_status_is_retryable_v1(
       response.status.code));
-  check_mem_eq(response.status.command_id, status.command_id,
+  check_equal(response.status.command_id, status.command_id,
                sizeof(status.command_id));
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_REPLAYED);
 
   status.responder_node_id[0] ^= 1u;
-  check_int_eq(mesh_mgmt_execution_command_status_encode_v1(
+  check_equal(mesh_mgmt_execution_command_status_encode_v1(
                    &status, payload, sizeof(payload), &payload_len),
                MESH_MGMT_EXECUTION_WIRE_OK);
   frame_len = sign_remote_frame_values(
       &context, MESH_MGMT_KIND_COMMAND_STATUS, payload, payload_len,
       TEST_CERT_SERIAL, 3u, 0x10u, 21u, 0x72u, frame);
-  check_int_eq(mesh_mgmt_dispatcher_receive_v1(
+  check_equal(mesh_mgmt_dispatcher_receive_v1(
                    &dispatcher, frame, frame_len,
                    context.transport_peer_id, TEST_NOW_MS, &event, &stage),
                MESH_MGMT_DISPATCH_AUTH_FAILED);
-  check_hex64_eq(dispatcher.replay.last_sequence, 20u);
+  check_equal(dispatcher.replay.last_sequence, 20u);
   mesh_mgmt_dispatcher_destroy_v1(&dispatcher);
 }
 
@@ -894,6 +894,8 @@ static int connection_capture_event(void *context, const mesh_mgmt_dispatch_even
   if (event->type == MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED)
     capture->hello_ack = event->hello_ack;
   if (capture->connection && capture->response_frame) {
+    uint8_t signature[MESH_MGMT_SIGNATURE_SIZE];
+    memcpy(signature, event->envelope.frame.signature, sizeof(signature));
     capture->regular_send_result = mesh_mgmt_connection_send_v1(
         capture->connection, capture->response_frame,
         capture->response_frame_len);
@@ -901,6 +903,7 @@ static int connection_capture_event(void *context, const mesh_mgmt_dispatch_even
         mesh_mgmt_connection_send_event_response_v1(
             capture->connection, capture->response_frame,
             capture->response_frame_len);
+    check_equal(event->envelope.frame.signature, signature, sizeof(signature));
   }
   return capture->reject_result;
 }
@@ -953,7 +956,7 @@ static void build_connection_handshake(const test_context_t *context,
   memcpy(ack.peer_connection_id, context->session_config.connection_id, 16);
   memcpy(ack.channel_binding, context->session_config.channel_binding,
          sizeof(ack.channel_binding));
-  check_int_eq(
+  check_equal(
       mesh_mgmt_hello_ack_encode_v1(&ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
       MESH_MGMT_SESSION_OK);
   *hello_frame_len = sign_remote_frame(context, MESH_MGMT_KIND_HELLO, hello_payload,
@@ -995,43 +998,43 @@ static void test_connection_owns_handshake_dispatch_and_receipt_commit(void) {
   fake.frame_lengths[2] = probe_frame_len;
   fake.frame_count = 3u;
 
-  check_int_eq(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_send_v1(&connection, probe_frame, probe_frame_len),
+  check_equal(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
+  check_equal(mesh_mgmt_connection_send_v1(&connection, probe_frame, probe_frame_len),
                MESH_MGMT_CONNECTION_INVALID_STATE);
-  check_size_eq(fake.send_count, 0u);
-  check_int_eq(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
+  check_equal(fake.send_count, 0u);
+  check_equal(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(capture.events[0], MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
-  check_mem_eq(capture.hello_ack.peer_connection_id, context.remote_connection_id, 16);
-  check_int_eq(mesh_mgmt_connection_send_hello_ack_v1(&connection, ack_frame, ack_frame_len),
+  check_equal(capture.events[0], MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
+  check_equal(capture.hello_ack.peer_connection_id, context.remote_connection_id, 16);
+  check_equal(mesh_mgmt_connection_send_hello_ack_v1(&connection, ack_frame, ack_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(capture.events[1], MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
+  check_equal(capture.events[1], MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
   capture.connection = &connection;
   capture.response_frame = probe_frame;
   capture.response_frame_len = probe_frame_len;
-  check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(capture.events[2], MESH_MGMT_DISPATCH_EVENT_MEMBERSHIP);
-  check_int_eq(capture.regular_send_result,
+  check_equal(capture.events[2], MESH_MGMT_DISPATCH_EVENT_MEMBERSHIP);
+  check_equal(capture.regular_send_result,
                MESH_MGMT_CONNECTION_INVALID_STATE);
-  check_int_eq(capture.event_response_result, MESH_MGMT_CONNECTION_OK);
-  check_int_eq(connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
-  check_hex64_eq(connection.dispatcher.replay.last_sequence, 16u);
-  check_hex64_eq(connection.transport.generation, 4u);
-  check_size_eq(capture.event_count, 3u);
-  check_size_eq(fake.release_count, 3u);
-  check_int_eq(mesh_mgmt_connection_send_v1(&connection, command_frame, command_frame_len),
+  check_equal(capture.event_response_result, MESH_MGMT_CONNECTION_OK);
+  check_equal(connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
+  check_equal(connection.dispatcher.replay.last_sequence, 16u);
+  check_equal(connection.transport.generation, 4u);
+  check_equal(capture.event_count, 3u);
+  check_equal(fake.release_count, 3u);
+  check_equal(mesh_mgmt_connection_send_v1(&connection, command_frame, command_frame_len),
                MESH_MGMT_CONNECTION_INVALID_FRAME);
-  check_int_eq(connection.last_dispatch_result, MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED);
-  check_size_eq(fake.send_count, 3u);
-  check_int_eq(mesh_mgmt_connection_send_v1(&connection, probe_frame, probe_frame_len),
+  check_equal(connection.last_dispatch_result, MESH_MGMT_DISPATCH_SIDE_EFFECT_DISABLED);
+  check_equal(fake.send_count, 3u);
+  check_equal(mesh_mgmt_connection_send_v1(&connection, probe_frame, probe_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_size_eq(fake.send_count, 4u);
-  check_int_eq(mesh_mgmt_connection_send_event_response_v1(
+  check_equal(fake.send_count, 4u);
+  check_equal(mesh_mgmt_connection_send_event_response_v1(
                    &connection, probe_frame, probe_frame_len),
                MESH_MGMT_CONNECTION_INVALID_STATE);
   mesh_mgmt_connection_destroy_v1(&connection);
@@ -1058,17 +1061,17 @@ static void test_connection_commits_before_terminal_callback_rejection(void) {
   fake.frame_count = 1u;
   capture.reject_result = 73;
 
-  check_int_eq(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
+  check_equal(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
+  check_equal(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_EVENT_REJECTED);
-  check_int_eq(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
-  check_int_eq(connection.last_event_result, 73);
-  check_hex64_eq(connection.transport.generation, 2u);
+  check_equal(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
+  check_equal(connection.last_event_result, 73);
+  check_equal(connection.transport.generation, 2u);
   check_false(connection.transport.frame_ready);
   check_true(connection.dispatcher.session.remote_hello_verified);
-  check_int_eq(mesh_mgmt_connection_send_v1(&connection, hello_frame, hello_frame_len),
+  check_equal(mesh_mgmt_connection_send_v1(&connection, hello_frame, hello_frame_len),
                MESH_MGMT_CONNECTION_EVENT_REJECTED);
   mesh_mgmt_connection_destroy_v1(&connection);
 }
@@ -1096,17 +1099,17 @@ static void test_connection_commits_and_closes_on_authentication_failure(void) {
   fake.frame_lengths[0] = hello_frame_len;
   fake.frame_count = 1u;
 
-  check_int_eq(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
+  check_equal(mesh_mgmt_connection_init_v1(&connection, &config), MESH_MGMT_CONNECTION_OK);
+  check_equal(mesh_mgmt_connection_send_hello_v1(&connection, hello_frame, hello_frame_len),
                MESH_MGMT_CONNECTION_OK);
-  check_int_eq(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS),
                MESH_MGMT_CONNECTION_DISPATCH_FAILED);
-  check_int_eq(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
-  check_int_eq(connection.last_dispatch_result, MESH_MGMT_DISPATCH_AUTH_FAILED);
-  check_int_eq(connection.last_dispatch_stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
-  check_hex64_eq(connection.transport.generation, 2u);
+  check_equal(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
+  check_equal(connection.last_dispatch_result, MESH_MGMT_DISPATCH_AUTH_FAILED);
+  check_equal(connection.last_dispatch_stage, MESH_MGMT_DISPATCH_STAGE_SESSION);
+  check_equal(connection.transport.generation, 2u);
   check_false(connection.transport.frame_ready);
-  check_size_eq(capture.event_count, 0u);
+  check_equal(capture.event_count, 0u);
   mesh_mgmt_connection_destroy_v1(&connection);
 }
 
@@ -1190,7 +1193,7 @@ static void build_local_peer_handshake(const test_context_t *context,
   hello.max_frame = context->session_config.max_frame;
   hello.max_digest_entries = context->session_config.max_digest_entries;
   hello.max_delta_batch = context->session_config.max_delta_batch;
-  check_int_eq(
+  check_equal(
       mesh_mgmt_hello_encode_v1(&hello, hello_payload, sizeof(hello_payload), &hello_payload_len),
       MESH_MGMT_SESSION_OK);
 
@@ -1211,7 +1214,7 @@ static void build_local_peer_handshake(const test_context_t *context,
   memcpy(ack.peer_connection_id, context->remote_connection_id, 16);
   memcpy(ack.channel_binding, context->session_config.channel_binding,
          sizeof(ack.channel_binding));
-  check_int_eq(
+  check_equal(
       mesh_mgmt_hello_ack_encode_v1(&ack, ack_payload, sizeof(ack_payload), &ack_payload_len),
       MESH_MGMT_SESSION_OK);
   *hello_frame_len = sign_remote_frame(context, MESH_MGMT_KIND_HELLO, hello_payload,
@@ -1273,7 +1276,7 @@ static void test_peer_uses_live_signer_builder_contract(void) {
   callbacks.now_ms = TEST_NOW_MS + 1u;
   prepare_connection_config(&context, &fake, &capture, &config.connection);
   prepare_local_peer_signer(&context, &callbacks, &signer_config);
-  check_int_eq(mesh_mgmt_peer_signer_init_v1(&signer, &signer_config), MESH_MGMT_PEER_SIGNER_OK);
+  check_equal(mesh_mgmt_peer_signer_init_v1(&signer, &signer_config), MESH_MGMT_PEER_SIGNER_OK);
   memcpy(config.local_transport_peer_id, context.transport_peer_id,
          sizeof(config.local_transport_peer_id));
   config.build_hello = mesh_mgmt_peer_signer_build_hello_v1;
@@ -1286,22 +1289,22 @@ static void test_peer_uses_live_signer_builder_contract(void) {
   fake.frame_lengths[1] = ack_frame_len;
   fake.frame_count = 2u;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(fake.last_sent, fake.last_sent_len, &sent),
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_envelope_verify_v1(fake.last_sent, fake.last_sent_len, &sent),
                MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(sent.frame.kind, MESH_MGMT_KIND_HELLO);
-  check_hex64_eq(sent.header.origin_sequence, 100u);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_envelope_verify_v1(fake.last_sent, fake.last_sent_len, &sent),
+  check_equal(sent.frame.kind, MESH_MGMT_KIND_HELLO);
+  check_equal(sent.header.origin_sequence, 100u);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_envelope_verify_v1(fake.last_sent, fake.last_sent_len, &sent),
                MESH_MGMT_ENVELOPE_OK);
-  check_int_eq(sent.frame.kind, MESH_MGMT_KIND_HELLO_ACK);
-  check_hex64_eq(sent.header.origin_sequence, 101u);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(peer.connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
+  check_equal(sent.frame.kind, MESH_MGMT_KIND_HELLO_ACK);
+  check_equal(sent.header.origin_sequence, 101u);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(peer.connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
   check_true(signer.hello_built);
   check_true(signer.ack_built);
-  check_hex64_eq(signer.next_sequence, 102u);
+  check_equal(signer.next_sequence, 102u);
   mesh_mgmt_peer_destroy_v1(&peer);
   mesh_mgmt_peer_signer_destroy_v1(&signer);
 }
@@ -1340,22 +1343,22 @@ static void test_peer_automates_hello_and_ack_after_receipt_commit(void) {
   fake.frame_lengths[1] = ack_frame_len;
   fake.frame_count = 2u;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_INVALID_STATE);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_size_eq(builder.hello_calls, 1u);
-  check_size_eq(fake.send_count, 1u);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_size_eq(builder.ack_calls, 1u);
-  check_size_eq(fake.send_count, 2u);
-  check_hex64_eq(peer.connection.transport.generation, 2u);
-  check_mem_eq(builder.observed_ack.peer_connection_id, context.remote_connection_id, 16);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(peer.connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
-  check_hex64_eq(peer.connection.transport.generation, 3u);
-  check_int_eq(capture.events[0], MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
-  check_int_eq(capture.events[1], MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_INVALID_STATE);
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_INVALID_STATE);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(builder.hello_calls, 1u);
+  check_equal(fake.send_count, 1u);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(builder.ack_calls, 1u);
+  check_equal(fake.send_count, 2u);
+  check_equal(peer.connection.transport.generation, 2u);
+  check_equal(builder.observed_ack.peer_connection_id, context.remote_connection_id, 16);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(peer.connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
+  check_equal(peer.connection.transport.generation, 3u);
+  check_equal(capture.events[0], MESH_MGMT_DISPATCH_EVENT_HELLO_ACK_REQUIRED);
+  check_equal(capture.events[1], MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_INVALID_STATE);
   mesh_mgmt_peer_destroy_v1(&peer);
 }
 
@@ -1398,19 +1401,19 @@ static void test_peer_rejects_signed_mismatched_ack_after_commit(void) {
   fake.frame_lengths[0] = hello_frame_len;
   fake.frame_count = 1u;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
-  check_int_eq(peer.state, MESH_MGMT_PEER_TERMINAL);
-  check_int_eq(peer.last_builder_result, MESH_MGMT_PEER_BUILDER_INVALID_ACK);
-  check_int_eq(peer.connection.state, MESH_MGMT_CONNECTION_TERMINAL);
-  check_int_eq(peer.connection.last_error, MESH_MGMT_CONNECTION_LOCAL_FAILED);
-  check_hex64_eq(peer.connection.transport.generation, 2u);
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
+  check_equal(peer.state, MESH_MGMT_PEER_TERMINAL);
+  check_equal(peer.last_builder_result, MESH_MGMT_PEER_BUILDER_INVALID_ACK);
+  check_equal(peer.connection.state, MESH_MGMT_CONNECTION_TERMINAL);
+  check_equal(peer.connection.last_error, MESH_MGMT_CONNECTION_LOCAL_FAILED);
+  check_equal(peer.connection.transport.generation, 2u);
   check_false(peer.connection.transport.frame_ready);
-  check_size_eq(builder.ack_calls, 1u);
-  check_size_eq(fake.send_count, 1u);
-  check_size_eq(capture.event_count, 1u);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
+  check_equal(builder.ack_calls, 1u);
+  check_equal(fake.send_count, 1u);
+  check_equal(capture.event_count, 1u);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
   mesh_mgmt_peer_destroy_v1(&peer);
 }
 
@@ -1447,15 +1450,15 @@ static void test_peer_consumer_rejection_never_builds_or_sends_ack(void) {
   fake.frame_lengths[0] = hello_frame_len;
   fake.frame_count = 1u;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_CONNECTION_FAILED);
-  check_int_eq(peer.state, MESH_MGMT_PEER_TERMINAL);
-  check_int_eq(peer.last_connection_result, MESH_MGMT_CONNECTION_EVENT_REJECTED);
-  check_int_eq(peer.connection.last_error, MESH_MGMT_CONNECTION_EVENT_REJECTED);
-  check_hex64_eq(peer.connection.transport.generation, 2u);
-  check_size_eq(builder.ack_calls, 0u);
-  check_size_eq(fake.send_count, 1u);
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_pump_once_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_CONNECTION_FAILED);
+  check_equal(peer.state, MESH_MGMT_PEER_TERMINAL);
+  check_equal(peer.last_connection_result, MESH_MGMT_CONNECTION_EVENT_REJECTED);
+  check_equal(peer.connection.last_error, MESH_MGMT_CONNECTION_EVENT_REJECTED);
+  check_equal(peer.connection.transport.generation, 2u);
+  check_equal(builder.ack_calls, 0u);
+  check_equal(fake.send_count, 1u);
   mesh_mgmt_peer_destroy_v1(&peer);
 }
 
@@ -1482,12 +1485,12 @@ static void test_peer_rejects_invalid_local_hello_before_io(void) {
   builder.hello_frame = local_hello_frame;
   builder.hello_frame_len = local_hello_frame_len;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
-  check_int_eq(peer.last_builder_result, MESH_MGMT_PEER_BUILDER_INVALID_HELLO);
-  check_int_eq(peer.connection.last_error, MESH_MGMT_CONNECTION_LOCAL_FAILED);
-  check_size_eq(fake.send_count, 0u);
-  check_size_eq(builder.hello_calls, 1u);
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS), MESH_MGMT_PEER_BUILD_FAILED);
+  check_equal(peer.last_builder_result, MESH_MGMT_PEER_BUILDER_INVALID_HELLO);
+  check_equal(peer.connection.last_error, MESH_MGMT_CONNECTION_LOCAL_FAILED);
+  check_equal(fake.send_count, 0u);
+  check_equal(builder.hello_calls, 1u);
   mesh_mgmt_peer_destroy_v1(&peer);
 }
 
@@ -1515,13 +1518,99 @@ static void test_peer_rejects_local_hello_for_other_noise_session(void) {
   builder.hello_frame = local_hello_frame;
   builder.hello_frame_len = local_hello_frame_len;
 
-  check_int_eq(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
-  check_int_eq(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS),
+  check_equal(mesh_mgmt_peer_init_v1(&peer, &config), MESH_MGMT_PEER_OK);
+  check_equal(mesh_mgmt_peer_start_v1(&peer, TEST_NOW_MS),
                MESH_MGMT_PEER_BUILD_FAILED);
-  check_int_eq(peer.last_builder_result,
+  check_equal(peer.last_builder_result,
                MESH_MGMT_PEER_BUILDER_INVALID_HELLO);
-  check_size_eq(fake.send_count, 0u);
+  check_equal(fake.send_count, 0u);
   mesh_mgmt_peer_destroy_v1(&peer);
+}
+
+static int connection_async_recv(void *context, uint8_t **bytes, size_t *len) {
+  connection_fake_io_t *fake = context;
+  if (fake->recv_count == fake->frame_count) {
+    *bytes = NULL;
+    *len = 0u;
+    return MESH_MGMT_TRANSPORT_PENDING;
+  }
+  return connection_fake_recv(context, bytes, len);
+}
+
+static int connection_async_send(void *context, const uint8_t *bytes, size_t len, uint64_t token) {
+  (void)token;
+  return connection_fake_send(context, bytes, len);
+}
+
+static void test_connection_async_completion(int fail_ack) {
+  test_context_t context;
+  connection_fake_io_t fake = {0};
+  connection_event_capture_t capture = {0};
+  mesh_mgmt_connection_config_v1_t config;
+  mesh_mgmt_connection_v1_t connection = {0};
+  mesh_mgmt_transport_async_io_v1_t io = {&fake, connection_async_recv, connection_fake_release, connection_async_send};
+  uint8_t hello[MESH_MGMT_FRAME_MAX], ack[MESH_MGMT_FRAME_MAX], probe[MESH_MGMT_FRAME_MAX];
+  uint8_t combined[MESH_MGMT_FRAME_MAX];
+  size_t hello_len, ack_len, probe_len;
+  uint64_t token;
+  prepare_connection_config(&context, &fake, &capture, &config);
+  build_connection_handshake(&context, hello, &hello_len, ack, &ack_len);
+  probe_len = sign_remote_frame_values(&context, MESH_MGMT_KIND_PROBE, NULL, 0u,
+      TEST_CERT_SERIAL, 3u, 0x10, 16u, 0x51, probe);
+  check_less_equal(hello_len + ack_len + probe_len, sizeof(combined));
+  memcpy(combined, hello, hello_len);
+  memcpy(combined + hello_len, ack, ack_len);
+  memcpy(combined + hello_len + ack_len, probe, probe_len);
+  fake.frames[0] = combined; fake.frame_lengths[0] = hello_len + ack_len + probe_len;
+  fake.frame_count = 1u;
+  check_equal(mesh_mgmt_connection_init_async_v1(&connection, &config, &io), MESH_MGMT_CONNECTION_OK);
+  check_equal(mesh_mgmt_connection_send_hello_v1(&connection, hello, hello_len), MESH_MGMT_CONNECTION_PENDING);
+  token = connection.transport.pending_send_token;
+  check_false(connection.dispatcher.session.local_hello_sent);
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_PENDING);
+  check_equal(fake.recv_count, 0u);
+  check_equal(mesh_mgmt_connection_complete_send_v1(&connection, token + 1u, 1, hello_len), MESH_MGMT_CONNECTION_INVALID_STATE);
+  check_false(connection.dispatcher.session.local_hello_sent);
+  check_equal(mesh_mgmt_connection_complete_send_v1(&connection, token, 1, hello_len), MESH_MGMT_CONNECTION_OK);
+  check_true(connection.dispatcher.session.local_hello_sent);
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_OK);
+  check_equal(mesh_mgmt_connection_send_hello_ack_v1(&connection, ack, ack_len), MESH_MGMT_CONNECTION_PENDING);
+  token = connection.transport.pending_send_token;
+  check_false(connection.dispatcher.session.local_ack_sent);
+  check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_PENDING);
+  check_equal(capture.event_count, 1u);
+  check_equal(fake.recv_count, 1u);
+  check_equal(fake.release_count, 0u);
+  if (fail_ack == 1) {
+    check_equal(mesh_mgmt_connection_complete_send_v1(&connection, token, 0, 0u), MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
+    check_false(connection.dispatcher.session.local_ack_sent);
+    check_false(connection.dispatcher.replay.bound);
+    check_equal(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
+  } else {
+    check_equal(mesh_mgmt_connection_complete_send_v1(&connection, token, 1, ack_len), MESH_MGMT_CONNECTION_OK);
+    check_true(connection.dispatcher.session.local_ack_sent);
+    check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_OK);
+    check_equal(connection.dispatcher.session.state, MESH_MGMT_SESSION_ESTABLISHED);
+    capture.connection = &connection; capture.response_frame = probe; capture.response_frame_len = probe_len;
+    if (fail_ack == 2) {
+      fake.send_result = -1;
+      check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
+      check_equal(connection.state, MESH_MGMT_CONNECTION_TERMINAL);
+      check_equal(connection.transport.used, 0u);
+      check_equal(fake.release_count, 1u);
+      mesh_mgmt_connection_destroy_v1(&connection);
+      return;
+    }
+    check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_OK);
+    check_equal(capture.event_response_result, MESH_MGMT_CONNECTION_PENDING);
+    check_equal(connection.transport.generation, 4u);
+    token = connection.transport.pending_send_token;
+    check_equal(mesh_mgmt_connection_send_v1(&connection, probe, probe_len), MESH_MGMT_CONNECTION_BUSY);
+    check_equal(mesh_mgmt_connection_complete_send_v1(&connection, token, 1, probe_len), MESH_MGMT_CONNECTION_OK);
+    check_equal(mesh_mgmt_connection_pump_once_v1(&connection, TEST_NOW_MS), MESH_MGMT_CONNECTION_PENDING);
+    check_equal(connection.state, MESH_MGMT_CONNECTION_READY);
+  }
+  mesh_mgmt_connection_destroy_v1(&connection);
 }
 
 spec("mesh management identity and HELLO session") {
@@ -1574,6 +1663,9 @@ spec("mesh management identity and HELLO session") {
     }
   }
   describe("single-owner management connection") {
+    it("marks async HELLO/ACK only after completion and admits event responses") { test_connection_async_completion(0); }
+    it("fails a pending ACK without establishment or replay binding") { test_connection_async_completion(1); }
+    it("keeps callback views alive when an event response admission fails") { test_connection_async_completion(2); }
     it("serializes handshake, event responses, and receipt commit") {
       test_connection_owns_handshake_dispatch_and_receipt_commit();
     }

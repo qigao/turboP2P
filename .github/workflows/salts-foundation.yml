@@ -1,7 +1,7 @@
 name: Salts foundation regression
 on:
   pull_request:
-    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry]
+    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry, codex/tunnel-cnet]
   push:
     branches: [master]
   workflow_dispatch:

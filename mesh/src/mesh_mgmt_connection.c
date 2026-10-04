@@ -9,6 +9,9 @@ typedef mesh_mgmt_dispatch_result_t (*mesh_mgmt_connection_mark_fn)(
 
 static mesh_mgmt_connection_result_t connection_fail(mesh_mgmt_connection_v1_t *connection,
                                                      mesh_mgmt_connection_result_t result) {
+  if (!connection->in_event_callback)
+    (void)mesh_mgmt_transport_abort_v1(&connection->transport);
+  connection->pending_send_kind = 0u;
   connection->state = MESH_MGMT_CONNECTION_TERMINAL;
   connection->last_error = result;
   return result;
@@ -67,9 +70,15 @@ static mesh_mgmt_connection_result_t send_and_mark(mesh_mgmt_connection_v1_t *co
 
   transport_result = mesh_mgmt_transport_send_v1(&connection->transport, frame, frame_len);
   connection->last_transport_result = transport_result;
-  if (transport_result != MESH_MGMT_TRANSPORT_OK)
+  if (transport_result == MESH_MGMT_TRANSPORT_BUSY)
+    return MESH_MGMT_CONNECTION_BUSY;
+  if (transport_result < MESH_MGMT_TRANSPORT_OK)
     return connection_fail(connection, MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
 
+  if (transport_result == MESH_MGMT_TRANSPORT_PENDING) {
+    connection->pending_send_kind = kind;
+    return MESH_MGMT_CONNECTION_PENDING;
+  }
   dispatch_result = mark(&connection->dispatcher, &connection->last_dispatch_stage);
   connection->last_dispatch_result = dispatch_result;
   if (dispatch_result != MESH_MGMT_DISPATCH_OK) {
@@ -79,9 +88,10 @@ static mesh_mgmt_connection_result_t send_and_mark(mesh_mgmt_connection_v1_t *co
   return MESH_MGMT_CONNECTION_OK;
 }
 
-mesh_mgmt_connection_result_t
-mesh_mgmt_connection_init_v1(mesh_mgmt_connection_v1_t *connection,
-                             const mesh_mgmt_connection_config_v1_t *config) {
+static mesh_mgmt_connection_result_t
+connection_init(mesh_mgmt_connection_v1_t *connection,
+                const mesh_mgmt_connection_config_v1_t *config,
+                const mesh_mgmt_transport_async_io_v1_t *async_io) {
   mesh_mgmt_dispatch_stage_t stage = MESH_MGMT_DISPATCH_STAGE_SESSION;
   mesh_mgmt_dispatch_result_t dispatch_result;
   mesh_mgmt_transport_result_t transport_result;
@@ -101,7 +111,9 @@ mesh_mgmt_connection_init_v1(mesh_mgmt_connection_v1_t *connection,
     memset(connection, 0, sizeof(*connection));
     return MESH_MGMT_CONNECTION_DISPATCH_FAILED;
   }
-  transport_result = mesh_mgmt_transport_init_v1(&connection->transport, &config->io);
+  transport_result = async_io
+      ? mesh_mgmt_transport_init_async_v1(&connection->transport, async_io)
+      : mesh_mgmt_transport_init_v1(&connection->transport, &config->io);
   connection->last_transport_result = transport_result;
   if (transport_result != MESH_MGMT_TRANSPORT_OK) {
     mesh_mgmt_dispatcher_destroy_v1(&connection->dispatcher);
@@ -117,6 +129,48 @@ mesh_mgmt_connection_init_v1(mesh_mgmt_connection_v1_t *connection,
   connection->last_error = MESH_MGMT_CONNECTION_OK;
   connection->last_transport_result = MESH_MGMT_TRANSPORT_OK;
   connection->last_dispatch_result = MESH_MGMT_DISPATCH_OK;
+  return MESH_MGMT_CONNECTION_OK;
+}
+
+mesh_mgmt_connection_result_t mesh_mgmt_connection_init_v1(
+    mesh_mgmt_connection_v1_t *connection, const mesh_mgmt_connection_config_v1_t *config) {
+  return connection_init(connection, config, NULL);
+}
+
+mesh_mgmt_connection_result_t mesh_mgmt_connection_init_async_v1(
+    mesh_mgmt_connection_v1_t *connection, const mesh_mgmt_connection_config_v1_t *config,
+    const mesh_mgmt_transport_async_io_v1_t *io) {
+  if (!io)
+    return MESH_MGMT_CONNECTION_INVALID_ARG;
+  return connection_init(connection, config, io);
+}
+
+mesh_mgmt_connection_result_t mesh_mgmt_connection_complete_send_v1(
+    mesh_mgmt_connection_v1_t *connection, uint64_t token, int success, size_t bytes) {
+  mesh_mgmt_connection_result_t result = require_ready(connection);
+  mesh_mgmt_transport_result_t transport_result;
+  mesh_mgmt_dispatch_result_t dispatch_result = MESH_MGMT_DISPATCH_OK;
+  uint8_t kind;
+  if (result != MESH_MGMT_CONNECTION_OK)
+    return result;
+  transport_result = mesh_mgmt_transport_complete_send_v1(
+      &connection->transport, token, success, bytes);
+  if (transport_result == MESH_MGMT_TRANSPORT_INVALID_STATE)
+    return MESH_MGMT_CONNECTION_INVALID_STATE;
+  connection->last_transport_result = transport_result;
+  if (transport_result != MESH_MGMT_TRANSPORT_OK)
+    return connection_fail(connection, MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
+  kind = connection->pending_send_kind;
+  connection->pending_send_kind = 0u;
+  if (kind == MESH_MGMT_KIND_HELLO)
+    dispatch_result = mesh_mgmt_dispatcher_mark_hello_sent_v1(
+        &connection->dispatcher, &connection->last_dispatch_stage);
+  else if (kind == MESH_MGMT_KIND_HELLO_ACK)
+    dispatch_result = mesh_mgmt_dispatcher_mark_ack_sent_v1(
+        &connection->dispatcher, &connection->last_dispatch_stage);
+  connection->last_dispatch_result = dispatch_result;
+  if (dispatch_result != MESH_MGMT_DISPATCH_OK)
+    return connection_fail(connection, MESH_MGMT_CONNECTION_DISPATCH_FAILED);
   return MESH_MGMT_CONNECTION_OK;
 }
 
@@ -147,8 +201,12 @@ mesh_mgmt_connection_pump_once_v1(mesh_mgmt_connection_v1_t *connection, uint64_
 
   if (result != MESH_MGMT_CONNECTION_OK)
     return result;
+  if (connection->transport.pending_send_token)
+    return MESH_MGMT_CONNECTION_PENDING;
   transport_result = mesh_mgmt_transport_receive_v1(&connection->transport, &receipt);
   connection->last_transport_result = transport_result;
+  if (transport_result == MESH_MGMT_TRANSPORT_PENDING)
+    return MESH_MGMT_CONNECTION_PENDING;
   if (transport_result != MESH_MGMT_TRANSPORT_OK)
     return connection_fail(connection, MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
 
@@ -170,6 +228,10 @@ mesh_mgmt_connection_pump_once_v1(mesh_mgmt_connection_v1_t *connection, uint64_
   connection->in_event_callback = 0;
   connection->last_event_result = event_result;
 
+  if (connection->state == MESH_MGMT_CONNECTION_TERMINAL) {
+    (void)mesh_mgmt_transport_abort_v1(&connection->transport);
+    return connection->last_error;
+  }
   transport_result = mesh_mgmt_transport_commit_v1(&connection->transport, &receipt);
   connection->last_transport_result = transport_result;
   if (transport_result != MESH_MGMT_TRANSPORT_OK)
@@ -265,6 +327,12 @@ send_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
 
   transport_result = mesh_mgmt_transport_send_v1(&connection->transport, frame, frame_len);
   connection->last_transport_result = transport_result;
+  if (transport_result == MESH_MGMT_TRANSPORT_BUSY)
+    return MESH_MGMT_CONNECTION_BUSY;
+  if (transport_result == MESH_MGMT_TRANSPORT_PENDING) {
+    connection->pending_send_kind = kind;
+    return MESH_MGMT_CONNECTION_PENDING;
+  }
   if (transport_result != MESH_MGMT_TRANSPORT_OK)
     return connection_fail(connection, MESH_MGMT_CONNECTION_TRANSPORT_FAILED);
   connection->last_dispatch_result = MESH_MGMT_DISPATCH_OK;

@@ -15,6 +15,22 @@ set(mesh_src "${TURBOP2P_SOURCE_DIR}/mesh/src")
 set(mesh_tests "${TURBOP2P_SOURCE_DIR}/mesh/tests")
 add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/monocypher" monocypher)
 add_library(foundation STATIC
+  "${mesh_src}/mesh_mgmt_codec.c"
+  "${mesh_src}/mesh_mgmt_envelope.c"
+  "${mesh_src}/mesh_mgmt_identity.c"
+  "${mesh_src}/mesh_mgmt_session.c"
+  "${mesh_src}/mesh_mgmt_replay.c"
+  "${mesh_src}/mesh_mgmt_execution_wire.c"
+  "${mesh_src}/mesh_mgmt_execution.c"
+  "${mesh_src}/mesh_mgmt_execution_result.c"
+  "${mesh_src}/mesh_mgmt_dispatch.c"
+  "${mesh_src}/mesh_mgmt_execution_consumer.c"
+  "${mesh_src}/mesh_mgmt_execution_response_consumer.c"
+  "${mesh_src}/mesh_mgmt_transport.c"
+  "${mesh_src}/mesh_mgmt_connection.c"
+  "${mesh_src}/mesh_mgmt_peer.c"
+  "${mesh_src}/mesh_mgmt_peer_signer.c"
+  "${mesh_src}/mesh_mgmt_cnet_peer.c"
   "${mesh_src}/mesh_mgmt_crypto.c"
   "${mesh_src}/mesh_stream_bind.c"
   "${mesh_src}/mesh_stream_cnet_adapter.c"
@@ -48,6 +64,9 @@ target_include_directories(vector_owners PRIVATE
 target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::Core)
 
 foreach(test_name IN ITEMS
+  test_mesh_mgmt_session
+  test_mesh_mgmt_transport
+  test_mesh_mgmt_peer_signer
   test_mesh_mgmt_crypto
   test_mesh_stream_bind
   test_mesh_stream_channel
@@ -72,7 +91,7 @@ set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
 add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
 
-foreach(test_name IN ITEMS test_mesh_stream_cnet test_mesh_stream_cnet_bind test_mesh_stream_cnet_channel test_mesh_stream_cnet_registry)
+foreach(test_name IN ITEMS test_mesh_mgmt_cnet_tls_policy test_mesh_mgmt_cnet_peer test_mesh_stream_cnet test_mesh_stream_cnet_bind test_mesh_stream_cnet_channel test_mesh_stream_cnet_registry)
   add_executable(${test_name} "${mesh_tests}/${test_name}.c")
   set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
   target_link_libraries(${test_name} PRIVATE foundation Salts::TinyTest Salts::CNet)

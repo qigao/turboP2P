@@ -2,7 +2,8 @@
 
 #include "mesh_mgmt_crypto.h"
 
-#include <platform.h>
+#include <salts/random.h>
+#include <salts/clock.h>
 
 #include <string.h>
 
@@ -16,13 +17,13 @@ static int bytes_are_zero(const uint8_t *bytes, size_t length) {
 }
 
 static uint64_t signer_now_ms(mesh_mgmt_peer_signer_v1_t *signer) {
-  return signer->now_ms ? signer->now_ms(signer->callback_context) : turbo_realtime_ms();
+  return signer->now_ms ? signer->now_ms(signer->callback_context) : salts_realtime_ms();
 }
 
 static int signer_random_bytes(mesh_mgmt_peer_signer_v1_t *signer, uint8_t *output,
                                size_t output_len) {
   return signer->random_bytes ? signer->random_bytes(signer->callback_context, output, output_len)
-                              : turbo_secure_random(output, output_len);
+                              : salts_platform_secure_random(output, output_len);
 }
 
 static mesh_mgmt_peer_signer_result_t signer_require_ready(mesh_mgmt_peer_signer_v1_t *signer,
@@ -109,7 +110,7 @@ mesh_mgmt_peer_signer_init_v1(mesh_mgmt_peer_signer_v1_t *signer,
     return MESH_MGMT_PEER_SIGNER_IDENTITY_FAILED;
   }
   signer->in_build = 1u;
-  now_ms = config->now_ms ? config->now_ms(config->callback_context) : turbo_realtime_ms();
+  now_ms = config->now_ms ? config->now_ms(config->callback_context) : salts_realtime_ms();
   signer->in_build = 0u;
   identity_result = mesh_mgmt_certificate_verify_v1(
       config->hello.certificate, sizeof(config->hello.certificate), config->trusted_issuer_key,
@@ -299,7 +300,8 @@ mesh_mgmt_peer_signer_result_t mesh_mgmt_peer_signer_build_targeted_v1(
     case MESH_MGMT_KIND_COMMAND_STATUS:
       break;
     default:
-      return MESH_MGMT_PEER_SIGNER_INVALID_ARG;
+      if (!mesh_mgmt_dispatch_kind_is_observer_safe_v1(kind))
+        return MESH_MGMT_PEER_SIGNER_INVALID_ARG;
   }
   return signer_build_frame(signer, kind, target_node_id, payload,
                             payload_len, out_frame, out_frame_len);

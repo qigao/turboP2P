@@ -178,8 +178,8 @@ static mesh_mgmt_peer_result_t connection_fail(mesh_mgmt_peer_v1_t *peer,
   return peer_fail(peer, MESH_MGMT_PEER_CONNECTION_FAILED);
 }
 
-mesh_mgmt_peer_result_t mesh_mgmt_peer_init_v1(mesh_mgmt_peer_v1_t *peer,
-                                               const mesh_mgmt_peer_config_v1_t *config) {
+static mesh_mgmt_peer_result_t peer_init(mesh_mgmt_peer_v1_t *peer,
+    const mesh_mgmt_peer_config_v1_t *config, const mesh_mgmt_transport_async_io_v1_t *async_io) {
   mesh_mgmt_connection_config_v1_t connection_config;
   mesh_mgmt_connection_result_t connection_result;
 
@@ -202,7 +202,9 @@ mesh_mgmt_peer_result_t mesh_mgmt_peer_init_v1(mesh_mgmt_peer_v1_t *peer,
   connection_config = config->connection;
   connection_config.on_event = peer_event;
   connection_config.event_context = peer;
-  connection_result = mesh_mgmt_connection_init_v1(&peer->connection, &connection_config);
+  connection_result = async_io
+      ? mesh_mgmt_connection_init_async_v1(&peer->connection, &connection_config, async_io)
+      : mesh_mgmt_connection_init_v1(&peer->connection, &connection_config);
   peer->last_connection_result = connection_result;
   if (connection_result != MESH_MGMT_CONNECTION_OK) {
     memset(peer, 0, sizeof(*peer));
@@ -212,6 +214,41 @@ mesh_mgmt_peer_result_t mesh_mgmt_peer_init_v1(mesh_mgmt_peer_v1_t *peer,
   peer->state = MESH_MGMT_PEER_READY;
   peer->last_error = MESH_MGMT_PEER_OK;
   return MESH_MGMT_PEER_OK;
+}
+
+mesh_mgmt_peer_result_t mesh_mgmt_peer_init_v1(
+    mesh_mgmt_peer_v1_t *peer, const mesh_mgmt_peer_config_v1_t *config) {
+  return peer_init(peer, config, NULL);
+}
+
+mesh_mgmt_peer_result_t mesh_mgmt_peer_init_async_v1(
+    mesh_mgmt_peer_v1_t *peer, const mesh_mgmt_peer_config_v1_t *config,
+    const mesh_mgmt_transport_async_io_v1_t *io) {
+  if (!io)
+    return MESH_MGMT_PEER_INVALID_ARG;
+  return peer_init(peer, config, io);
+}
+
+mesh_mgmt_peer_result_t mesh_mgmt_peer_complete_send_v1(
+    mesh_mgmt_peer_v1_t *peer, uint64_t token, int success, size_t bytes) {
+  mesh_mgmt_peer_result_t result = require_ready(peer);
+  mesh_mgmt_connection_result_t connection_result;
+  if (result != MESH_MGMT_PEER_OK)
+    return result;
+  connection_result = mesh_mgmt_connection_complete_send_v1(&peer->connection, token, success, bytes);
+  if (connection_result == MESH_MGMT_CONNECTION_INVALID_STATE)
+    return MESH_MGMT_PEER_INVALID_STATE;
+  if (connection_result != MESH_MGMT_CONNECTION_OK)
+    return connection_fail(peer, connection_result);
+  peer->last_connection_result = MESH_MGMT_CONNECTION_OK;
+  return MESH_MGMT_PEER_OK;
+}
+
+mesh_mgmt_peer_result_t mesh_mgmt_peer_abort_v1(mesh_mgmt_peer_v1_t *peer) {
+  mesh_mgmt_peer_result_t result = require_ready(peer);
+  if (result != MESH_MGMT_PEER_OK)
+    return result;
+  return connection_fail(peer, MESH_MGMT_CONNECTION_LOCAL_FAILED);
 }
 
 void mesh_mgmt_peer_destroy_v1(mesh_mgmt_peer_v1_t *peer) {
@@ -244,12 +281,12 @@ mesh_mgmt_peer_result_t mesh_mgmt_peer_start_v1(mesh_mgmt_peer_v1_t *peer, uint6
     return builder_fail(peer, MESH_MGMT_PEER_BUILDER_INVALID_HELLO);
 
   connection_result = mesh_mgmt_connection_send_hello_v1(&peer->connection, frame, frame_len);
-  if (connection_result != MESH_MGMT_CONNECTION_OK)
+  if (connection_result != MESH_MGMT_CONNECTION_OK && connection_result != MESH_MGMT_CONNECTION_PENDING)
     return connection_fail(peer, connection_result);
-  peer->last_connection_result = MESH_MGMT_CONNECTION_OK;
+  peer->last_connection_result = connection_result;
   peer->started = 1;
   peer->last_error = MESH_MGMT_PEER_OK;
-  return MESH_MGMT_PEER_OK;
+  return connection_result == MESH_MGMT_CONNECTION_PENDING ? MESH_MGMT_PEER_PENDING : MESH_MGMT_PEER_OK;
 }
 
 mesh_mgmt_peer_result_t mesh_mgmt_peer_pump_once_v1(mesh_mgmt_peer_v1_t *peer, uint64_t now_ms) {
@@ -265,6 +302,8 @@ mesh_mgmt_peer_result_t mesh_mgmt_peer_pump_once_v1(mesh_mgmt_peer_v1_t *peer, u
     return MESH_MGMT_PEER_INVALID_STATE;
 
   connection_result = mesh_mgmt_connection_pump_once_v1(&peer->connection, now_ms);
+  if (connection_result == MESH_MGMT_CONNECTION_PENDING)
+    return MESH_MGMT_PEER_PENDING;
   if (connection_result != MESH_MGMT_CONNECTION_OK)
     return connection_fail(peer, connection_result);
   peer->last_connection_result = MESH_MGMT_CONNECTION_OK;
@@ -284,9 +323,9 @@ mesh_mgmt_peer_result_t mesh_mgmt_peer_pump_once_v1(mesh_mgmt_peer_v1_t *peer, u
   connection_result = mesh_mgmt_connection_send_hello_ack_v1(&peer->connection, frame, frame_len);
   peer->ack_pending = 0;
   memset(&peer->pending_ack, 0, sizeof(peer->pending_ack));
-  if (connection_result != MESH_MGMT_CONNECTION_OK)
+  if (connection_result != MESH_MGMT_CONNECTION_OK && connection_result != MESH_MGMT_CONNECTION_PENDING)
     return connection_fail(peer, connection_result);
-  peer->last_connection_result = MESH_MGMT_CONNECTION_OK;
+  peer->last_connection_result = connection_result;
   peer->last_error = MESH_MGMT_PEER_OK;
-  return MESH_MGMT_PEER_OK;
+  return connection_result == MESH_MGMT_CONNECTION_PENDING ? MESH_MGMT_PEER_PENDING : MESH_MGMT_PEER_OK;
 }
