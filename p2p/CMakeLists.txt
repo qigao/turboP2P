@@ -52,7 +52,7 @@ target_include_directories(
 target_link_libraries(
   p2p
   PUBLIC TurboUtils::Core TurboNet::CoroNet TurboParser::Parser
-  PRIVATE OpenSSL::Crypto monocypher Salts::Platform Salts::CNet TurboP2P::NoiseProtocol roaring uthash)
+  PRIVATE OpenSSL::Crypto monocypher Salts::Platform Salts::Concurrency Salts::CNet TurboP2P::NoiseProtocol roaring uthash)
 target_link_libraries(p2p PRIVATE Salts::Crypto)
 if(NOT WIN32)
   target_link_libraries(p2p PRIVATE m)

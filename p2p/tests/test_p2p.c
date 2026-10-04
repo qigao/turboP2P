@@ -996,8 +996,9 @@ static void test_p2p_blocking_private_key_provider_is_bounded_and_opaque(void) {
     check(node->crypto.identity.uses_private_key_provider == 0);
     check_mem_eq(node->crypto.identity.secret_key, zero, sizeof(zero));
     check_not_null(node->private_key_executor);
-    check_uint_eq(1, node->private_key_executor->workers);
-    check_uint_eq(2, node->private_key_executor->capacity);
+    check_int_eq(P2P_OK, p2p_key_worker_status(node->private_key_executor->worker, &status));
+    check_uint_eq(1, status.workers);
+    check_uint_eq(2, status.operation_capacity);
     check_uint_eq(500, node->private_key_executor->operation_timeout_ms);
     installed_executor = node->private_key_executor;
     status.struct_size = sizeof(status);
@@ -4042,10 +4043,15 @@ static void test_p2p_blocking_private_key_provider_completes_both_xx_roles(void)
                                          memory_order_relaxed));
     check_uint_eq(2, atomic_load_explicit(&context2.calculate_calls,
                                          memory_order_relaxed));
-    check_uint_eq(1, node1->private_key_executor->completed);
-    check_uint_eq(1, node2->private_key_executor->completed);
-    check_uint_eq(0, node1->private_key_executor->active_operations);
-    check_uint_eq(0, node2->private_key_executor->active_operations);
+    {
+        p2p_private_key_executor_status_v4_t worker_status;
+        check_int_eq(P2P_OK, p2p_key_worker_status(node1->private_key_executor->worker, &worker_status));
+        check_uint_eq(1, worker_status.completed);
+        check_uint_eq(0, worker_status.active_operations);
+        check_int_eq(P2P_OK, p2p_key_worker_status(node2->private_key_executor->worker, &worker_status));
+        check_uint_eq(1, worker_status.completed);
+        check_uint_eq(0, worker_status.active_operations);
+    }
 
     p2p_test_shutdown_nodes(node1, node2, NULL);
     p2p_destroy(node2);
@@ -4349,8 +4355,7 @@ static void test_p2p_blocking_private_key_stale_generation_is_isolated(void) {
         turbo_mutex_lock(&node->mutex);
         operation = peer->private_key_operation;
         worker_completed =
-            operation && atomic_load_explicit(&operation->completed,
-                                              memory_order_acquire) != 0;
+            operation && p2p_key_work_ready(operation->work);
         turbo_mutex_unlock(&node->mutex);
         if (worker_completed) {
             break;
@@ -4471,6 +4476,12 @@ static void test_p2p_blocking_private_key_late_completion_fails_closed(void) {
     }
     check_int_eq(P2P_OK, status_result);
     check_uint_eq(1, status.completion_post_failures);
+    /* Wakes carry no operation ownership. Delay the authoritative owner pump
+     * past its deadline even when the worker has already completed. */
+    {
+        uint64_t until_ms = turbo_hrtime() / 1000000U + provider.operation_timeout_ms;
+        while (turbo_hrtime() / 1000000U <= until_ms) turbo_sleep_ms(1);
+    }
     p2p_private_key_executor_pump(server);
     check_int_eq(P2P_OK,
                  p2p_node_get_private_key_executor_status_v4(server,

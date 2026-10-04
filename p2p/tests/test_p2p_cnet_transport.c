@@ -3,6 +3,9 @@
 #include "crypto/p2p_crypto.h"
 #include "security/p2p_cookie.h"
 #include "security/p2p_cnet_admission.h"
+#include "security/p2p_key_worker.h"
+#include "p2p_security_fixture.h"
+#include <stdatomic.h>
 #include <salts/clock.h>
 #include <salts/thread.h>
 #include <stdlib.h>
@@ -355,6 +358,7 @@ typedef struct {
     p2p_identity_t identity;
     p2p_noise_handshake_t handshake;
     p2p_crypto_session_t session;
+    p2p_key_work_t *work;
     uint8_t frame[4096];
     size_t used;
     size_t pending_handshake_bytes;
@@ -365,6 +369,10 @@ typedef struct {
 struct secure_pair_s {
     secure_endpoint_t client, server;
     p2p_cnet_admission_t *admission;
+    p2p_key_worker_t *worker;
+    p2p_identity_t provider_identity;
+    atomic_int provider_calls;
+    unsigned waiting_polls;
     uint8_t cookie_secret[32];
     uint8_t network[32];
     unsigned peer_creations;
@@ -409,10 +417,55 @@ static void secure_sent(p2p_connection_t *connection, size_t length, void *conte
     check_equal(P2P_OK, p2p_cnet_connection_pause(connection, 0));
 }
 
+static int blocking_public(void *context, uint8_t output[32]) {
+    secure_pair_t *pair = context;
+    memcpy(output, pair->provider_identity.public_key, 32);
+    return P2P_OK;
+}
+
+static int blocking_calculate(void *context, const uint8_t remote[32], uint64_t deadline,
+    const p2p_private_key_cancel_v4_t *cancel, uint8_t output[32]) {
+    secure_pair_t *pair = context;
+    uint64_t until_ms = salts_monotonic_ms() + 20;
+    atomic_fetch_add(&pair->provider_calls, 1);
+    while (salts_monotonic_ms() < until_ms) {
+        if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
+        if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
+        salts_sleep_ms(1);
+    }
+    return p2p_test_x25519(output, pair->provider_identity.secret_key, remote);
+}
+
+static void noise_work_complete(p2p_key_work_t *work, const p2p_key_result_t *result,
+    void *context) {
+    secure_endpoint_t *endpoint = context;
+    uint8_t frame[P2P_SECURITY_HANDSHAKE_FRAME_MAX + 2];
+    check_true(work == endpoint->work);
+    endpoint->work = NULL;
+    if (!endpoint->transport.connection || !endpoint->transport.connection->is_connected) return;
+    check_equal(P2P_OK, result->status);
+    check_equal(UINT64_C(1), result->generation);
+    frame[0] = (uint8_t)(result->output_len >> 8);
+    frame[1] = (uint8_t)result->output_len;
+    memcpy(frame + 2, result->output, result->output_len);
+    check_equal(P2P_OK, p2p_connection_send(endpoint->transport.connection,
+        frame, result->output_len + 2));
+    endpoint->pending_handshake_bytes = result->output_len + 2;
+    memset(frame, 0xa5, sizeof(frame));
+    /* Receive stays paused until secure_sent observes the write terminal. */
+}
+
 static int send_noise(secure_endpoint_t *endpoint) {
     uint8_t frame[4096];
     size_t length = 0;
-    int result = p2p_noise_write_message(&endpoint->handshake, frame + 2, &length, sizeof(frame) - 2);
+    int result;
+    if (!endpoint->initiator && endpoint->pair->worker) {
+        result = p2p_cnet_connection_pause(endpoint->transport.connection, 1);
+        if (result != P2P_OK) return result;
+        return p2p_key_worker_submit(endpoint->pair->worker, &endpoint->handshake, 1,
+            NULL, 0, noise_work_complete, endpoint, &endpoint->work);
+    }
+    result = p2p_noise_write_message(&endpoint->handshake, frame + 2, &length, sizeof(frame) - 2);
     if (result != P2P_OK) return result;
     frame[0] = (uint8_t)(length >> 8);
     frame[1] = (uint8_t)length;
@@ -547,12 +600,14 @@ static void secure_rejected(const cnet_stream_peer *source, int status, void *co
     closed(NULL, status, &pair->server.transport);
 }
 
-static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrupt) {
+static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrupt, int blocking) {
     secure_pair_t pair = {0};
     p2p_cnet_config_t policy = config(receive_size);
     p2p_cnet_callbacks_t events;
     cnet_stream_peer remote;
     uint64_t deadline;
+    int cancelled = 0;
+    atomic_init(&pair.provider_calls, 0);
     pair.client.pair = pair.server.pair = &pair;
     pair.client.initiator = 1;
     pair.cookie_secret[0] = 7;
@@ -560,7 +615,20 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
     pair.pause_handoff = pause;
     pair.corrupt_cookie = corrupt;
     check_equal(P2P_OK, p2p_crypto_generate_identity(&pair.client.identity));
-    check_equal(P2P_OK, p2p_crypto_generate_identity(&pair.server.identity));
+    if (blocking) {
+        p2p_blocking_private_key_provider_v4_t provider = {0};
+        provider.struct_size = sizeof(provider);
+        provider.context = &pair;
+        provider.get_public_key = blocking_public;
+        provider.calculate_x25519 = blocking_calculate;
+        provider.executor_workers = 1;
+        provider.executor_capacity = 2;
+        provider.operation_timeout_ms = TEST_DEADLINE_MS;
+        check_equal(P2P_OK, p2p_crypto_generate_identity(&pair.provider_identity));
+        check_equal(P2P_OK, p2p_crypto_identity_from_blocking_provider(&pair.server.identity,
+            &provider, pair.provider_identity.public_key));
+        check_equal(P2P_OK, p2p_key_worker_create(&provider, NULL, NULL, &pair.worker));
+    } else check_equal(P2P_OK, p2p_crypto_generate_identity(&pair.server.identity));
     check_equal(P2P_OK, p2p_cnet_owner_create(&policy, &pair.client.transport.owner));
     check_equal(P2P_OK, p2p_cnet_owner_create(&policy, &pair.server.transport.owner));
     {
@@ -588,6 +656,18 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
     while (!pair.client.delivered && !pair.server.transport.closed && salts_monotonic_ms() < deadline) {
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.client.transport.owner));
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.server.transport.owner));
+        if (pair.server.work) {
+            pair.waiting_polls++;
+            check_equal(0, pair.server.session.ready);
+            if (blocking == 2 && !cancelled && atomic_load(&pair.provider_calls)) {
+                p2p_connection_destroy(pair.server.transport.connection);
+                pair.server.transport.connection = NULL;
+                check_equal(1, p2p_key_work_cancel(pair.server.work));
+                cancelled = 1;
+            }
+        }
+        if (pair.worker) check_equal(P2P_OK, p2p_key_worker_poll(pair.worker));
+        if (cancelled && !pair.server.work) break;
         if (pair.peer_creations && pair.pause_handoff) {
             check_true(pair.server.handshake.state != NULL);
             check_equal((size_t)0, pair.server.used);
@@ -597,7 +677,13 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
         }
         salts_sleep_ms(1);
     }
-    if (corrupt) {
+    if (blocking == 2) {
+        check_equal(1, cancelled);
+        check_true(pair.server.work == NULL);
+        check_equal(0, pair.client.delivered);
+        check_equal(0, pair.server.delivered);
+        check_equal((size_t)0, pair.server.pending_handshake_bytes);
+    } else if (corrupt) {
         check_equal(0U, pair.peer_creations);
         check_equal(P2P_ERR_CRYPTO, pair.server.transport.close_status);
         check_equal(1U, pair.server.transport.closed);
@@ -608,6 +694,8 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
         check_equal(1, pair.server.delivered);
         check_equal(pair.client.handshake.handshake_hash, pair.server.handshake.handshake_hash, 32);
     }
+    if (blocking == 1) check_true(pair.waiting_polls > 1);
+    check_equal(P2P_OK, p2p_key_worker_destroy(pair.worker));
     check_equal(P2P_OK, p2p_cnet_admission_stop(pair.admission));
     check_equal(P2P_OK, p2p_cnet_owner_destroy(pair.client.transport.owner));
     check_equal(P2P_OK, p2p_cnet_owner_destroy(pair.server.transport.owner));
@@ -792,8 +880,10 @@ spec("P2P CNet connection ownership") {
     it("closes pending sends and reuses CNet slots without old callbacks") { test_close_pending_and_reuse(); }
     it("cancels an admitted connect before progress") { test_cancel_connect_and_reject_accept(); }
     it("bounds outstanding write count and retained connections") { test_write_count_and_connection_bounds(); }
-    it("hands a cookie gate to Noise with a coalesced first frame") { test_cookie_noise_handoff(4096, 0, 0); }
-    it("preserves a paused gate-to-Noise tail") { test_cookie_noise_handoff(4096, 1, 0); }
-    it("handles seven-byte cookie and Noise receive fragments") { test_cookie_noise_handoff(7, 0, 0); }
-    it("rejects a corrupted cookie before creating a Noise peer") { test_cookie_noise_handoff(4096, 0, 1); }
+    it("keeps CNet progress live while a blocking provider computes Noise") { test_cookie_noise_handoff(7, 0, 0, 1); }
+    it("discards private-key completion after a CNet disconnect") { test_cookie_noise_handoff(4096, 0, 0, 2); }
+    it("hands a cookie gate to Noise with a coalesced first frame") { test_cookie_noise_handoff(4096, 0, 0, 0); }
+    it("preserves a paused gate-to-Noise tail") { test_cookie_noise_handoff(4096, 1, 0, 0); }
+    it("handles seven-byte cookie and Noise receive fragments") { test_cookie_noise_handoff(7, 0, 0, 0); }
+    it("rejects a corrupted cookie before creating a Noise peer") { test_cookie_noise_handoff(4096, 0, 1, 0); }
 }

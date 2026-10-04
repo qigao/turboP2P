@@ -947,29 +947,9 @@ static void p2p_node_fill_security_status_v2_locked(
 static void p2p_node_fill_private_key_executor_status_v4_locked(
     const p2p_private_key_executor_t *executor,
     p2p_private_key_executor_status_v4_t *status) {
-    turbo_threadpool_stats_t pool_status = {0};
-
-    memset(status, 0, sizeof(*status));
-    status->struct_size = sizeof(*status);
-    if (executor->pool) {
-        turbo_threadpool_get_stats(executor->pool, &pool_status);
-    }
-    status->workers = executor->workers;
-    status->operation_capacity = executor->capacity;
-    status->operation_timeout_ms = executor->operation_timeout_ms;
-    status->active_operations = executor->active_operations;
-    status->queued_operations = pool_status.queued_tasks > 0
-                                    ? (size_t)pool_status.queued_tasks
-                                    : 0;
-    status->accepting =
-        !p2p_private_key_executor_is_closing(executor) &&
-        pool_status.accepting != 0;
-    status->submitted = executor->submitted;
-    status->completed = executor->completed;
-    status->rejected = executor->rejected;
-    status->timed_out = executor->timed_out;
-    status->cancelled = executor->cancelled;
-    status->completion_post_failures = executor->completion_post_failures;
+    p2p_key_worker_status(executor->worker, status);
+    status->rejected += executor->rejected;
+    if (p2p_private_key_executor_is_closing(executor)) status->accepting = 0;
 }
 
 int p2p_node_get_security_status_v2(
