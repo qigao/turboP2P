@@ -140,10 +140,11 @@ endif()
 
 add_library(p2p_cnet_transport STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/connection.c"
-  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/cnet_transport.c")
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/cnet_transport.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cnet_admission.c")
 target_include_directories(p2p_cnet_transport PUBLIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src" "${TURBOP2P_SOURCE_DIR}/p2p/include")
-target_link_libraries(p2p_cnet_transport PUBLIC Salts::CNet Salts::Core)
+target_link_libraries(p2p_cnet_transport PUBLIC Salts::CNet Salts::Core p2p_security)
 add_executable(test_p2p_cnet_transport
   "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_transport.c")
 set_property(TARGET test_p2p_cnet_transport PROPERTY LINKER_LANGUAGE CXX)
@@ -157,4 +158,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(test_p2p_cnet_transport PRIVATE
     "-Wl,--wrap=cnet_connect_peer" "-Wl,--wrap=cnet_close"
     "-Wl,--wrap=cnet_send_buffer" "-Wl,--wrap=cnet_client_stop")
+endif()
+
+add_executable(test_p2p_cnet_admission
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_admission.c")
+set_property(TARGET test_p2p_cnet_admission PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_admission PRIVATE
+  p2p_cnet_transport Salts::TinyTest Salts::Platform)
+add_test(NAME test_p2p_cnet_admission COMMAND test_p2p_cnet_admission)
+set_tests_properties(test_p2p_cnet_admission PROPERTIES TIMEOUT 60)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_p2p_cnet_admission PRIVATE P2P_ADMISSION_TEST_WRAP)
+  target_link_options(test_p2p_cnet_admission PRIVATE
+    "-Wl,--wrap=cnet_client_adopt_accepted" "-Wl,--wrap=cnet_send_buffer")
 endif()

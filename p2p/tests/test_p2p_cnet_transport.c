@@ -2,6 +2,7 @@
 #include "core/cnet_transport.h"
 #include "crypto/p2p_crypto.h"
 #include "security/p2p_cookie.h"
+#include "security/p2p_cnet_admission.h"
 #include <salts/clock.h>
 #include <salts/thread.h>
 #include <stdlib.h>
@@ -361,17 +362,9 @@ typedef struct {
     int delivered;
 } secure_endpoint_t;
 
-typedef struct {
-    secure_pair_t *pair;
-    uint8_t preface[P2P_SECURE_PREFACE_SIZE];
-    uint8_t packet[P2P_COOKIE_PACKET_SIZE];
-    size_t used;
-    int phase;
-} gate_t;
-
 struct secure_pair_s {
     secure_endpoint_t client, server;
-    gate_t *gate;
+    p2p_cnet_admission_t *admission;
     uint8_t cookie_secret[32];
     uint8_t network[32];
     unsigned peer_creations;
@@ -516,76 +509,42 @@ static int client_cookie_connected(p2p_connection_t *connection, void *context) 
     return p2p_connection_send(connection, preface, sizeof(preface));
 }
 
-static int gate_connected(p2p_connection_t *connection, void *context) {
-    gate_t *gate = context;
-    return connected(connection, &gate->pair->server.transport);
+static int secure_admit(const cnet_stream_peer *source, void *context) {
+    (void)source;
+    (void)context;
+    return P2P_OK; /* This fixture has no node-wide admission table. */
 }
 
-static void gate_closed(p2p_connection_t *connection, int status, void *context) {
-    gate_t *gate = context;
-    closed(connection, status, &gate->pair->server.transport);
-    gate->pair->gate = NULL;
-    free(gate);
-}
-
-static int gate_receive(p2p_connection_t *connection, const uint8_t *bytes,
-                         size_t length, size_t *consumed, void *context) {
-    gate_t *gate = context;
-    secure_pair_t *pair = gate->pair;
-    size_t required = gate->phase ? P2P_COOKIE_PACKET_SIZE : P2P_SECURE_PREFACE_SIZE;
-    uint8_t *buffer = gate->phase ? gate->packet : gate->preface;
-    size_t take = required - gate->used;
-    uint8_t packet[P2P_COOKIE_PACKET_SIZE], binding[P2P_COOKIE_BINDING_SIZE];
-    p2p_cnet_callbacks_t events;
-    int result;
-    if (take > length) take = length;
-    memcpy(buffer + gate->used, bytes, take);
-    gate->used += take;
-    *consumed = take;
-    if (gate->used != required) return P2P_OK;
-    if (!gate->phase) {
-        result = p2p_secure_preface_validate(pair->network, gate->preface);
-        if (result != P2P_OK) return result;
-        result = p2p_cookie_build_challenge(pair->cookie_secret, "127.0.0.1", gate->preface,
-            salts_monotonic_ms(), 10000, 300000, packet);
-        if (result != P2P_OK) return result;
-        gate->used = 0;
-        gate->phase = 1;
-        return p2p_connection_send(connection, packet, sizeof(packet));
-    }
-    result = p2p_cookie_verify_response(pair->cookie_secret, "127.0.0.1", gate->preface,
-        salts_monotonic_ms(), 10000, 300000, gate->packet, binding);
-    if (result != P2P_OK) return result;
-    result = p2p_noise_init_responder(&pair->server.handshake, &pair->server.identity);
-    if (result != P2P_OK) return result;
-    pair->peer_creations++;
-    events = secure_callbacks(&pair->server);
-    result = p2p_cnet_connection_handoff(connection, &events);
-    if (result != P2P_OK) return result;
-    check_equal(P2P_OK, p2p_cnet_connection_set_send_hwm(connection, TEST_BUFFER_SIZE));
-    if (pair->pause_handoff) check_equal(P2P_OK, p2p_cnet_connection_pause(connection, 1));
-    pair->gate = NULL;
-    free(gate);
+static int secure_promoted_connected(p2p_connection_t *connection, void *context) {
+    secure_endpoint_t *endpoint = context;
+    connected(connection, &endpoint->transport);
+    if (endpoint->pair->pause_handoff)
+        return p2p_cnet_connection_pause(connection, 1);
     return P2P_OK;
 }
 
-static int secure_accept(p2p_cnet_owner_t *owner, p2p_connection_t *connection,
-                           const cnet_stream_peer *peer, void *context) {
+static int secure_promote(const cnet_stream_peer *source,
+    const uint8_t preface[P2P_SECURE_PREFACE_SIZE],
+    const uint8_t binding[P2P_COOKIE_BINDING_SIZE],
+    p2p_cnet_callbacks_t *output, void *context) {
     secure_pair_t *pair = context;
-    p2p_cnet_callbacks_t events = {0};
     const uint8_t loopback[4] = {127, 0, 0, 1};
-    (void)owner;
-    check_equal(loopback, peer->address, sizeof(loopback));
-    pair->gate = calloc(1, sizeof(*pair->gate));
-    if (!pair->gate) return P2P_ERR_NO_MEM;
-    pair->gate->pair = pair;
-    pair->server.transport.connection = connection;
-    events.connected = gate_connected;
-    events.receive = gate_receive;
-    events.closed = gate_closed;
-    events.context = pair->gate;
-    check_equal(P2P_OK, p2p_cnet_connection_set_send_hwm(connection, P2P_COOKIE_PACKET_SIZE));
-    return p2p_cnet_connection_handoff(connection, &events);
+    int result;
+    (void)binding;
+    check_equal(loopback, source->address, sizeof(loopback));
+    check_equal(P2P_OK, p2p_secure_preface_validate(pair->network, preface));
+    result = p2p_noise_init_responder(&pair->server.handshake, &pair->server.identity);
+    if (result != P2P_OK) return result;
+    pair->peer_creations++;
+    *output = secure_callbacks(&pair->server);
+    output->connected = secure_promoted_connected;
+    return P2P_OK;
+}
+
+static void secure_rejected(const cnet_stream_peer *source, int status, void *context) {
+    secure_pair_t *pair = context;
+    (void)source;
+    closed(NULL, status, &pair->server.transport);
 }
 
 static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrupt) {
@@ -604,8 +563,22 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
     check_equal(P2P_OK, p2p_crypto_generate_identity(&pair.server.identity));
     check_equal(P2P_OK, p2p_cnet_owner_create(&policy, &pair.client.transport.owner));
     check_equal(P2P_OK, p2p_cnet_owner_create(&policy, &pair.server.transport.owner));
+    {
+        p2p_cnet_admission_config_t gate_policy = {0};
+        p2p_cnet_admission_callbacks_t gate_events = {
+            secure_admit, secure_promote, secure_rejected, &pair};
+        gate_policy.gate_limit = gate_policy.source_limit = 4;
+        gate_policy.peer_send_hwm_bytes = TEST_BUFFER_SIZE;
+        gate_policy.handshake_timeout_ms = TEST_DEADLINE_MS;
+        gate_policy.cookie_lifetime_ms = 10000;
+        gate_policy.cookie_key_rotation_ms = 300000;
+        memcpy(gate_policy.network_id_hash, pair.network, sizeof(pair.network));
+        memcpy(gate_policy.cookie_master_secret, pair.cookie_secret, sizeof(pair.cookie_secret));
+        check_equal(P2P_OK, p2p_cnet_admission_create(pair.server.transport.owner,
+            &gate_policy, &gate_events, &pair.admission));
+    }
     check_equal(P2P_OK, p2p_cnet_owner_listen(pair.server.transport.owner, "127.0.0.1", 0, 8,
-        secure_accept, &pair, &remote));
+        p2p_cnet_admission_accept, pair.admission, &remote));
     events = secure_callbacks(&pair.client);
     events.connected = client_cookie_connected;
     events.receive = client_cookie_receive;
@@ -635,9 +608,10 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
         check_equal(1, pair.server.delivered);
         check_equal(pair.client.handshake.handshake_hash, pair.server.handshake.handshake_hash, 32);
     }
+    check_equal(P2P_OK, p2p_cnet_admission_stop(pair.admission));
     check_equal(P2P_OK, p2p_cnet_owner_destroy(pair.client.transport.owner));
     check_equal(P2P_OK, p2p_cnet_owner_destroy(pair.server.transport.owner));
-    free(pair.gate);
+    check_equal(P2P_OK, p2p_cnet_admission_destroy(pair.admission));
     p2p_crypto_session_destroy(&pair.client.session);
     p2p_crypto_session_destroy(&pair.server.session);
     p2p_noise_handshake_destroy(&pair.client.handshake);
