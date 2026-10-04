@@ -355,7 +355,8 @@ stateDiagram-v2
 admission 在启动时分配固定 gate 数组；每次 accept 的扫描为 O(gate_limit)，gate 本身
 不在热路径分配。全局 gate 数与 IPv4 地址 / IPv6 /64 的 pending gate 数均显式限额。
 创建时必须提供 node admission 和 promotion 回调：前者仍负责来源速率、拒绝列表和
-node 总 pending peer 配额，后者在创建 peer 前重新检查配额。新组件不复制这些跨
+node 总 pending peer 配额，后者在创建 peer 前重新检查配额；当前 gate 在这次检查前
+已经退出 pending 计数，避免把同一连接同时算作 gate 和 peer。新组件不复制这些跨
 cookie/peer 的 node 事实源，也不以 gate 配额替代它们。cookie 通过只证明响应有效，
 不是 identity/credential 认证或 READY。
 
@@ -371,9 +372,9 @@ transport 已有的一块有界尾部。发送队列拒绝、错误网络、坏 
 在当前栈上释放 admission。回滚撤销本阶段即可，无数据转换。
 
 原 transport cookie/Noise 联调已删除临时 gate，改用这份生产 admission；peer/Noise
-驱动仍是 fixture。新 admission 测试为 15 个 Linux 用例，覆盖配额和重用、IPv6 /64、
+驱动仍是 fixture。新 admission 测试为 16 个 Linux 用例，覆盖配额和重用、IPv6 /64、
 mandatory node policy、坏 preface/proof、promotion/peer 初始化失败、两阶段静默超时、
-延迟 send terminal、停止后迟到 completion、challenge 入队失败。故障注入仅在测试
+延迟 send terminal、停止后迟到 completion、challenge 入队失败，以及 owner stop 阻止 handoff 后的 peer context 清理。故障注入仅在测试
 链接器 wrap 中，生产源码无测试开关。root test target 同步增加 admission 用例。
 
 本地完整 Release 为 33/33 CTest 通过；一个已有 mesh 测试产物缺少执行权限，恢复权限

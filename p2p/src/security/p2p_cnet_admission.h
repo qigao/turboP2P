@@ -22,7 +22,9 @@ typedef struct {
      * before a gate is allocated. Promotion must recheck the node's peer quota.
      * Callbacks run on the owner thread; recursive admission mutation fails. */
     int (*admit)(const cnet_stream_peer *source, void *context);
-    /* Called only after valid proof AND completed challenge send. This is a
+    /* Called only after valid proof AND completed challenge send. The current
+     * gate has already left the pending count when the node rechecks quota.
+     * This is a
      * cookie proof, not identity authentication or application readiness.
      * Output receive/closed callbacks are mandatory. On success their context
      * transfers to the connection; connected runs once after handoff and may

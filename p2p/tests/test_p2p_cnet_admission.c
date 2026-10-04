@@ -28,7 +28,7 @@ struct fixture_s {
     uint8_t bytes[TEST_BUFFER_BYTES];
     size_t received;
     unsigned policies, promotions, rejections, peer_closes;
-    int last_error, peer_error, deny, fail_promotion, fail_connected;
+    int last_error, peer_error, deny, fail_promotion, fail_connected, stop_owner;
     int recursive_stop, recursive_destroy, recursive_expire;
     int override_source;
     cnet_stream_peer source;
@@ -100,8 +100,12 @@ static int promote_peer(const cnet_stream_peer *source,
     p2p_cnet_callbacks_t *output, void *context) {
     fixture_t *fixture = context;
     uint8_t response[P2P_COOKIE_PACKET_SIZE], expected[P2P_COOKIE_BINDING_SIZE];
+    p2p_cnet_admission_stats_t pending;
     check_true(source->port != 0);
     fixture->promotions++;
+    check_equal(P2P_OK, p2p_cnet_admission_stats(fixture->admission, &pending));
+    /* A node with one pending-peer slot must be able to replace its own gate. */
+    check_equal((size_t)0, pending.active);
     check_equal(P2P_OK, p2p_secure_preface_validate(fixture->policy.network_id_hash, preface));
     check_equal(P2P_OK, p2p_cookie_build_response(fixture->clients[0].challenge, response, expected));
     check_equal(expected, binding, sizeof(expected));
@@ -110,6 +114,7 @@ static int promote_peer(const cnet_stream_peer *source,
     output->receive = peer_receive;
     output->closed = peer_closed;
     output->context = fixture;
+    if (fixture->stop_owner) check_equal(P2P_OK, p2p_cnet_owner_stop(fixture->server));
     return P2P_OK;
 }
 
@@ -260,16 +265,17 @@ static void test_rejection(int reason) {
     fixture.deny = reason == 0;
     fixture.fail_promotion = reason == 3;
     fixture.fail_connected = reason == 4;
+    fixture.stop_owner = reason == 5;
     fixture.clients[0].respond = 1;
     fixture.clients[0].corrupt = reason == 2;
     connect_client(&fixture, 0);
     if (!fixture.deny) preface(&fixture, reason == 1);
     wait_result(&fixture);
     check_equal((size_t)0, stats(&fixture).active);
-    if (reason == 4) {
+    if (reason >= 4) {
         check_equal(1U, fixture.peer_closes);
-        check_equal(P2P_ERR_CRYPTO, fixture.peer_error);
-        check_equal(0U, fixture.rejections);
+        check_equal(reason == 4 ? P2P_ERR_CRYPTO : P2P_ERR_INVALID_STATE, fixture.peer_error);
+        check_equal(reason == 4 ? 0U : 1U, fixture.rejections);
     } else {
         check_equal(1U, fixture.rejections);
         check_equal(reason == 0 ? P2P_ERR_UNTRUSTED_IDENTITY : reason == 1 ? P2P_ERR_PROTOCOL :
@@ -433,6 +439,7 @@ spec("P2P CNet cookie admission") {
     it("rejects invalid proof without creating a peer") { test_rejection(2); }
     it("releases a verified gate when the peer quota refuses promotion") { test_rejection(3); }
     it("reports peer initialization failure once with its original error") { test_rejection(4); }
+    it("releases prepared peer context when owner stop prevents handoff") { test_rejection(5); }
     it("bounds global gates and reuses a disconnected slot") { test_capacity(1, 1); }
     it("bounds pending gates from one IPv4 source") { test_capacity(2, 1); }
     it("groups IPv6 sources by /64 while isolating different prefixes") { test_ipv6_prefix_capacity(); }

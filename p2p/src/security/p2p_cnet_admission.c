@@ -67,7 +67,8 @@ static void promote(gate_t *gate) {
     p2p_cnet_admission_t *admission = gate->admission;
     p2p_connection_t *connection = gate->connection;
     p2p_cnet_callbacks_t next = {0};
-    int result;
+    gate_t verified;
+    int result, produced;
     if (gate->state != GATE_VERIFIED || !gate->challenge_completed) return;
     if (expired(gate, salts_monotonic_ms())) {
         fail_gate(gate, P2P_ERR_TIMEOUT);
@@ -77,24 +78,27 @@ static void promote(gate_t *gate) {
                                                admission->config.peer_send_hwm_bytes);
     if (result == P2P_OK) result = p2p_cnet_connection_pause(connection, 0);
     if (result != P2P_OK) { fail_gate(gate, result); return; }
-    result = admission->callbacks.promote(&gate->source, gate->preface,
-        gate->binding, &next, admission->callbacks.context);
-    if (result != P2P_OK) { fail_gate(gate, result); return; }
-    if (!next.receive || !next.closed) {
-        /* A malformed producer never gains ownership. If it supplied a cleanup
-         * callback, deliver exactly one terminal failure before dropping it. */
-        fail_gate(gate, P2P_ERR_INVALID_ARG);
-        if (next.closed) next.closed(connection, P2P_ERR_INVALID_ARG, next.context);
-        return;
-    }
-    result = p2p_cnet_connection_handoff(connection, &next);
-    if (result != P2P_OK) {
-        fail_gate(gate, result);
-        next.closed(connection, result, next.context);
-        return;
-    }
-    admission->stats.promoted++;
+    /* Replace a pending gate with a pending peer, never count both. Keep the
+     * verified inputs on this stack while the node rechecks its total quota. */
+    verified = *gate;
     release_gate(gate);
+    result = admission->callbacks.promote(&verified.source, verified.preface,
+        verified.binding, &next, admission->callbacks.context);
+    produced = result == P2P_OK;
+    if (!next.receive || !next.closed) {
+        if (result == P2P_OK) result = P2P_ERR_INVALID_ARG;
+    } else if (result == P2P_OK) {
+        result = p2p_cnet_connection_handoff(connection, &next);
+    }
+    if (result != P2P_OK) {
+        p2p_connection_destroy(connection);
+        reject(admission, &verified.source, result);
+        p2p_crypto_wipe(&verified, sizeof(verified));
+        if (produced && next.closed) next.closed(connection, result, next.context);
+        return;
+    }
+    p2p_crypto_wipe(&verified, sizeof(verified));
+    admission->stats.promoted++;
     result = next.connected ? next.connected(connection, next.context) : P2P_OK;
     if (result != P2P_OK) {
         p2p_connection_destroy(connection);
@@ -111,7 +115,7 @@ static int gate_receive(p2p_connection_t *connection, const uint8_t *bytes,
     int result = P2P_OK;
     (void)connection;
     *consumed = 0;
-    admission->busy = 1;
+    admission->busy++;
     if (expired(gate, now_ms)) { fail_gate(gate, P2P_ERR_TIMEOUT); goto done; }
     if (gate->state != GATE_PREFACE && gate->state != GATE_RESPONSE) {
         fail_gate(gate, P2P_ERR_INVALID_STATE);
@@ -150,7 +154,7 @@ static int gate_receive(p2p_connection_t *connection, const uint8_t *bytes,
         promote(gate);
     }
 done:
-    admission->busy = 0;
+    admission->busy--;
     /* Rejection already destroyed/detached this connection. No callback is
      * left behind for transport to report the same failure a second time. */
     return P2P_OK;
@@ -160,7 +164,7 @@ static void gate_sent(p2p_connection_t *connection, size_t length, void *context
     gate_t *gate = context;
     p2p_cnet_admission_t *admission = gate->admission;
     (void)connection;
-    admission->busy = 1;
+    admission->busy++;
     if (gate->challenge_completed || length != P2P_COOKIE_PACKET_SIZE ||
         (gate->state != GATE_RESPONSE && gate->state != GATE_VERIFIED)) {
         fail_gate(gate, P2P_ERR_PROTOCOL);
@@ -169,16 +173,16 @@ static void gate_sent(p2p_connection_t *connection, size_t length, void *context
         admission->stats.challenges_completed++;
         promote(gate);
     }
-    admission->busy = 0;
+    admission->busy--;
 }
 
 static void gate_closed(p2p_connection_t *connection, int status, void *context) {
     gate_t *gate = context;
     p2p_cnet_admission_t *admission = gate->admission;
     (void)connection;
-    admission->busy = 1;
+    admission->busy++;
     fail_gate(gate, status == P2P_OK ? P2P_ERR_NETWORK : status);
-    admission->busy = 0;
+    admission->busy--;
 }
 
 int p2p_cnet_admission_create(p2p_cnet_owner_t *owner,
