@@ -151,8 +151,9 @@ mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
 /**
- * Dedicated mode advances endpoint dialing and CoroNet. Shared mode is a
- * no-op because mesh_poll() owns connection policy and the event loop.
+ * Dedicated mode advances endpoint dialing and p2p_poll(). A polling failure
+ * returns P2P_FAILED and preserves the P2P code in last_p2p_result. Shared mode
+ * is a no-op because mesh_poll() owns connection policy and the event loop.
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
@@ -160,7 +161,7 @@ mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 /**
  * Atomically install a dedicated runtime's remote trust snapshot and
  * revalidate all established Noise sessions before processing more traffic.
- * This command must run on the runtime's CoroNet owner thread. READY and
+ * This command must run on the runtime's network owner thread. READY and
  * RUNNING states are accepted; shared_mesh mode is rejected because the
  * borrowed Mesh node owns its security policy. If revalidation cannot
  * complete, P2P disconnects every established security session before this

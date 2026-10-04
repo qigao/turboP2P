@@ -227,8 +227,7 @@ int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size
 
 static int p2p_dht_poll_owner(p2p_node_t *node) {
     const p2p_node_network_ops_t *ops = node->network_ops;
-    if (!ops || !ops->poll) return P2P_ERR_INVALID_STATE;
-    int ret = ops->poll(node, node->network_context);
+    int ret = p2p_poll(node);
     if (ret == P2P_OK && node->network_ops != ops) return P2P_ERR_INVALID_STATE;
     return ret;
 }

@@ -68,7 +68,7 @@ static void remote_loop(void *context) {
     if (loop->result == P2P_OK) loop->result = p2p_node_cnet_listen(endpoint->owner);
     atomic_store(&loop->ready, loop->result == P2P_OK ? 1 : -1);
     while (loop->result == P2P_OK && !atomic_load(&loop->stop)) {
-        loop->result = p2p_node_cnet_poll(endpoint->owner);
+        loop->result = p2p_poll(endpoint->node);
         salts_sleep_ms(1);
     }
     int result = p2p_node_cnet_destroy(endpoint->owner);
@@ -99,7 +99,7 @@ static void test_remote_get(int short_buffer, int missing) {
     if (ready == 1) {
         result = p2p_connect(pair.client.node, "127.0.0.1", pair.server.node->port);
         while (result == P2P_OK && !pair.client.authenticated && salts_monotonic_ms() < deadline)
-            result = p2p_node_cnet_poll(pair.client.owner);
+            result = p2p_poll(pair.client.node);
         if (result == P2P_OK && pair.client.authenticated)
             result = p2p_dht_get(pair.client.node, missing ? "absent" : cache_key, output, &length);
         else result = P2P_ERR_TIMEOUT;

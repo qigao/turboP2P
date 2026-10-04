@@ -3,8 +3,7 @@
 #include "mesh_mgmt_crypto.h"
 #include "mesh_mgmt_mesh_bridge.h"
 
-#include <CoroNet/turbo_coro_context.h>
-#include <platform.h>
+#include <salts/clock.h>
 
 #include <string.h>
 
@@ -35,7 +34,7 @@ static int runtime_event(void *context, p2p_peer_t *peer,
     return -1;
   if (event->type == MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED) {
     runtime->last_endpoint_result = mesh_mgmt_endpoint_pool_mark_authenticated_v1(
-        &runtime->endpoint_pool, remote_transport_peer_id, turbo_monotonic_ms());
+        &runtime->endpoint_pool, remote_transport_peer_id, salts_monotonic_ms());
     if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_NOT_FOUND) {
       if (!runtime->admit_peer || runtime->admit_peer(runtime->callback_context, peer,
                                                       remote_transport_peer_id, event) != 0)
@@ -81,7 +80,7 @@ static void runtime_peer_closed(void *context, p2p_peer_t *peer,
                                                ? MESH_MGMT_ENDPOINT_FAILURE_PROTOCOL
                                                : MESH_MGMT_ENDPOINT_FAILURE_TRANSPORT;
     runtime->last_endpoint_result = mesh_mgmt_endpoint_pool_mark_failed_v1(
-        &runtime->endpoint_pool, remote_transport_peer_id, failure, turbo_monotonic_ms());
+        &runtime->endpoint_pool, remote_transport_peer_id, failure, salts_monotonic_ms());
   }
   if (runtime->on_peer_closed)
     runtime->on_peer_closed(runtime->callback_context, peer, remote_transport_peer_id, reason);
@@ -334,10 +333,12 @@ mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   runtime->in_api = 1u;
   if (runtime->owns_node) {
     runtime->last_endpoint_result =
-        mesh_mgmt_endpoint_pool_tick_v1(&runtime->endpoint_pool, turbo_monotonic_ms());
+        mesh_mgmt_endpoint_pool_tick_v1(&runtime->endpoint_pool, salts_monotonic_ms());
     if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK)
       return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
-    (void)coro_context_run(p2p_get_loop(runtime->node), TURBO_RUN_NOWAIT);
+    runtime->last_p2p_result = p2p_poll(runtime->node);
+    if (runtime->last_p2p_result != P2P_OK)
+      return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
   }
   return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }

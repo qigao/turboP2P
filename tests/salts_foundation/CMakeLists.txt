@@ -63,6 +63,14 @@ target_include_directories(vector_owners PRIVATE
   "${mesh_src}" "${TURBOP2P_SOURCE_DIR}/p2p/include")
 target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::Core)
 
+# The runtime's polling consumer no longer includes CoroNet. Its complete
+# lifecycle still requires the legacy constructor and the root mesh build.
+add_library(mgmt_runtime_compile OBJECT "${mesh_src}/mesh_mgmt_agent_runtime.c")
+target_include_directories(mgmt_runtime_compile PRIVATE
+  "${mesh_src}" "${TURBOP2P_SOURCE_DIR}/mesh/include"
+  "${TURBOP2P_SOURCE_DIR}/p2p/include")
+target_link_libraries(mgmt_runtime_compile PRIVATE Salts::CSTL Salts::Platform Salts::Core)
+
 foreach(test_name IN ITEMS
   test_mesh_mgmt_session
   test_mesh_mgmt_transport
@@ -203,13 +211,15 @@ add_test(NAME test_p2p_cnet_peer COMMAND test_p2p_cnet_peer)
 set_tests_properties(test_p2p_cnet_peer PROPERTIES TIMEOUT 60)
 
 # Production node network policy, routing handlers and explicit CNet owner.
-# Shared node/configuration and file handlers are real; the public loop stays legacy.
+# Shared node/configuration, public polling and file handlers are real;
+# public construction and blocking start still require the legacy runtime.
 add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/croar" croar)
 add_library(p2p_node_core STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_state.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/file.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_file_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_dht_api.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_loop_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_security_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_peer_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/handlers_transfer.c"
@@ -253,7 +263,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_cnet_dht PRIVATE P2P_DHT_TEST_WRAP)
   target_link_options(test_p2p_cnet_dht PRIVATE "-Wl,--wrap=malloc")
   target_compile_definitions(test_p2p_cnet_node PRIVATE P2P_NODE_TEST_WRAP)
-  target_link_options(test_p2p_cnet_node PRIVATE "-Wl,--wrap=cnet_client_stop")
+  target_link_options(test_p2p_cnet_node PRIVATE
+    "-Wl,--wrap=cnet_client_stop" "-Wl,--wrap=cnet_client_poll")
   target_compile_definitions(test_p2p_cnet_files PRIVATE P2P_FILES_TEST_WRAP)
   target_link_options(test_p2p_cnet_files PRIVATE "-Wl,--wrap=p2p_peer_send")
 endif()

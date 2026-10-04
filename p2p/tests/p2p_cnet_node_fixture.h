@@ -159,6 +159,7 @@ static void on_connected(p2p_peer_t *peer, void *context) {
     endpoint->peer = peer;
     check_true(peer->counted);
     check_true(peer->is_connected);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint->node));
     if (endpoint->stop_on_auth) {
         check_equal(P2P_ERR_INVALID_STATE, p2p_node_cnet_destroy(endpoint->owner));
         check_equal(P2P_OK, p2p_node_cnet_stop(endpoint->owner));
@@ -203,8 +204,8 @@ static void connect_pair(pair_t *pair) {
     check_equal(P2P_OK, p2p_connect(pair->client.node, pair->server.node->ip, pair->server.node->port));
 }
 static void pump(pair_t *pair) {
-    if (!pair->client.stopped) check_equal(P2P_OK, p2p_node_cnet_poll(pair->client.owner));
-    if (!pair->server.stopped) check_equal(P2P_OK, p2p_node_cnet_poll(pair->server.owner));
+    if (!pair->client.stopped) check_equal(P2P_OK, p2p_poll(pair->client.node));
+    if (!pair->server.stopped) check_equal(P2P_OK, p2p_poll(pair->server.node));
     salts_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
@@ -218,6 +219,7 @@ static void teardown(pair_t *pair) {
     for (int i = 0; i < 2; ++i) {
         endpoint_t *endpoint = i ? &pair->server : &pair->client;
         check_equal(P2P_OK, p2p_node_cnet_destroy(endpoint->owner));
+        check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint->node));
         check_true(endpoint->node->network_ops == NULL);
         check_true(endpoint->node->peers_table == NULL);
         check_true(endpoint->node->dht_lookups == NULL);

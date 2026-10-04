@@ -1,5 +1,35 @@
 #include "p2p_cnet_node_fixture.h"
 
+static void test_poll_lifecycle(void) {
+    endpoint_t endpoint = {0};
+    p2p_node_cnet_t *duplicate = NULL;
+    p2p_cnet_config_t transport = config(TEST_SEND_BYTES);
+    check_equal(P2P_ERR_INVALID_ARG, p2p_poll(NULL));
+    init_node(&endpoint, 17, 0);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint.node));
+    transport.accept_budget = 0;
+    check_equal(P2P_ERR_INVALID_ARG,
+        p2p_node_cnet_create(endpoint.node, &transport, &endpoint.owner));
+    check_true(endpoint.owner == NULL);
+    check_true(endpoint.node->network_context == NULL);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint.node));
+    transport = config(TEST_SEND_BYTES);
+    start_endpoint(&endpoint, TEST_SEND_BYTES);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_node_state_destroy(endpoint.node));
+    check_equal(P2P_ERR_INVALID_STATE,
+        p2p_node_cnet_create(endpoint.node, &transport, &duplicate));
+    check_true(duplicate == NULL);
+    check_true(endpoint.node->network_context == endpoint.owner);
+    check_equal(P2P_OK, p2p_poll(endpoint.node));
+    check_equal(P2P_OK, p2p_node_cnet_stop(endpoint.owner));
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint.node));
+    check_equal(P2P_OK, p2p_node_cnet_stop(endpoint.owner));
+    check_equal(P2P_OK, p2p_node_cnet_destroy(endpoint.owner));
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(endpoint.node));
+    check_true(endpoint.node->network_context == NULL);
+    check_equal(P2P_OK, p2p_node_state_destroy(endpoint.node));
+}
+
 static int has_route(endpoint_t *endpoint, endpoint_t *remote) {
     kad_id_t id;
     int found = 0;
@@ -70,6 +100,7 @@ static void test_stop_callback(void) {
     check_true(pair.server.stopped);
     check_equal(0, pair.server.node->peer_count);
     check_true(pair.server.node->peers_table == NULL);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(pair.server.node));
     check_equal(P2P_ERR_INVALID_STATE, p2p_connect(pair.server.node, "127.0.0.1", pair.client.node->port));
     teardown(&pair);
 }
@@ -96,11 +127,11 @@ static void test_stale_peer(void) {
     wait_ready(&pair);
     pair.client.peer->last_seen = (salts_monotonic_ms() - P2P_PEER_TIMEOUT_MS - 1) * 1000000U;
     p2p_node_maintain_peers(pair.client.node, salts_monotonic_ms());
-    check_equal(P2P_OK, p2p_node_cnet_poll(pair.client.owner));
+    check_equal(P2P_OK, p2p_poll(pair.client.node));
     check_equal(1, pair.client.disconnected);
     check_equal(0, pair.client.node->peer_count);
     check_equal((size_t)0, pair.client.node->reserved_send_capacity_bytes);
-    check_equal(P2P_OK, p2p_node_cnet_poll(pair.client.owner));
+    check_equal(P2P_OK, p2p_poll(pair.client.node));
     check_equal(1, pair.client.disconnected);
     teardown(&pair);
 }
@@ -112,7 +143,7 @@ static void test_handshake_expiry(void) {
     peer = p2p_peer_find(pair.client.node, pair.server.node->ip, pair.server.node->port);
     check_not_null(peer);
     peer->security_deadline_ms = salts_monotonic_ms();
-    check_equal(P2P_OK, p2p_node_cnet_poll(pair.client.owner));
+    check_equal(P2P_OK, p2p_poll(pair.client.node));
     check_true(pair.client.node->peers_table == NULL);
     check_equal((uint64_t)1, pair.client.node->security_rejection_counts[P2P_SECURITY_REJECTION_HANDSHAKE_TIMEOUT]);
     check_equal((size_t)0, pair.client.node->reserved_send_capacity_bytes);
@@ -260,20 +291,59 @@ static void test_direct_disconnect(void) {
     connect_pair(&pair);
     wait_ready(&pair);
     p2p_peer_disconnect(pair.server.peer);
-    check_equal(P2P_OK, p2p_node_cnet_poll(pair.server.owner));
+    check_equal(P2P_OK, p2p_poll(pair.server.node));
     check_equal(1, pair.server.disconnected);
     check_equal(0, pair.server.node->peer_count);
     check_true(pair.server.node->peers_table == NULL);
-    check_equal(P2P_OK, p2p_node_cnet_poll(pair.server.owner));
+    check_equal(P2P_OK, p2p_poll(pair.server.node));
     check_equal(1, pair.server.disconnected);
     teardown(&pair);
 }
 #ifdef P2P_NODE_TEST_WRAP
 static int timeout_stop;
+static int timeout_poll;
 int __real_cnet_client_stop(cnet_client *, uint32_t);
+int __real_cnet_client_poll(cnet_client *, uint32_t, size_t *);
 int __wrap_cnet_client_stop(cnet_client *client, uint32_t timeout_ms) {
     if (timeout_stop) { timeout_stop = 0; return SALTS_ETIMEDOUT; }
     return __real_cnet_client_stop(client, timeout_ms);
+}
+int __wrap_cnet_client_poll(cnet_client *client, uint32_t timeout_ms, size_t *events) {
+    if (timeout_poll) { timeout_poll = 0; *events = 0; return SALTS_ETIMEDOUT; }
+    return __real_cnet_client_poll(client, timeout_ms, events);
+}
+static void test_poll_error(void) {
+    pair_t pair = {0};
+    setup(&pair, TEST_SEND_BYTES, 0);
+    connect_pair(&pair);
+    wait_ready(&pair);
+    timeout_poll = 1;
+    check_equal(P2P_ERR_TIMEOUT, p2p_poll(pair.client.node));
+    check_true(pair.client.node->network_context == pair.client.owner);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(pair.client.node));
+    teardown(&pair);
+}
+static void test_callback_stop_error(void) {
+    pair_t pair = {0};
+    int result = P2P_OK;
+    uint64_t deadline;
+    setup(&pair, 7, 0);
+    pair.server.stop_on_auth = 1;
+    connect_pair(&pair);
+    timeout_stop = 1;
+    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.server.stopped && salts_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(pair.client.node));
+        result = p2p_poll(pair.server.node);
+        if (result != P2P_OK) break;
+        salts_sleep_ms(1);
+    }
+    check_true(pair.server.stopped);
+    check_equal(P2P_ERR_TIMEOUT, result);
+    check_true(pair.server.node->network_context == pair.server.owner);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(pair.server.node));
+    check_equal(0, timeout_stop);
+    teardown(&pair);
 }
 static void test_stop_timeout(void) {
     pair_t pair = {0};
@@ -285,11 +355,12 @@ static void test_stop_timeout(void) {
     check_true(pair.client.node->network_context == pair.client.owner);
     check_true(pair.client.node->peers_table == NULL);
     check_equal((size_t)0, pair.client.node->reserved_send_capacity_bytes);
-    check_equal(P2P_ERR_INVALID_STATE, p2p_node_cnet_poll(pair.client.owner));
+    check_equal(P2P_ERR_INVALID_STATE, p2p_poll(pair.client.node));
     teardown(&pair);
 }
 #endif
 spec("P2P production node network over CNet") {
+    it("polls only a bound live owner and preserves state after failed or duplicate attachment") { test_poll_lifecycle(); }
     it("authenticates, learns listening endpoints, exchanges messages and completes DHT lookup") { test_roundtrip(TEST_SEND_BYTES, 0); }
     it("preserves routing and DHT under fragmentation with both key workers") { test_roundtrip(7, 1); }
     it("defers callback stop and rejects callback destruction") { test_stop_callback(); }
@@ -305,6 +376,8 @@ spec("P2P production node network over CNet") {
     it("converges crossed connections to one authenticated identity and one reservation") { test_cross_connect(); }
     it("reaps direct protocol disconnects exactly once") { test_direct_disconnect(); }
 #ifdef P2P_NODE_TEST_WRAP
+    it("propagates a native poll timeout and retains the owner for cleanup") { test_poll_error(); }
+    it("propagates callback-deferred stop timeout and allows cleanup retry") { test_callback_stop_error(); }
     it("retains node and owner after a drain timeout until retry succeeds") { test_stop_timeout(); }
 #endif
 }
