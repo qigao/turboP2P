@@ -1176,7 +1176,7 @@ target_link_libraries(mesh_stream_mgmt_ticket PUBLIC
 set_property(TARGET mesh_stream_mgmt_ticket PROPERTY FOLDER "mesh/internal")
 
 # Authorized receiver-side stream state. It is kept transport-agnostic and
-# internal until an authenticated CoroNet adapter can own its lifecycle.
+# internal; authenticated adapters own the network lifecycle.
 add_library(mesh_stream_session STATIC
   src/mesh_stream_session.c
   src/mesh_stream_session.h)
@@ -1185,30 +1185,35 @@ target_include_directories(mesh_stream_session PUBLIC
 target_link_libraries(mesh_stream_session PUBLIC mesh_stream_codec)
 set_property(TARGET mesh_stream_session PROPERTY FOLDER "mesh/internal")
 
-# Bounded receive-window driver, authenticated lifecycle owner, bounded channel
-# registry, and thin CoroNet adapter. The target remains internal and is not
-# linked into the public mesh data path.
-add_library(mesh_stream_transport STATIC
+# Network-independent receive window, lifecycle owner and channel registry.
+add_library(mesh_stream_transport_core STATIC
   src/mesh_stream_transport.c
   src/mesh_stream_transport.h
   src/mesh_stream_channel.c
   src/mesh_stream_channel.h
   src/mesh_stream_registry.c
-  src/mesh_stream_registry.h
+  src/mesh_stream_registry.h)
+target_include_directories(mesh_stream_transport_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_stream_transport_core PUBLIC mesh_stream_session)
+set_property(TARGET mesh_stream_transport_core PROPERTY FOLDER "mesh/internal")
+
+# Preserve the existing CoroNet entry point and transitive core symbols.
+add_library(mesh_stream_transport STATIC
   src/mesh_stream_coronet_adapter.c
   src/mesh_stream_coronet_adapter.h)
 target_include_directories(mesh_stream_transport PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_stream_transport PUBLIC
-  mesh_stream_bind mesh_stream_session TurboNet::CoroNet)
+  mesh_stream_transport_core mesh_stream_bind TurboNet::CoroNet)
 set_property(TARGET mesh_stream_transport PROPERTY FOLDER "mesh/internal")
 
-# Event-loop identity bind adapter; deliberately independent of CoroNet.
+# Event-loop identity bind and receiver channel adapter, independent of CoroNet.
 add_library(mesh_stream_cnet_adapter STATIC
   src/mesh_stream_cnet_adapter.c
   src/mesh_stream_cnet_adapter.h)
 target_include_directories(mesh_stream_cnet_adapter PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_stream_cnet_adapter PUBLIC mesh_stream_bind Salts::CNet)
+target_link_libraries(mesh_stream_cnet_adapter PUBLIC
+  mesh_stream_bind mesh_stream_transport_core Salts::CNet)
 set_property(TARGET mesh_stream_cnet_adapter PROPERTY FOLDER "mesh/internal")
 
 # Reliable ordered block-stream session (P1): frame protocol, sliding
