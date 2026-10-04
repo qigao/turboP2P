@@ -1,5 +1,6 @@
 #include "mesh_node_control_flowmq_network_provider.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <string.h>
@@ -69,8 +70,8 @@ static mesh_control_result_t provider_try_start(
          sizeof(command.resource_id));
   if (command.action == MESH_CONTROL_DESIRED_APPLY) {
     if (!request->document || request->document_size == 0u ||
-        turbo_crypto_sha256(request->document, request->document_size,
-                            digest) != TURBO_CRYPTO_OK ||
+        salts_crypto_sha256(request->document, request->document_size,
+                            digest) != SALTS_CRYPTO_OK ||
         turbo_crypto_verify(digest, request->operation.desired_digest,
                             sizeof(digest)) != TURBO_CRYPTO_OK) {
       memset(digest, 0, sizeof(digest));

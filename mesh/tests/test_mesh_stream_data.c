@@ -2,7 +2,8 @@
 
 #include "mesh_stream_data.h"
 
-#include <turbo_thread.h>
+#include <salts/clock.h>
+#include <salts/thread.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -215,12 +216,12 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
   size_t fed = 0u;
   size_t got = 0u;
   int finish_sent_flag = 0;
-  uint64_t deadline = turbo_monotonic_ms() + 10000u;
+  uint64_t deadline = salts_monotonic_ms() + 10000u;
 
   (void)now_ms;
   *out_len = 0u;
-  check_int_eq(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
-  while (turbo_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
+  check_equal(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
+  while (salts_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
     size_t consumed = 0u;
     size_t n = 0u;
 
@@ -236,11 +237,11 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
     (void)mesh_stream_data_receiver_pump(receiver, out + got, out_cap - got, &n);
     got += n;
     if (n == 0u)
-      turbo_sleep_ms(1);
+      salts_sleep_ms(1);
   }
   if (!finish_sent_flag)
     (void)mesh_stream_data_sender_finish(sender);
-  while (turbo_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
+  while (salts_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
     size_t n = 0u;
 
     (void)mesh_stream_data_tick(sender, 0u);
@@ -248,7 +249,7 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
     (void)mesh_stream_data_receiver_pump(receiver, out + got, out_cap - got, &n);
     got += n;
     if (n == 0u)
-      turbo_sleep_ms(1);
+      salts_sleep_ms(1);
   }
   *out_len = got;
 }
@@ -283,8 +284,8 @@ static void test_roundtrip(void) {
   check_not_null(receiver);
   run_stream(sender, receiver, data, sizeof(data), out, sizeof(out), &out_len, &now_ms);
   check_true(mesh_stream_data_complete(receiver));
-  check_size_eq(out_len, sizeof(data));
-  check_mem_eq(out, data, sizeof(data));
+  check_equal(out_len, sizeof(data));
+  check_equal(out, data, sizeof(data));
 
   mesh_stream_data_destroy(receiver);
   mesh_stream_data_destroy(sender);
@@ -324,8 +325,8 @@ static void test_loss_recovery(void) {
   run_stream(sender, receiver, data, sizeof(data), out, sizeof(out), &out_len, &now_ms);
   check_true(link.to_receiver.dropped >= 1u);
   check_true(mesh_stream_data_complete(receiver));
-  check_size_eq(out_len, sizeof(data));
-  check_mem_eq(out, data, sizeof(data));
+  check_equal(out_len, sizeof(data));
+  check_equal(out, data, sizeof(data));
 
   mesh_stream_data_destroy(receiver);
   mesh_stream_data_destroy(sender);
@@ -368,8 +369,8 @@ static void test_timer_resend_when_nack_lost(void) {
   check_true(link.to_receiver.dropped >= 1u);
   check_true(link.to_sender.dropped >= 1u);
   check_true(mesh_stream_data_complete(receiver));
-  check_size_eq(out_len, sizeof(data));
-  check_mem_eq(out, data, sizeof(data));
+  check_equal(out_len, sizeof(data));
+  check_equal(out, data, sizeof(data));
 
   mesh_stream_data_destroy(receiver);
   mesh_stream_data_destroy(sender);
@@ -407,8 +408,8 @@ static void test_reorder_recovery(void) {
   check_not_null(receiver);
   run_stream(sender, receiver, data, sizeof(data), out, sizeof(out), &out_len, &now_ms);
   check_true(mesh_stream_data_complete(receiver));
-  check_size_eq(out_len, sizeof(data));
-  check_mem_eq(out, data, sizeof(data));
+  check_equal(out_len, sizeof(data));
+  check_equal(out, data, sizeof(data));
 
   mesh_stream_data_destroy(receiver);
   mesh_stream_data_destroy(sender);
@@ -442,7 +443,7 @@ static void test_backpressure(void) {
   receiver = mesh_stream_data_create(MESH_STREAM_DATA_ROLE_RECEIVER, &config, &receiver_io);
   check_not_null(sender);
   check_not_null(receiver);
-  check_int_eq(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
+  check_equal(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
 
   /* Feed more than the whole window without pumping the receiver: the sender
    * must stop accepting (AGAIN) once the window is full. */
@@ -492,8 +493,8 @@ static void test_backpressure(void) {
 
     run_stream(sender, receiver, data, sizeof(data), out, sizeof(out), &out_len, &now_ms);
     check_true(mesh_stream_data_complete(receiver));
-    check_size_eq(out_len, sizeof(data));
-    check_mem_eq(out, data, sizeof(data));
+    check_equal(out_len, sizeof(data));
+    check_equal(out, data, sizeof(data));
   }
 
   mesh_stream_data_destroy(receiver);
@@ -529,7 +530,7 @@ static void test_resume_after_disconnect(void) {
   receiver = mesh_stream_data_create(MESH_STREAM_DATA_ROLE_RECEIVER, &config, &receiver_io);
   check_not_null(sender);
   check_not_null(receiver);
-  check_int_eq(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
+  check_equal(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
 
   /* Deliver the first two blocks, then "disconnect" (drop the pipe). */
   {
@@ -570,16 +571,16 @@ static void test_resume_after_disconnect(void) {
   receiver = mesh_stream_data_create(MESH_STREAM_DATA_ROLE_RECEIVER, &config, &receiver_io);
   check_not_null(sender);
   check_not_null(receiver);
-  check_int_eq(MESH_STREAM_DATA_OK,
+  check_equal(MESH_STREAM_DATA_OK,
                mesh_stream_data_receiver_send_resume(receiver, 2u * TEST_BLOCK, 2u));
   run_stream(sender, receiver, data, sizeof(data), out, sizeof(out), &out_len, &now_ms);
   check_true(mesh_stream_data_complete(receiver));
   /* Blocks 0..1 were already delivered before the disconnect; the resumed
    * connection delivers only blocks 2..4 (2148 bytes). */
-  check_size_eq(out_len, sizeof(data) - 2u * TEST_BLOCK);
-  check_mem_eq(out, data + 2u * TEST_BLOCK, sizeof(data) - 2u * TEST_BLOCK);
+  check_equal(out_len, sizeof(data) - 2u * TEST_BLOCK);
+  check_equal(out, data + 2u * TEST_BLOCK, sizeof(data) - 2u * TEST_BLOCK);
   /* Only blocks 2..4 (3 DATA frames) cross the wire on the new connection. */
-  check_size_eq(link.data_frames, TEST_BLOCKS - 2u);
+  check_equal(link.data_frames, TEST_BLOCKS - 2u);
 
   mesh_stream_data_destroy(receiver);
   mesh_stream_data_destroy(sender);
@@ -621,11 +622,11 @@ static void test_integrity_and_invalid_args(void) {
     bad.block_size = 0u;
     check_null(mesh_stream_data_create(MESH_STREAM_DATA_ROLE_SENDER, &bad, &sender_io));
   }
-  check_int_eq(MESH_STREAM_DATA_INVALID_ARG,
+  check_equal(MESH_STREAM_DATA_INVALID_ARG,
                mesh_stream_data_sender_pump(receiver));
-  check_int_eq(MESH_STREAM_DATA_INVALID_ARG,
+  check_equal(MESH_STREAM_DATA_INVALID_ARG,
                mesh_stream_data_receiver_pump(sender, out, sizeof(out), &out_len));
-  check_int_eq(MESH_STREAM_DATA_INVALID_ARG,
+  check_equal(MESH_STREAM_DATA_INVALID_ARG,
                mesh_stream_data_tick(NULL, 1u));
 
   mesh_stream_data_destroy(receiver);

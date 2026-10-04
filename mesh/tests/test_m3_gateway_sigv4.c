@@ -2,6 +2,7 @@
 
 #include "m3_gateway_sigv4.h"
 
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 
 #include <stdio.h>
@@ -42,7 +43,7 @@ static void client_sign(const char *method, const char *uri, const char *query, 
            "%s\n%s\n%s\nhost:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n"
            "host;x-amz-content-sha256;x-amz-date\n%s",
            method, uri, query ? query : "", host, payload_hash, amzdate, payload_hash);
-  turbo_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
+  salts_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
   to_hex(cr_digest, sizeof(cr_digest), cr_hex);
 
   snprintf(scope, sizeof(scope), "%s/%s/%s/aws4_request", date, region, service);
@@ -210,7 +211,7 @@ static void client_sign_presigned(const char *method, const char *uri, const cha
 
   snprintf(canonical_request, sizeof(canonical_request),
            "%s\n%s\n%s\nhost:%s\nhost\nUNSIGNED-PAYLOAD", method, uri, canonical_query, host);
-  turbo_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
+  salts_crypto_sha256(canonical_request, strlen(canonical_request), cr_digest);
   to_hex(cr_digest, sizeof(cr_digest), cr_hex);
 
   snprintf(scope, sizeof(scope), "%s/%s/%s/aws4_request", date, region, service);

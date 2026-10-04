@@ -4,7 +4,7 @@
 #include "mesh_stream_media_pull_multisource.h"
 #include "mesh_stream_multisource.h"
 
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -26,25 +26,25 @@ static void fill_data(void) {
   for (size_t i = 0u; i < TEST_OBJECT_SIZE; i++)
     g_data[i] = (uint8_t)(i * 7u + (i >> 4u) + 1u);
   for (size_t b = 0u; b < TEST_BLOCKS; b++)
-    (void)turbo_crypto_sha256(g_data + b * TEST_BLOCK, TEST_BLOCK, g_digests[b]);
+    (void)salts_crypto_sha256(g_data + b * TEST_BLOCK, TEST_BLOCK, g_digests[b]);
 }
 
 static void build_manifest(m3_object_manifest_v2_t *manifest,
                            m3_chunk_cid_v1_t *chunks) {
-  turbo_crypto_sha256_ctx_t ctx;
+  salts_crypto_sha256_ctx_t ctx;
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
 
-  (void)turbo_crypto_sha256_init(&ctx);
+  (void)salts_crypto_sha256_init(&ctx);
   memset(manifest, 0, sizeof(*manifest));
   memset(chunks, 0, TEST_BLOCKS * sizeof(*chunks));
   for (size_t i = 0u; i < TEST_BLOCKS; i++) {
     memcpy(chunks[i].digest, g_digests[i], MESH_STREAM_DATA_HASH_SIZE);
-    (void)turbo_crypto_sha256_update(&ctx, chunks[i].digest,
+    (void)salts_crypto_sha256_update(&ctx, chunks[i].digest,
                                      sizeof(chunks[i].digest));
     chunks[i].hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     chunks[i].size = TEST_BLOCK;
   }
-  (void)turbo_crypto_sha256_final(&ctx, digest);
+  (void)salts_crypto_sha256_final(&ctx, digest);
   manifest->version = M3_OBJECT_MANIFEST_VERSION_2;
   manifest->object_cid.hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
   manifest->object_cid.size = TEST_OBJECT_SIZE;
@@ -150,7 +150,7 @@ static void run_pull(mesh_stream_media_pull_v1_t *pull, uint8_t *out,
       check_true(++guard < 100000u);
       continue;
     }
-    check_int_eq(MESH_STREAM_MEDIA_PULL_OK, rc);
+    check_equal(MESH_STREAM_MEDIA_PULL_OK, rc);
   }
 }
 
@@ -176,10 +176,10 @@ static void test_multisource_drives_range_pull(void) {
 
   make_ids(ids);
   memset(&selector, 0, sizeof(selector));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 3u, 4u));
   for (size_t s = 0u; s < TEST_SOURCES; s++)
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
 
   init_fake_io(&fake, &now_ms);
@@ -195,7 +195,7 @@ static void test_multisource_drives_range_pull(void) {
   ctx.ms = ms;
   ctx.first_chunk = 3u;
   ctx.now_ms = &now_ms;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_multisource_io_v1(&ctx, &pull_io));
 
   memset(&config, 0, sizeof(config));
@@ -203,14 +203,14 @@ static void test_multisource_drives_range_pull(void) {
   config.max_chunk_bytes = TEST_BLOCK;
   config.target_segment_bytes = 3u * TEST_BLOCK;
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 3u * TEST_BLOCK,
                                                3u * TEST_BLOCK));
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, 3u * TEST_BLOCK);
-  check_mem_eq(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
+  check_equal(out_len, 3u * TEST_BLOCK);
+  check_equal(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
   check_true(mesh_stream_media_pull_complete(&pull));
   check_true(mesh_stream_multisource_complete(ms));
 
@@ -220,7 +220,7 @@ static void test_multisource_drives_range_pull(void) {
 
     for (size_t s = 0u; s < TEST_SOURCES; s++)
       total_served += fake.sources[s].served;
-    check_uint_eq(total_served, 3u);
+    check_equal(total_served, 3u);
   }
 
   mesh_stream_media_pull_destroy_v1(&pull);
@@ -247,10 +247,10 @@ static void test_corrupt_source_eliminated(void) {
   build_manifest(&manifest, chunks);
   make_ids(ids);
   memset(&selector, 0, sizeof(selector));
-  check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+  check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                mesh_stream_source_selector_init(&selector, 3u, 4u));
   for (size_t s = 0u; s < TEST_SOURCES; s++)
-    check_int_eq(MESH_STREAM_SOURCE_SELECTOR_OK,
+    check_equal(MESH_STREAM_SOURCE_SELECTOR_OK,
                  mesh_stream_source_selector_register(&selector, ids[s]));
 
   init_fake_io(&fake, &now_ms);
@@ -267,24 +267,24 @@ static void test_corrupt_source_eliminated(void) {
   ctx.ms = ms;
   ctx.first_chunk = 3u;
   ctx.now_ms = &now_ms;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_multisource_io_v1(&ctx, &pull_io));
   memset(&config, 0, sizeof(config));
   config.io = pull_io;
   config.max_chunk_bytes = TEST_BLOCK;
   config.target_segment_bytes = 3u * TEST_BLOCK;
   memset(&pull, 0, sizeof(pull));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_init_v1(&pull, &manifest, &config));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_OK,
+  check_equal(MESH_STREAM_MEDIA_PULL_OK,
                mesh_stream_media_pull_start_v1(&pull, 3u * TEST_BLOCK,
                                                3u * TEST_BLOCK));
   run_pull(&pull, out, sizeof(out), &out_len);
-  check_size_eq(out_len, 3u * TEST_BLOCK);
-  check_mem_eq(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
+  check_equal(out_len, 3u * TEST_BLOCK);
+  check_equal(out, g_data + 3u * TEST_BLOCK, 3u * TEST_BLOCK);
   check_true(mesh_stream_media_pull_complete(&pull));
   /* The corrupt source was served but its block was replaced by a good one. */
-  check_uint_eq(fake.sources[0].corrupted_served, 1u);
+  check_equal(fake.sources[0].corrupted_served, 1u);
 
   mesh_stream_media_pull_destroy_v1(&pull);
   mesh_stream_multisource_destroy(ms);
@@ -299,16 +299,16 @@ static void test_invalid_args(void) {
   ctx.ms = (mesh_stream_multisource_t *)&io;
   ctx.first_chunk = 0u;
   ctx.now_ms = &now_ms;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_multisource_io_v1(NULL, &io));
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_multisource_io_v1(&ctx, NULL));
   ctx.ms = NULL;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_multisource_io_v1(&ctx, &io));
   ctx.ms = (mesh_stream_multisource_t *)&io;
   ctx.now_ms = NULL;
-  check_int_eq(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
+  check_equal(MESH_STREAM_MEDIA_PULL_INVALID_ARG,
                mesh_stream_media_pull_multisource_io_v1(&ctx, &io));
 }
 

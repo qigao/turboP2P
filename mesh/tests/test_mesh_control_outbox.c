@@ -51,34 +51,34 @@ static void test_outbox_copies_and_preserves_fifo(void) {
 
   make_envelope(&first, 1u, sizeof(first_payload));
   make_envelope(&second, 2u, sizeof(second_payload));
-  check_int_eq(mesh_control_outbox_init_v1(&outbox, &config),
+  check_equal(mesh_control_outbox_init_v1(&outbox, &config),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &first, first_payload, sizeof(first_payload)),
                MESH_CONTROL_OK);
   memset(first_payload, 0, sizeof(first_payload));
-  check_int_eq(mesh_control_outbox_peek_v1(&outbox, &view),
+  check_equal(mesh_control_outbox_peek_v1(&outbox, &view),
                MESH_CONTROL_OK);
-  check_mem_eq(view.payload, expected_first, sizeof(expected_first));
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(view.payload, expected_first, sizeof(expected_first));
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &second, second_payload,
                    sizeof(second_payload)),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &second, second_payload,
                    sizeof(second_payload)),
                MESH_CONTROL_RESOURCE_EXHAUSTED);
-  check_int_eq(mesh_control_outbox_consume_v1(&outbox), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_peek_v1(&outbox, &view),
+  check_equal(mesh_control_outbox_consume_v1(&outbox), MESH_CONTROL_OK);
+  check_equal(mesh_control_outbox_peek_v1(&outbox, &view),
                MESH_CONTROL_OK);
-  check_mem_eq(view.payload, second_payload, sizeof(second_payload));
-  check_int_eq(mesh_control_outbox_get_stats_v1(&outbox, &stats),
+  check_equal(view.payload, second_payload, sizeof(second_payload));
+  check_equal(mesh_control_outbox_get_stats_v1(&outbox, &stats),
                MESH_CONTROL_OK);
-  check_size_eq(stats.pending, 1u);
-  check_size_eq(stats.retained_bytes, sizeof(second_payload));
-  check_hex64_eq(stats.published, 2u);
-  check_hex64_eq(stats.consumed, 1u);
-  check_hex64_eq(stats.rejected_full, 1u);
+  check_equal(stats.pending, 1u);
+  check_equal(stats.retained_bytes, sizeof(second_payload));
+  check_equal(stats.published, 2u);
+  check_equal(stats.consumed, 1u);
+  check_equal(stats.rejected_full, 1u);
   mesh_control_outbox_destroy_v1(&outbox);
 }
 
@@ -91,28 +91,28 @@ static void test_outbox_enforces_byte_budget_and_close_drain(void) {
   uint8_t payload[4] = {1u, 2u, 3u, 4u};
 
   make_envelope(&envelope, 3u, sizeof(payload));
-  check_int_eq(mesh_control_outbox_init_v1(&outbox, &config),
+  check_equal(mesh_control_outbox_init_v1(&outbox, &config),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &envelope, payload, sizeof(payload)),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &envelope, payload, sizeof(payload)),
                MESH_CONTROL_RESOURCE_EXHAUSTED);
-  check_int_eq(mesh_control_outbox_close_v1(&outbox), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_try_push_v1(
+  check_equal(mesh_control_outbox_close_v1(&outbox), MESH_CONTROL_OK);
+  check_equal(mesh_control_outbox_try_push_v1(
                    &outbox, &envelope, payload, sizeof(payload)),
                MESH_CONTROL_CLOSED);
-  check_int_eq(mesh_control_outbox_peek_v1(&outbox, &view),
+  check_equal(mesh_control_outbox_peek_v1(&outbox, &view),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_consume_v1(&outbox), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_outbox_peek_v1(&outbox, &view),
+  check_equal(mesh_control_outbox_consume_v1(&outbox), MESH_CONTROL_OK);
+  check_equal(mesh_control_outbox_peek_v1(&outbox, &view),
                MESH_CONTROL_EMPTY);
-  check_int_eq(mesh_control_outbox_get_stats_v1(&outbox, &stats),
+  check_equal(mesh_control_outbox_get_stats_v1(&outbox, &stats),
                MESH_CONTROL_OK);
   check_false(stats.accepting);
-  check_hex64_eq(stats.rejected_full, 1u);
-  check_hex64_eq(stats.rejected_closed, 1u);
+  check_equal(stats.rejected_full, 1u);
+  check_equal(stats.rejected_closed, 1u);
   mesh_control_outbox_destroy_v1(&outbox);
 }
 
@@ -120,15 +120,15 @@ static void test_outbox_rejects_unbounded_configuration(void) {
   mesh_control_outbox_v1_t outbox = {0};
   mesh_control_outbox_config_v1_t config = {0u, 1u, 1u};
 
-  check_int_eq(mesh_control_outbox_init_v1(&outbox, &config),
+  check_equal(mesh_control_outbox_init_v1(&outbox, &config),
                MESH_CONTROL_INVALID_ARG);
   config.entry_capacity = MESH_CONTROL_OUTBOX_MAX_ENTRIES_V1 + 1u;
-  check_int_eq(mesh_control_outbox_init_v1(&outbox, &config),
+  check_equal(mesh_control_outbox_init_v1(&outbox, &config),
                MESH_CONTROL_INVALID_ARG);
   config.entry_capacity = 1u;
   config.retained_byte_capacity = 4u;
   config.max_payload_size = 5u;
-  check_int_eq(mesh_control_outbox_init_v1(&outbox, &config),
+  check_equal(mesh_control_outbox_init_v1(&outbox, &config),
                MESH_CONTROL_INVALID_ARG);
 }
 

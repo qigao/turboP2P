@@ -6,7 +6,7 @@
 #include "mesh_release.h"
 
 #include <iris/iris.h>
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <turbo_thread.h>
 
 #include <errno.h>
@@ -566,10 +566,10 @@ static int put_object_prepare(m3_gateway_t *g, const uint8_t *body, size_t body_
   {
     chunk_list_t chunks = {0};
     m3_object_manifest_v1_t manifest = {0};
-    turbo_crypto_sha256_ctx_t object_ctx;
+    salts_crypto_sha256_ctx_t object_ctx;
     size_t offset = 0u;
 
-    turbo_crypto_sha256_init(&object_ctx);
+    salts_crypto_sha256_init(&object_ctx);
     while (offset < body_len) {
       size_t take = body_len - offset;
       m3_chunk_cid_v1_t cid;
@@ -581,8 +581,8 @@ static int put_object_prepare(m3_gateway_t *g, const uint8_t *body, size_t body_
       if (m3_chunk_cid_calculate_v1(body + offset, take, &cid) != M3_CHUNK_STORE_OK ||
           m3_chunk_store_put_bytes_v1(&g->chunk_store, &cid, body + offset, take,
                                       &created) != M3_CHUNK_STORE_OK ||
-          turbo_crypto_sha256_update(&object_ctx, cid.digest, sizeof(cid.digest)) !=
-              TURBO_CRYPTO_OK ||
+          salts_crypto_sha256_update(&object_ctx, cid.digest, sizeof(cid.digest)) !=
+              SALTS_CRYPTO_OK ||
           chunk_list_push(&chunks, &cid) != 0) {
         rc = 2;
         free(chunks.cids);
@@ -590,7 +590,7 @@ static int put_object_prepare(m3_gateway_t *g, const uint8_t *body, size_t body_
       }
       offset += take;
     }
-    turbo_crypto_sha256_final(&object_ctx, object_digest);
+    salts_crypto_sha256_final(&object_ctx, object_digest);
     manifest.version = M3_OBJECT_MANIFEST_VERSION;
     manifest.object_cid.hash_algorithm = M3_CHUNK_STORE_HASH_ALGORITHM_SHA256;
     manifest.object_cid.size = total;
@@ -674,7 +674,7 @@ void m3_handle_put_object(Req *req, Res *res) {
   const char *bucket;
   const char *object;
   const char *expected_hash;
-  turbo_crypto_sha256_ctx_t body_ctx;
+  salts_crypto_sha256_ctx_t body_ctx;
   uint8_t body_digest[32];
   char body_digest_hex[65];
   char etag[2u + 2u * M3_CHUNK_CID_DIGEST_SIZE + 1u];
@@ -700,14 +700,14 @@ void m3_handle_put_object(Req *req, Res *res) {
   }
 
   /* Verify the payload hash header matches the received body. */
-  turbo_crypto_sha256_init(&body_ctx);
+  salts_crypto_sha256_init(&body_ctx);
   if (req->body_len > 0u &&
-      turbo_crypto_sha256_update(&body_ctx, (const uint8_t *)req->body, req->body_len) !=
-          TURBO_CRYPTO_OK) {
+      salts_crypto_sha256_update(&body_ctx, (const uint8_t *)req->body, req->body_len) !=
+          SALTS_CRYPTO_OK) {
     send_s3_error(res, 500, "InternalError", "Hash failed.");
     return;
   }
-  turbo_crypto_sha256_final(&body_ctx, body_digest);
+  salts_crypto_sha256_final(&body_ctx, body_digest);
   hex_encode(body_digest, sizeof(body_digest), body_digest_hex);
   if (strcmp(body_digest_hex, expected_hash) != 0) {
     send_s3_error(res, 400, "BadDigest", "Payload hash mismatch.");

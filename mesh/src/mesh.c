@@ -11,6 +11,7 @@
 #include "mesh_path_optimizer.h"
 #include <fmt.h>
 #include <p2p.h>
+#include <salts/crypto.h>
 #include <turbo_crypto.h>
 #include <turbo_coro.h>
 #include <CoroNet/turbo_coro_context.h>
@@ -1322,8 +1323,8 @@ static int mesh_configure_p2p_security(mesh_network_t *mesh,
     if (!trusted_keys) {
         return MESH_ERR_NO_MEMORY;
     }
-    if (turbo_crypto_sha256(mesh->network_id, strlen(mesh->network_id),
-                            network_id_hash) != TURBO_CRYPTO_OK ||
+    if (salts_crypto_sha256(mesh->network_id, strlen(mesh->network_id),
+                            network_id_hash) != SALTS_CRYPTO_OK ||
         p2p_node_get_public_key(mesh->p2p_node, trusted_keys) != P2P_OK) {
         result = MESH_ERR_NETWORK;
         goto cleanup;

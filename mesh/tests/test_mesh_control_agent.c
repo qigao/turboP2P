@@ -2,7 +2,7 @@
 #include "mesh_mgmt_crypto.h"
 #include <p2p.h>
 #include "tinytest.h"
-#include <turbo_crypto.h>
+#include <salts/crypto.h>
 #include <turbo_http.h>
 
 #include <stdio.h>
@@ -683,8 +683,8 @@ static int test_agent_network_fixture_init(
   memset(fixture->node_private, 0x44, sizeof(fixture->node_private));
   if (p2p_public_key_from_private_key(fixture->node_private,
                                      fixture->node_public) != P2P_OK ||
-      turbo_crypto_sha256(network_id, strlen(network_id), fixture->mesh_id) !=
-          TURBO_CRYPTO_OK ||
+      salts_crypto_sha256(network_id, strlen(network_id), fixture->mesh_id) !=
+          SALTS_CRYPTO_OK ||
       mesh_mgmt_ed25519_public_from_private(TEST_SIGNING_PRIVATE_KEY,
                                             fixture->issuer.public_key) !=
           MESH_MGMT_CRYPTO_OK)
