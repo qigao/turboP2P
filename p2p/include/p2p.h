@@ -357,12 +357,25 @@ CXX_C_API int p2p_start(p2p_node_t *node);
 
 /**
  * Start server and gossip (non-blocking)
- * Use this with p2p_get_loop() + coro_context_run() for custom event loop integration
+ * Call p2p_poll() from the owner thread for custom event loop integration.
  */
 CXX_C_API int p2p_start_nonblocking(p2p_node_t *node);
 
 /**
- * Get the CoroNet context for integration
+ * Advance one non-blocking turn of the node's explicitly bound network owner.
+ * Call on the owner thread, outside its callbacks, without concurrent destroy.
+ * Callbacks run synchronously; their work and deferred shutdown may delay return.
+ * This does not create an owner or start a listener. Deferred owner shutdown
+ * is processed after callbacks; cleanup failure is returned to the caller.
+ * @return P2P_OK on success (not an event count), P2P_ERR_INVALID_ARG for NULL,
+ * P2P_ERR_INVALID_STATE for an absent/stopped owner or recursive progress,
+ * otherwise the owner's P2P error code. A failure does not destroy the node.
+ */
+CXX_C_API int p2p_poll(p2p_node_t *node);
+
+/**
+ * Get the legacy CoroNet context for integration; prefer p2p_poll() for progress.
+ * This never returns another backend's context as a CoroNet pointer.
  */
 CXX_C_API coro_context_t *p2p_get_loop(p2p_node_t *node);
 

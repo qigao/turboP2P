@@ -160,7 +160,7 @@ static void test_peer_disconnect(void) {
     p2p_peer_t *peer = fixture.pair.server.peer;
     check_true(fixture.pair.server.node->transfers->active->held_peers[0] == peer);
     p2p_peer_disconnect(peer);
-    check_equal(P2P_OK, p2p_node_cnet_poll(fixture.pair.server.owner));
+    check_equal(P2P_OK, p2p_poll(fixture.pair.server.node));
     check_true(peer->destroying);
     check_true(peer->callback_refs > 0);
     check_true(fixture.pair.server.node->peers_table == NULL);

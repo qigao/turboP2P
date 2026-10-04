@@ -3695,9 +3695,9 @@ static void mesh_handle_ip_packet(mesh_network_t *mesh, mesh_peer_t *incoming_pe
 }
 
 static void mesh_disconnect_all_p2p_peers(mesh_network_t *mesh) {
+    enum { MESH_DISCONNECT_POLL_LIMIT = 100, MESH_DISCONNECT_POLL_INTERVAL_MS = 1 };
     p2p_peer_t **peers = NULL;
     size_t count = 0;
-    coro_context_t *ctx = NULL;
 
     if (!mesh || !mesh->p2p_node) {
         return;
@@ -3741,14 +3741,13 @@ static void mesh_disconnect_all_p2p_peers(mesh_network_t *mesh) {
     }
     free(peers);
 
-    ctx = p2p_get_loop(mesh->p2p_node);
-    if (!ctx) {
-        return;
-    }
-
-    for (int i = 0; i < 100; i++) {
-        coro_context_run(ctx, TURBO_RUN_NOWAIT);
-        turbo_sleep_ms(1);
+    for (int i = 0; i < MESH_DISCONNECT_POLL_LIMIT; i++) {
+        int result = p2p_poll(mesh->p2p_node);
+        if (result != P2P_OK) {
+            TLOG_ERROR("Failed to poll P2P during mesh disconnect: {}", result);
+            return;
+        }
+        turbo_sleep_ms(MESH_DISCONNECT_POLL_INTERVAL_MS);
     }
 }
 
@@ -4971,12 +4970,9 @@ int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t len) {
 int mesh_poll(mesh_network_t *mesh, int timeout_ms) {
     if (!mesh) return -1;
 
-    /* Run P2P event loop in non-blocking mode (single iteration) */
-    /* This ensures all P2P callbacks run in the SAME thread as mesh_poll */
-    coro_context_t *ctx = p2p_get_loop(mesh->p2p_node);
-    if (ctx) {
-        coro_context_run(ctx, TURBO_RUN_NOWAIT);
-    }
+    /* P2P callbacks remain on the thread that owns mesh_poll. */
+    if (mesh->p2p_node && p2p_poll(mesh->p2p_node) != P2P_OK)
+        return MESH_ERR_NETWORK;
     if (mesh->ice_ctx) {
         coro_context_run(mesh->ice_ctx, TURBO_RUN_NOWAIT);
     }

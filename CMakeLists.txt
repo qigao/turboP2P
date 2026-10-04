@@ -149,6 +149,7 @@ install(
 if(BUILD_TESTS)
   add_executable(test_salts_sha256 tests/salts_foundation/test_salts_sha256.c)
   set_property(TARGET test_salts_sha256 PROPERTY LINKER_LANGUAGE CXX)
-  target_link_libraries(test_salts_sha256 PRIVATE Salts::Crypto Salts::TinyTest)
+  target_link_libraries(test_salts_sha256 PRIVATE
+    Salts::Crypto Salts::TinyTest TurboP2P::NoiseProtocol)
   add_test(NAME test_salts_sha256 COMMAND test_salts_sha256)
 endif()

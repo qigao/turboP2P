@@ -514,8 +514,9 @@ CXX_C_API int mesh_send_packet(mesh_network_t *mesh, const uint8_t *data, size_t
 /**
  * Process events (non-blocking)
  * @param mesh Mesh handle
- * @param timeout_ms Timeout in milliseconds
- * @return Number of events processed
+ * @param timeout_ms Reserved; polling does not wait for events
+ * @return MESH_OK on success, MESH_ERR_NETWORK if P2P polling fails,
+ * or MESH_ERR_INVALID_ARG for a NULL handle
  */
 CXX_C_API int mesh_poll(mesh_network_t *mesh, int timeout_ms);
 

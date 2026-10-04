@@ -539,3 +539,25 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 本地复验：按本文件 SDK 环境配置后，`cmake -S tests/salts_foundation -B build/salts-foundation -G Ninja -DCMAKE_BUILD_TYPE=Release`，随后 `cmake --build build/salts-foundation --parallel 2` 与 `ctest --test-dir build/salts-foundation --output-on-failure`。CI 的 `P2P sanitizer regression` 步骤记录同一 latest SDK 图下的插桩配置和九个 target；依赖不锁版本，re2c 继续使用共享 vcpkg-cache action。
 
 **MED（事实，剩余范围）**：公开构造器/事件循环/get_loop、现有 Pub/Sub 占位消息行为、完整根工程及跨平台运行仍未切换或完成验证；阶段 N 的文件能力限制继续有效。公开错误语义明确收紧为容量不足/本地分配失败/非法循环状态的既有错误码；API 签名、数据格式不变。CNet owner 仍为 `@internal @incomplete`。回滚本阶段可退回 O，无用户数据或 wire 格式迁移；回滚同时会撤销上述正确性修复。
+
+## 第二阶段 Q：公共 polling 契约与 mesh 调用方
+
+**MED（事实，已接入）**：mesh 的正常进度、断开排空和独立管理 runtime 仍直接获取 `coro_context_t *` 驱动 P2P，无法接入显式 CNet owner；管理 runtime 还忽略进度错误。本阶段新增完整公共 `p2p_poll(node)`，复用上一阶段的 owner binding，迁移这三个调用点及同步 DHT getter。独立 ICE context 继续由原有 ICE 生命周期管理。
+
+选择增加一个不暴露 context 的进度入口，而不是更改 `p2p_get_loop()` 返回类型。后者仍有 `coro_post`、`coro_context_stop` 等真实调用方，伪装或替换 context 会破坏它们。新接口只转发显式绑定的 owner，不探测指针类型、不创建线程或后备 runtime，也不复制网络状态。每轮新增 O(1) 的入口检查与已有间接调用；协议、文件格式与所有权不变。
+
+契约与调用方行为：
+
+- `p2p_poll` 在 owner 线程、回调外推进一次非阻塞网络 turn，不负责创建 owner、启动 listener 或销毁 node。用户回调同步执行；同步文件 I/O、用户代码及回调请求的延迟 shutdown 仍可延长返回时间，不能据此保证总耗时上限。
+- NULL 返回 `INVALID_ARG`；缺失 owner 或 owner 拒绝停止/重入状态时返回 `INVALID_STATE`；其他 P2P 错误原样上返。入口不持有 node mutex，调用者必须保证 node 存活并避免并发销毁。CNet 回调 stop 先关闭新工作入口，退出当前回调后排空；失败保留 node/owner 供原 owner 销毁路径重试。
+- 同步 DHT getter 保留 poll 后 binding 检查；即使 stop 本轮成功，尚未完成的同步查询也返回 `INVALID_STATE`，不会用已停止的 owner 继续查询。
+- `mesh_poll` 在 P2P progress 失败时返回既有 `MESH_ERR_NETWORK`，不继续本轮 ICE/路由维护；void 断开清理边界记录一次错误并结束剩余排空轮次。独立管理 runtime 返回 `MESH_MGMT_AGENT_RUNTIME_P2P_FAILED`，保存 `last_p2p_result` 并释放 `in_api`；共享模式仍由 mesh 推进。管理 runtime 的时钟同时迁至 Salts。
+- 新接口为增量 C symbol，现有签名保留。使用该接口的新调用方必须链接包含该 symbol 的新版 P2P 库；旧库不能满足新二进制。`create/start/start_nonblocking/destroy/get_loop` 仍使用旧 constructor/lifecycle，这不是公开 CNet 构造器切换。
+
+**MED（事实，已修正依赖）**：阶段 O 为 `test_salts_sha256` 增加 Noise fingerprint 回归后，foundation 已链接 Noise，但根测试 target 漏掉依赖。本阶段给根 target 补上 `TurboP2P::NoiseProtocol`，保证包含路径和链接要求由同一个 target 提供；完整 root 的实际链接仍待 legacy SDK 可用后验证。
+
+验证：node/files/security-config/DHT 的实际网络进度统一通过公开 `p2p_poll`，生产 state/security/peer/transport/codec 路径没有替身。node 套件扩展为十八个 Linux 场景，新增配置失败/重复 owner 绑定时状态保留、绑定前后与 stop/destroy 后的 polling、底层 CNet poll 超时传播，以及回调延迟 stop 超时后的保留/重试。认证回调统一断言拒绝递归 polling；已有双向消息、文件、DHT 和停止回归因此覆盖公共入口。仅 SDK 失败注入使用 Linux linker wrap。
+
+管理 runtime 增加独立生产源码编译 target，在 Salts SDK 下不包含 CoroNet；对象符号确认使用 `p2p_poll`/`salts_monotonic_ms`。它只是编译检查，不是完整管理生命周期运行测试。七个覆盖本次 API、调用方和 fixture 的编译单元通过 `-Wall -Wextra -Werror`。九套 ASan/UBSan 在遇错即停模式下 **9/9** 通过（`detect_leaks=0`，发布 SDK 未插桩）。本地完整 Release 首跑两个构建产物因执行权限为 644 未启动；恢复权限后完整重跑 **39/39** 通过。latest SDK 版本与远端结果以本 PR 的 CI 记录为准；复验命令沿用阶段 P。
+
+**MED（事实，剩余范围）**：完整 mesh/root、旧 CoroNet adapter 与跨平台运行尚未验证，公开构造器和阻塞 start 仍未迁到 CNet；阶段 P 的 Pub/Sub、异步 DHT 和阶段 N 文件限制继续有效。CNet owner 保留内部未完成迁移标记。后续需要提供兼容的构造/启动/停止与 post 契约，再移除旧 SDK。撤销本阶段可回到 P，但使用新 symbol 的调用方必须一起回滚；不涉及用户数据或 wire 转换。Salts/SaltsUtils 继续使用 latest released packages，re2c 继续使用共享 vcpkg-cache action。
