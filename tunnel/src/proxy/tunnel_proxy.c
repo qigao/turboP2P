@@ -360,7 +360,8 @@ int tunnel_proxy_set_config(tunnel_proxy_t *proxy, const tunnel_proxy_config_t *
 int tunnel_proxy_start(tunnel_proxy_t *proxy) {
   cnet_client_config policy = {0};
   if (!proxy || !proxy->tunnel) return TUNNEL_ERR_INVALID_ARG;
-  if (proxy->client.impl || proxy->tunnel->config.mode == TUNNEL_MODE_PACKET) return TUNNEL_OK;
+  if (proxy->client.impl) return proxy->stop_requested ? TUNNEL_ERR_NETWORK : TUNNEL_OK;
+  if (proxy->tunnel->config.mode == TUNNEL_MODE_PACKET) return TUNNEL_OK;
   proxy->stop_requested = 0;
 #ifdef _WIN32
   policy.backend = NATIVE_IO_BACKEND_IOCP;
