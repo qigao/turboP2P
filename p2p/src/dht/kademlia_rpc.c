@@ -520,6 +520,18 @@ void p2p_dht_lookup_finish(p2p_node_t *node, p2p_dht_lookup_t *lookup) {
     lookup_finish_detached(lookup);
 }
 
+void p2p_dht_lookup_cancel(p2p_node_t *node, uint32_t request_id) {
+    p2p_dht_lookup_t *lookup;
+    if (!node) return;
+    salts_mutex_lock(&node->mutex);
+    lookup = p2p_dht_lookup_find(node, request_id);
+    if (lookup) lookup_detach_locked(node, lookup);
+    salts_mutex_unlock(&node->mutex);
+    if (!lookup) return;
+    if (lookup->cleanup && lookup->user_data) lookup->cleanup(lookup->user_data);
+    free(lookup);
+}
+
 void p2p_dht_lookup_try_progress(p2p_node_t *node) {
     p2p_dht_lookup_t *lookup = NULL;
     p2p_dht_lookup_t *tmp = NULL;
@@ -552,6 +564,7 @@ void p2p_dht_lookup_try_progress(p2p_node_t *node) {
 
 p2p_dht_lookup_t *p2p_dht_lookup_start(p2p_node_t *node, const uint8_t *target, p2p_msg_type_t type) {
     p2p_dht_lookup_t *lookup = NULL;
+    uint32_t request_id;
 
     if (!node || !target || !node->network_ops) return NULL;
 
@@ -574,10 +587,15 @@ p2p_dht_lookup_t *p2p_dht_lookup_start(p2p_node_t *node, const uint8_t *target, 
     }
 
     lookup_sort_candidates(lookup);
+    request_id = lookup->request_id;
     HASH_ADD(hh, node->dht_lookups, request_id, sizeof(lookup->request_id), lookup);
     salts_mutex_unlock(&node->mutex);
-    lookup_next_wave_by_id(node, lookup->request_id);
-
+    lookup_next_wave_by_id(node, request_id);
+    /* An immediate connection failure callback can stop the node and cancel
+     * this lookup while the first wave is being dispatched. */
+    salts_mutex_lock(&node->mutex);
+    lookup = p2p_dht_lookup_find(node, request_id);
+    salts_mutex_unlock(&node->mutex);
     return lookup;
 }
 

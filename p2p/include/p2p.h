@@ -725,13 +725,20 @@ CXX_C_API int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *
  * @param node Node
  * @param key Key (string)
  * @param buf Buffer for value
- * @param buf_len Buffer length (input/output)
+ * @param buf_len Buffer capacity on input, value length on success or required
+ *                capacity on P2P_ERR_RESOURCE_EXHAUSTED; no partial copy.
+ * Network misses drive the node owner synchronously and must be called on its
+ * owner thread outside callbacks. Reentrant progress or a stopped owner returns
+ * P2P_ERR_INVALID_STATE. A cache hit does not progress the network. Exhausted
+ * candidates or the bounded wait deadline return P2P_ERR_NOT_FOUND, and the
+ * lookup owned by this call is removed before return.
  * @return P2P_OK on success
  */
 CXX_C_API int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
 
 /**
  * Get a value already present in the local DHT cache without network waiting.
+ * Buffer capacity/required-length behavior is the same as p2p_dht_get().
  */
 CXX_C_API int p2p_dht_get_cached(p2p_node_t *node, const char *key, void *buf, size_t *buf_len);
 

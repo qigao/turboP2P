@@ -4,11 +4,14 @@
 #include "../internal.h"
 
 /* Explicit owner binding; no runtime detection or implicit backend fallback.
- * Queries run under node->mutex on the owner thread and must not mutate state. */
+ * Pending-gate queries run under node->mutex and must not mutate state.
+ * Poll runs without the mutex on the owner thread, may dispatch callbacks, and
+ * must reject recursive progress. Its return uses P2P error codes. */
 struct p2p_node_network_ops_s {
     int (*connect)(p2p_peer_t *peer, void *context);
     int (*pending_gates)(p2p_node_t *node, const char *source_ip,
         size_t *total, size_t *source, void *context);
+    int (*poll)(p2p_node_t *node, void *context);
 };
 
 int p2p_node_source_prefix_matches(const char *left, const char *right);

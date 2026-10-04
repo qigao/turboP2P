@@ -209,6 +209,7 @@ add_library(p2p_node_core STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/node_state.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/file.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_file_api.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_dht_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_security_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/api/p2p_peer_api.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/protocol/handlers_transfer.c"
@@ -243,7 +244,14 @@ set_property(TARGET test_p2p_cnet_security_config PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_security_config PRIVATE p2p_node_core Salts::TinyTest)
 add_test(NAME test_p2p_cnet_security_config COMMAND test_p2p_cnet_security_config)
 set_tests_properties(test_p2p_cnet_security_config PROPERTIES TIMEOUT 60)
+add_executable(test_p2p_cnet_dht "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_dht.c")
+set_property(TARGET test_p2p_cnet_dht PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_dht PRIVATE p2p_node_core Salts::TinyTest)
+add_test(NAME test_p2p_cnet_dht COMMAND test_p2p_cnet_dht)
+set_tests_properties(test_p2p_cnet_dht PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_p2p_cnet_dht PRIVATE P2P_DHT_TEST_WRAP)
+  target_link_options(test_p2p_cnet_dht PRIVATE "-Wl,--wrap=malloc")
   target_compile_definitions(test_p2p_cnet_node PRIVATE P2P_NODE_TEST_WRAP)
   target_link_options(test_p2p_cnet_node PRIVATE "-Wl,--wrap=cnet_client_stop")
   target_compile_definitions(test_p2p_cnet_files PRIVATE P2P_FILES_TEST_WRAP)

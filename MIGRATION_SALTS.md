@@ -516,3 +516,26 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 符号隔离修复后，SHA-256/security/node/files/security-config 五项针对性回归通过；加入 SHA-256 和 security 后的九套 ASan/UBSan 全部通过，新增摘要测试也通过严格编译。静态库符号表确认三个私有 SHA-256 符号均已带前缀。
 
 **MED（事实，剩余范围）**：公开 create/start/get_loop 仍返回/驱动 CoroNet，阻塞 DHT get、完整 root、旧 adapter 和跨平台运行尚未验证或切换；本阶段 N 列出的文件持久化/目录/完整多源策略仍未完成。内部 CNet owner 继续标为 `@internal @incomplete`，不宣称公开产品已全量切换。回滚本阶段提交即可回到 N；没有 wire、配置或用户数据迁移。Salts/SaltsUtils 继续消费 latest released packages，re2c 继续使用共享 vcpkg-cache action。
+
+## 第二阶段 P：共享 DHT API 与有界 owner polling
+
+**MED（事实，已修复）**：`p2p_dht_get()` 原来直接运行 CoroNet 并使用 TurboUtils 时钟/睡眠，CNet 节点无法调用该公开实现；超时返回后请求仍留在 lookup 表。本阶段提取 `p2p_dht_api.c`，共享 put/get、cached put/get 和 entry count。私有 `node_network_ops` 新增单次非阻塞 poll：构造器分别显式绑定 CoroNet/CNet 实现，不探测 context，也不加入失败降级。公开 create/start/get_loop 的 CoroNet 类型与实现保持原状。
+
+**HIGH（事实，已修复）**：缓存查询的底层函数在容量不足时写回所需长度，而旧阻塞 getter 将这个长度当成下一轮容量。本阶段把“容量不足”与“未找到”分开，立即返回 `P2P_ERR_RESOURCE_EXHAUSTED` 和所需长度，不做部分复制或继续查询。缓存覆盖先分配并复制候选数据，再替换旧值；分配失败保留旧数据、长度和 TTL。公开两种 put 入口检查本地存储错误并返回 `P2P_ERR_NO_MEM`，失败时不发送副本。
+
+状态与生命周期约束：
+
+- 本地缓存仍是唯一值事实源，受 node mutex 保护。cache hit 不驱动网络；cache miss 在 owner 线程、回调外执行单次 poll 验证，再启动 lookup。回调内 miss、已停止或未绑定 owner 返回 `P2P_ERR_INVALID_STATE`。
+- 同步查询只拥有自己的 request id。轮询使用 Salts 单调时钟/睡眠和既有一秒期限，每轮仍执行 CNet 的 worker、peer、transfer 和 DHT 维护；poll 错误立即上返。收到值、候选耗尽、超时、容量不足或 owner 停止后均取消本次残留 lookup，不清理其他请求。
+- 私有 cancel 按 id 在锁内摘表，在锁外仅执行 cleanup 一次，不发送 completion；已完成/已停止/已取消的 id 是无副作用操作。start 在首轮 dispatch 后重新按 id 查询，避免同步停止已摘表后返回旧指针。
+- put 保留原有“先本地存储，再尽力复制/迭代寻找邻居”的语义；不是分布式持久化确认。没有候选时，本地存储仍成功。异步 put 的完整超时、候选请求关联和重试策略不在本阶段宣称完成。
+
+**HIGH（事实，已修复）**：本次 UBSan 发现应用帧密文紧随两字节长度前缀，传给 Noise-C 向量 ChaCha 后触发未对齐 word 访问。发送分配增加两个字节的前置 padding，让密文地址对齐，释放时保留分配基址；发送范围仍只含原前缀和密文，不增加整帧复制、不修改加密算法或 wire。前阶段 sanitizer 的 CTest 成功退出不能排除可恢复 UBSan 诊断；本阶段将 `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` 加入真实验证与 CI，禁止这种诊断被成功退出掩盖。修复本次测试中误用 DHT ID 长度作为网络标识长度的问题后重新验证。
+
+选择共享 API + 单次 owner poll，是为了保持已有同步 getter 和独立缓存入口；复制 CNet 专属 DHT API 会使容量/错误语义漂移，把 CNet 指针伪装为 `coro_context_t *` 则会破坏现有 mesh/示例调用方。代价为私有 ops 中一个函数指针和一次查询前的 bounded poll；锁内仅查缓存/摘表，网络与用户回调在锁外。无新的 worker、调度线程或消息副本协议。测试中的远端线程独立创建、驱动和销毁其 CNet owner。
+
+验证：新增十二个场景覆盖本地缓存与容量、cached/iterative put 的七字节接收分片、独立 owner 线程上的远端命中/容量不足/未找到、无应答超时与保留其他 lookup、cancel cleanup 一次、回调缓存读取与拒绝重入、停止后的缓存读取、poll 错误/中途停止，以及 Linux 分配失败时旧值保持。完整 Linux Release **39/39** 一次通过；security/transport/admission/worker/peer/node/files/security-config/DHT 九套 ASan/UBSan 在遇错即停模式下 **9/9** 通过（`detect_leaks=0`；发布 SDK 未插桩）。六个已编译修改源码通过 `-Wall -Wextra -Werror`；旧 CoroNet adapter/root 未因这些测试而获得验证。
+
+本地复验：按本文件 SDK 环境配置后，`cmake -S tests/salts_foundation -B build/salts-foundation -G Ninja -DCMAKE_BUILD_TYPE=Release`，随后 `cmake --build build/salts-foundation --parallel 2` 与 `ctest --test-dir build/salts-foundation --output-on-failure`。CI 的 `P2P sanitizer regression` 步骤记录同一 latest SDK 图下的插桩配置和九个 target；依赖不锁版本，re2c 继续使用共享 vcpkg-cache action。
+
+**MED（事实，剩余范围）**：公开构造器/事件循环/get_loop、现有 Pub/Sub 占位消息行为、完整根工程及跨平台运行仍未切换或完成验证；阶段 N 的文件能力限制继续有效。公开错误语义明确收紧为容量不足/本地分配失败/非法循环状态的既有错误码；API 签名、数据格式不变。CNet owner 仍为 `@internal @incomplete`。回滚本阶段可退回 O，无用户数据或 wire 格式迁移；回滚同时会撤销上述正确性修复。
