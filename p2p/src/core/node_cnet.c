@@ -54,7 +54,12 @@ static int pending_gates(p2p_node_t *node, const char *ip, size_t *total,
     return p2p_cnet_admission_pending(owner->admission, ip, total, source);
 }
 
-static const p2p_node_network_ops_t network_ops = {connect_peer, pending_gates};
+static int poll_node(p2p_node_t *node, void *context) {
+    (void)node;
+    return p2p_node_cnet_poll(context);
+}
+
+static const p2p_node_network_ops_t network_ops = {connect_peer, pending_gates, poll_node};
 
 static void cookie_status_locked(const p2p_node_t *node, p2p_node_cookie_status_t *output) {
     const p2p_node_cnet_t *owner = node->network_context;

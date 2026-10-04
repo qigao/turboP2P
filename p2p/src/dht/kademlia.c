@@ -281,10 +281,11 @@ int kademlia_store(kademlia_dht_t *dht, const kad_id_t *key, const void *data, s
     while (val) {
         if (memcmp(&val->key, key, sizeof(kad_id_t)) == 0) {
             /* Update existing value */
+            void *replacement = malloc(len);
+            if (!replacement) return -1;
+            memcpy(replacement, data, len);
             free(val->data);
-            val->data = malloc(len);
-            if (!val->data) return -1;
-            memcpy(val->data, data, len);
+            val->data = replacement;
             val->len = len;
             val->expires = (uint64_t)time(NULL) + 3600;  /* 1 hour TTL */
             return 0;

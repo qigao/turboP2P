@@ -461,6 +461,7 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
 
         size_t ct_len;
         uint8_t *ct_buf;
+        uint8_t *ct_storage;
 
         if (frame_len > P2P_NOISE_MAX_PLAINTEXT_SIZE) {
             free(frame_buf);
@@ -476,11 +477,15 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
             p2p_peer_disconnect(peer);
             return ret;
         }
-        ct_buf = (uint8_t *)malloc(ct_len + 2);
-        if (!ct_buf) {
+        /* Leave padding before the two-byte wire prefix so Noise-C's private
+         * ChaCha word loads see aligned ciphertext. The sent frame is unchanged
+         * and requires no additional copy. Keep the allocation base for free. */
+        ct_storage = (uint8_t *)malloc(ct_len + sizeof(uint32_t));
+        if (!ct_storage) {
             free(frame_buf);
             return P2P_ERR_NO_MEM;
         }
+        ct_buf = ct_storage + sizeof(uint32_t) - 2U;
 
         ct_buf[0] = (uint8_t)((ct_len >> 8) & 0xFF);
         ct_buf[1] = (uint8_t)(ct_len & 0xFF);
@@ -491,7 +496,7 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
         free(frame_buf);
 
         if (ret != P2P_OK) {
-            free(ct_buf);
+            free(ct_storage);
             TLOG_ERROR("[P2P] peer_send: encryption failed");
             p2p_node_record_security_failure(peer->node,
                                              peer->security_stage, ret);
@@ -500,7 +505,7 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
         }
 
         ret = peer_send_raw(peer, ct_buf, encrypted_len + 2);
-        free(ct_buf);
+        free(ct_storage);
         if (ret != P2P_OK) {
             /* CipherState advanced before the transport admitted the frame.
              * Continuing or retrying would permanently desynchronize nonces. */

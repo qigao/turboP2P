@@ -61,8 +61,16 @@ static int node_pending_coronet(p2p_node_t *node, const char *ip,
     return P2P_OK;
 }
 
+static int node_poll_coronet(p2p_node_t *node, void *context) {
+    (void)context;
+    if (!node->ctx || coro_context_current() == node->ctx)
+        return P2P_ERR_INVALID_STATE;
+    coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
+    return P2P_OK;
+}
+
 static const p2p_node_network_ops_t node_coronet_ops = {
-    node_connect_coronet, node_pending_coronet
+    node_connect_coronet, node_pending_coronet, node_poll_coronet
 };
 
 p2p_node_t* p2p_node_create(const char *ip, int port) {

@@ -54,6 +54,7 @@ typedef struct p2p_private_key_operation_s p2p_private_key_operation_t;
 #define P2P_CONNECT_RETRY_MS 3000
 #define P2P_MANUAL_DISCONNECT_SUPPRESS_MS 5000
 #define P2P_DHT_GET_TIMEOUT_MS 1000
+#define P2P_DHT_POLL_INTERVAL_MS 10
 #ifndef P2P_PENDING_PEER_LIMIT
 #define P2P_PENDING_PEER_LIMIT 128
 #endif
@@ -514,6 +515,9 @@ int p2p_dht_lookup_on_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_mes
 void p2p_dht_lookup_try_progress(p2p_node_t *node);
 int p2p_connect_candidate(p2p_node_t *node, const char *ip, int port);
 void p2p_dht_lookup_finish(p2p_node_t *node, p2p_dht_lookup_t *lookup);
+/* Owner-thread cancellation by id. Detach under mutex; run cleanup once
+ * outside it, without delivering a completion callback. Missing id is a no-op. */
+void p2p_dht_lookup_cancel(p2p_node_t *node, uint32_t request_id);
 p2p_dht_lookup_t *p2p_dht_lookup_find(p2p_node_t *node, uint32_t request_id);
 
 /* Lifecycle */
