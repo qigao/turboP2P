@@ -1,4 +1,5 @@
 #include <salts/crypto.h>
+#include <noise/protocol.h>
 #include <tinytest.h>
 
 static const uint8_t abc_digest[32] = {
@@ -37,5 +38,17 @@ spec("SaltsUtils SHA-256 migration") {
   it("rejects invalid buffers without silently computing a different digest") {
     check_equal(salts_crypto_sha256(NULL, 1u, digest), SALTS_CRYPTO_EINVAL);
     check_equal(salts_crypto_sha256("abc", 3u, NULL), SALTS_CRYPTO_EINVAL);
+  }
+  it("links Noise fingerprints and Salts SHA-256 without sharing private symbols") {
+    char fingerprint[3u * sizeof(abc_digest)];
+    check_equal(noise_format_fingerprint(NOISE_FINGERPRINT_FULL,
+        fingerprint, sizeof(fingerprint), (const uint8_t *)"abc", 3u),
+        NOISE_ERROR_NONE);
+    check_equal(fingerprint,
+        "ba:78:16:bf:8f:01:cf:ea:41:41:40:de:5d:ae:22:23:"
+        "b0:03:61:a3:96:17:7a:9c:b4:10:ff:61:f2:00:15:ad",
+        sizeof(fingerprint));
+    check_equal(salts_crypto_sha256("abc", 3u, digest), SALTS_CRYPTO_OK);
+    check_equal(digest, abc_digest, sizeof(digest));
   }
 }

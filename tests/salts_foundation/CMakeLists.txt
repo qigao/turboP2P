@@ -114,6 +114,7 @@ add_subdirectory("${TURBOP2P_SOURCE_DIR}/tunnel" tunnel)
 # Compile the P2P security production closure before migrating its network owner.
 include(NoiseC)
 turbo_p2p_configure_noise_c()
+target_link_libraries(test_salts_sha256 PRIVATE TurboP2P::NoiseProtocol)
 add_library(p2p_security STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/crypto/p2p_crypto.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cookie.c"

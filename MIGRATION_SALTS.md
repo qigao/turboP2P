@@ -497,6 +497,8 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 
 **MED（事实，已修复）**：阻塞私钥配置原来直接调用 CoroNet notifier factory，node security status 读取旧 gate 数组对应的计数；CNet fixture 因此只能直接填写身份与配置字段，无法证明公开配置入口可用。本阶段把安全/身份/provider/trust API 提取为 `p2p_security_api.c`，把 callbacks、disconnect、peer 查询提取为 `p2p_peer_api.c`，不再把事件循环或阻塞 DHT 查询一起链接。原公开签名、结构布局、默认值、凭证和 Noise wire 不变。
 
+**HIGH（事实，已修复）**：首次 latest SDK CI 使用 Salts 1.8.19 / SaltsUtils 4.1.18 时，Noise-C 与 `Salts::Crypto` 的 `sha256_update` 重复定义导致链接失败，本地 1.8.15 / 4.1.17 未触发。`NoiseC.cmake` 现在仅在私有 target 中将 SHA-256 的 reset/update/finish 定义及调用统一加 `turbop2p_noise_` 前缀；上游源码、公开头文件和 Salts SDK 均不修改，也不更改链接顺序或允许重复符号。SHA-256 回归程序同时链接两库，验证 Noise 完整指纹及 Salts 摘要的标准向量，避免只验证各自独立链接；此修复同样用于根工程。
+
 构造器显式绑定 executor factory：共享 node state 选择 owner polling；旧 node constructor 附加 CoroNet context 后选择 CoroNet notifier。配置入口不探测 context、不推断后端，也没有失败后换实现的路径。provider 的所有权自检仍同步执行；候选 identity/executor 验证成功后才替换旧状态，失败保留旧 identity/executor。已配置安全策略、存在 peer 表或附加网络 owner 时拒绝再次设置身份。CNet owner 在创建时校验自身发送上限能容纳已配置的 peer HWM，并拒绝重用已停止、transfer manager 已释放的 node。
 
 状态归属与线程契约：
@@ -510,5 +512,7 @@ legacy SDK，未执行完整根工程；不据此宣称旧 CoroNet 综合回归�
 选择构造期 factory 与只读状态绑定，是为了共享一处配置验证和信任更新逻辑。把 `ctx == NULL` 当后端标志会使未初始化节点误入 polling 路径；复制 CNet 专用配置 API 则会使默认值、拒绝原因和密钥生命周期漂移。代价是两个内部函数指针和每次 admission 统计事件的一次状态锁。统计复杂度为 O(1)，v3 固定矩阵复制有界；原有信任列表/peer 快照的容量及复杂度不变。
 
 验证：新增 `test_p2p_cnet_security_config` 八个场景覆盖配置/provider 失败回滚、blocking executor 保留与替换、真实 pinned 双节点握手、同步 opaque provider、阻塞 provider 的 worker 状态与消息发送、保留/撤销 trust、身份变化断开、transport HWM 不匹配拒绝，以及独立 Salts thread 在握手和 owner destroy 期间读取 node-atomic 状态、停止后最终统计与禁止重启。原 node/file 套件改用真实公开密钥、安全配置和 callback 注册 API，只有凭证/key provider 回调仍是 fixture；容量遵循公开配置的最小合法值。Linux 38 项 CTest 回归通过（本地三个程序的执行权限丢失导致未启动，恢复权限后补跑通过）；security-config/files/node/peer/transport/admission/worker 七套 ASan/UBSan 通过（`detect_leaks=0`，发布 SDK 未插桩）。本次九个已编译修改源码通过 `-Wall -Wextra -Werror`。
+
+符号隔离修复后，SHA-256/security/node/files/security-config 五项针对性回归通过；加入 SHA-256 和 security 后的九套 ASan/UBSan 全部通过，新增摘要测试也通过严格编译。静态库符号表确认三个私有 SHA-256 符号均已带前缀。
 
 **MED（事实，剩余范围）**：公开 create/start/get_loop 仍返回/驱动 CoroNet，阻塞 DHT get、完整 root、旧 adapter 和跨平台运行尚未验证或切换；本阶段 N 列出的文件持久化/目录/完整多源策略仍未完成。内部 CNet owner 继续标为 `@internal @incomplete`，不宣称公开产品已全量切换。回滚本阶段提交即可回到 N；没有 wire、配置或用户数据迁移。Salts/SaltsUtils 继续消费 latest released packages，re2c 继续使用共享 vcpkg-cache action。
