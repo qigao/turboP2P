@@ -19,9 +19,12 @@ typedef enum {
 
 /* Connection operations (virtual function table) */
 typedef struct {
+    /* Returns P2P_OK for admission, otherwise a P2P error. */
     int (*send)(void *handle, const void *data, size_t len);
     void (*close)(void *handle);
     void *handle;
+    /* Optional asynchronous owner: detach callbacks and reclaim after quiescence. */
+    void (*destroy)(void *handle);
 } p2p_conn_ops_t;
 
 /* Unified connection structure */

@@ -4492,7 +4492,7 @@ static int p2p_test_send_enobufs(void *handle, const void *data, size_t len) {
     (void)handle;
     (void)data;
     (void)len;
-    return TURBO_ENOBUFS;
+    return P2P_ERR_RESOURCE_EXHAUSTED;
 }
 
 static void p2p_test_connection_close_noop(void *handle) {
