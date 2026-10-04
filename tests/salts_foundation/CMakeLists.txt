@@ -13,7 +13,10 @@ find_package(OpenSSL REQUIRED)
 # second network runtime. Full product transport tests stay in the normal root build.
 set(mesh_src "${TURBOP2P_SOURCE_DIR}/mesh/src")
 set(mesh_tests "${TURBOP2P_SOURCE_DIR}/mesh/tests")
+add_subdirectory("${TURBOP2P_SOURCE_DIR}/vendor/monocypher" monocypher)
 add_library(foundation STATIC
+  "${mesh_src}/mesh_mgmt_crypto.c"
+  "${mesh_src}/mesh_stream_bind.c"
   "${mesh_src}/mesh_control_primitives.c"
   "${mesh_src}/mesh_control_outbox.c"
   "${mesh_src}/mesh_stream_codec.c"
@@ -30,7 +33,7 @@ add_library(foundation STATIC
   "${mesh_src}/mesh_stream_media_pull_multisource.c")
 target_include_directories(foundation PUBLIC "${mesh_src}")
 target_link_libraries(foundation PUBLIC
-  Salts::CSTL Salts::Platform Salts::Crypto OpenSSL::Crypto)
+  Salts::CSTL Salts::Platform Salts::Crypto OpenSSL::Crypto monocypher)
 
 # These two vector owners still call P2P/management adapters. Compile-check
 # their new CSTL contracts here; their lifecycle tests require the root build.
@@ -42,6 +45,8 @@ target_include_directories(vector_owners PRIVATE
 target_link_libraries(vector_owners PRIVATE Salts::CSTL Salts::Platform Salts::Core)
 
 foreach(test_name IN ITEMS
+  test_mesh_mgmt_crypto
+  test_mesh_stream_bind
   test_mesh_control_outbox
   test_mesh_stream_transport
   test_mesh_stream_data

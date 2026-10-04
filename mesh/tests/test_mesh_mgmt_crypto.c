@@ -40,15 +40,15 @@ static void test_crypto_matches_rfc8032_empty_message_vector(void) {
     uint8_t public_key[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE] = {0};
     uint8_t signature[MESH_MGMT_ED25519_SIGNATURE_SIZE] = {0};
 
-    check_int_eq(mesh_mgmt_ed25519_public_from_private(
+    check_equal(mesh_mgmt_ed25519_public_from_private(
                      RFC8032_PRIVATE_KEY, public_key),
                  MESH_MGMT_CRYPTO_OK);
-    check_mem_eq(public_key, RFC8032_PUBLIC_KEY, sizeof(public_key));
-    check_int_eq(mesh_mgmt_ed25519_sign(RFC8032_PRIVATE_KEY, NULL, 0,
+    check_equal(public_key, RFC8032_PUBLIC_KEY, sizeof(public_key));
+    check_equal(mesh_mgmt_ed25519_sign(RFC8032_PRIVATE_KEY, NULL, 0,
                                         signature),
                  MESH_MGMT_CRYPTO_OK);
-    check_mem_eq(signature, RFC8032_SIGNATURE, sizeof(signature));
-    check_int_eq(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 0,
+    check_equal(signature, RFC8032_SIGNATURE, sizeof(signature));
+    check_equal(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 0,
                                           RFC8032_SIGNATURE),
                  MESH_MGMT_CRYPTO_OK);
 }
@@ -58,7 +58,7 @@ static void test_crypto_rejects_modified_signature(void) {
 
     memcpy(signature, RFC8032_SIGNATURE, sizeof(signature));
     signature[0] ^= 0x01u;
-    check_int_eq(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 0,
+    check_equal(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 0,
                                           signature),
                  MESH_MGMT_CRYPTO_AUTH_FAILED);
 }
@@ -66,40 +66,59 @@ static void test_crypto_rejects_modified_signature(void) {
 static void test_crypto_matches_blake2b_256_empty_vector(void) {
     uint8_t digest[MESH_MGMT_BLAKE2B_256_SIZE] = {0};
 
-    check_int_eq(mesh_mgmt_blake2b_256(NULL, 0, digest),
+    check_equal(mesh_mgmt_blake2b_256(NULL, 0, digest),
                  MESH_MGMT_CRYPTO_OK);
-    check_mem_eq(digest, BLAKE2B_256_EMPTY, sizeof(digest));
-    check_int_eq(mesh_mgmt_crypto_equal_32(digest, BLAKE2B_256_EMPTY), 1);
+    check_equal(digest, BLAKE2B_256_EMPTY, sizeof(digest));
+    check_equal(mesh_mgmt_crypto_equal_32(digest, BLAKE2B_256_EMPTY), 1);
     digest[0] ^= 0x01u;
-    check_int_eq(mesh_mgmt_crypto_equal_32(digest, BLAKE2B_256_EMPTY), 0);
-    check_int_eq(mesh_mgmt_crypto_equal_32(NULL, BLAKE2B_256_EMPTY), 0);
+    check_equal(mesh_mgmt_crypto_equal_32(digest, BLAKE2B_256_EMPTY), 0);
+    check_equal(mesh_mgmt_crypto_equal_32(NULL, BLAKE2B_256_EMPTY), 0);
     digest[0] ^= 0x01u;
-    check_int_eq(mesh_mgmt_crypto_equal_16(digest, BLAKE2B_256_EMPTY), 1);
+    check_equal(mesh_mgmt_crypto_equal_16(digest, BLAKE2B_256_EMPTY), 1);
     digest[0] ^= 0x01u;
-    check_int_eq(mesh_mgmt_crypto_equal_16(digest, BLAKE2B_256_EMPTY), 0);
-    check_int_eq(mesh_mgmt_crypto_equal_16(NULL, BLAKE2B_256_EMPTY), 0);
+    check_equal(mesh_mgmt_crypto_equal_16(digest, BLAKE2B_256_EMPTY), 0);
+    check_equal(mesh_mgmt_crypto_equal_16(NULL, BLAKE2B_256_EMPTY), 0);
+}
+
+static void test_crypto_hashes_nonempty_and_multiple_blocks(void) {
+    static const uint8_t abc_digest[32] = {0xbd, 0xdd, 0x81, 0x3c, 0x63, 0x42, 0x39, 0x72, 0x31, 0x71, 0xef, 0x3f, 0xee, 0x98, 0x57, 0x9b, 0x94, 0x96, 0x4e, 0x3b, 0xb1, 0xcb, 0x3e, 0x42, 0x72, 0x62, 0xc8, 0xc0, 0x68, 0xd5, 0x23, 0x19};
+    static const uint8_t multiblock_digest[32] = {0xf7, 0xf3, 0xc4, 0x6b, 0xa2, 0x56, 0x4f, 0xf4, 0xc4, 0xc1, 0x62, 0xda, 0x1f, 0x5b, 0x60, 0x5f, 0x9f, 0x1c, 0x4a, 0xa6, 0xa2, 0x06, 0x52, 0xa9, 0xf9, 0xa3, 0x37, 0xc1, 0xa2, 0xf5, 0xb9, 0xc9};
+    uint8_t message[129];
+    uint8_t digest[32];
+    /* Independent BLAKE2b-256 vectors; 129 bytes crosses its 128-byte block. */
+    for (size_t i = 0u; i < sizeof(message); ++i)
+        message[i] = (uint8_t)i;
+    check_equal(mesh_mgmt_blake2b_256((const uint8_t *)"abc", 3u, digest), MESH_MGMT_CRYPTO_OK);
+    check_equal(digest, abc_digest, sizeof(digest));
+    check_equal(mesh_mgmt_blake2b_256(message, sizeof(message), digest), MESH_MGMT_CRYPTO_OK);
+    check_equal(digest, multiblock_digest, sizeof(digest));
+    mesh_mgmt_crypto_wipe(message, sizeof(message));
+    check_equal(message, (uint8_t[129]){0}, sizeof(message));
 }
 
 static void test_crypto_rejects_invalid_arguments(void) {
     uint8_t output[MESH_MGMT_ED25519_SIGNATURE_SIZE] = {0};
 
+    mesh_mgmt_crypto_wipe(NULL, 0u);
+    mesh_mgmt_crypto_wipe(NULL, 1u);
+
     memset(output, 0xa5, sizeof(output));
-    check_int_eq(mesh_mgmt_ed25519_public_from_private(NULL, output),
+    check_equal(mesh_mgmt_ed25519_public_from_private(NULL, output),
                  MESH_MGMT_CRYPTO_INVALID_ARG);
-    check_mem_eq(output, (uint8_t[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE]){0},
+    check_equal(output, (uint8_t[MESH_MGMT_ED25519_PUBLIC_KEY_SIZE]){0},
                  MESH_MGMT_ED25519_PUBLIC_KEY_SIZE);
     memset(output, 0xa5, sizeof(output));
-    check_int_eq(mesh_mgmt_ed25519_sign(RFC8032_PRIVATE_KEY, NULL, 1, output),
+    check_equal(mesh_mgmt_ed25519_sign(RFC8032_PRIVATE_KEY, NULL, 1, output),
                  MESH_MGMT_CRYPTO_INVALID_ARG);
-    check_mem_eq(output, (uint8_t[MESH_MGMT_ED25519_SIGNATURE_SIZE]){0},
+    check_equal(output, (uint8_t[MESH_MGMT_ED25519_SIGNATURE_SIZE]){0},
                  MESH_MGMT_ED25519_SIGNATURE_SIZE);
-    check_int_eq(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 1,
+    check_equal(mesh_mgmt_ed25519_verify(RFC8032_PUBLIC_KEY, NULL, 1,
                                           RFC8032_SIGNATURE),
                  MESH_MGMT_CRYPTO_INVALID_ARG);
     memset(output, 0xa5, sizeof(output));
-    check_int_eq(mesh_mgmt_blake2b_256(NULL, 1, output),
+    check_equal(mesh_mgmt_blake2b_256(NULL, 1, output),
                  MESH_MGMT_CRYPTO_INVALID_ARG);
-    check_mem_eq(output, (uint8_t[MESH_MGMT_BLAKE2B_256_SIZE]){0},
+    check_equal(output, (uint8_t[MESH_MGMT_BLAKE2B_256_SIZE]){0},
                  MESH_MGMT_BLAKE2B_256_SIZE);
 }
 
@@ -113,6 +132,9 @@ spec("mesh management crypto") {
         }
         it("matches the BLAKE2b-256 empty-message vector") {
             test_crypto_matches_blake2b_256_empty_vector();
+        }
+        it("matches nonempty and multiple-block BLAKE2b-256 vectors and wipes storage") {
+            test_crypto_hashes_nonempty_and_multiple_blocks();
         }
         it("rejects invalid pointers before entering crypto providers") {
             test_crypto_rejects_invalid_arguments();

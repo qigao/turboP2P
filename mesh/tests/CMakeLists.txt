@@ -497,7 +497,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
     endif()
 
     set(test_framework TurboUtils::TinyTest)
-    if(test_name MATCHES "^test_mesh_(control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
+    if(test_name MATCHES "^test_mesh_(mgmt_crypto|stream_bind|control_outbox|stream_cnet|stream_transport|stream_data|stream_source_selector|media_index|media_playlist|release|stream_media_pull|stream_media_pull_multisource)$")
         set(test_framework Salts::TinyTest)
         # Direct headers must resolve to the same runtime as the selected SDK.
         target_include_directories(${test_name} BEFORE PRIVATE "$ENV{SALTS_ROOT}/include")
