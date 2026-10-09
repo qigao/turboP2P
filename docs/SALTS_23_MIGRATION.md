@@ -129,3 +129,34 @@ project the typed policy into the **real** endpoint pool, and exercise a real
 two-listener CNet+Noise+MMP end-to-end session driven by DataBind-parsed
 EXPLICIT configuration. Linux Release and ASan/UBSan are required in draft
 PR #39.
+
+## Phase C3 — Typed RPC service configuration and canonical admission (#36)
+
+`mesh_mgmt_service_config_from_json_v1()` consumes a strict DataBind 4.3
+schema with fixed scalars before the variable `dns_name`. It supports the
+published RPC/IPv4 service contract, schema version 1, four 0..255 octets,
+port 1..65535 and optional canonical lowercase DNS. Unknown fields, type
+coercion, malformed or unsupported IPv6/service-family settings fail fast.
+No textual address parser, host DNS resolver or alternate network engine is
+introduced; IPv6 needs a separate explicitly versioned contract.
+
+The CNet Owner receives **no DataBind objects**. After codec, immutable plan
+and record have been released, a caller holds an independent
+`mesh_mgmt_service_config_v1_t` containing the canonical address, port and
+owned DNS. Its `mesh_mgmt_service_config_publish_view_v1` borrows the DNS
+from this address-stable config only for the synchronous
+`mesh_mgmt_agent_runtime_publish_cached_service_v1` call. Never persist,
+move or copy that borrowed view. Canonical validation reuses
+`mesh_mgmt_service_record_encode_v1` with a dummy nonzero local identity,
+epoch and expiry — it never signs, publishes or touches the DHT while parsing.
+
+The existing live Noise/MMP service discovery test now drives this Configurator
+before publishing the **real signed RPC service** and re-verifies cached
+service resolution and tampering refusal. The typed adapter also has direct
+tests for malformed JSON/version, unknown fields, exact scalar tokens,
+invalid addresses, DNS and embedded NUL, plus view lifetime.
+
+This completes a **Client+RPC-service Configurator slice** only: additional
+ACE Server SG topology, Manager/Pool/ManagedDial, generated IDL/CMeta service
+descriptors, cross-platform installed consumer and complete root migration
+remain the distinct #36/#37/#38 acceptance gates.

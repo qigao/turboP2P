@@ -1,6 +1,7 @@
 #include <tinytest.h>
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_client_config.h"
+#include "mesh_mgmt_service_config.h"
 #include "mesh_mgmt_test_identity.h"
 #include "core/node_state.h"
 #include "transfer/transfer.h"
@@ -161,6 +162,11 @@ static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
   mesh_mgmt_service_publish_v1_t service = {0};
+  mesh_mgmt_service_config_v1_t service_config = {0};
+  static const char SERVICE_JSON[] =
+      "{\"schema_version\":1,\"address_family\":4,\"octet0\":100,"
+      "\"octet1\":64,\"octet2\":0,\"octet3\":2,\"port\":7878,"
+      "\"dns_name\":\"node-b.mesh\"}";
   mesh_mgmt_service_record_v1_t record;
   mesh_mgmt_endpoint_publish_v1_t endpoint = {0};
   mesh_mgmt_agent_cached_endpoint_v1_t cached = {0};
@@ -176,9 +182,12 @@ static void test_session_records_reconnect(void) {
       &client.runtime.endpoint_pool, server.public_key, &snapshot));
   check_equal(MESH_MGMT_ENDPOINT_ACTIVE, snapshot.state);
 
-  service.address_family = MESH_MGMT_SERVICE_ADDRESS_IPV4;
-  service.virtual_address[0] = 100; service.virtual_address[1] = 64;
-  service.virtual_address[3] = 2; service.dns_name = "node-b.mesh"; service.port = 7878;
+  check_equal(MESH_MGMT_SERVICE_CONFIG_OK,
+      mesh_mgmt_service_config_from_json_v1(
+          SERVICE_JSON, sizeof(SERVICE_JSON) - 1u, &service_config));
+  check_equal(MESH_MGMT_SERVICE_CONFIG_OK,
+      mesh_mgmt_service_config_publish_view_v1(&service_config, &service));
+  check_true(service.dns_name == service_config.dns_name);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_publish_cached_service_v1(
       &client.runtime, &service, &epoch));
   check_equal(1u, epoch);
