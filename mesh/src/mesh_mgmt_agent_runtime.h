@@ -170,6 +170,14 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v2(
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
 
+/** Configure an immutable CNet Client destination strategy after init and
+ * before start. Supported only by dedicated CNet runtime; no hot reconfiguration
+ * or legacy fallback once enabled. All candidates are static or authenticated
+ * signed endpoint records, and authentication still governs protocol READY. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_set_client_policy_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_client_destination_policy_v2_t *policy);
+
 /**
  * Dedicated mode advances endpoint dialing and p2p_poll(). A polling failure
  * returns P2P_FAILED and preserves the P2P code in last_p2p_result. Shared mode

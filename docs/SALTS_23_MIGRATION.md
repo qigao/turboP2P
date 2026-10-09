@@ -45,3 +45,46 @@ The root `CMakeLists.txt`, `p2p/CMakeLists.txt` and `mesh/CMakeLists.txt`
 still reference retired targets. Subsequent work follows #5–#12, with
 Windows/installed-consumer CI and representative data-plane benchmarking
 required before full migration is accepted.
+
+
+## Phase C1 — production Client Destination admission (#33)
+
+`mesh_mgmt_agent_runtime_set_client_policy_v2()` now installs one **immutable**
+CNet 2.3 Client destination plan on a dedicated management runtime **after
+init and before start**. This is a production entry point, not a standalone
+SDK smoke. Only `EXPLICIT`, `ROUND_ROBIN`, and `STRICT_KEY` are accepted;
+future advisory weight/pressure modes require validated provider inputs first.
+
+1. Static bootstraps or cryptographically **verified** MMP endpoint records
+   create bounded identity-keyed entries. The pool derives a stable
+   BLAKE2b-256-to-u64 selection ID from the complete 32-byte transport peer
+   key; nonzero identity and collisions are fail-closed. Stable IDs do not
+   represent socket handles or authenticate an endpoint by themselves.
+2. Every Owner poll progresses expiry and pending dial timeouts in the
+   existing **sole** pool state, then builds one sorted immutable Client
+   selection snapshot. A pinned ID stays in the set with
+   `eligible=false` during backoff, quarantine, DIALING, ACTIVE or expiry.
+   CNet's `cnet_destination_choose()` runs **once** on this admission, never
+   in receive/send callbacks. Missing/blocked pinned IDs are reported as
+   `NO_SOURCE` with **zero dial attempts**, not redirected.
+3. At most one real `p2p_connect()` request is made per selected Owner
+   progress turn. Its connection still belongs to CNet's configured Owner;
+   P2P enforces live transport capacity and Noise, while the management
+   router owns signed MMP protocol READY. TCP connected/queue admission
+   cannot mark a management service authenticated.
+4. The runtime treats `NO_SOURCE` as a normal no-dial turn and continues
+   `p2p_poll()`. Incorrect versions, invalid snapshots, resource exhaustion
+   and callback lifecycle violations still fail fast. No automatic DATA
+   retries, new thread/Actor, or second CNet Manager is introduced.
+5. Existing `tick_v1` fan-out remains only for existing unconfigured
+   consumers. Once the new policy is installed, entering that path is an
+   explicit INVALID_STATE; there is no hidden mode fallback or hot reload.
+
+**Verification:** the new management Client policy CTest drives the real
+production pool with bounded dial callbacks; the dedicated runtime test
+constructs two real CNet listeners and confirms that an EXPLICIT signed
+transport identity alone completes Noise+MMP while the other stays untouched.
+These are part of the Linux Release and focused ASan/UBSan gates in draft
+PR #35. Retained next steps: SG Server Owner placement/credited handoff,
+owner-local CNet Manager/ClientPool/ManagedDial with complete protocol READY
+and terminal lease accounting, and DataBind 4.3-compiled ACE configuration.

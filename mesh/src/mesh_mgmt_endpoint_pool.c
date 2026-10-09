@@ -4,6 +4,7 @@
 
 #include <salts/random.h>
 #include <salts/clock.h>
+#include <salts/error_codes.h>
 
 #include <string.h>
 
@@ -63,6 +64,40 @@ static mesh_mgmt_endpoint_entry_v1_t *find_free(mesh_mgmt_endpoint_pool_v1_t *po
       return entry;
   }
   return NULL;
+}
+
+
+/* Stable 64-bit selection identity derived from the complete authenticated
+ * transport public key. A collision between different full identities is
+ * rejected before admission, never silently treated as the same peer. */
+static mesh_mgmt_endpoint_pool_result_t destination_id_for_peer(
+    const uint8_t peer_id[P2P_KEY_SIZE], uint64_t *out_id) {
+  uint8_t digest[MESH_MGMT_BLAKE2B_256_SIZE] = {0};
+  uint64_t value = 0u;
+  if (!peer_id || !out_id || bytes_are_zero(peer_id, P2P_KEY_SIZE))
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+  *out_id = 0u;
+  if (mesh_mgmt_blake2b_256(peer_id, P2P_KEY_SIZE, digest) != MESH_MGMT_CRYPTO_OK)
+    return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+  for (size_t i = 0u; i < sizeof(value); i++)
+    value = (value << 8u) | (uint64_t)digest[i];
+  mesh_mgmt_crypto_wipe(digest, sizeof(digest));
+  if (!value)
+    return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+  *out_id = value;
+  return MESH_MGMT_ENDPOINT_POOL_OK;
+}
+
+static int destination_id_conflicts(const mesh_mgmt_endpoint_pool_v1_t *pool,
+                                    uint64_t id,
+                                    const uint8_t full_peer_id[P2P_KEY_SIZE]) {
+  for (size_t i = 0u; i < pool->capacity; i++) {
+    const mesh_mgmt_endpoint_entry_v1_t *entry = entry_at_const(pool, i);
+    if (entry && entry->occupied && entry->destination_id == id &&
+        !mesh_mgmt_crypto_equal_32(entry->record.transport_peer_id, full_peer_id))
+      return 1;
+  }
+  return 0;
 }
 
 static int endpoint_conflicts(const mesh_mgmt_endpoint_pool_v1_t *pool,
@@ -178,11 +213,13 @@ static mesh_mgmt_endpoint_pool_result_t schedule_failure(mesh_mgmt_endpoint_pool
 }
 
 static void assign_record(mesh_mgmt_endpoint_entry_v1_t *entry,
-                          const mesh_mgmt_endpoint_record_v1_t *record) {
+                          const mesh_mgmt_endpoint_record_v1_t *record,
+                          uint64_t destination_id) {
   mesh_mgmt_endpoint_state_t previous_state = entry->state;
   uint8_t was_occupied = entry->occupied;
 
   entry->record = *record;
+  entry->destination_id = destination_id;
   entry->occupied = 1u;
   entry->retire_on_close = 0u;
   if (!was_occupied || previous_state == MESH_MGMT_ENDPOINT_EXPIRED) {
@@ -248,6 +285,8 @@ mesh_mgmt_endpoint_pool_add_static_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
                                       const char *host, uint16_t port) {
   mesh_mgmt_endpoint_entry_v1_t *entry;
   mesh_mgmt_endpoint_record_v1_t record;
+  mesh_mgmt_endpoint_pool_result_t identity_result;
+  uint64_t destination_id = 0u;
 
   if (!pool || !transport_peer_id || !endpoint_host_is_valid(host) || port == 0u ||
       bytes_are_zero(transport_peer_id, P2P_KEY_SIZE))
@@ -255,6 +294,11 @@ mesh_mgmt_endpoint_pool_add_static_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
   if (!pool->initialized || pool->in_api)
     return MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
   if (endpoint_conflicts(pool, transport_peer_id, host, port))
+    return MESH_MGMT_ENDPOINT_POOL_CONFLICT;
+  identity_result = destination_id_for_peer(transport_peer_id, &destination_id);
+  if (identity_result != MESH_MGMT_ENDPOINT_POOL_OK)
+    return identity_result;
+  if (destination_id_conflicts(pool, destination_id, transport_peer_id))
     return MESH_MGMT_ENDPOINT_POOL_CONFLICT;
 
   entry = find_by_identity(pool, transport_peer_id);
@@ -269,7 +313,7 @@ mesh_mgmt_endpoint_pool_add_static_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
   memcpy(record.host, host, strlen(host) + 1u);
   record.port = port;
   record.source = MESH_MGMT_ENDPOINT_SOURCE_STATIC;
-  assign_record(entry, &record);
+  assign_record(entry, &record, destination_id);
   pool->last_error = MESH_MGMT_ENDPOINT_POOL_OK;
   return MESH_MGMT_ENDPOINT_POOL_OK;
 }
@@ -279,6 +323,8 @@ static mesh_mgmt_endpoint_pool_result_t pool_apply_verified(
     const mesh_mgmt_endpoint_record_v1_t *record,
     uint64_t now_ms, uint64_t expiry_deadline_ms) {
   mesh_mgmt_endpoint_entry_v1_t *entry;
+  mesh_mgmt_endpoint_pool_result_t identity_result;
+  uint64_t destination_id = 0u;
 
   if (!pool || !record || record->source != MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD ||
       bytes_are_zero(record->transport_peer_id, P2P_KEY_SIZE) ||
@@ -290,6 +336,11 @@ static mesh_mgmt_endpoint_pool_result_t pool_apply_verified(
   if (record->expires_at_ms <= now_ms)
     return MESH_MGMT_ENDPOINT_POOL_EXPIRED;
   if (endpoint_conflicts(pool, record->transport_peer_id, record->host, record->port))
+    return MESH_MGMT_ENDPOINT_POOL_CONFLICT;
+  identity_result = destination_id_for_peer(record->transport_peer_id, &destination_id);
+  if (identity_result != MESH_MGMT_ENDPOINT_POOL_OK)
+    return identity_result;
+  if (destination_id_conflicts(pool, destination_id, record->transport_peer_id))
     return MESH_MGMT_ENDPOINT_POOL_CONFLICT;
 
   entry = find_by_identity(pool, record->transport_peer_id);
@@ -308,7 +359,7 @@ static mesh_mgmt_endpoint_pool_result_t pool_apply_verified(
       return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
     pool->count++;
   }
-  assign_record(entry, record);
+  assign_record(entry, record, destination_id);
   entry->expiry_deadline_ms = expiry_deadline_ms;
   pool->last_error = MESH_MGMT_ENDPOINT_POOL_OK;
   return MESH_MGMT_ENDPOINT_POOL_OK;
@@ -352,61 +403,209 @@ void mesh_mgmt_endpoint_pool_stop_v1(mesh_mgmt_endpoint_pool_v1_t *pool) {
   pool->running = 0u;
 }
 
+
+/* Only this pool owns endpoint eligibility/backoff/quarantine. Selection is an
+ * advisory decision, never an additional connection credit or transport READY. */
+static mesh_mgmt_endpoint_pool_result_t progress_endpoint(
+    mesh_mgmt_endpoint_pool_v1_t *pool, mesh_mgmt_endpoint_entry_v1_t *entry,
+    uint64_t now_ms, int *out_due) {
+  *out_due = 0;
+  if (!entry || !entry->occupied)
+    return MESH_MGMT_ENDPOINT_POOL_OK;
+  if (entry->record.source == MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD &&
+      entry->expiry_deadline_ms <= now_ms) {
+    if (entry->state == MESH_MGMT_ENDPOINT_ACTIVE)
+      entry->retire_on_close = 1u;
+    else
+      entry->state = MESH_MGMT_ENDPOINT_EXPIRED;
+    return MESH_MGMT_ENDPOINT_POOL_OK;
+  }
+  if (entry->state == MESH_MGMT_ENDPOINT_DIALING) {
+    if (now_ms < entry->connect_deadline_ms)
+      return MESH_MGMT_ENDPOINT_POOL_OK;
+    return schedule_failure(pool, entry, MESH_MGMT_ENDPOINT_FAILURE_TRANSPORT, now_ms);
+  }
+  if ((entry->state == MESH_MGMT_ENDPOINT_IDLE ||
+       entry->state == MESH_MGMT_ENDPOINT_BACKOFF) &&
+      (entry->state != MESH_MGMT_ENDPOINT_BACKOFF || now_ms >= entry->next_attempt_ms))
+    *out_due = 1;
+  return MESH_MGMT_ENDPOINT_POOL_OK;
+}
+
+static mesh_mgmt_endpoint_pool_result_t dial_endpoint(
+    mesh_mgmt_endpoint_pool_v1_t *pool, mesh_mgmt_endpoint_entry_v1_t *entry,
+    uint64_t now_ms) {
+  if (now_ms > UINT64_MAX - pool->connect_timeout_ms)
+    return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+  entry->last_connect_result = pool_connect(pool, &entry->record);
+  if (entry->last_connect_result == P2P_OK) {
+    entry->state = MESH_MGMT_ENDPOINT_DIALING;
+    entry->connect_deadline_ms = now_ms + pool->connect_timeout_ms;
+    entry->next_attempt_ms = 0u;
+    return MESH_MGMT_ENDPOINT_POOL_OK;
+  }
+  return schedule_failure(pool, entry, MESH_MGMT_ENDPOINT_FAILURE_TRANSPORT, now_ms);
+}
+
 mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_tick_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
                                                                  uint64_t now_ms) {
-  size_t index;
   mesh_mgmt_endpoint_pool_result_t result = MESH_MGMT_ENDPOINT_POOL_OK;
-
   if (!pool)
     return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
-  if (!pool->initialized || !pool->running || pool->in_api)
+  if (!pool->initialized || !pool->running || pool->in_api || pool->policy_enabled)
     return MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
-  pool->in_api = 1u;
-  for (index = 0u; index < pool->capacity; index++) {
-    mesh_mgmt_endpoint_entry_v1_t *entry = entry_at(pool, index);
 
-    if (!entry || !entry->occupied)
-      continue;
-    if (entry->record.source == MESH_MGMT_ENDPOINT_SOURCE_VERIFIED_RECORD &&
-        entry->expiry_deadline_ms <= now_ms) {
-      if (entry->state == MESH_MGMT_ENDPOINT_ACTIVE)
-        entry->retire_on_close = 1u;
-      else
-        entry->state = MESH_MGMT_ENDPOINT_EXPIRED;
-      continue;
-    }
-    if (entry->state == MESH_MGMT_ENDPOINT_DIALING) {
-      if (now_ms < entry->connect_deadline_ms)
-        continue;
-      result = schedule_failure(pool, entry, MESH_MGMT_ENDPOINT_FAILURE_TRANSPORT, now_ms);
+  pool->in_api = 1u;
+  for (size_t i = 0u; i < pool->capacity; i++) {
+    mesh_mgmt_endpoint_entry_v1_t *entry = entry_at(pool, i);
+    int due = 0;
+    result = progress_endpoint(pool, entry, now_ms, &due);
+    if (result != MESH_MGMT_ENDPOINT_POOL_OK)
+      break;
+    if (due) {
+      result = dial_endpoint(pool, entry, now_ms);
       if (result != MESH_MGMT_ENDPOINT_POOL_OK)
-        goto failed;
-      continue;
-    }
-    if (entry->state != MESH_MGMT_ENDPOINT_IDLE && entry->state != MESH_MGMT_ENDPOINT_BACKOFF)
-      continue;
-    if (entry->state == MESH_MGMT_ENDPOINT_BACKOFF && now_ms < entry->next_attempt_ms)
-      continue;
-    if (now_ms > UINT64_MAX - pool->connect_timeout_ms) {
-      result = MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
-      goto failed;
-    }
-    entry->last_connect_result = pool_connect(pool, &entry->record);
-    if (entry->last_connect_result == P2P_OK) {
-      entry->state = MESH_MGMT_ENDPOINT_DIALING;
-      entry->connect_deadline_ms = now_ms + pool->connect_timeout_ms;
-      entry->next_attempt_ms = 0u;
-    } else {
-      result = schedule_failure(pool, entry, MESH_MGMT_ENDPOINT_FAILURE_TRANSPORT, now_ms);
-      if (result != MESH_MGMT_ENDPOINT_POOL_OK)
-        goto failed;
+        break;
     }
   }
   pool->in_api = 0u;
-  pool->last_error = MESH_MGMT_ENDPOINT_POOL_OK;
-  return MESH_MGMT_ENDPOINT_POOL_OK;
+  pool->last_error = result;
+  return result;
+}
 
-failed:
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_set_client_policy_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_client_destination_policy_v2_t *policy) {
+  uint64_t pinned_id = 0u;
+  mesh_mgmt_endpoint_pool_result_t result;
+  if (!pool || !policy || policy->size != sizeof(*policy) ||
+      policy->version != MESH_MGMT_CLIENT_DESTINATION_POLICY_VERSION)
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+  if (!pool->initialized || pool->running || pool->in_api || pool->policy_enabled)
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
+  switch (policy->kind) {
+    case CNET_DESTINATION_EXPLICIT:
+      if (policy->key_known || policy->key_hash != 0u)
+        return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+      result = destination_id_for_peer(policy->explicit_transport_peer_id, &pinned_id);
+      if (result != MESH_MGMT_ENDPOINT_POOL_OK)
+        return result;
+      break;
+    case CNET_DESTINATION_STRICT_KEY:
+      if (!policy->key_known || !bytes_are_zero(policy->explicit_transport_peer_id, P2P_KEY_SIZE))
+        return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+      break;
+    case CNET_DESTINATION_ROUND_ROBIN:
+      if (policy->key_known || policy->key_hash != 0u ||
+          !bytes_are_zero(policy->explicit_transport_peer_id, P2P_KEY_SIZE))
+        return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+      break;
+    default:
+      return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+  }
+  pool->policy = *policy;
+  pool->explicit_destination_id = pinned_id;
+  pool->selection_generation = 0u;
+  pool->selection_sequence = 0u;
+  pool->policy_enabled = 1u;
+  return MESH_MGMT_ENDPOINT_POOL_OK;
+}
+
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_tick_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool, uint64_t now_ms) {
+  cnet_destination_hint hints[MESH_MGMT_ENDPOINT_POOL_MAX_ENDPOINTS] = {0};
+  size_t slots[MESH_MGMT_ENDPOINT_POOL_MAX_ENDPOINTS] = {0};
+  cnet_destination_selection selection = {0};
+  cnet_destination_result selected = {0};
+  mesh_mgmt_endpoint_pool_result_t result = MESH_MGMT_ENDPOINT_POOL_OK;
+  size_t count = 0u;
+  int selection_status;
+  if (!pool)
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_ARG;
+  if (!pool->initialized || !pool->running || pool->in_api || !pool->policy_enabled)
+    return MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
+  if (pool->selection_generation == UINT64_MAX ||
+      pool->selection_sequence == UINT64_MAX)
+    return MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+  pool->in_api = 1u;
+
+  /* Evaluate every live domain fact first; every authorized but unavailable
+   * identity stays in the immutable set with eligible=false. STRICT_KEY must
+   * NOT pick a neighbor when its pinned identity is in BACKOFF/QUARANTINED. */
+  for (size_t i = 0u; i < pool->capacity; i++) {
+    mesh_mgmt_endpoint_entry_v1_t *entry = entry_at(pool, i);
+    int due = 0;
+    if (!entry || !entry->occupied)
+      continue;
+    result = progress_endpoint(pool, entry, now_ms, &due);
+    if (result != MESH_MGMT_ENDPOINT_POOL_OK)
+      goto completed;
+    if (!entry->destination_id || count >= MESH_MGMT_ENDPOINT_POOL_MAX_ENDPOINTS) {
+      result = MESH_MGMT_ENDPOINT_POOL_RESOURCE_EXHAUSTED;
+      goto completed;
+    }
+    cnet_destination_hint hint = {entry->destination_id, 1u,
+        entry->state == MESH_MGMT_ENDPOINT_DIALING ? 1u : 0u,
+        due != 0};
+    /* Fixed 64-entry insertion sort by stable identity; never use vec index
+     * as endpoint_id, since signed-record ordering may change on refresh. */
+    size_t cursor = count;
+    while (cursor > 0u && hints[cursor - 1u].endpoint_id > hint.endpoint_id) {
+      hints[cursor] = hints[cursor - 1u];
+      slots[cursor] = slots[cursor - 1u];
+      cursor--;
+    }
+    if ((cursor > 0u && hints[cursor - 1u].endpoint_id == hint.endpoint_id) ||
+        (cursor < count && hints[cursor].endpoint_id == hint.endpoint_id)) {
+      result = MESH_MGMT_ENDPOINT_POOL_CONFLICT;
+      goto completed;
+    }
+    hints[cursor] = hint;
+    slots[cursor] = i;
+    count++;
+  }
+  if (!count) {
+    result = MESH_MGMT_ENDPOINT_POOL_NO_SOURCE;
+    goto completed;
+  }
+  selection.size = sizeof(selection);
+  selection.version = CNET_DESTINATION_POLICY_VERSION;
+  selection.kind = pool->policy.kind;
+  selection.endpoints = hints;
+  selection.endpoint_count = count;
+  selection.snapshot_generation = ++pool->selection_generation;
+  selection.expires_at_ms = UINT64_MAX;
+  selection.now_ms = now_ms;
+  selection.sequence = pool->selection_sequence;
+  selection.explicit_endpoint_id = pool->explicit_destination_id;
+  selection.key_hash = pool->policy.key_hash;
+  selection.key_known = pool->policy.key_known;
+  selection_status = cnet_destination_choose(&selection, &selected);
+  if (selection_status == SALTS_ENOBUFS || selection_status == SALTS_ENOENT) {
+    result = MESH_MGMT_ENDPOINT_POOL_NO_SOURCE;
+    goto completed;
+  }
+  if (selection_status != SALTS_OK || selected.index >= count ||
+      selected.endpoint_id != hints[selected.index].endpoint_id) {
+    result = MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
+    goto completed;
+  }
+  mesh_mgmt_endpoint_entry_v1_t *winner = entry_at(pool, slots[selected.index]);
+  if (!winner || !hints[selected.index].eligible ||
+      winner->destination_id != selected.endpoint_id) {
+    result = MESH_MGMT_ENDPOINT_POOL_INVALID_STATE;
+    goto completed;
+  }
+  if (pool->policy.kind == CNET_DESTINATION_EXPLICIT &&
+      !mesh_mgmt_crypto_equal_32(winner->record.transport_peer_id,
+                                 pool->policy.explicit_transport_peer_id)) {
+    result = MESH_MGMT_ENDPOINT_POOL_CONFLICT;
+    goto completed;
+  }
+  pool->selection_sequence++;
+  result = dial_endpoint(pool, winner, now_ms);
+
+completed:
   pool->in_api = 0u;
   pool->last_error = result;
   return result;

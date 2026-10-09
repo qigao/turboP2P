@@ -274,7 +274,14 @@ add_library(mgmt_agent_runtime STATIC
   "${mesh_src}/mesh_mgmt_p2p_peer.c"
   "${mesh_src}/mesh_mgmt_p2p_security.c"
   "${mesh_src}/mesh_mgmt_execution_disabled_responder.c")
-target_link_libraries(mgmt_agent_runtime PUBLIC foundation p2p_node_core)
+target_link_libraries(mgmt_agent_runtime PUBLIC foundation p2p_node_core Salts::CNet)
+add_executable(test_mesh_mgmt_destination_policy
+  "${mesh_tests}/test_mesh_mgmt_destination_policy.c")
+set_property(TARGET test_mesh_mgmt_destination_policy PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_destination_policy PRIVATE
+  mgmt_agent_runtime Salts::TinyTest)
+add_test(NAME test_mesh_mgmt_destination_policy COMMAND test_mesh_mgmt_destination_policy)
+set_tests_properties(test_mesh_mgmt_destination_policy PROPERTIES TIMEOUT 60)
 # The compatibility entry point must compile too; linking/running shared mesh
 # still requires the complete root build.
 add_library(mgmt_mesh_bridge_compile OBJECT "${mesh_src}/mesh_mgmt_agent_runtime_mesh.c")

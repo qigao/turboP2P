@@ -1076,7 +1076,8 @@ add_library(mesh_mgmt_endpoint_pool STATIC
 target_include_directories(mesh_mgmt_endpoint_pool PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_endpoint_pool PUBLIC
-  mesh_mgmt_crypto TurboP2P::P2P Salts::CSTL PRIVATE Salts::Platform)
+  mesh_mgmt_crypto TurboP2P::P2P Salts::CSTL Salts::CNet
+  PRIVATE Salts::Platform)
 set_property(TARGET mesh_mgmt_endpoint_pool PROPERTY FOLDER "mesh/internal")
 
 # Strict canonical codec and direct-trust verification boundary for signed

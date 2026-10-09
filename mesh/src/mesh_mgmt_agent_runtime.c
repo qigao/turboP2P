@@ -358,6 +358,28 @@ mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }
 
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_set_client_policy_v2(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_client_destination_policy_v2_t *policy) {
+  if (!runtime || !policy)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_READY || runtime_is_busy(runtime) ||
+      !runtime->owns_node || runtime->shared_mesh != NULL || !runtime->node)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+
+  runtime->in_api = 1u;
+  runtime->last_endpoint_result =
+      mesh_mgmt_endpoint_pool_set_client_policy_v2(&runtime->endpoint_pool, policy);
+  mesh_mgmt_agent_runtime_result_t status = MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED;
+  if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_OK)
+    status = MESH_MGMT_AGENT_RUNTIME_OK;
+  else if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_INVALID_STATE)
+    status = MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  else if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_INVALID_ARG)
+    status = MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  return runtime_fail(runtime, status);
+}
+
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (!runtime)
@@ -367,9 +389,11 @@ mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
 
   runtime->in_api = 1u;
   if (runtime->owns_node) {
-    runtime->last_endpoint_result =
-        mesh_mgmt_endpoint_pool_tick_v1(&runtime->endpoint_pool, cmeta_monotonic_ms());
-    if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK)
+    runtime->last_endpoint_result = runtime->endpoint_pool.policy_enabled
+        ? mesh_mgmt_endpoint_pool_tick_v2(&runtime->endpoint_pool, cmeta_monotonic_ms())
+        : mesh_mgmt_endpoint_pool_tick_v1(&runtime->endpoint_pool, cmeta_monotonic_ms());
+    if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK &&
+        runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_NO_SOURCE)
       return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
     runtime->last_p2p_result = p2p_poll(runtime->node);
     if (runtime->last_p2p_result != P2P_OK)
