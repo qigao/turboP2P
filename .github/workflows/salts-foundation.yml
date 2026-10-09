@@ -1,7 +1,7 @@
 name: Salts foundation regression
 on:
   pull_request:
-    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry, codex/tunnel-cnet, codex/mgmt-cnet, codex/p2p-security, codex/p2p-cnet-admission, codex/p2p-owner-key-worker, codex/p2p-cnet-peer, codex/p2p-cnet-node, codex/p2p-cnet-files, codex/p2p-cnet-security, codex/p2p-cnet-dht, codex/p2p-public-poll, codex/p2p-cnet-lifecycle, codex/mgmt-cnet-lifecycle, refactor/salts23-utils43-ace-cnet, feature/mesh-cnet-client-policy-23, feature/mesh-databind-policy-config-43, feature/mesh-databind-service-config-43, feature/p2p-cnet-sg-handoff-23]
+    branches: [master, codex/salts-foundation-phase-1, codex/mesh-stream-async-control, codex/mesh-bind-crypto, codex/mesh-stream-cnet-identity, codex/mesh-stream-cnet-channel, codex/mesh-stream-cnet-registry, codex/tunnel-cnet, codex/mgmt-cnet, codex/p2p-security, codex/p2p-cnet-admission, codex/p2p-owner-key-worker, codex/p2p-cnet-peer, codex/p2p-cnet-node, codex/p2p-cnet-files, codex/p2p-cnet-security, codex/p2p-cnet-dht, codex/p2p-public-poll, codex/p2p-cnet-lifecycle, codex/mgmt-cnet-lifecycle, refactor/salts23-utils43-ace-cnet, feature/mesh-cnet-client-policy-23, feature/mesh-databind-policy-config-43, feature/mesh-databind-service-config-43, feature/p2p-cnet-sg-handoff-23, feature/p2p-cnet-sg-host-23]
   push:
     branches: [master]
   workflow_dispatch:
@@ -56,6 +56,7 @@ jobs:
             test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht \
             test_p2p_cnet_lifecycle test_p2p_cnet_sg_handoff \
             test_p2p_cnet_sg_host \
+            test_p2p_cnet_sg_host_four \
             test_mesh_mgmt_cnet_runtime \
             test_mesh_mgmt_destination_policy \
             test_mesh_mgmt_client_config \
@@ -63,7 +64,7 @@ jobs:
             test_mesh_mgmt_service_config_cpp \
             test_salts_23_contracts test_salts_23_contracts_cpp
           ctest --test-dir build/p2p-sanitize --output-on-failure \
-            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_mesh_mgmt_destination_policy|test_mesh_mgmt_client_config|test_mesh_mgmt_service_config(_cpp)?|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle|cnet_sg_handoff|cnet_sg_host))$'
+            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_mesh_mgmt_destination_policy|test_mesh_mgmt_client_config|test_mesh_mgmt_service_config(_cpp)?|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle|cnet_sg_handoff|cnet_sg_host(_four)?))$'
 
 
       - name: Report ccache compilation statistics
