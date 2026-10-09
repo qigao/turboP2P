@@ -91,7 +91,7 @@ static int records_are_equal(const mesh_mgmt_endpoint_record_v1_t *left,
 
 static int pool_random(mesh_mgmt_endpoint_pool_v1_t *pool, uint8_t *output, size_t output_len) {
   return pool->random_bytes ? pool->random_bytes(pool->callback_context, output, output_len)
-                            : salts_secure_random(output, output_len);
+                            : cmeta_platform_secure_random(output, output_len);
 }
 
 static int pool_connect(mesh_mgmt_endpoint_pool_v1_t *pool,

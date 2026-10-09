@@ -266,7 +266,7 @@ mesh_stream_bind_ticket_issue_v1(mesh_stream_bind_store_v1_t *store,
   ticket.issued_at_ms = now_ms;
   ticket.expires_at_ms = now_ms + ttl_ms;
   for (attempt = 0; attempt < BIND_RANDOM_ATTEMPTS; attempt++) {
-    if (salts_platform_secure_random(ticket.ticket_id, sizeof(ticket.ticket_id)) != 0) {
+    if (cmeta_platform_secure_random(ticket.ticket_id, sizeof(ticket.ticket_id)) != 0) {
       memset(&ticket, 0, sizeof(ticket));
       return MESH_STREAM_BIND_RANDOM_FAILURE;
     }
@@ -348,7 +348,7 @@ mesh_stream_bind_result_t mesh_stream_bind_initiator_start_v1(
   mesh_mgmt_wire_write_u64(output + INIT_GENERATION_OFFSET, ticket->claims.admission_generation);
   mesh_mgmt_wire_write_u64(output + INIT_EXPIRES_OFFSET, ticket->expires_at_ms);
   memcpy(output + INIT_CHANNEL_OFFSET, channel_binding, 32);
-  if (salts_platform_secure_random(output + INIT_NONCE_OFFSET, MESH_STREAM_BIND_NONCE_SIZE) != 0) {
+  if (cmeta_platform_secure_random(output + INIT_NONCE_OFFSET, MESH_STREAM_BIND_NONCE_SIZE) != 0) {
     memset(output, 0, MESH_STREAM_BIND_INIT_SIZE);
     return MESH_STREAM_BIND_RANDOM_FAILURE;
   }
@@ -423,7 +423,7 @@ mesh_stream_bind_result_t mesh_stream_bind_responder_accept_v1(
   memcpy(output + ACCEPT_TICKET_OFFSET, entry->ticket.ticket_id, 32);
   memcpy(output + ACCEPT_INIT_HASH_OFFSET, init_hash, 32);
   memcpy(output + ACCEPT_CHANNEL_OFFSET, channel_binding, 32);
-  if (salts_platform_secure_random(output + ACCEPT_NONCE_OFFSET, MESH_STREAM_BIND_NONCE_SIZE) != 0) {
+  if (cmeta_platform_secure_random(output + ACCEPT_NONCE_OFFSET, MESH_STREAM_BIND_NONCE_SIZE) != 0) {
     memset(output, 0, MESH_STREAM_BIND_ACCEPT_SIZE);
     return MESH_STREAM_BIND_RANDOM_FAILURE;
   }

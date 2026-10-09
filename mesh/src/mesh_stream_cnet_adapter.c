@@ -313,7 +313,7 @@ static int channel_send_control(void *context, const uint8_t *bytes, size_t len,
   mesh_stream_cnet_channel_v1_t *adapter = context;
   mem_buffer_t *buffer;
   int status;
-  if (!channel_is_authorized(adapter, salts_monotonic_ms()))
+  if (!channel_is_authorized(adapter, cmeta_monotonic_ms()))
     return SALTS_EPERM;
   mesh_stream_channel_v1_t *channel = mesh_stream_cnet_channel_borrow_v1(adapter);
   if (!channel || !channel->transport.send_pending ||
@@ -331,7 +331,7 @@ static int channel_send_control(void *context, const uint8_t *bytes, size_t len,
 
 static int channel_deliver_event(void *context, const mesh_stream_receive_event_v1_t *event) {
   mesh_stream_cnet_channel_v1_t *adapter = context;
-  if (!channel_is_authorized(adapter, salts_monotonic_ms()))
+  if (!channel_is_authorized(adapter, cmeta_monotonic_ms()))
     return SALTS_EPERM;
   return adapter->on_event(adapter->event_context, event);
 }
@@ -428,7 +428,7 @@ mesh_stream_channel_result_t mesh_stream_cnet_channel_init_v1(
 }
 
 static void registry_retire_binding(void *context) {
-  retire_channel_binding(context, salts_monotonic_ms());
+  retire_channel_binding(context, cmeta_monotonic_ms());
 }
 
 mesh_stream_registry_result_t mesh_stream_cnet_channel_register_v1(
@@ -537,7 +537,7 @@ void mesh_stream_cnet_channel_destroy_v1(mesh_stream_cnet_channel_v1_t *adapter)
     if (mesh_stream_cnet_channel_borrow_v1(adapter))
       (void)mesh_stream_registry_close_v1(adapter->registry, adapter->registry_handle);
   } else {
-    retire_channel_binding(adapter, salts_monotonic_ms());
+    retire_channel_binding(adapter, cmeta_monotonic_ms());
     mesh_stream_channel_destroy_v1(&adapter->channel);
   }
   memset(adapter, 0, sizeof(*adapter));
