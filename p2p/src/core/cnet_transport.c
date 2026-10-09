@@ -959,6 +959,15 @@ int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner) {
         return sg_result; /* Retain all owner + inbox state for retry. */
     }
     listener_status = close_listener(owner);
+    if (listener_status != SALTS_OK) {
+        /* The SG Host owns the only NativeIO observer. A pending external
+         * accept cancellation must be routed to the listener before it may
+         * be destroyed. Do NOT stop/destroy the borrowed-backend CNet client
+         * here: the host must still progress that shared shard exactly once.
+         * Caller must observe/route and retry stop on the same SG Owner. */
+        owner->busy = 0;
+        return p2p_error(listener_status);
+    }
     status = owner->client.impl
         ? (owner->external_backend
             ? cnet_client_stop_external(&owner->client)

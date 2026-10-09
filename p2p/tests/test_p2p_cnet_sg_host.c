@@ -18,6 +18,8 @@ typedef struct sg_lane {
     size_t observe_calls, observed, settled;
     unsigned cancelled, accepted;
     bool released;
+    bool stopped;
+    size_t stop_retries;
     int error;
     const char *error_site;
 } sg_lane;
@@ -102,7 +104,7 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
     sg_case *test = lane->test;
     size_t observed = 0u, settled = 0u;
     int status;
-    if (lane->error) return;
+    if (lane->error || lane->stopped) return;
     if (native_io_sharded_context_shard(context) != lane->shard ||
         cmeta_thread_current_token() != lane->worker_token) {
         mark_failed(lane, SALTS_EPERM);
@@ -122,6 +124,11 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
     if (lane->shard == 0u) {
         SG_GO(lane, p2p_cnet_owner_poll_sg_host(
             lane->acceptor, context, lane->lease, &observed, &settled));
+    } else if (lane->stop_retries) {
+        /* P2P node stop has detached application callbacks. SG Host must
+         * still drive the borrowed CNet terminal before destroy/retry. */
+        SG_GO(lane, p2p_cnet_owner_poll_sg_host(
+            lane->transport, context, lane->lease, &observed, &settled));
     } else {
         SG_GO(lane, p2p_node_cnet_poll_sg_host(
             test->server.owner, context, lane->lease, &observed, &settled));
@@ -133,13 +140,27 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
 
 static void host_stop(native_io_sharded_context *context, void *arg) {
     sg_lane *lane = (sg_lane *)arg;
+    int result;
     if (native_io_sharded_context_shard(context) != lane->shard) {
         mark_failed(lane, SALTS_EPERM); return;
     }
-    if (lane->shard == 0u)
-        SG_GO(lane, p2p_cnet_owner_stop(lane->acceptor));
-    else
-        SG_GO(lane, p2p_node_cnet_stop(lane->test->server.owner));
+    if (lane->stopped) return;
+    result = lane->shard == 0u
+        ? p2p_cnet_owner_stop(lane->acceptor)
+        : p2p_node_cnet_stop(lane->test->server.owner);
+    if (result == P2P_ERR_INVALID_STATE) {
+        /* A canceled external NativeIO accept/connection may still hold a
+         * host-owned terminal. This is a REQUIRED observe/retry condition,
+         * not permission to free the CNet client/SG host lease early. */
+        ++lane->stop_retries;
+        return;
+    }
+    if (result != P2P_OK) {
+        lane->error_site = "SG Host owner stop";
+        mark_failed(lane, result);
+        return;
+    }
+    lane->stopped = true;
 }
 
 static void host_destroy(native_io_sharded_context *context, void *arg) {
@@ -287,6 +308,23 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     for (size_t i = 0u; i < HOST_SHARDS; ++i)
         submit_lane(test, i, host_stop);
     barrier(test);
+    const uint64_t stop_deadline = cmeta_monotonic_ms() + HOST_TIMEOUT;
+    while ((!test->lanes[0].stopped || !test->lanes[1].stopped) &&
+           cmeta_monotonic_ms() < stop_deadline) {
+        for (size_t i = 0u; i < HOST_SHARDS; ++i)
+            if (!test->lanes[i].stopped)
+                submit_lane(test, i, host_progress);
+        barrier(test);
+        for (size_t i = 0u; i < HOST_SHARDS; ++i)
+            if (!test->lanes[i].stopped)
+                submit_lane(test, i, host_stop);
+        barrier(test);
+        cmeta_sleep_ms(1u);
+    }
+    check_true(test->lanes[0].stopped);
+    check_true(test->lanes[1].stopped);
+    /* Some backends settle the canceled accept synchronously and need zero
+     * retries; asynchronous backends must continue the SAME Host observe. */
     check_equal(P2P_ERR_INVALID_STATE,
                 p2p_cnet_owner_destroy(test->lanes[0].acceptor));
     check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(test->handoff));
