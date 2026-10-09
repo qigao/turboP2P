@@ -12,11 +12,11 @@ static void p2p_transfer_free(p2p_transfer_t *transfer) {
         return;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_close_file_locked(transfer);
     p2p_transfer_free_bitmap_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
-    salts_mutex_destroy(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_destroy(&transfer->mutex);
     for (uint8_t i = 0; i < transfer->held_peer_count; ++i)
         p2p_peer_release(transfer->held_peers[i]);
     TLOG_DEBUGF("[Transfer] Destroyed transfer #{}", transfer->id);
@@ -29,27 +29,27 @@ void p2p_transfer_manager_init(p2p_transfer_manager_t *mgr) {
     mgr->next_id = 1;
     mgr->outstanding_refs = 0;
     mgr->closing = 0;
-    salts_mutex_init(&mgr->mutex);
+    cmeta_mutex_init(&mgr->mutex);
 }
 
 int p2p_transfer_manager_destroy(p2p_transfer_manager_t *mgr) {
     if (!mgr || !mgr->mutex) return P2P_OK;
-    salts_mutex_lock(&mgr->mutex);
+    cmeta_mutex_lock(&mgr->mutex);
     mgr->closing = 1;
     if (mgr->outstanding_refs) {
-        salts_mutex_unlock(&mgr->mutex);
+        cmeta_mutex_unlock(&mgr->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     p2p_transfer_t *t = mgr->active;
     mgr->active = NULL;
     mgr->count = 0;
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
     while (t) {
         p2p_transfer_t *next = t->next;
         p2p_transfer_free(t);
         t = next;
     }
-    salts_mutex_destroy(&mgr->mutex);
+    cmeta_mutex_destroy(&mgr->mutex);
     return P2P_OK;
 }
 
@@ -58,13 +58,13 @@ p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_di
     p2p_transfer_t *t = (p2p_transfer_t *)calloc(1, sizeof(p2p_transfer_t));
     if (!t) return NULL;
 
-    salts_mutex_init(&t->mutex);
+    cmeta_mutex_init(&t->mutex);
     if (!t->mutex) { free(t); return NULL; }
 
-    salts_mutex_lock(&mgr->mutex);
+    cmeta_mutex_lock(&mgr->mutex);
     if (mgr->closing) {
-        salts_mutex_unlock(&mgr->mutex);
-        salts_mutex_destroy(&t->mutex);
+        cmeta_mutex_unlock(&mgr->mutex);
+        cmeta_mutex_destroy(&t->mutex);
         free(t);
         return NULL;
     }
@@ -79,7 +79,7 @@ p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_di
     t->next = mgr->active;
     mgr->active = t;
     mgr->count++;
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
 
     TLOG_DEBUGF("[Transfer] Created transfer #{} ({})",
               t->id, dir == P2P_TRANSFER_DIR_DOWNLOAD ? "download" : "upload");
@@ -91,7 +91,7 @@ void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer)
 
     if (!mgr || !transfer) return;
 
-    salts_mutex_lock(&mgr->mutex);
+    cmeta_mutex_lock(&mgr->mutex);
     p2p_transfer_t **pp = &mgr->active;
     while (*pp) {
         if (*pp == transfer) {
@@ -104,7 +104,7 @@ void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer)
         }
         pp = &(*pp)->next;
     }
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
 
     if (should_free) {
         p2p_transfer_free(transfer);
@@ -113,19 +113,19 @@ void p2p_transfer_destroy(p2p_transfer_manager_t *mgr, p2p_transfer_t *transfer)
 
 p2p_transfer_t* p2p_transfer_find_by_id(p2p_transfer_manager_t *mgr, uint32_t id) {
     if (!mgr || !mgr->mutex) return NULL;
-    salts_mutex_lock(&mgr->mutex);
-    if (mgr->closing) { salts_mutex_unlock(&mgr->mutex); return NULL; }
+    cmeta_mutex_lock(&mgr->mutex);
+    if (mgr->closing) { cmeta_mutex_unlock(&mgr->mutex); return NULL; }
     p2p_transfer_t *t = mgr->active;
     while (t) {
         if (t->id == id && !t->destroying) {
             t->ref_count++;
             mgr->outstanding_refs++;
-            salts_mutex_unlock(&mgr->mutex);
+            cmeta_mutex_unlock(&mgr->mutex);
             return t;
         }
         t = t->next;
     }
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
     return NULL;
 }
 
@@ -137,25 +137,25 @@ p2p_transfer_t* p2p_transfer_find_upload_by_remote_id(
         return NULL;
     }
 
-    salts_mutex_lock(&mgr->mutex);
-    if (mgr->closing) { salts_mutex_unlock(&mgr->mutex); return NULL; }
+    cmeta_mutex_lock(&mgr->mutex);
+    if (mgr->closing) { cmeta_mutex_unlock(&mgr->mutex); return NULL; }
     transfer = mgr->active;
     while (transfer) {
-        salts_mutex_lock(&transfer->mutex);
+        cmeta_mutex_lock(&transfer->mutex);
         if (!transfer->destroying &&
             transfer->direction == P2P_TRANSFER_DIR_UPLOAD &&
             transfer->remote_id == remote_id &&
             transfer->peer == peer) {
             transfer->ref_count++;
             mgr->outstanding_refs++;
-            salts_mutex_unlock(&transfer->mutex);
-            salts_mutex_unlock(&mgr->mutex);
+            cmeta_mutex_unlock(&transfer->mutex);
+            cmeta_mutex_unlock(&mgr->mutex);
             return transfer;
         }
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         transfer = transfer->next;
     }
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
     return NULL;
 }
 
@@ -168,19 +168,19 @@ void p2p_transfer_release(p2p_transfer_t *transfer) {
     }
 
     mgr = transfer->manager;
-    salts_mutex_lock(&mgr->mutex);
-    if (!transfer->ref_count) { salts_mutex_unlock(&mgr->mutex); return; }
+    cmeta_mutex_lock(&mgr->mutex);
+    if (!transfer->ref_count) { cmeta_mutex_unlock(&mgr->mutex); return; }
     transfer->ref_count--;
     should_free = (transfer->destroying && transfer->ref_count == 0);
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
 
     if (should_free) {
         p2p_transfer_free(transfer);
     }
     /* Keep the manager lease until peer/file cleanup has finished. */
-    salts_mutex_lock(&mgr->mutex);
+    cmeta_mutex_lock(&mgr->mutex);
     mgr->outstanding_refs--;
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
 }
 
 int p2p_transfer_hold_peer_locked(p2p_transfer_t *transfer, p2p_peer_t *peer) {
@@ -197,9 +197,9 @@ int p2p_transfer_hold_peer_locked(p2p_transfer_t *transfer, p2p_peer_t *peer) {
 int p2p_transfer_open_file(p2p_transfer_t *transfer, const char *mode) {
     int ret = P2P_OK;
     if (!transfer) return P2P_ERR_INVALID_ARG;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_open_file_locked(transfer, mode);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
@@ -229,9 +229,9 @@ void p2p_transfer_close_file(p2p_transfer_t *transfer) {
     if (!transfer) {
         return;
     }
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_close_file_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 void p2p_transfer_close_file_locked(p2p_transfer_t *transfer) {
@@ -251,14 +251,14 @@ void p2p_transfer_update_progress(p2p_transfer_t *transfer, size_t bytes) {
         return;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer->bytes_transferred += bytes;
     transfer->last_activity = salts_hrtime();
     progress_cb = transfer->progress_cb;
     user_data = transfer->user_data;
     bytes_transferred = transfer->bytes_transferred;
     file_size = transfer->file_size;
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 
     if (progress_cb) {
         progress_cb(transfer, bytes_transferred, file_size, user_data);
@@ -274,10 +274,10 @@ void p2p_transfer_complete(p2p_transfer_t *transfer, int success, const char *er
         return;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     if (transfer->state == P2P_TRANSFER_COMPLETED ||
         transfer->state == P2P_TRANSFER_FAILED) {
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         return;
     }
     transfer->state = success ? P2P_TRANSFER_COMPLETED : P2P_TRANSFER_FAILED;
@@ -294,7 +294,7 @@ void p2p_transfer_complete(p2p_transfer_t *transfer, int success, const char *er
     }
     complete_cb = transfer->complete_cb;
     user_data = transfer->user_data;
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 
     TLOG_INFOF("[Transfer] Transfer #{} {}{}{}",
              transfer_id,
@@ -328,9 +328,9 @@ size_t p2p_transfer_calc_chunk_count(size_t file_size, size_t chunk_size) {
 size_t p2p_transfer_get_chunk_offset(p2p_transfer_t *transfer, uint32_t chunk_index) {
     size_t offset = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     offset = p2p_transfer_get_chunk_offset_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return offset;
 }
 
@@ -341,9 +341,9 @@ size_t p2p_transfer_get_chunk_offset_locked(p2p_transfer_t *transfer, uint32_t c
 size_t p2p_transfer_get_chunk_size(p2p_transfer_t *transfer, uint32_t chunk_index) {
     size_t size = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     size = p2p_transfer_get_chunk_size_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return size;
 }
 
@@ -359,9 +359,9 @@ size_t p2p_transfer_get_chunk_size_locked(p2p_transfer_t *transfer, uint32_t chu
 int p2p_transfer_init_bitmap(p2p_transfer_t *transfer) {
     int ret = P2P_OK;
     if (!transfer) return P2P_ERR_INVALID_ARG;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_init_bitmap_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
@@ -385,9 +385,9 @@ void p2p_transfer_free_bitmap(p2p_transfer_t *transfer) {
     if (!transfer) {
         return;
     }
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_free_bitmap_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 void p2p_transfer_free_bitmap_locked(p2p_transfer_t *transfer) {
@@ -402,9 +402,9 @@ void p2p_transfer_mark_chunk_done(p2p_transfer_t *transfer, uint32_t chunk_index
     if (!transfer) {
         return;
     }
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_mark_chunk_done_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 void p2p_transfer_mark_chunk_done_locked(p2p_transfer_t *transfer, uint32_t chunk_index) {
@@ -423,9 +423,9 @@ void p2p_transfer_mark_chunk_done_locked(p2p_transfer_t *transfer, uint32_t chun
 uint32_t p2p_transfer_next_chunk(p2p_transfer_t *transfer) {
     uint32_t next = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     next = p2p_transfer_next_chunk_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return next;
 }
 
@@ -441,9 +441,9 @@ int p2p_transfer_mgr_pause(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     p2p_transfer_t *t = p2p_transfer_find_by_id(mgr, transfer_id);
     if (!t) return P2P_ERR_NOT_FOUND;
 
-    salts_mutex_lock(&t->mutex);
+    cmeta_mutex_lock(&t->mutex);
     if (t->state != P2P_TRANSFER_ACTIVE) {
-        salts_mutex_unlock(&t->mutex);
+        cmeta_mutex_unlock(&t->mutex);
         p2p_transfer_release(t);
         return P2P_ERR_INVALID_STATE;
     }
@@ -453,7 +453,7 @@ int p2p_transfer_mgr_pause(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     if (t->chunk_bitmap) {
         p2p_resume_save(t);
     }
-    salts_mutex_unlock(&t->mutex);
+    cmeta_mutex_unlock(&t->mutex);
 
     TLOG_INFOF("[Transfer] Transfer #{} paused", transfer_id);
     p2p_transfer_release(t);
@@ -465,16 +465,16 @@ int p2p_transfer_mgr_resume(p2p_transfer_manager_t *mgr, uint32_t transfer_id,
     p2p_transfer_t *t = p2p_transfer_find_by_id(mgr, transfer_id);
     if (!t) return P2P_ERR_NOT_FOUND;
 
-    salts_mutex_lock(&t->mutex);
+    cmeta_mutex_lock(&t->mutex);
     if (t->state != P2P_TRANSFER_PAUSED) {
-        salts_mutex_unlock(&t->mutex);
+        cmeta_mutex_unlock(&t->mutex);
         p2p_transfer_release(t);
         return P2P_ERR_INVALID_STATE;
     }
 
     t->state = P2P_TRANSFER_ACTIVE;
     t->last_activity = salts_hrtime();
-    salts_mutex_unlock(&t->mutex);
+    cmeta_mutex_unlock(&t->mutex);
 
     TLOG_INFOF("[Transfer] Transfer #{} resumed", transfer_id);
 
@@ -491,10 +491,10 @@ int p2p_transfer_mgr_cancel(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     p2p_transfer_t *t = p2p_transfer_find_by_id(mgr, transfer_id);
     if (!t) return P2P_ERR_NOT_FOUND;
 
-    salts_mutex_lock(&t->mutex);
+    cmeta_mutex_lock(&t->mutex);
     if (t->state == P2P_TRANSFER_COMPLETED ||
         t->state == P2P_TRANSFER_CANCELLED) {
-        salts_mutex_unlock(&t->mutex);
+        cmeta_mutex_unlock(&t->mutex);
         p2p_transfer_release(t);
         return P2P_ERR_INVALID_STATE;
     }
@@ -506,7 +506,7 @@ int p2p_transfer_mgr_cancel(p2p_transfer_manager_t *mgr, uint32_t transfer_id) {
     }
     complete_cb = t->complete_cb;
     user_data = t->user_data;
-    salts_mutex_unlock(&t->mutex);
+    cmeta_mutex_unlock(&t->mutex);
 
     TLOG_INFOF("[Transfer] Transfer #{} cancelled", transfer_id);
 
@@ -525,7 +525,7 @@ int p2p_transfer_mgr_get_status(p2p_transfer_manager_t *mgr, uint32_t transfer_i
     p2p_transfer_t *t = p2p_transfer_find_by_id(mgr, transfer_id);
     if (!t) return P2P_ERR_NOT_FOUND;
 
-    salts_mutex_lock(&t->mutex);
+    cmeta_mutex_lock(&t->mutex);
     status->id = t->id;
     status->state = (int)t->state;
     status->bytes_transferred = t->bytes_transferred;
@@ -533,7 +533,7 @@ int p2p_transfer_mgr_get_status(p2p_transfer_manager_t *mgr, uint32_t transfer_i
     strncpy(status->filename, t->filename, sizeof(status->filename) - 1);
     status->filename[sizeof(status->filename) - 1] = '\0';
     status->error_code = t->error_code;
-    salts_mutex_unlock(&t->mutex);
+    cmeta_mutex_unlock(&t->mutex);
 
     p2p_transfer_release(t);
     return P2P_OK;
@@ -629,45 +629,45 @@ int p2p_transfer_check_timeouts_locked(p2p_transfer_t *transfer, uint32_t *timed
 void p2p_transfer_enable_parallel(p2p_transfer_t *transfer, int enable) {
     if (!transfer) return;
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer->parallel_enabled = enable ? 1 : 0;
     if (!enable) {
         transfer->in_flight_count = 0;
     }
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 int p2p_transfer_add_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index) {
     int ret = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_add_in_flight_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
 void p2p_transfer_remove_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index) {
     if (!transfer) return;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_remove_in_flight_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 int p2p_transfer_is_in_flight(p2p_transfer_t *transfer, uint32_t chunk_index) {
     int ret = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_is_in_flight_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
 uint32_t p2p_transfer_get_next_to_request(p2p_transfer_t *transfer) {
     uint32_t next = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     next = p2p_transfer_get_next_to_request_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return next;
 }
 
@@ -679,9 +679,9 @@ int p2p_transfer_check_timeouts(p2p_transfer_t *transfer, uint32_t *timed_out_ch
                                  uint8_t *count, uint8_t max_count) {
     int ret = 0;
     if (!transfer || !timed_out_chunks || !count) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_check_timeouts_locked(transfer, timed_out_chunks, count, max_count);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
@@ -691,7 +691,7 @@ void p2p_transfer_manager_tick(p2p_transfer_manager_t *mgr, p2p_node_t *node) {
 
     if (!mgr || !node) return;
 
-    salts_mutex_lock(&mgr->mutex);
+    cmeta_mutex_lock(&mgr->mutex);
     if (mgr->count > 0) {
         p2p_transfer_t *transfer = NULL;
 
@@ -702,7 +702,7 @@ void p2p_transfer_manager_tick(p2p_transfer_manager_t *mgr, p2p_node_t *node) {
             transfer = transfer->next;
         }
     }
-    salts_mutex_unlock(&mgr->mutex);
+    cmeta_mutex_unlock(&mgr->mutex);
 
     for (size_t i = 0; i < count; i++) {
         p2p_transfer_t *transfer = p2p_transfer_find_by_id(mgr, ids[i]);
@@ -713,7 +713,7 @@ void p2p_transfer_manager_tick(p2p_transfer_manager_t *mgr, p2p_node_t *node) {
             continue;
         }
 
-        salts_mutex_lock(&transfer->mutex);
+        cmeta_mutex_lock(&transfer->mutex);
         /* Only check active downloads */
         if (transfer->state == P2P_TRANSFER_ACTIVE &&
             transfer->direction == P2P_TRANSFER_DIR_DOWNLOAD &&
@@ -725,7 +725,7 @@ void p2p_transfer_manager_tick(p2p_transfer_manager_t *mgr, p2p_node_t *node) {
                 fail_transfer = 1;
             }
         }
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
 
         if (fail_transfer) {
             p2p_transfer_complete(transfer, 0, "Max retries exceeded");
@@ -883,9 +883,9 @@ uint8_t p2p_transfer_get_chunk_source_locked(p2p_transfer_t *transfer, uint32_t 
 
 void p2p_transfer_enable_multi_source(p2p_transfer_t *transfer, int enable) {
     if (!transfer) return;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer->multi_source_enabled = enable ? 1 : 0;
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     TLOG_DEBUGF("[Transfer] Multi-source {} for transfer #{}",
               enable ? "enabled" : "disabled", transfer->id);
 }
@@ -893,57 +893,57 @@ void p2p_transfer_enable_multi_source(p2p_transfer_t *transfer, int enable) {
 int p2p_transfer_source_add(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     int ret = 0;
     if (!transfer || !peer) return P2P_ERR_INVALID_ARG;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_source_add_locked(transfer, peer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
 void p2p_transfer_source_remove(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     if (!transfer || !peer) return;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_source_remove_locked(transfer, peer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 p2p_peer_t* p2p_transfer_select_source(p2p_transfer_t *transfer) {
     p2p_peer_t *peer = NULL;
     if (!transfer) return NULL;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     peer = p2p_transfer_select_source_locked(transfer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return peer;
 }
 
 void p2p_transfer_source_received(p2p_transfer_t *transfer, p2p_peer_t *peer, size_t bytes) {
     if (!transfer || !peer) return;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_source_received_locked(transfer, peer, bytes);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 void p2p_transfer_source_failed(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     if (!transfer || !peer) return;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     p2p_transfer_source_failed_locked(transfer, peer);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 }
 
 int p2p_transfer_add_in_flight_multi(p2p_transfer_t *transfer, uint32_t chunk_index,
                                       uint8_t source_index) {
     int ret = 0;
     if (!transfer) return 0;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_transfer_add_in_flight_multi_locked(transfer, chunk_index, source_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return ret;
 }
 
 uint8_t p2p_transfer_get_chunk_source(p2p_transfer_t *transfer, uint32_t chunk_index) {
     uint8_t source = 255;
     if (!transfer) return 255;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     source = p2p_transfer_get_chunk_source_locked(transfer, chunk_index);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     return source;
 }

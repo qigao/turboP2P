@@ -461,14 +461,14 @@ static void lookup_next_wave_by_id(p2p_node_t *node, uint32_t request_id) {
         lookup_wave_action_t action;
         int progressed = 0;
 
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         p2p_dht_lookup_t *lookup = p2p_dht_lookup_find(node, request_id);
         if (!lookup) {
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
             return;
         }
         progressed = lookup_prepare_wave_action_locked(node, lookup, &action);
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
 
         if (action.type == LOOKUP_WAVE_ACTION_SEND) {
             int send_ok = lookup_send_request_raw(action.msg_type,
@@ -476,7 +476,7 @@ static void lookup_next_wave_by_id(p2p_node_t *node, uint32_t request_id) {
                                                   action.target,
                                                   action.peer);
 
-            salts_mutex_lock(&node->mutex);
+            cmeta_mutex_lock(&node->mutex);
             lookup = p2p_dht_lookup_find(node, request_id);
             if (lookup && send_ok &&
                 lookup_mark_sent_request_locked(lookup, &action)) {
@@ -486,7 +486,7 @@ static void lookup_next_wave_by_id(p2p_node_t *node, uint32_t request_id) {
                 lookup_mark_candidate_contacted_locked(lookup, &action);
                 progressed = 1;
             }
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
             p2p_peer_release(action.peer);
         }
 
@@ -514,19 +514,19 @@ p2p_dht_lookup_t *p2p_dht_lookup_find(p2p_node_t *node, uint32_t request_id) {
 void p2p_dht_lookup_finish(p2p_node_t *node, p2p_dht_lookup_t *lookup) {
     if (!node || !lookup) return;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     lookup = lookup_detach_locked(node, lookup);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     lookup_finish_detached(lookup);
 }
 
 void p2p_dht_lookup_cancel(p2p_node_t *node, uint32_t request_id) {
     p2p_dht_lookup_t *lookup;
     if (!node) return;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     lookup = p2p_dht_lookup_find(node, request_id);
     if (lookup) lookup_detach_locked(node, lookup);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (!lookup) return;
     if (lookup->cleanup && lookup->user_data) lookup->cleanup(lookup->user_data);
     free(lookup);
@@ -542,7 +542,7 @@ void p2p_dht_lookup_try_progress(p2p_node_t *node) {
         return;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     HASH_ITER(hh, node->dht_lookups, lookup, tmp) {
         if (lookup->active_requests >= KADEMLIA_ALPHA) {
             continue;
@@ -551,7 +551,7 @@ void p2p_dht_lookup_try_progress(p2p_node_t *node) {
             request_ids[request_count++] = lookup->request_id;
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     for (int i = 0; i < request_count; i++) {
         lookup_next_wave_by_id(node, request_ids[i]);
@@ -575,12 +575,12 @@ p2p_dht_lookup_t *p2p_dht_lookup_start(p2p_node_t *node, const uint8_t *target, 
     memcpy(lookup->target, target, KADEMLIA_ID_BYTES);
     lookup->type = type;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     lookup_seed_from_kad_locked(node, lookup, target);
     lookup_seed_from_connected_peers_locked(node, lookup);
 
     if (lookup->candidate_count == 0) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         TLOG_DEBUG("[P2P] Skipping DHT lookup without candidates");
         free(lookup);
         return NULL;
@@ -589,13 +589,13 @@ p2p_dht_lookup_t *p2p_dht_lookup_start(p2p_node_t *node, const uint8_t *target, 
     lookup_sort_candidates(lookup);
     request_id = lookup->request_id;
     HASH_ADD(hh, node->dht_lookups, request_id, sizeof(lookup->request_id), lookup);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     lookup_next_wave_by_id(node, request_id);
     /* An immediate connection failure callback can stop the node and cancel
      * this lookup while the first wave is being dispatched. */
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     lookup = p2p_dht_lookup_find(node, request_id);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return lookup;
 }
 
@@ -609,17 +609,17 @@ int p2p_dht_lookup_on_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_mes
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     lookup = p2p_dht_lookup_find(node, msg->header.request_id);
     if (!lookup) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_OK;
     }
 
     res = &msg->payload.dht_response;
     finished_lookup = lookup_try_resolve_get_hit_locked(node, lookup, peer, res);
     if (finished_lookup) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         lookup_finish_detached(finished_lookup);
         return P2P_OK;
     }
@@ -629,7 +629,7 @@ int p2p_dht_lookup_on_response(p2p_node_t *node, p2p_peer_t *peer, const p2p_mes
     lookup_sort_candidates(lookup);
     decision = lookup_decide_progress_locked(node, lookup);
 
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (decision.finished_lookup) {
         lookup_finish_detached(decision.finished_lookup);
         return P2P_OK;

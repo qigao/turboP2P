@@ -32,8 +32,8 @@ struct p2p_cnet_admission_s {
     p2p_cnet_admission_config_t config;
     p2p_cnet_admission_callbacks_t callbacks;
     p2p_cnet_admission_stats_t stats;
-    salts_mutex_t owned_status_mutex;
-    salts_mutex_t *status_mutex;
+    cmeta_mutex_t owned_status_mutex;
+    cmeta_mutex_t *status_mutex;
     gate_t *gates;
     int busy;
     int stopped;
@@ -41,17 +41,17 @@ struct p2p_cnet_admission_s {
 
 static void reject(p2p_cnet_admission_t *admission,
     const cnet_stream_peer *source, int status, p2p_cnet_rejection_origin_t origin) {
-    salts_mutex_lock(admission->status_mutex);
+    cmeta_mutex_lock(admission->status_mutex);
     admission->stats.rejected++;
-    salts_mutex_unlock(admission->status_mutex);
+    cmeta_mutex_unlock(admission->status_mutex);
     if (admission->callbacks.rejected)
         admission->callbacks.rejected(source, status, origin, admission->callbacks.context);
 }
 
 static void release_gate(gate_t *gate) {
-    salts_mutex_lock(gate->admission->status_mutex);
+    cmeta_mutex_lock(gate->admission->status_mutex);
     gate->admission->stats.active--;
-    salts_mutex_unlock(gate->admission->status_mutex);
+    cmeta_mutex_unlock(gate->admission->status_mutex);
     p2p_crypto_wipe(gate, sizeof(*gate));
 }
 
@@ -106,9 +106,9 @@ static void promote(gate_t *gate) {
         return;
     }
     p2p_crypto_wipe(&verified, sizeof(verified));
-    salts_mutex_lock(admission->status_mutex);
+    cmeta_mutex_lock(admission->status_mutex);
     admission->stats.promoted++;
-    salts_mutex_unlock(admission->status_mutex);
+    cmeta_mutex_unlock(admission->status_mutex);
     result = next.connected ? next.connected(connection, next.context) : P2P_OK;
     if (result != P2P_OK) {
         p2p_connection_destroy(connection);
@@ -152,24 +152,24 @@ static int gate_receive(p2p_connection_t *connection, const uint8_t *bytes,
         gate->used = 0;
         gate->state = GATE_RESPONSE;
         gate->cookie_started_ms = now_ms;
-        salts_mutex_lock(admission->status_mutex);
+        cmeta_mutex_lock(admission->status_mutex);
         admission->stats.challenges_issued++;
         if (admission->callbacks.stage_completed_locked)
             admission->callbacks.stage_completed_locked(P2P_CNET_ADMISSION_PREFACE,
                 gate->started_ms, now_ms, admission->callbacks.context);
-        salts_mutex_unlock(admission->status_mutex);
+        cmeta_mutex_unlock(admission->status_mutex);
     } else {
         result = p2p_cookie_verify_response(admission->config.cookie_master_secret,
             gate->source_ip, gate->preface, now_ms, admission->config.cookie_lifetime_ms,
             admission->config.cookie_key_rotation_ms, gate->packet, gate->binding);
         if (result != P2P_OK) { fail_gate(gate, result); goto done; }
         gate->state = GATE_VERIFIED;
-        salts_mutex_lock(admission->status_mutex);
+        cmeta_mutex_lock(admission->status_mutex);
         admission->stats.verifications_succeeded++;
         if (admission->callbacks.stage_completed_locked)
             admission->callbacks.stage_completed_locked(P2P_CNET_ADMISSION_COOKIE,
                 gate->cookie_started_ms, now_ms, admission->callbacks.context);
-        salts_mutex_unlock(admission->status_mutex);
+        cmeta_mutex_unlock(admission->status_mutex);
         /* Proof may arrive before the local write terminal. Pause at the exact
          * response boundary so the transport retains a coalesced Noise tail. */
         result = p2p_cnet_connection_pause(gate->connection, 1);
@@ -193,9 +193,9 @@ static void gate_sent(p2p_connection_t *connection, size_t length, void *context
         fail_gate(gate, P2P_ERR_PROTOCOL);
     } else {
         gate->challenge_completed = 1;
-        salts_mutex_lock(admission->status_mutex);
+        cmeta_mutex_lock(admission->status_mutex);
         admission->stats.challenges_completed++;
-        salts_mutex_unlock(admission->status_mutex);
+        cmeta_mutex_unlock(admission->status_mutex);
         promote(gate);
     }
     admission->busy--;
@@ -235,7 +235,7 @@ int p2p_cnet_admission_create(p2p_cnet_owner_t *owner,
     admission->callbacks = *callbacks;
     if (config->status_mutex) admission->status_mutex = config->status_mutex;
     else {
-        salts_mutex_init(&admission->owned_status_mutex);
+        cmeta_mutex_init(&admission->owned_status_mutex);
         if (!admission->owned_status_mutex) {
             free(admission->gates);
             p2p_crypto_wipe(admission, sizeof(*admission));
@@ -298,10 +298,10 @@ int p2p_cnet_admission_accept(p2p_cnet_owner_t *owner,
         p2p_crypto_wipe(free_gate, sizeof(*free_gate));
         goto reject_accept;
     }
-    salts_mutex_lock(admission->status_mutex);
+    cmeta_mutex_lock(admission->status_mutex);
     admission->stats.active++;
     admission->stats.accepted++;
-    salts_mutex_unlock(admission->status_mutex);
+    cmeta_mutex_unlock(admission->status_mutex);
     admission->busy = 0;
     return P2P_OK;
 reject_accept:
@@ -341,7 +341,7 @@ int p2p_cnet_admission_destroy(p2p_cnet_admission_t *admission) {
     if (!admission) return P2P_OK;
     if (admission->busy || !admission->stopped) return P2P_ERR_INVALID_STATE;
     free(admission->gates);
-    if (admission->owned_status_mutex) salts_mutex_destroy(&admission->owned_status_mutex);
+    if (admission->owned_status_mutex) cmeta_mutex_destroy(&admission->owned_status_mutex);
     p2p_crypto_wipe(admission, sizeof(*admission));
     free(admission);
     return P2P_OK;
@@ -350,9 +350,9 @@ int p2p_cnet_admission_destroy(p2p_cnet_admission_t *admission) {
 int p2p_cnet_admission_stats(const p2p_cnet_admission_t *admission,
                             p2p_cnet_admission_stats_t *output) {
     if (!admission || !output) return P2P_ERR_INVALID_ARG;
-    salts_mutex_lock(admission->status_mutex);
+    cmeta_mutex_lock(admission->status_mutex);
     p2p_cnet_admission_stats_locked(admission, output);
-    salts_mutex_unlock(admission->status_mutex);
+    cmeta_mutex_unlock(admission->status_mutex);
     return P2P_OK;
 }
 

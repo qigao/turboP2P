@@ -108,14 +108,14 @@ static void p2p_receiver_send_source_acks(p2p_transfer_t *transfer,
     if (!transfer) {
         return;
     }
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer_id = transfer->id;
     for (uint8_t i = 0; i < transfer->source_count; i++) {
         if (transfer->sources[i].peer) {
             peers[peer_count++] = transfer->sources[i].peer;
         }
     }
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     for (uint8_t i = 0; i < peer_count; i++) {
         p2p_receiver_send_file_ack(peers[i], transfer_id, success);
     }
@@ -159,9 +159,9 @@ int p2p_receiver_request_chunk(p2p_node_t *node, p2p_transfer_t *transfer, uint3
 
     if (!node || !transfer) return P2P_ERR_INVALID_ARG;
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     ret = p2p_receiver_prepare_chunk_request_locked(transfer, chunk_index, &peer, &transfer_id);
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     if (ret != P2P_OK) {
         return ret;
     }
@@ -215,11 +215,11 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
         return P2P_ERR_NOT_FOUND;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     peer_index = p2p_receiver_request_peer_index_locked(transfer, peer);
     if (peer_index < 0) {
         reject_upload = !(file_size == 0 && total_chunks == 0);
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         if (reject_upload) {
             p2p_receiver_send_file_ack(peer, request_id, 0);
         }
@@ -229,7 +229,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
     if (transfer->request_peer_done[peer_index]) {
         reject_upload =
             transfer->peer != peer && !(file_size == 0 && total_chunks == 0);
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         if (reject_upload) {
             p2p_receiver_send_file_ack(peer, request_id, 0);
         }
@@ -245,7 +245,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
         complete_no_source =
             transfer->state == P2P_TRANSFER_STATE_PENDING &&
             transfer->response_count == transfer->request_peer_count;
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         if (complete_no_source) {
             p2p_transfer_complete(
                 transfer, 0, "No peer provides the requested object");
@@ -258,7 +258,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
          transfer->state != P2P_TRANSFER_STATE_ACTIVE) ||
         file_size > SIZE_MAX) {
         reject_upload = transfer->peer != peer;
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         if (reject_upload) {
             p2p_receiver_send_file_ack(peer, request_id, 0);
         }
@@ -275,7 +275,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
         complete_no_source =
             transfer->state == P2P_TRANSFER_STATE_PENDING &&
             transfer->response_count == transfer->request_peer_count;
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         p2p_receiver_send_file_ack(peer, request_id, 0);
         if (complete_no_source) {
             p2p_transfer_complete(
@@ -290,20 +290,20 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
             transfer->total_chunks != total_chunks ||
             memcmp(transfer->file_hash, file_hash,
                    P2P_SHA256_DIGEST_SIZE) != 0) {
-            salts_mutex_unlock(&transfer->mutex);
+            cmeta_mutex_unlock(&transfer->mutex);
             p2p_receiver_send_file_ack(peer, request_id, 0);
             p2p_transfer_release(transfer);
             return P2P_ERR_INVALID_ARG;
         }
         ret = p2p_transfer_source_add_locked(transfer, peer);
         if (ret != P2P_OK) {
-            salts_mutex_unlock(&transfer->mutex);
+            cmeta_mutex_unlock(&transfer->mutex);
             p2p_receiver_send_file_ack(peer, request_id, 0);
             p2p_transfer_release(transfer);
             return ret;
         }
         transfer->multi_source_enabled = 1;
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         p2p_transfer_release(transfer);
         return P2P_OK;
     }
@@ -316,7 +316,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
     transfer->peer = peer;
     ret = p2p_transfer_source_add_locked(transfer, peer);
     if (ret != P2P_OK) {
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         p2p_transfer_complete(transfer, 0, "Failed to register file source");
         p2p_receiver_send_file_ack(peer, request_id, 0);
         p2p_transfer_release(transfer);
@@ -328,7 +328,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
     ret = p2p_transfer_init_bitmap_locked(transfer);
     if (ret != P2P_OK) {
         TLOG_ERROR("[P2P] Failed to init bitmap for transfer");
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         p2p_transfer_complete(transfer, 0, "Failed to initialize chunk state");
         p2p_receiver_send_file_ack(peer, request_id, 0);
         p2p_transfer_release(transfer);
@@ -339,7 +339,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
     ret = p2p_transfer_open_file_locked(transfer, "wb");
     if (ret != P2P_OK) {
         TLOG_ERROR("[P2P] Failed to open output file for transfer");
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         p2p_transfer_complete(transfer, 0, "Failed to open output file");
         p2p_receiver_send_file_ack(peer, request_id, 0);
         p2p_transfer_release(transfer);
@@ -400,7 +400,7 @@ int p2p_receiver_handle_file_response(p2p_node_t *node, p2p_peer_t *peer,
         }
     }
 
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     if (start_ret != P2P_OK) {
         p2p_transfer_complete(transfer, 0, "Failed to request initial chunk");
         p2p_receiver_send_file_ack(peer, request_id, 0);
@@ -447,7 +447,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
         goto done;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer_locked = 1;
 
     if (transfer->direction != P2P_TRANSFER_DIR_DOWNLOAD) {
@@ -470,7 +470,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
     }
     p2p_sha256(data, data_len, actual_chunk_hash);
     if (memcmp(actual_chunk_hash, chunk_hash, sizeof(actual_chunk_hash)) != 0) {
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
         transfer_locked = 0;
         p2p_transfer_complete(transfer, 0, "Chunk digest mismatch");
         ret = P2P_ERR_INVALID;
@@ -508,7 +508,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
     if (complete_now) {
         p2p_transfer_close_file_locked(transfer);
     }
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     transfer_locked = 0;
     p2p_transfer_update_progress(transfer, data_len);
 
@@ -540,7 +540,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
         goto done;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer_locked = 1;
     if (transfer->state != P2P_TRANSFER_STATE_ACTIVE) {
         goto done;
@@ -582,7 +582,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
             break;
         }
     }
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     transfer_locked = 0;
     if (next_request_ret != P2P_OK) {
         ret = next_request_ret;
@@ -592,7 +592,7 @@ int p2p_receiver_handle_chunk_data(p2p_node_t *node, p2p_peer_t *peer,
 
 done:
     if (transfer && transfer_locked) {
-        salts_mutex_unlock(&transfer->mutex);
+        cmeta_mutex_unlock(&transfer->mutex);
     }
     if (transfer) {
         p2p_transfer_release(transfer);
