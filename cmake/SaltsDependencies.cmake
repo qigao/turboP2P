@@ -17,7 +17,10 @@ find_package(Salts CONFIG REQUIRED PATHS "${_SALTS_ROOT_PATH}"
              NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 find_package(SaltsUtils CONFIG REQUIRED PATHS "${_SALTS_UTILS_ROOT_PATH}"
              NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
-foreach(_target IN ITEMS Salts::CSTL Salts::Crypto)
+foreach(_target IN ITEMS
+    Salts::Core Salts::Platform Salts::Concurrency Salts::CSTL Salts::Crypto
+    Salts::CMeta Salts::CFlow Salts::CNet Salts::Plugin Salts::TinyTest
+    Salts::DataBind)
   if(NOT TARGET ${_target})
     message(FATAL_ERROR "Installed Salts profile is missing ${_target}")
   endif()
