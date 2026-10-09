@@ -210,3 +210,38 @@ explicit polling loops; it does not install
 `cnet_sg_host_route_batch`, or benchmark 1/2/4 SG host worker threads.
 That work remains open under #37. No claim of full CPU-scaled multicore
 P2P or complete root TurboP2P release is made from this phase alone.
+
+
+## Phase S2 — NativeIO SG Host with real P2P protocol Owner (#37)
+
+The explicitly configured `p2p_cnet_owner_create_external` now borrows the
+single NativeIO backend associated with one `native_io_sharded_host_lease`.
+It does not create another NativeIO backend. The immutable SG runtime/shard
+identity and lease generation are checked before progress; wrong-shard or
+foreign tickets fail before any CNet command or completion is consumed.
+
+One SG Owner task calls `p2p_cnet_owner_poll_sg_host`, advancing CNet external
+requests then calling `native_io_sharded_context_observe_host` **exactly once**.
+It routes the **whole** batch through `cnet_sg_host_route_batch`, processes
+accepted child descriptors, and re-arms one external accept. SG-owned terminal
+completions were settled by SG and are never resubmitted to CNet.
+Each task terminates promptly; there is no Actor, hidden task loop or separate
+observer. A shard supports ONE standalone P2P hosted transport through this
+helper; mixed cohosting needs a **combined** host routes[] and is not admitted
+by making multiple independent observe calls.
+
+The final P2P Owner may use `p2p_node_cnet_bind_handoff_accept` without an
+unneeded local listener, while the acceptor on another SG shard owns the
+sole listener. The acceptor uses real Salts Server placement and bounded
+`cnet_handoff`; only the final Owner makes the actual
+`cnet_client_adopt_accepted` and runs P2P cookie/Noise/identity callbacks.
+Credit remains TAKEN through final CNet terminal plus borrowed application
+callback retirement. Stop/destroy must release all credited sockets, clients,
+P2P contexts, then SG host leases **before** NativeIO SG shutdown.
+
+The installed-SDK acceptance uses real SG worker shards, real TCP handoff and
+P2P application traffic with a standalone source client outside SG. This is
+a stricter gate than merely checking strategy IDs or a mocked completion
+batch, but it is **not** mixed-protocol cohosting nor a 1/2/4-core performance
+qualification. Complete #37 only after SG-host multi-consumer, 4-shard
+workloads, real multicore benchmark and cross-platform installed SDK gates.

@@ -169,8 +169,9 @@ static void rejected(const cnet_stream_peer *source, int status,
     cmeta_mutex_unlock(&owner->node->mutex);
 }
 
-int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
-    p2p_node_cnet_t **output) {
+static int node_cnet_create_impl(p2p_node_t *node, const p2p_cnet_config_t *config,
+    native_io_backend *external_backend,
+    native_io_sharded_host_lease host_lease, p2p_node_cnet_t **output) {
     p2p_node_cnet_t *owner;
     p2p_cnet_admission_config_t policy = {0};
     p2p_cnet_admission_callbacks_t callbacks = {
@@ -197,7 +198,10 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     if (!owner) return P2P_ERR_NO_MEM;
     owner->node = node;
     owner->peer_limit = config->client.connection_capacity;
-    result = p2p_cnet_owner_create(config, &owner->transport);
+    result = external_backend
+        ? p2p_cnet_owner_create_external(config, external_backend,
+                                         host_lease, &owner->transport)
+        : p2p_cnet_owner_create(config, &owner->transport);
     if (result != P2P_OK) { free(owner); return result; }
     policy.gate_limit = node->security_config.cookie_gate_limit;
     policy.source_limit = policy.gate_limit < P2P_PENDING_PEER_SOURCE_LIMIT ?
@@ -226,6 +230,31 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     owner->maintenance_ms = cmeta_monotonic_ms();
     *output = owner;
     return P2P_OK;
+}
+
+int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
+    p2p_node_cnet_t **output) {
+    return node_cnet_create_impl(node, config, NULL,
+                                 (native_io_sharded_host_lease){0}, output);
+}
+
+int p2p_node_cnet_create_external(p2p_node_t *node,
+                                  const p2p_cnet_config_t *config,
+                                  native_io_backend *borrowed_backend,
+                                  native_io_sharded_host_lease lease,
+                                  p2p_node_cnet_t **output) {
+    if (!borrowed_backend) {
+        if (output) *output = NULL;
+        return P2P_ERR_INVALID_ARG;
+    }
+    return node_cnet_create_impl(node, config, borrowed_backend, lease, output);
+}
+
+int p2p_node_cnet_bind_handoff_accept(p2p_node_cnet_t *owner) {
+    if (!owner || owner->busy || owner->stopping || !owner->admission)
+        return P2P_ERR_INVALID_STATE;
+    return p2p_cnet_owner_bind_handoff_accept(
+        owner->transport, p2p_cnet_admission_accept, owner->admission);
 }
 
 p2p_cnet_owner_t *p2p_node_cnet_transport_owner(p2p_node_cnet_t *owner) {
@@ -270,9 +299,14 @@ static void reap_disconnected(p2p_node_t *node) {
     }
 }
 
-int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
+static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
+                               native_io_sharded_context *context,
+                               const native_io_sharded_host_lease *lease,
+                               size_t *out_observed, size_t *out_sg_settled) {
     uint64_t now;
     int result;
+    if (out_observed) *out_observed = 0u;
+    if (out_sg_settled) *out_sg_settled = 0u;
     if (!owner) return P2P_ERR_INVALID_ARG;
     if (owner->busy || owner->stopping) return P2P_ERR_INVALID_STATE;
     owner->busy = 1;
@@ -281,7 +315,11 @@ int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
     p2p_node_expire_pending_peers(owner->node, now);
     if (result == P2P_OK && !owner->stopping) {
         p2p_private_key_executor_pump(owner->node);
-        if (!owner->stopping) result = p2p_cnet_owner_poll(owner->transport);
+        if (!owner->stopping)
+            result = context
+                ? p2p_cnet_owner_poll_sg_host(owner->transport, context,
+                    *lease, out_observed, out_sg_settled)
+                : p2p_cnet_owner_poll(owner->transport);
     }
     reap_disconnected(owner->node);
     if (!owner->stopping && now >= owner->maintenance_ms &&
@@ -295,6 +333,20 @@ int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
     owner->busy = 0;
     if (owner->stopping) return p2p_node_cnet_stop(owner);
     return result;
+}
+
+int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
+    return node_cnet_poll_impl(owner, NULL, NULL, NULL, NULL);
+}
+
+int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
+                               native_io_sharded_context *context,
+                               native_io_sharded_host_lease lease,
+                               size_t *out_observed, size_t *out_sg_settled) {
+    if (!context || !out_observed || !out_sg_settled)
+        return P2P_ERR_INVALID_ARG;
+    return node_cnet_poll_impl(owner, context, &lease,
+                               out_observed, out_sg_settled);
 }
 
 static void detach_node(p2p_node_cnet_t *owner) {

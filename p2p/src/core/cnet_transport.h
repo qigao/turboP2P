@@ -6,6 +6,7 @@
 #include <cnet/cnet.h>
 #include <cnet/handoff.h>
 #include <cnet/owner_placement.h>
+#include <cnet/sg_host.h>
 
 typedef struct p2p_cnet_owner_s p2p_cnet_owner_t;
 
@@ -42,16 +43,49 @@ typedef int (*p2p_cnet_accept_fn)(p2p_cnet_owner_t *owner,
  * The public v2 lifecycle selects this owner; legacy constructors remain separate. */
 int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
                           p2p_cnet_owner_t **output);
+
+/* SG-native Host mode: caller provides one live shard-owned NativeIO backend
+ * under a native_io_sharded_host_lease and exclusively drives the callback
+ * owner on that shard. CNet will never create/observe/destroy a second backend.
+ * Do not share this backend with another observer or with a standalone poller.
+ * The caller must not release the SG lease before owner_destroy succeeds. */
+int p2p_cnet_owner_create_external(const p2p_cnet_config_t *config,
+                                   native_io_backend *borrowed_backend,
+                                   native_io_sharded_host_lease lease,
+                                   p2p_cnet_owner_t **output);
+
 int p2p_cnet_owner_listen(p2p_cnet_owner_t *owner, const char *host,
                           uint16_t port, size_t backlog,
                           p2p_cnet_accept_fn accept, void *context,
                           cnet_stream_peer *local);
+/* A final SG Owner binds real P2P cookie admission without opening another
+ * socket/listener on its native SG shard. Exclusive startup only. */
+int p2p_cnet_owner_bind_handoff_accept(p2p_cnet_owner_t *owner,
+                                       p2p_cnet_accept_fn accept,
+                                       void *context);
+
 int p2p_cnet_owner_connect(p2p_cnet_owner_t *owner, const cnet_stream_peer *peer,
                            const p2p_cnet_callbacks_t *callbacks,
                            p2p_connection_t **output);
 /* One bounded, nonblocking accept/client/receive pass. Recursive progress is
  * rejected. Paused receive storage is at most one configured receive buffer. */
 int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner);
+
+/* Runs one Owner task using ONE authoritative NativeIO SG observe batch.
+ * Explicit EXTERNAL clients/listener, not the owned-backend polling path.
+ * On the fixed SG Owner: advance client commands, observe through caller's
+ * registered host lease ONCE, route the WHOLE batch with cnet_sg_host_route_batch,
+ * advance clients and process local accepted/handoff streams and callbacks.
+ * Can be used by exactly ONE externally hosted transport per shard; additional
+ * cohosted CNet consumers must be composed in a higher-level joint routes[]
+ * host and cannot call this standalone function on the same batch.
+ * out_observed and out_sg_settled are cleared on entry. */
+int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
+                                native_io_sharded_context *context,
+                                native_io_sharded_host_lease lease,
+                                size_t *out_observed,
+                                size_t *out_sg_settled);
+
 /* Stop inside a callback is deferred to poll return. Destruction inside any
  * callback is rejected. Retry stop/destroy after a drain timeout; retain owner
  * and callback contexts until destroy succeeds. Stopped owners cannot restart. */

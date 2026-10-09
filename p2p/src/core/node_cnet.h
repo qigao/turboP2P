@@ -22,6 +22,32 @@ typedef struct p2p_node_cnet_s p2p_node_cnet_t;
 int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     p2p_node_cnet_t **output);
 int p2p_node_cnet_listen(p2p_node_cnet_t *owner);
+
+/* SG-native P2P final Owner borrows the shard backend; does not open a
+ * second NativeIO backend. Must be created/bound/polled/destroyed solely
+ * through tasks on that SG Owner shard while the Host lease is live.
+ * A remote credited accepted TCP socket still enters the existing cookie,
+ * Noise, credential and P2P data handlers of this node. */
+int p2p_node_cnet_create_external(p2p_node_t *node,
+                                  const p2p_cnet_config_t *config,
+                                  native_io_backend *borrowed_backend,
+                                  native_io_sharded_host_lease lease,
+                                  p2p_node_cnet_t **output);
+
+/* A handoff target has NO local listener: install actual P2P admission
+ * callbacks for cnet_handoff_take -> cnet_client_adopt_accepted only. */
+int p2p_node_cnet_bind_handoff_accept(p2p_node_cnet_t *owner);
+
+/* One P2P Owner per SG shard in this helper. Progresses P2P domain state,
+ * advances external CNet, performs precisely ONE SG host-observe and routes
+ * the complete batch. Never call p2p_poll() concurrently or externally
+ * observe the same backend. Explicit host leases remain caller-owned. */
+int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
+                               native_io_sharded_context *context,
+                               native_io_sharded_host_lease lease,
+                               size_t *out_observed,
+                               size_t *out_sg_settled);
+
 /* Borrow the exact CNet transport Owner for an explicit host-side SG
  * placement topology. The returned pointer must outlive the SG inbox and
  * every accepted peer; stop nodes, then destroy SG, then destroy nodes.
