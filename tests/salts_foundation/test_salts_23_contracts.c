@@ -71,11 +71,11 @@ static int check_client_destination(void) {
 
   /* Remove a different member: rendezvous chooses stable endpoint identity,
    * not an array index that moves when membership changes. */
-  for (size_t i = 0; i < 3u; ++i) {
-    if (peers[i].endpoint_id != chosen.endpoint_id || index == 0u)
-      retained[index++] = peers[i];
-    if (index == 2u) break;
-  }
+  /* Retain the winner and remove exactly one different endpoint while
+   * preserving the ascending stable-ID ordering required by CNet. */
+  const size_t remove = (chosen.index == 0u) ? 1u : 0u;
+  for (size_t i = 0; i < 3u; ++i)
+    if (i != remove) retained[index++] = peers[i];
   VERIFY(index == 2u);
   selection.endpoints = retained;
   selection.endpoint_count = 2u;
