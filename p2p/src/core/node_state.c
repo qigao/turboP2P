@@ -35,7 +35,7 @@ int p2p_node_state_create_checked(const char *ip, int port, p2p_node_t **output)
     strcpy(node->ip, ip);
     node->port = port;
     vivaldi_init(&node->coord);
-    salts_mutex_init(&node->mutex);
+    cmeta_mutex_init(&node->mutex);
     if (!node->mutex) { free(node); return P2P_ERR_NO_MEM; }
     node->kad_dht = kademlia_create(ip, (uint16_t)port);
     if (!node->kad_dht) goto fail;
@@ -60,28 +60,28 @@ fail:
 void p2p_node_add_file(p2p_node_t *node, p2p_file_t *file) {
     if (!node || !file) return;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     file->next_file = node->local_files;
     node->local_files = file;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 }
 
 void p2p_node_remove_file(p2p_node_t *node, const char *key) {
     if (!node || !key) return;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_file_t **curr = &node->local_files;
     while (*curr) {
         if (strcmp((*curr)->hash, key) == 0) {
             p2p_file_t *to_remove = *curr;
             *curr = (*curr)->next_file;
             p2p_file_free(to_remove);
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
             return;
         }
         curr = &(*curr)->next_file;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 }
 
 p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const uint8_t *id) {
@@ -91,9 +91,9 @@ p2p_file_t *p2p_node_find_local_file_by_id(p2p_node_t *node, const uint8_t *id) 
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     file = p2p_node_find_local_file_by_id_locked(node, id);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return file;
 }
 
@@ -121,10 +121,10 @@ p2p_file_t *p2p_node_detach_local_files(p2p_node_t *node) {
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     files = node->local_files;
     node->local_files = NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return files;
 }
@@ -136,10 +136,10 @@ p2p_download_t *p2p_node_detach_downloads(p2p_node_t *node) {
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     downloads = node->downloads;
     node->downloads = NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return downloads;
 }
@@ -197,9 +197,9 @@ p2p_topic_t *p2p_topic_find(p2p_node_t *node, const char *name) {
 
     if (!node || !name) return NULL;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     topic = node_find_topic_locked(node, name);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return topic;
 }
@@ -209,9 +209,9 @@ p2p_topic_t *p2p_topic_find_or_create(p2p_node_t *node, const char *name) {
 
     if (!node || !name) return NULL;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     topic = node_find_or_create_topic_locked(node, name);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return topic;
 }
@@ -223,9 +223,9 @@ int p2p_topic_exists(p2p_node_t *node, const char *name) {
         return 0;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     exists = node_find_topic_locked(node, name) != NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return exists;
 }
@@ -233,19 +233,19 @@ int p2p_topic_exists(p2p_node_t *node, const char *name) {
 int p2p_node_remove_topic(p2p_node_t *node, const char *name) {
     if (!node || !name) return P2P_ERR_INVALID_ARG;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_topic_t **curr = &node->topics;
     while (*curr) {
         if (strcmp((*curr)->name, name) == 0) {
             p2p_topic_t *to_remove = *curr;
             *curr = (*curr)->next_topic;
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
             p2p_topic_destroy(to_remove);
             return P2P_OK;
         }
         curr = &(*curr)->next_topic;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_ERR_NOT_FOUND;
 }
 
@@ -256,10 +256,10 @@ p2p_topic_t *p2p_node_detach_topics(p2p_node_t *node) {
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     topics = node->topics;
     node->topics = NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return topics;
 }
@@ -268,11 +268,11 @@ void p2p_cleanup_peers(p2p_node_t *node) {
     if (!node || !node->peers_table) return;
 
     /* Detach table from node first to prevent re-entry from callbacks */
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_peer_entry_t *table = node->peers_table;
     node->peers_table = NULL;
     node->peer_count = 0;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     p2p_peer_entry_t *curr, *tmp;
     HASH_ITER(hh, table, curr, tmp) {
@@ -415,7 +415,7 @@ int p2p_node_state_destroy(p2p_node_t *node) {
         p2p_crypto_wipe(node->pinned_trusted_keys, node->pinned_trusted_key_count * P2P_KEY_SIZE);
         free(node->pinned_trusted_keys);
     }
-    salts_mutex_destroy(&node->mutex);
+    cmeta_mutex_destroy(&node->mutex);
     p2p_crypto_wipe(node, sizeof(*node));
     free(node);
     return P2P_OK;

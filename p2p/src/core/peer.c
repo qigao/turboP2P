@@ -168,18 +168,18 @@ CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer) {
 
     p2p_node_t *node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     if (peer->destroying) {
-        if (node) salts_mutex_unlock(&node->mutex);
+        if (node) cmeta_mutex_unlock(&node->mutex);
         return;
     }
     peer->destroying = 1;
     should_finalize = (peer->callback_refs == 0);
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     p2p_peer_disconnect(peer);
@@ -233,13 +233,13 @@ int p2p_peer_hold(p2p_peer_t *peer) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     held = p2p_peer_hold_locked(peer);
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     return held;
@@ -255,7 +255,7 @@ void p2p_peer_release(p2p_peer_t *peer) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     if (peer->callback_refs > 0) {
@@ -266,7 +266,7 @@ void p2p_peer_release(p2p_peer_t *peer) {
     }
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     if (should_finalize) {
@@ -330,7 +330,7 @@ static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
     p2p_endpoint_to_key(key, sizeof(key), peer->ip, peer->port);
     now_ms = salts_hrtime() / 1000000;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     HASH_FIND_STR(node->connect_suppressions, key, suppression);
     if (suppression) {
         if (suppression->until_ms > now_ms) {
@@ -340,7 +340,7 @@ static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
             free(suppression);
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return blocked;
 }
@@ -1305,7 +1305,7 @@ void p2p_peer_transport_closed(p2p_peer_t *peer, int destroy_peer) {
 
 void p2p_peer_transport_connected(p2p_peer_t *peer) {
     p2p_node_t *node = peer->node;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     peer->is_connected = 0;
     peer->reconnect_after_ms = 0;
     peer->state = P2P_PEER_STATE_HANDSHAKING;
@@ -1317,6 +1317,6 @@ void p2p_peer_transport_connected(p2p_peer_t *peer) {
     peer->last_ping_sent_ms = 0;
     peer->outstanding_ping_ms = 0;
     peer->rtt_sample_count = 0;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_node_on_peer_connected(node, peer);
 }
