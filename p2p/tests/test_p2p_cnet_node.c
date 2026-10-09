@@ -219,14 +219,14 @@ static void test_gate_and_peer_quota(void) {
         peer->state = P2P_PEER_STATE_HANDSHAKING;
         p2p_node_add_peer_locked(pair.server.node, peer);
     }
-    salts_mutex_lock(&pair.server.node->mutex);
+    cmeta_mutex_lock(&pair.server.node->mutex);
     check_equal(P2P_OK, pair.server.node->network_ops->pending_gates(pair.server.node,
         "127.0.0.1", &total, &source, pair.server.node->network_context));
     check_equal((size_t)1, total);
     check_equal((size_t)1, source);
     check_true(!p2p_node_pending_peer_source_capacity_available_locked(pair.server.node, "127.0.0.1"));
     check_true(p2p_node_pending_peer_source_capacity_available_locked(pair.server.node, "127.0.0.2"));
-    salts_mutex_unlock(&pair.server.node->mutex);
+    cmeta_mutex_unlock(&pair.server.node->mutex);
     check_equal(P2P_ERR_RESOURCE_EXHAUSTED, p2p_connect(pair.server.node, "127.0.0.1", pair.client.node->port));
     teardown(&pair);
 }
@@ -336,7 +336,7 @@ static void test_callback_stop_error(void) {
         check_equal(P2P_OK, p2p_poll(pair.client.node));
         result = p2p_poll(pair.server.node);
         if (result != P2P_OK) break;
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     check_true(pair.server.stopped);
     check_equal(P2P_ERR_TIMEOUT, result);

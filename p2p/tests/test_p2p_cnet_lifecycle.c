@@ -84,7 +84,7 @@ static void start_pair(pair_t *pair, size_t receive_bytes) {
 static void pump(pair_t *pair) {
     if (!pair->client.stopped) check_equal(P2P_OK, p2p_poll(pair->client.node));
     if (!pair->server.stopped) check_equal(P2P_OK, p2p_poll(pair->server.node));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
     uint64_t deadline = salts_monotonic_ms() + WAIT_MS;

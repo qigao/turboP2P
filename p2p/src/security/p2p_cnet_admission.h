@@ -27,7 +27,7 @@ typedef struct {
     uint8_t cookie_master_secret[P2P_COOKIE_SECRET_SIZE];
     /* Optional borrowed mutex for an enclosing node-atomic status snapshot.
      * NULL selects an admission-owned mutex. Must outlive admission destroy. */
-    salts_mutex_t *status_mutex;
+    cmeta_mutex_t *status_mutex;
 } p2p_cnet_admission_config_t;
 
 typedef enum { P2P_CNET_ADMISSION_PREFACE, P2P_CNET_ADMISSION_COOKIE }

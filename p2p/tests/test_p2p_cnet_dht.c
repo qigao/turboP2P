@@ -69,7 +69,7 @@ static void remote_loop(void *context) {
     atomic_store(&loop->ready, loop->result == P2P_OK ? 1 : -1);
     while (loop->result == P2P_OK && !atomic_load(&loop->stop)) {
         loop->result = p2p_poll(endpoint->node);
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     int result = p2p_node_cnet_destroy(endpoint->owner);
     if (loop->result == P2P_OK) loop->result = result;
@@ -91,9 +91,9 @@ static void test_remote_get(int short_buffer, int missing) {
     loop.endpoint = &pair.server;
     atomic_init(&loop.ready, 0);
     atomic_init(&loop.stop, 0);
-    check_equal(0, salts_thread_create(&thread, remote_loop, &loop));
+    check_equal(0, cmeta_thread_create(&thread, remote_loop, &loop));
     uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&loop.ready) && salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+    while (!atomic_load(&loop.ready) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     int ready = atomic_load(&loop.ready);
     int result = P2P_ERR_INVALID_STATE;
     if (ready == 1) {
@@ -105,8 +105,8 @@ static void test_remote_get(int short_buffer, int missing) {
         else result = P2P_ERR_TIMEOUT;
     }
     atomic_store(&loop.stop, 1);
-    check_equal(0, salts_thread_join(&thread));
-    salts_thread_destroy(&thread);
+    check_equal(0, cmeta_thread_join(&thread));
+    cmeta_thread_destroy(&thread);
     check_equal(1, ready);
     check_equal(P2P_OK, loop.result);
     check_equal(missing ? P2P_ERR_NOT_FOUND : short_buffer ? P2P_ERR_RESOURCE_EXHAUSTED : P2P_OK, result);

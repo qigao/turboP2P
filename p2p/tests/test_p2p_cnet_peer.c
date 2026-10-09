@@ -122,7 +122,7 @@ static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
            salts_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
         if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     crypto_x25519(output, endpoint->secret, remote);
     return crypto_verify32(output, zero) ? P2P_OK : P2P_ERR_CRYPTO;
@@ -131,7 +131,7 @@ static void init_node(endpoint_t *endpoint, int number, int blocking) {
     p2p_node_t *node = endpoint->node = calloc(1, sizeof(*node));
     p2p_blocking_private_key_provider_v4_t provider = {0};
     check_not_null(node);
-    salts_mutex_init(&node->mutex);
+    cmeta_mutex_init(&node->mutex);
     node->user_data = endpoint;
     endpoint->blocking = blocking;
     atomic_init(&endpoint->calls, 0);
@@ -238,7 +238,7 @@ static void pump(pair_t *pair) {
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->client.owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->server.owner));
     check_equal(P2P_OK, p2p_cnet_admission_expire(pair->server.admission, salts_monotonic_ms()));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
     uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
@@ -260,7 +260,7 @@ static void teardown(pair_t *pair) {
         check_equal(P2P_OK, p2p_cnet_owner_destroy(endpoint->owner));
         check_equal((size_t)0, endpoint->node->transport_send_reservations);
         check_equal((size_t)0, endpoint->node->reserved_send_capacity_bytes);
-        salts_mutex_destroy(&endpoint->node->mutex);
+        cmeta_mutex_destroy(&endpoint->node->mutex);
         p2p_crypto_wipe(&endpoint->node->crypto, sizeof(endpoint->node->crypto));
         free(endpoint->node);
     }

@@ -112,7 +112,7 @@ typedef struct p2p_transfer_s {
     uint8_t parallel_enabled;                 /* Enable parallel requests */
     uint8_t destroying;
     uint32_t ref_count;
-    salts_mutex_t mutex;
+    cmeta_mutex_t mutex;
 
     struct p2p_transfer_s *next;
 } p2p_transfer_t;
@@ -123,7 +123,7 @@ struct p2p_transfer_manager_s {
     uint32_t next_id;
     size_t outstanding_refs;
     int closing;
-    salts_mutex_t mutex;
+    cmeta_mutex_t mutex;
 };
 
 void p2p_transfer_manager_init(p2p_transfer_manager_t *mgr);

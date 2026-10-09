@@ -197,7 +197,7 @@ static void pump(fixture_t *fixture) {
     check_equal(P2P_OK, p2p_cnet_admission_expire(fixture->admission, salts_monotonic_ms()));
     check_equal(P2P_OK, p2p_cnet_owner_poll(fixture->client_owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(fixture->server));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 
 static p2p_cnet_admission_stats_t stats(fixture_t *fixture) {
