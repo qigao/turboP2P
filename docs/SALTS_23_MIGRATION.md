@@ -88,3 +88,44 @@ These are part of the Linux Release and focused ASan/UBSan gates in draft
 PR #35. Retained next steps: SG Server Owner placement/credited handoff,
 owner-local CNet Manager/ClientPool/ManagedDial with complete protocol READY
 and terminal lease accounting, and DataBind 4.3-compiled ACE configuration.
+
+
+## Phase C2 — DataBind 4.3 host ACE Configurator (#36)
+
+`mesh_mgmt_client_policy_from_json_v1()` is a synchronous **host-side
+startup-only** adapter to the canonical `Salts::DataBind` runtime. A trusted
+`MeshClientPolicy` IDL schema is parsed into one codec, and a
+`DataBindValidationPlan` is compiled during configuration admission before
+the runtime's CNet policy is published. Strict JSON binding rejects unknown
+keys and scalar token coercion. Version, kind, identity encoding and
+key/identity exclusivity fail closed, leaving the output zeroed on failure.
+
+The host copies the DataBind record into an owned
+`mesh_mgmt_client_destination_policy_v2_t`. The codec, immutable plan and
+record are freed **before returning**. No borrowed reflection, parser, schema
+executor, application data, or secret is kept by a CNet Owner or a P2P
+receive/send callback. The full transport public key, not its 64-bit strategy
+projection, remains the Noise/MMP authentication authority.
+
+**Current SaltsUtils 4.3 admission detail:** `data_bind_create_from_text()`
+validates the schema's positional Binary field ordering even when the only
+requested format is JSON. Thus the trusted `MeshClientPolicy` declaration
+places fixed `schema_version`/`key_hash` before the two variable strings,
+while JSON object key order remains unrestricted. We do not request or infer
+Binary runtime layouts, and this loader restriction must not be hidden by a
+second schema parser or format fallback. Track true text-only schema admission
+upstream rather than allowing invalid ordering in this consumer.
+
+An EXPLICIT identity from configuration can only select a matching trusted
+static bootstrap or independently **verified** signed endpoint record.
+Configuration text does not by itself grant remote trust. The adapter accepts
+bounded strict JSON for Client EXPLICIT, ROUND_ROBIN and STRICT_KEY only.
+It does not implement a generic runtime Service Configurator, hot reload,
+data-plane Binary layout admission, SG topology, or Server placement.
+Those and generated CMeta service descriptors follow #36/#37/#38 separately.
+
+Tests reject malformed/unknown fields/versions/coercion/identity input,
+project the typed policy into the **real** endpoint pool, and exercise a real
+two-listener CNet+Noise+MMP end-to-end session driven by DataBind-parsed
+EXPLICIT configuration. Linux Release and ASan/UBSan are required in draft
+PR #39.

@@ -275,6 +275,22 @@ add_library(mgmt_agent_runtime STATIC
   "${mesh_src}/mesh_mgmt_p2p_security.c"
   "${mesh_src}/mesh_mgmt_execution_disabled_responder.c")
 target_link_libraries(mgmt_agent_runtime PUBLIC foundation p2p_node_core Salts::CNet)
+
+# Strict DataBind Configurator compiles to a fully owned CNet policy before
+# any network Owner callback; no JSON runtime in the P2P data path.
+add_library(mesh_mgmt_client_config STATIC
+  "${mesh_src}/mesh_mgmt_client_config.c")
+target_include_directories(mesh_mgmt_client_config PUBLIC "${mesh_src}")
+target_link_libraries(mesh_mgmt_client_config PUBLIC mgmt_agent_runtime
+  PRIVATE Salts::DataBind)
+add_executable(test_mesh_mgmt_client_config
+  "${mesh_tests}/test_mesh_mgmt_client_config.c")
+set_property(TARGET test_mesh_mgmt_client_config PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_client_config PRIVATE
+  mesh_mgmt_client_config Salts::TinyTest)
+add_test(NAME test_mesh_mgmt_client_config COMMAND test_mesh_mgmt_client_config)
+set_tests_properties(test_mesh_mgmt_client_config PROPERTIES TIMEOUT 60)
+
 add_executable(test_mesh_mgmt_destination_policy
   "${mesh_tests}/test_mesh_mgmt_destination_policy.c")
 set_property(TARGET test_mesh_mgmt_destination_policy PROPERTY LINKER_LANGUAGE CXX)
@@ -289,7 +305,7 @@ target_include_directories(mgmt_mesh_bridge_compile PRIVATE "${TURBOP2P_SOURCE_D
 target_link_libraries(mgmt_mesh_bridge_compile PRIVATE mgmt_agent_runtime)
 add_executable(test_mesh_mgmt_cnet_runtime "${mesh_tests}/test_mesh_mgmt_cnet_runtime.c")
 set_property(TARGET test_mesh_mgmt_cnet_runtime PROPERTY LINKER_LANGUAGE CXX)
-target_link_libraries(test_mesh_mgmt_cnet_runtime PRIVATE mgmt_agent_runtime Salts::TinyTest)
+target_link_libraries(test_mesh_mgmt_cnet_runtime PRIVATE mgmt_agent_runtime mesh_mgmt_client_config Salts::TinyTest)
 add_test(NAME test_mesh_mgmt_cnet_runtime COMMAND test_mesh_mgmt_cnet_runtime)
 set_tests_properties(test_mesh_mgmt_cnet_runtime PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
