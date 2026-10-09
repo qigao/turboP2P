@@ -1117,19 +1117,6 @@ if(WIN32)
 endif()
 set_property(TARGET mesh_mgmt_service_record PROPERTY FOLDER "mesh/internal")
 
-# DataBind 4.3 ACE service configuration is a startup-only adapter and borrows
-# no schema/record into P2P or MMP owner callbacks. Canonical service encoding
-# enforces DNS and address rules before a signed service is published.
-add_library(mesh_mgmt_service_config STATIC
-  src/mesh_mgmt_service_config.c
-  src/mesh_mgmt_service_config.h)
-target_include_directories(mesh_mgmt_service_config PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_link_libraries(mesh_mgmt_service_config PUBLIC
-  mesh_mgmt_service_record PRIVATE Salts::DataBind)
-set_property(TARGET mesh_mgmt_service_config PROPERTY FOLDER "mesh/internal")
-
-
 # Validated local endpoint signer and connected-peer DHT push boundary. It
 # borrows the P2P node and owns a wiped copy of the management signing seed.
 add_library(mesh_mgmt_endpoint_publisher STATIC
@@ -1151,6 +1138,19 @@ target_include_directories(mesh_mgmt_service_publisher PUBLIC
 target_link_libraries(mesh_mgmt_service_publisher PUBLIC
   mesh_mgmt_service_record mesh_mgmt_peer_signer TurboP2P::P2P Salts::Platform)
 set_property(TARGET mesh_mgmt_service_publisher PROPERTY FOLDER "mesh/internal")
+
+# DataBind 4.3 ACE service configuration is a startup-only adapter and borrows
+# no schema/record into P2P or MMP owner callbacks. Canonical service encoding
+# enforces DNS and address rules before a signed service is published.
+add_library(mesh_mgmt_service_config STATIC
+  src/mesh_mgmt_service_config.c
+  src/mesh_mgmt_service_config.h)
+target_include_directories(mesh_mgmt_service_config PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_service_config PUBLIC
+  mesh_mgmt_service_publisher PRIVATE Salts::DataBind)
+set_property(TARGET mesh_mgmt_service_config PROPERTY FOLDER "mesh/internal")
+
 
 # Dedicated mesh-agent composition root. It owns a private P2P listener, the
 # MMP callback router and bounded endpoint reconnect state on one event loop.

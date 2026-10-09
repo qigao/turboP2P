@@ -304,6 +304,13 @@ set_property(TARGET test_mesh_mgmt_service_config PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_mesh_mgmt_service_config PRIVATE
   mesh_mgmt_service_config Salts::TinyTest)
 add_test(NAME test_mesh_mgmt_service_config COMMAND test_mesh_mgmt_service_config)
+add_executable(test_mesh_mgmt_service_config_cpp
+  "${mesh_tests}/test_mesh_mgmt_service_config_cpp.cpp")
+set_property(TARGET test_mesh_mgmt_service_config_cpp PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_service_config_cpp PRIVATE mesh_mgmt_service_config)
+add_test(NAME test_mesh_mgmt_service_config_cpp COMMAND test_mesh_mgmt_service_config_cpp)
+set_tests_properties(test_mesh_mgmt_service_config_cpp PROPERTIES TIMEOUT 60)
+
 set_tests_properties(test_mesh_mgmt_service_config PROPERTIES TIMEOUT 60)
 
 add_executable(test_mesh_mgmt_destination_policy
