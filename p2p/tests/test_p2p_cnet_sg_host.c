@@ -82,6 +82,10 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
     if (lane->shard == 0u) {
         SG_GO(lane, p2p_cnet_owner_create_external(
             &cfg, lane->backend, lane->lease, &lane->acceptor));
+        if (p2p_cnet_owner_poll(lane->acceptor) != P2P_ERR_INVALID_STATE) {
+            mark_failed(lane, P2P_ERR_INVALID_STATE);
+            return;
+        }
         SG_GO(lane, p2p_cnet_owner_listen(lane->acceptor, "127.0.0.1",
             0u, 8u, accept_must_handoff, lane, &lane->listener));
     } else {
@@ -94,6 +98,10 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
             server->node, &cfg, lane->backend, lane->lease,
             &server->owner));
         SG_GO(lane, p2p_node_cnet_bind_handoff_accept(server->owner));
+        if (p2p_poll(server->node) != P2P_ERR_INVALID_STATE) {
+            mark_failed(lane, P2P_ERR_INVALID_STATE);
+            return;
+        }
         lane->transport = p2p_node_cnet_transport_owner(server->owner);
         if (!lane->transport) mark_failed(lane, P2P_ERR_INVALID_STATE);
     }

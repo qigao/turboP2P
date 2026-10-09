@@ -13,6 +13,7 @@ struct p2p_node_cnet_s {
     p2p_cnet_admission_t *admission;
     size_t peer_limit;
     uint64_t maintenance_ms;
+    int externally_hosted;
     int busy;
     int stopping;
     int detached;
@@ -198,6 +199,7 @@ static int node_cnet_create_impl(p2p_node_t *node, const p2p_cnet_config_t *conf
     if (!owner) return P2P_ERR_NO_MEM;
     owner->node = node;
     owner->peer_limit = config->client.connection_capacity;
+    owner->externally_hosted = external_backend != NULL;
     result = external_backend
         ? p2p_cnet_owner_create_external(config, external_backend,
                                          host_lease, &owner->transport)
@@ -308,7 +310,9 @@ static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
     if (out_observed) *out_observed = 0u;
     if (out_sg_settled) *out_sg_settled = 0u;
     if (!owner) return P2P_ERR_INVALID_ARG;
-    if (owner->busy || owner->stopping) return P2P_ERR_INVALID_STATE;
+    if (owner->busy || owner->stopping ||
+        (context != NULL) != (owner->externally_hosted != 0))
+        return P2P_ERR_INVALID_STATE;
     owner->busy = 1;
     now = cmeta_monotonic_ms();
     result = p2p_cnet_admission_expire(owner->admission, now);

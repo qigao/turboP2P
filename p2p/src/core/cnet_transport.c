@@ -443,7 +443,7 @@ int p2p_cnet_owner_listen(p2p_cnet_owner_t *owner, const char *host,
     cnet_listener_config config = {0};
     int status;
     if (!owner || !host || !accept || !local || !backlog) return P2P_ERR_INVALID_ARG;
-    if (owner->stopping || owner->listener.impl) return P2P_ERR_INVALID_STATE;
+    if (owner->stopping || owner->listener.impl || owner->accept) return P2P_ERR_INVALID_STATE;
     config.backend = owner->config.client.backend;
     config.host = host;
     config.port = port;
@@ -826,7 +826,11 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     size_t events = 0;
     int result, progress;
     if (!owner) return P2P_ERR_INVALID_ARG;
-    if (owner->busy || owner->stopped) return P2P_ERR_INVALID_STATE;
+    /* Explicit progress mode is a construction-time ownership contract;
+     * accidentally calling the owned-backend poll on an SG Hosted Owner
+     * must NOT mark it stopping or try to create a second observer. */
+    if (owner->external_backend || owner->busy || owner->stopped)
+        return P2P_ERR_INVALID_STATE;
     if (owner->stopping) return p2p_cnet_owner_stop(owner);
     owner->busy = 1;
     result = sg_take_owner(owner, 0);
