@@ -243,6 +243,16 @@ set_property(TARGET test_p2p_cnet_dht PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_dht PRIVATE p2p_node_core Salts::TinyTest)
 add_test(NAME test_p2p_cnet_dht COMMAND test_p2p_cnet_dht)
 set_tests_properties(test_p2p_cnet_dht PROPERTIES TIMEOUT 60)
+# Cross-Owner accepted TCP handoff through real CNet queues; the final
+# Owner runs actual node cookie + Noise authentication, not just policy ABI.
+add_executable(test_p2p_cnet_sg_handoff
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_sg_handoff.c")
+set_property(TARGET test_p2p_cnet_sg_handoff PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_sg_handoff PRIVATE
+  p2p_node_core Salts::CNet Salts::TinyTest)
+add_test(NAME test_p2p_cnet_sg_handoff COMMAND test_p2p_cnet_sg_handoff)
+set_tests_properties(test_p2p_cnet_sg_handoff PROPERTIES TIMEOUT 60)
+
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
 set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_lifecycle PRIVATE p2p_node_core Salts::TinyTest)

@@ -4,6 +4,8 @@
 #include "connection.h"
 #include "../../include/p2p.h"
 #include <cnet/cnet.h>
+#include <cnet/handoff.h>
+#include <cnet/owner_placement.h>
 
 typedef struct p2p_cnet_owner_s p2p_cnet_owner_t;
 
@@ -56,6 +58,58 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner);
 int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner);
 int p2p_cnet_owner_destroy(p2p_cnet_owner_t *owner);
 size_t p2p_cnet_owner_connection_count(const p2p_cnet_owner_t *owner);
+
+/*
+ * Server SG cross-Owner admission (transport-level phase; NativeIO SG host
+ * observation integration remains a separate host contract).
+ * Explicit Owner indices are stable. Every target must be a distinct live
+ * owner with its own CNet client, real P2P accept/cookie admission callback
+ * bound by p2p_cnet_owner_listen(), and single-threaded Owner polling.
+ *
+ * Only EXPLICIT, ROUND_ROBIN and LOWEST_PRESSURE are supported before Noise.
+ * STRICT_KEY is deliberately rejected here: an unauthenticated inbound TCP
+ * peer does not yet have a trusted application key. No silent placement
+ * fallback, Actor, extra backend, or cross-Owner protocol callback.
+ *
+ * Create after listener callback binding and before polling. The SG borrows
+ * all owners until sg_destroy succeeds. Each final Owner inbox holds a real
+ * CNet handoff credit from producer reserve until final CNet terminal AND
+ * application callback retirement (or complete client stop). An SG cannot be
+ * destroyed while its producer/final owners still run or credits remain.
+ * Seal before stopping the acceptor. Stop ALL owners, destroy SG, then destroy
+ * the owners; a timeout retains every borrowed object for retry.
+ */
+#define P2P_CNET_SG_VERSION 1u
+#define P2P_CNET_SG_MAX_OWNERS 4u
+typedef struct p2p_cnet_sg_s p2p_cnet_sg_t;
+
+typedef struct {
+    size_t size;
+    uint32_t version;
+    p2p_cnet_owner_t *acceptor;
+    p2p_cnet_owner_t *final_owners[P2P_CNET_SG_MAX_OWNERS];
+    size_t final_owner_count;
+    cnet_owner_placement_kind placement;
+    size_t explicit_owner;
+    size_t queue_capacity;
+    size_t connection_capacity;
+} p2p_cnet_sg_config_v1_t;
+
+typedef struct {
+    size_t size;
+    uint32_t version;
+    uint64_t routed;
+    uint64_t denied;
+    cnet_handoff_snapshot handoff;
+    uint8_t sealed;
+} p2p_cnet_sg_snapshot_v1_t;
+
+int p2p_cnet_sg_create_v1(const p2p_cnet_sg_config_v1_t *config,
+                           p2p_cnet_sg_t **output);
+int p2p_cnet_sg_seal_v1(p2p_cnet_sg_t *sg);
+int p2p_cnet_sg_snapshot_v1(p2p_cnet_sg_t *sg, size_t final_owner_index,
+                             p2p_cnet_sg_snapshot_v1_t *output);
+int p2p_cnet_sg_destroy_v1(p2p_cnet_sg_t *sg);
 
 /* Copies callback descriptors; the context remains borrowed. May be called
  * during receive for cookie-to-peer handoff. Existing admitted sends keep FIFO

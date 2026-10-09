@@ -160,3 +160,53 @@ This completes a **Client+RPC-service Configurator slice** only: additional
 ACE Server SG topology, Manager/Pool/ManagedDial, generated IDL/CMeta service
 descriptors, cross-platform installed consumer and complete root migration
 remain the distinct #36/#37/#38 acceptance gates.
+
+
+## Phase S1 — credited P2P cross-Owner Server handoff (#37)
+
+`p2p_cnet_sg_create_v1` binds one live CNet acceptor to up to four
+**distinct final CNet Owners**, each with its own real P2P listener, cookie
+gate, Noise handshake, identity callbacks, peer tables and backend. The
+acceptor's existing `p2p_cnet_owner_poll` performs the **only** TCP accept.
+For each detached stream it gathers a coherent final-Owner
+`cnet_handoff_get_snapshot` credit/queue view and calls the real Salts 2.3
+`cnet_owner_placement_choose` exactly once. Cross-Owner selection moves the
+socket through `reserve → publish` into an owner-local inbox.
+The final Owner's existing poll exclusively executes
+`take → cnet_client_adopt_accepted → cookie → Noise → P2P protocol`.
+No producer thread invokes final Owner application callbacks, and an
+admitted socket is **never migrated again**.
+
+Supported preauthentication placement: EXPLICIT, ROUND_ROBIN and
+LOWEST_PRESSURE (using admission credit pressure, not synthetic CPU metrics).
+STRICT_KEY is rejected: TCP source address is **not** authenticated peer
+identity and cannot be used as a trusted strict key. Capacity/queue shortage
+or a sealed inbox closes only the current detached socket and counts a denied
+admission; no alternate Owner is implicitly selected. Error conditions such
+as malformed topology and stale admission fail fast. A same-Owner choice may
+adopt directly while preserving the current CNet path.
+
+One `cnet_handoff_ticket` follows each accepted socket across Owners.
+TAKEN credits are held through CNet terminal **and** application callback
+retirement; completed CNet stop also qualifies for retirement only after
+callback quiescence. No callback, queue, CNet record or detached TCP descriptor
+is freed speculatively after a timeout. The safe shutdown ordering is:
+seal SG → stop/join acceptor producers → stop final Owner P2P nodes and drain
+queued/taken tickets → SG destroy → node/transport destroy. Out-of-order
+destroy is refused while owners or credits are still live.
+
+**Production evidence required**: installed Salts 2.3 foundation regression
+drives real TCP accepted sockets into two final P2P Owner contexts, performs
+each server's own cookie/Noise identity check, then sends authenticated
+application messages. Separate tests verify forged/unavailable preauth strict
+key is refused, malformed topology, hard connection-credit full, sealed
+inbox and cancellation/drain semantics. Existing ordinary one-Owner P2P
+polling remains unchanged when SG is not configured.
+
+**Not yet SG-native host**: This phase is the production cross-Owner
+handoff, but the acceptor/final Owners are still advanced by their own
+explicit polling loops; it does not install
+`native_io_sharded_host_lease`, route one already-observed batch through
+`cnet_sg_host_route_batch`, or benchmark 1/2/4 SG host worker threads.
+That work remains open under #37. No claim of full CPU-scaled multicore
+P2P or complete root TurboP2P release is made from this phase alone.
