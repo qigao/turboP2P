@@ -9,7 +9,7 @@ static void executor_complete(p2p_key_work_t *work,
     p2p_peer_t *peer = operation->peer;
     p2p_node_t *node = operation->node;
     int was_current = 0;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (peer->private_key_operation == operation && operation->work == work) {
         peer->private_key_operation = NULL;
         was_current = 1;
@@ -17,7 +17,7 @@ static void executor_complete(p2p_key_work_t *work,
     operation->result = result->status;
     operation->output = result->output;
     operation->output_len = result->output_len;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_peer_complete_private_key_operation(operation, was_current);
     p2p_peer_release(peer);
     p2p_crypto_wipe(operation, sizeof(*operation));
@@ -58,11 +58,11 @@ int p2p_private_key_executor_submit(p2p_peer_t *peer,
     if (p2p_private_key_executor_is_closing(executor)) return P2P_ERR_INVALID_STATE;
     operation = calloc(1, sizeof(*operation));
     if (!operation) return P2P_ERR_NO_MEM;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (p2p_private_key_executor_is_closing(executor) ||
         peer->private_key_operation || !p2p_peer_hold_locked(peer)) {
         executor->rejected++;
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         free(operation);
         return P2P_ERR_RESOURCE_EXHAUSTED;
     }
@@ -80,7 +80,7 @@ int p2p_private_key_executor_submit(p2p_peer_t *peer,
         operation->deadline_ms = p2p_key_work_deadline(operation->work);
         peer->private_key_operation = operation;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (result != P2P_OK) {
         p2p_peer_release(peer);
         p2p_crypto_wipe(operation, sizeof(*operation));
@@ -93,12 +93,12 @@ void p2p_private_key_executor_cancel_peer(p2p_peer_t *peer) {
     void (*request_cancel)(void *) = NULL;
     void *context = NULL;
     if (!peer || !peer->node) return;
-    salts_mutex_lock(&peer->node->mutex);
+    cmeta_mutex_lock(&peer->node->mutex);
     if (peer->private_key_operation && p2p_key_work_cancel(peer->private_key_operation->work)) {
         request_cancel = peer->private_key_operation->executor->provider.request_cancel;
         context = peer->private_key_operation->executor->provider.context;
     }
-    salts_mutex_unlock(&peer->node->mutex);
+    cmeta_mutex_unlock(&peer->node->mutex);
     if (request_cancel) request_cancel(context);
 }
 

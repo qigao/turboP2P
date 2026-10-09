@@ -175,7 +175,7 @@ set_tests_properties(test_p2p_key_worker PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_key_worker PRIVATE P2P_KEY_WORKER_TEST_WRAP)
   target_link_options(test_p2p_key_worker PRIVATE
-    "-Wl,--wrap=salts_threadpool_try_submit_task")
+    "-Wl,--wrap=cmeta_threadpool_try_submit_task")
 endif()
 
 # Compile the actual peer, codec and node-bound executor with CNet. Test doubles

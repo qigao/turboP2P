@@ -21,8 +21,8 @@ struct p2p_key_work_s {
 };
 
 struct p2p_key_worker_s {
-    salts_threadpool_t *pool;
-    salts_mutex_t mutex;
+    cmeta_threadpool_t *pool;
+    cmeta_mutex_t mutex;
     p2p_blocking_private_key_provider_v4_t provider;
     p2p_key_notify_fn notify;
     void *notify_context;
@@ -83,9 +83,9 @@ static void finalize_work(void *context) {
      * wake nor an owner completion owns the pool callback's final reference. */
     atomic_store_explicit(&work->completed, 1, memory_order_release);
     if (worker->notify && worker->notify(worker->notify_context) != P2P_OK) {
-        salts_mutex_lock(&worker->mutex);
+        cmeta_mutex_lock(&worker->mutex);
         worker->status.completion_post_failures++;
-        salts_mutex_unlock(&worker->mutex);
+        cmeta_mutex_unlock(&worker->mutex);
     }
     release_work(work);
 }
@@ -93,7 +93,7 @@ static void finalize_work(void *context) {
 int p2p_key_worker_create(const p2p_blocking_private_key_provider_v4_t *provider,
     p2p_key_notify_fn notify, void *notify_context, p2p_key_worker_t **output) {
     p2p_key_worker_t *worker;
-    salts_threadpool_config_t config;
+    cmeta_threadpool_config_t config;
     uint16_t workers, capacity;
     uint32_t timeout;
     if (!output) return P2P_ERR_INVALID_ARG;
@@ -108,12 +108,12 @@ int p2p_key_worker_create(const p2p_blocking_private_key_provider_v4_t *provider
         return P2P_ERR_INVALID_ARG;
     worker = calloc(1, sizeof(*worker));
     if (!worker) return P2P_ERR_NO_MEM;
-    salts_mutex_init(&worker->mutex);
+    cmeta_mutex_init(&worker->mutex);
     if (!worker->mutex) { free(worker); return P2P_ERR_NO_MEM; }
     config.num_threads = workers;
     config.queue_capacity = capacity;
-    worker->pool = salts_threadpool_create_with_config(&config);
-    if (!worker->pool) { salts_mutex_destroy(&worker->mutex); free(worker); return P2P_ERR_NO_MEM; }
+    worker->pool = cmeta_threadpool_create_with_config(&config);
+    if (!worker->pool) { cmeta_mutex_destroy(&worker->mutex); free(worker); return P2P_ERR_NO_MEM; }
     worker->provider = *provider;
     worker->notify = notify;
     worker->notify_context = notify_context;
@@ -138,7 +138,7 @@ int p2p_key_worker_submit(p2p_key_worker_t *worker,
     const uint8_t *payload, size_t payload_len,
     p2p_key_complete_fn complete, void *context, p2p_key_work_t **output) {
     p2p_key_work_t *work;
-    salts_threadpool_task_t task;
+    cmeta_threadpool_task_t task;
     uint64_t now_ms;
     int result;
     if (!output) return P2P_ERR_INVALID_ARG;
@@ -162,14 +162,14 @@ int p2p_key_worker_submit(p2p_key_worker_t *worker,
     atomic_init(&work->cancelled, 0);
     atomic_init(&work->completed, 0);
     atomic_init(&work->references, 2); /* admitted list + pool terminal */
-    task = (salts_threadpool_task_t){run_work, cancel_queued, finalize_work, work};
-    salts_mutex_lock(&worker->mutex);
+    task = (cmeta_threadpool_task_t){run_work, cancel_queued, finalize_work, work};
+    cmeta_mutex_lock(&worker->mutex);
     result = worker->status.active_operations >= worker->status.operation_capacity ?
         P2P_ERR_RESOURCE_EXHAUSTED : P2P_OK;
     for (p2p_key_work_t *item = worker->operations; item && result == P2P_OK; item = item->next)
         if (item->handshake == handshake) result = P2P_ERR_INVALID_STATE;
     if (result == P2P_OK) {
-        int status = salts_threadpool_try_submit_task(worker->pool, &task);
+        int status = cmeta_threadpool_try_submit_task(worker->pool, &task);
         if (status != SALTS_OK) result = status == SALTS_ENOBUFS ?
             P2P_ERR_RESOURCE_EXHAUSTED : P2P_ERR_INVALID_STATE;
     }
@@ -180,7 +180,7 @@ int p2p_key_worker_submit(p2p_key_worker_t *worker,
         worker->status.submitted++;
         *output = work;
     } else worker->status.rejected++;
-    salts_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     if (result != P2P_OK) {
         /* Rejected descriptors invoke no run/cancel/finalize callback. */
         release_work(work);
@@ -209,11 +209,11 @@ int p2p_key_worker_poll(p2p_key_worker_t *worker) {
         p2p_key_work_t *work = NULL;
         p2p_key_work_t **link;
         p2p_key_result_t result;
-        salts_mutex_lock(&worker->mutex);
+        cmeta_mutex_lock(&worker->mutex);
         for (link = &worker->operations; *link; link = &(*link)->next) {
             if (p2p_key_work_ready(*link)) { work = *link; *link = work->next; break; }
         }
-        if (!work) { salts_mutex_unlock(&worker->mutex); break; }
+        if (!work) { cmeta_mutex_unlock(&worker->mutex); break; }
         if (cancelled(work)) work->result = P2P_ERR_INVALID_STATE;
         else if (work->result == P2P_OK && salts_monotonic_ms() >= work->deadline_ms)
             work->result = P2P_ERR_TIMEOUT;
@@ -222,7 +222,7 @@ int p2p_key_worker_poll(p2p_key_worker_t *worker) {
         worker->status.completed++;
         if (work->result == P2P_ERR_TIMEOUT) worker->status.timed_out++;
         if (cancelled(work)) worker->status.cancelled++;
-        salts_mutex_unlock(&worker->mutex);
+        cmeta_mutex_unlock(&worker->mutex);
         result = (p2p_key_result_t){work->handshake, work->generation, work->deadline_ms,
                                   work->result, work->output, work->output_len};
         work->complete(work, &result, work->context);
@@ -233,27 +233,27 @@ int p2p_key_worker_poll(p2p_key_worker_t *worker) {
 }
 
 int p2p_key_worker_stop(p2p_key_worker_t *worker) {
-    salts_threadpool_t *pool;
+    cmeta_threadpool_t *pool;
     int result;
     if (!worker) return P2P_ERR_INVALID_ARG;
     if (worker->polling) return P2P_ERR_INVALID_STATE;
-    salts_mutex_lock(&worker->mutex);
+    cmeta_mutex_lock(&worker->mutex);
     pool = worker->pool;
     atomic_store_explicit(&worker->closing, 1, memory_order_release);
     for (p2p_key_work_t *work = worker->operations; work; work = work->next)
         atomic_store_explicit(&work->cancelled, 1, memory_order_release);
     result = worker->status.active_operations != 0;
-    salts_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     if (!pool) return P2P_OK;
     if (result && worker->provider.request_cancel) worker->provider.request_cancel(worker->provider.context);
-    if (salts_threadpool_shutdown_with_policy(pool, SALTS_THREADPOOL_SHUTDOWN_CANCEL_PENDING) != SALTS_OK ||
-        salts_threadpool_wait_status(pool) != SALTS_OK) return P2P_ERR_INVALID_STATE;
+    if (cmeta_threadpool_shutdown_with_policy(pool, SALTS_THREADPOOL_SHUTDOWN_CANCEL_PENDING) != SALTS_OK ||
+        cmeta_threadpool_wait_status(pool) != SALTS_OK) return P2P_ERR_INVALID_STATE;
     result = p2p_key_worker_poll(worker);
     if (result != P2P_OK) return result;
-    salts_mutex_lock(&worker->mutex);
+    cmeta_mutex_lock(&worker->mutex);
     worker->pool = NULL;
-    salts_mutex_unlock(&worker->mutex);
-    salts_threadpool_destroy(pool);
+    cmeta_mutex_unlock(&worker->mutex);
+    cmeta_threadpool_destroy(pool);
     return P2P_OK;
 }
 
@@ -262,7 +262,7 @@ int p2p_key_worker_destroy(p2p_key_worker_t *worker) {
     if (!worker) return P2P_OK;
     result = p2p_key_worker_stop(worker);
     if (result != P2P_OK) return result;
-    salts_mutex_destroy(&worker->mutex);
+    cmeta_mutex_destroy(&worker->mutex);
     p2p_crypto_wipe(worker, sizeof(*worker));
     free(worker);
     return P2P_OK;
@@ -270,13 +270,13 @@ int p2p_key_worker_destroy(p2p_key_worker_t *worker) {
 
 int p2p_key_worker_status(p2p_key_worker_t *worker,
     p2p_private_key_executor_status_v4_t *output) {
-    salts_threadpool_stats_t pool = {0};
+    cmeta_threadpool_stats_t pool = {0};
     if (!worker || !output) return P2P_ERR_INVALID_ARG;
-    salts_mutex_lock(&worker->mutex);
+    cmeta_mutex_lock(&worker->mutex);
     *output = worker->status;
-    if (worker->pool) salts_threadpool_get_stats(worker->pool, &pool);
+    if (worker->pool) cmeta_threadpool_get_stats(worker->pool, &pool);
     output->queued_operations = pool.queued_tasks > 0 ? (size_t)pool.queued_tasks : 0;
     output->accepting = !atomic_load_explicit(&worker->closing, memory_order_acquire) && pool.accepting;
-    salts_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return P2P_OK;
 }

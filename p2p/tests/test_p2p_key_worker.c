@@ -50,7 +50,7 @@ static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
             atomic_fetch_add(&provider->finished, 1);
             return P2P_ERR_TIMEOUT;
         }
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     result = provider->error ? provider->error : p2p_test_x25519(output, provider->secret, remote);
     atomic_fetch_add(&provider->finished, 1);
@@ -129,7 +129,7 @@ static void submit(peer_t *peer, const void *payload, size_t length) {
 
 static void wait_ready(peer_t *peer) {
     uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!p2p_key_work_ready(peer->work) && salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+    while (!p2p_key_work_ready(peer->work) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_true(p2p_key_work_ready(peer->work));
 }
 
@@ -235,7 +235,7 @@ static void test_failure(int reason) {
     wait_ready(&peer);
     if (reason == 2) {
         uint64_t deadline = p2p_key_work_deadline(peer.work);
-        while (salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+        while (salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     }
     check_equal(P2P_OK, p2p_key_worker_poll(worker));
     check_equal(expected, peer.status);
@@ -257,7 +257,7 @@ static void test_stop_queued(void) {
     prepare_peer(&second, &provider, worker);
     submit(&first, NULL, 0);
     deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&context.calls) && salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+    while (!atomic_load(&context.calls) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_equal(1, atomic_load(&context.calls));
     submit(&second, NULL, 0);
     check_equal(P2P_OK, p2p_key_worker_stop(worker));
@@ -282,7 +282,7 @@ static void test_stop_queued(void) {
 static int blocked_notify(void *context) {
     provider_t *provider = context;
     atomic_fetch_add(&provider->notifications, 1);
-    while (!atomic_load(&provider->notify_release)) salts_sleep_ms(1);
+    while (!atomic_load(&provider->notify_release)) cmeta_sleep_ms(1);
     return P2P_ERR_RESOURCE_EXHAUSTED;
 }
 
@@ -298,7 +298,7 @@ static void test_owner_finishes_before_notifier(void) {
     submit(&peer, NULL, 0);
     atomic_store(&context.release, 1);
     deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&context.notifications) && salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+    while (!atomic_load(&context.notifications) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_equal(1, atomic_load(&context.notifications));
     check_equal(P2P_OK, p2p_key_worker_poll(worker));
     check_equal(1, peer.completions);
@@ -366,8 +366,8 @@ static void test_invalid_and_duplicate(void) {
 
 #ifdef P2P_KEY_WORKER_TEST_WRAP
 static int reject_submit;
-int __real_salts_threadpool_try_submit_task(salts_threadpool_t *, const salts_threadpool_task_t *);
-int __wrap_salts_threadpool_try_submit_task(salts_threadpool_t *pool, const salts_threadpool_task_t *task) {
+int __real_salts_threadpool_try_submit_task(cmeta_threadpool_t *, const cmeta_threadpool_task_t *);
+int __wrap_salts_threadpool_try_submit_task(cmeta_threadpool_t *pool, const cmeta_threadpool_task_t *task) {
     if (reject_submit) { reject_submit = 0; return SALTS_ENOBUFS; }
     return __real_salts_threadpool_try_submit_task(pool, task);
 }
