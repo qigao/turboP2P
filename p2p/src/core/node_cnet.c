@@ -228,6 +228,12 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     return P2P_OK;
 }
 
+p2p_cnet_owner_t *p2p_node_cnet_transport_owner(p2p_node_cnet_t *owner) {
+    if (!owner || owner->stopping || owner->stopped || !owner->transport)
+        return NULL;
+    return owner->transport;
+}
+
 int p2p_node_cnet_listen(p2p_node_cnet_t *owner) {
     cnet_stream_peer local;
     int result;

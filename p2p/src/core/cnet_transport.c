@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 typedef struct {
     size_t length;
@@ -30,6 +31,8 @@ typedef struct p2p_cnet_connection_s {
     int terminal;
     int detached;
     int error;
+    cnet_handoff *inbound_credit;
+    cnet_handoff_ticket inbound_ticket;
 } p2p_cnet_connection_t;
 
 struct p2p_cnet_owner_s {
@@ -43,6 +46,22 @@ struct p2p_cnet_owner_s {
     int busy;
     int stopping;
     int stopped;
+    p2p_cnet_sg_t *sg_acceptor;
+    p2p_cnet_sg_t *sg_final;
+    size_t sg_final_index;
+};
+
+struct p2p_cnet_sg_s {
+    p2p_cnet_owner_t *acceptor;
+    p2p_cnet_owner_t *finals[P2P_CNET_SG_MAX_OWNERS];
+    cnet_handoff inboxes[P2P_CNET_SG_MAX_OWNERS];
+    size_t owner_count;
+    size_t explicit_owner;
+    cnet_owner_placement_kind placement;
+    uint64_t sequence;
+    atomic_uint_fast64_t routed;
+    atomic_uint_fast64_t denied;
+    atomic_bool sealed;
 };
 
 static int connection_send(void *handle, const void *data, size_t length);
@@ -115,10 +134,20 @@ static void free_connection(p2p_cnet_connection_t *connection) {
     free(connection);
 }
 
-static void sweep(p2p_cnet_owner_t *owner) {
+/* A TAKEN handoff credit protects the final connection and all application
+ * callback context. Release it only after CNet's terminal and peer detach (or
+ * a fully completed CNet client stop). Never release from on_state itself. */
+static int sweep(p2p_cnet_owner_t *owner) {
     p2p_cnet_connection_t **link = &owner->connections;
     while (*link) {
         p2p_cnet_connection_t *connection = *link;
+        if (connection->inbound_credit != NULL &&
+            ((connection->detached && connection->terminal) || owner->stopped)) {
+            int status = cnet_handoff_release(connection->inbound_credit,
+                                              connection->inbound_ticket);
+            if (status != SALTS_OK) return p2p_error(status);
+            connection->inbound_credit = NULL;
+        }
         if (connection->detached && (connection->terminal || owner->stopped)) {
             *link = connection->next;
             owner->connection_count--;
@@ -127,6 +156,7 @@ static void sweep(p2p_cnet_owner_t *owner) {
             link = &connection->next;
         }
     }
+    return P2P_OK;
 }
 
 static int connection_send_completed(void *handle, const void *data, size_t length,
@@ -409,32 +439,297 @@ int p2p_cnet_owner_connect(p2p_cnet_owner_t *owner, const cnet_stream_peer *peer
     return P2P_OK;
 }
 
+
+/* A detached inbound socket belongs to exactly one final CNet Owner. The
+ * remote address snapshot is copied before CNet consumes the descriptor.
+ * Until final terminal/callback retirement a TAKEN ticket protects storage. */
+static int adopt_detached(p2p_cnet_owner_t *owner,
+                          cnet_accepted_stream *accepted,
+                          cnet_handoff *credit_owner,
+                          cnet_handoff_ticket credit) {
+    p2p_cnet_connection_t *connection;
+    cnet_observer events;
+    cnet_stream_peer peer;
+    int status;
+
+    if (!owner->accept || owner->stopping || owner->stopped) {
+        cnet_accepted_stream_close(accepted);
+        if (credit_owner) cnet_handoff_release(credit_owner, credit);
+        return P2P_ERR_INVALID_STATE;
+    }
+    peer = accepted->peer;
+    connection = allocate_connection(owner, P2P_CONN_INBOUND);
+    if (!connection) {
+        cnet_accepted_stream_close(accepted);
+        if (credit_owner) cnet_handoff_release(credit_owner, credit);
+        return owner->connection_count >= owner->config.client.connection_capacity
+            ? P2P_ERR_RESOURCE_EXHAUSTED : P2P_ERR_NO_MEM;
+    }
+    events = observer(connection);
+    status = cnet_client_adopt_accepted(&owner->client, accepted, &events,
+                                         &connection->handle);
+    if (status != SALTS_OK) {
+        if (accepted->internal_active) cnet_accepted_stream_close(accepted);
+        free_connection(connection);
+        if (credit_owner) cnet_handoff_release(credit_owner, credit);
+        return p2p_error(status);
+    }
+    connection->inbound_credit = credit_owner;
+    connection->inbound_ticket = credit;
+    publish_connection(owner, connection);
+    status = owner->accept(owner, &connection->base, &peer,
+                            owner->accept_context);
+    if (status != P2P_OK || !connection->callbacks.receive) {
+        if (status != P2P_OK) connection->error = status;
+        connection_destroy(connection);
+    }
+    return P2P_OK;
+}
+
+/* The SG's inbound placement is decided once at accept, using an immutable
+ * owner order and a coherent *advisory* handoff credit snapshot. Full protocol
+ * auth (cookie, Noise, MMP) is performed solely on the selected final Owner.
+ * In particular TCP source IP is NOT a signed STRICT_KEY identity. */
+static int sg_route_accepted(p2p_cnet_owner_t *owner,
+                             cnet_accepted_stream *accepted) {
+    p2p_cnet_sg_t *sg = owner->sg_acceptor;
+    cnet_owner_placement_hint hints[P2P_CNET_SG_MAX_OWNERS] = {{0}};
+    cnet_owner_placement_input input = {0};
+    cnet_handoff_ticket ticket = {0};
+    size_t selected = SIZE_MAX;
+    int status;
+    if (atomic_load_explicit(&sg->sealed, memory_order_acquire)) {
+        cnet_accepted_stream_close(accepted);
+        atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+        return P2P_OK;
+    }
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        cnet_handoff_snapshot snap = {0};
+        if (cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK) {
+            cnet_accepted_stream_close(accepted);
+            return P2P_ERR_INVALID_STATE;
+        }
+        hints[i].pressure = (uint64_t)(snap.reserved + snap.queued + snap.taken);
+        hints[i].eligible = !snap.sealed &&
+            hints[i].pressure < snap.connection_capacity;
+        if (sg->finals[i] == owner) {
+            /* No cross-thread read of another Owner's connection_count. */
+            hints[i].pressure += (uint64_t)owner->connection_count;
+            hints[i].eligible = hints[i].eligible &&
+                owner->connection_count < owner->config.client.connection_capacity;
+        }
+    }
+    if (sg->sequence == UINT64_MAX) {
+        cnet_accepted_stream_close(accepted);
+        return P2P_ERR_RESOURCE_EXHAUSTED;
+    }
+    input.size = sizeof(input);
+    input.version = CNET_OWNER_PLACEMENT_VERSION;
+    input.kind = sg->placement;
+    input.owners = hints;
+    input.owner_count = sg->owner_count;
+    input.explicit_owner = sg->explicit_owner;
+    input.sequence = sg->sequence++;
+    status = cnet_owner_placement_choose(&input, &selected);
+    if (status == SALTS_ENOBUFS) {
+        cnet_accepted_stream_close(accepted);
+        atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+        return P2P_OK; /* Capacity denial is not a listener runtime failure. */
+    }
+    if (status != SALTS_OK || selected >= sg->owner_count) {
+        cnet_accepted_stream_close(accepted);
+        return P2P_ERR_INVALID_STATE;
+    }
+    if (sg->finals[selected] == owner) {
+        status = adopt_detached(owner, accepted, NULL, ticket);
+        if (status == P2P_OK) {
+            atomic_fetch_add_explicit(&sg->routed, 1u, memory_order_relaxed);
+            return P2P_OK;
+        }
+        if (status == P2P_ERR_RESOURCE_EXHAUSTED) {
+            atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+            return P2P_OK;
+        }
+        return status;
+    }
+    status = cnet_handoff_reserve(&sg->inboxes[selected], &ticket);
+    if (status != SALTS_OK) {
+        cnet_accepted_stream_close(accepted);
+        if (status == SALTS_ENOBUFS || status == SALTS_ESHUTDOWN) {
+            atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+            return P2P_OK; /* No hidden retry onto a different Owner. */
+        }
+        return p2p_error(status);
+    }
+    status = cnet_handoff_publish(&sg->inboxes[selected], ticket, accepted);
+    if (status != SALTS_OK) {
+        if (accepted->internal_active) cnet_accepted_stream_close(accepted);
+        if (cnet_handoff_release(&sg->inboxes[selected], ticket) != SALTS_OK)
+            return P2P_ERR_INVALID_STATE;
+        if (status == SALTS_ENOBUFS || status == SALTS_ESHUTDOWN) {
+            atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+            return P2P_OK;
+        }
+        return p2p_error(status);
+    }
+    atomic_fetch_add_explicit(&sg->routed, 1u, memory_order_relaxed);
+    return P2P_OK; /* Successful publish owns the socket and producer ticket. */
+}
+
+/* The final Owner alone takes credits and adopts detached sockets. In stop,
+ * seal first and close all queued streams, releasing tickets after close. */
+static int sg_take_owner(p2p_cnet_owner_t *owner, int closing) {
+    if (!owner->sg_final) return P2P_OK;
+    cnet_handoff *inbox =
+        &owner->sg_final->inboxes[owner->sg_final_index];
+    size_t progress = 0u;
+    while (closing || progress < owner->config.accept_budget) {
+        cnet_accepted_stream accepted = CNET_ACCEPTED_STREAM_INIT;
+        cnet_handoff_ticket ticket = {0};
+        int status = cnet_handoff_take(inbox, &ticket, &accepted);
+        if (status == SALTS_ENOENT) return P2P_OK;
+        if (status != SALTS_OK) return p2p_error(status);
+        ++progress;
+        if (closing) {
+            status = cnet_accepted_stream_close(&accepted);
+            if (status != SALTS_OK) return p2p_error(status);
+            status = cnet_handoff_release(inbox, ticket);
+            if (status != SALTS_OK) return p2p_error(status);
+        } else {
+            status = adopt_detached(owner, &accepted, inbox, ticket);
+            if (status != P2P_OK && status != P2P_ERR_RESOURCE_EXHAUSTED &&
+                status != P2P_ERR_NO_MEM)
+                return status;
+        }
+    }
+    return P2P_OK;
+}
+
+int p2p_cnet_sg_create_v1(const p2p_cnet_sg_config_v1_t *config,
+                           p2p_cnet_sg_t **output) {
+    p2p_cnet_sg_t *sg;
+    int status;
+    if (!output) return P2P_ERR_INVALID_ARG;
+    *output = NULL;
+    if (!config || config->size != sizeof(*config) ||
+        config->version != P2P_CNET_SG_VERSION || !config->acceptor ||
+        !config->acceptor->listener.impl ||
+        config->acceptor->sg_acceptor || config->acceptor->busy ||
+        config->acceptor->stopping || config->acceptor->stopped ||
+        config->final_owner_count == 0u ||
+        config->final_owner_count > P2P_CNET_SG_MAX_OWNERS ||
+        !config->queue_capacity || !config->connection_capacity ||
+        config->queue_capacity > config->connection_capacity ||
+        (config->placement != CNET_OWNER_PLACE_EXPLICIT &&
+         config->placement != CNET_OWNER_PLACE_ROUND_ROBIN &&
+         config->placement != CNET_OWNER_PLACE_LOWEST_PRESSURE) ||
+        (config->placement == CNET_OWNER_PLACE_EXPLICIT &&
+         config->explicit_owner >= config->final_owner_count) ||
+        (config->placement != CNET_OWNER_PLACE_EXPLICIT && config->explicit_owner))
+        return P2P_ERR_INVALID_ARG;
+    for (size_t i = 0u; i < config->final_owner_count; ++i) {
+        p2p_cnet_owner_t *target = config->final_owners[i];
+        if (!target || !target->client.impl || !target->accept || target->busy ||
+            target->stopping || target->stopped || target->sg_final ||
+            config->connection_capacity > target->config.client.connection_capacity ||
+            (target != config->acceptor && target->sg_acceptor))
+            return P2P_ERR_INVALID_STATE;
+        for (size_t j = 0u; j < i; ++j)
+            if (target == config->final_owners[j])
+                return P2P_ERR_INVALID_ARG;
+    }
+    sg = calloc(1u, sizeof(*sg));
+    if (!sg) return P2P_ERR_NO_MEM;
+    sg->acceptor = config->acceptor;
+    sg->owner_count = config->final_owner_count;
+    sg->placement = config->placement;
+    sg->explicit_owner = config->explicit_owner;
+    atomic_init(&sg->sealed, false);
+    atomic_init(&sg->routed, 0u);
+    atomic_init(&sg->denied, 0u);
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        cnet_handoff_config inbox = {sizeof(inbox), CNET_HANDOFF_VERSION,
+                                    config->connection_capacity,
+                                    config->queue_capacity};
+        status = cnet_handoff_init(&sg->inboxes[i], &inbox);
+        if (status != SALTS_OK) {
+            for (size_t j = 0u; j < i; ++j)
+                cnet_handoff_destroy(&sg->inboxes[j]);
+            free(sg);
+            return p2p_error(status);
+        }
+        sg->finals[i] = config->final_owners[i];
+    }
+    config->acceptor->sg_acceptor = sg;
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        sg->finals[i]->sg_final = sg;
+        sg->finals[i]->sg_final_index = i;
+    }
+    *output = sg;
+    return P2P_OK;
+}
+
+int p2p_cnet_sg_seal_v1(p2p_cnet_sg_t *sg) {
+    if (!sg) return P2P_ERR_INVALID_ARG;
+    atomic_store_explicit(&sg->sealed, true, memory_order_release);
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        int status = cnet_handoff_seal(&sg->inboxes[i]);
+        if (status != SALTS_OK) return p2p_error(status);
+    }
+    return P2P_OK;
+}
+
+int p2p_cnet_sg_snapshot_v1(p2p_cnet_sg_t *sg, size_t index,
+                             p2p_cnet_sg_snapshot_v1_t *output) {
+    int status;
+    if (!output) return P2P_ERR_INVALID_ARG;
+    memset(output, 0, sizeof(*output));
+    if (!sg || index >= sg->owner_count) return P2P_ERR_INVALID_ARG;
+    status = cnet_handoff_get_snapshot(&sg->inboxes[index], &output->handoff);
+    if (status != SALTS_OK) return p2p_error(status);
+    output->size = sizeof(*output);
+    output->version = P2P_CNET_SG_VERSION;
+    output->sealed = atomic_load_explicit(&sg->sealed, memory_order_acquire);
+    output->routed = atomic_load_explicit(&sg->routed, memory_order_relaxed);
+    output->denied = atomic_load_explicit(&sg->denied, memory_order_relaxed);
+    return P2P_OK;
+}
+
+int p2p_cnet_sg_destroy_v1(p2p_cnet_sg_t *sg) {
+    if (!sg) return P2P_ERR_INVALID_ARG;
+    if (!atomic_load_explicit(&sg->sealed, memory_order_acquire) ||
+        !sg->acceptor->stopped || sg->acceptor->busy)
+        return P2P_ERR_INVALID_STATE;
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        cnet_handoff_snapshot snap = {0};
+        if (!sg->finals[i]->stopped || sg->finals[i]->busy ||
+            cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK ||
+            !snap.drained)
+            return P2P_ERR_INVALID_STATE;
+    }
+    for (size_t i = 0u; i < sg->owner_count; ++i)
+        if (cnet_handoff_destroy(&sg->inboxes[i]) != SALTS_OK)
+            return P2P_ERR_INVALID_STATE;
+    sg->acceptor->sg_acceptor = NULL;
+    for (size_t i = 0u; i < sg->owner_count; ++i) {
+        sg->finals[i]->sg_final = NULL;
+        sg->finals[i]->sg_final_index = 0u;
+    }
+    free(sg);
+    return P2P_OK;
+}
+
 static int accept_connections(p2p_cnet_owner_t *owner) {
     if (!owner->listener.impl) return P2P_OK;
-    for (size_t index = 0; index < owner->config.accept_budget && !owner->stopping; ++index) {
+    for (size_t index = 0u; index < owner->config.accept_budget && !owner->stopping; ++index) {
         cnet_accepted_stream accepted = CNET_ACCEPTED_STREAM_INIT;
-        p2p_cnet_connection_t *connection;
-        cnet_observer events;
         int status = cnet_listener_accept_detached(&owner->listener, &accepted);
         if (status == SALTS_ETIMEDOUT) break;
         if (status != SALTS_OK) return p2p_error(status);
-        connection = allocate_connection(owner, P2P_CONN_INBOUND);
-        if (!connection) {
-            cnet_accepted_stream_close(&accepted);
-            return owner->connection_count >= owner->config.client.connection_capacity ?
-                P2P_ERR_RESOURCE_EXHAUSTED : P2P_ERR_NO_MEM;
-        }
-        events = observer(connection);
-        status = cnet_client_adopt_accepted(&owner->client, &accepted, &events,
-                                            &connection->handle);
-        if (status != SALTS_OK) { free_connection(connection); return p2p_error(status); }
-        publish_connection(owner, connection);
-        status = owner->accept(owner, &connection->base, &accepted.peer,
-                                owner->accept_context);
-        if (status != P2P_OK || !connection->callbacks.receive) {
-            if (status != P2P_OK) connection->error = status;
-            connection_destroy(connection);
-        }
+        status = owner->sg_acceptor
+            ? sg_route_accepted(owner, &accepted)
+            : adopt_detached(owner, &accepted, NULL, (cnet_handoff_ticket){0});
+        if (status != P2P_OK) return status;
     }
     return P2P_OK;
 }
@@ -465,7 +760,8 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     if (owner->busy || owner->stopped) return P2P_ERR_INVALID_STATE;
     if (owner->stopping) return p2p_cnet_owner_stop(owner);
     owner->busy = 1;
-    result = accept_connections(owner);
+    result = sg_take_owner(owner, 0);
+    if (result == P2P_OK) result = accept_connections(owner);
     resume_connections(owner);
     progress = cnet_client_poll(&owner->client, 0, &events);
     if (progress != SALTS_OK) owner->stopping = 1;
@@ -475,7 +771,11 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     for (p2p_cnet_connection_t *connection = owner->connections;
          connection; connection = connection->next) try_close(connection);
     owner->busy = 0;
-    sweep(owner);
+    int retire_result = sweep(owner);
+    if (retire_result != P2P_OK) {
+        owner->stopping = 1;
+        if (result == P2P_OK) result = retire_result;
+    }
     if (owner->stopping) {
         int stop_result = p2p_cnet_owner_stop(owner);
         if (result == P2P_OK) result = stop_result;
@@ -484,26 +784,44 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
 }
 
 int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner) {
-    int status, destroyed, listener_status;
+    int status, destroyed, listener_status, sg_result = P2P_OK;
     if (!owner) return P2P_ERR_INVALID_ARG;
     owner->stopping = 1;
     if (owner->busy || owner->stopped) return P2P_OK;
     owner->busy = 1;
+    if (owner->sg_acceptor)
+        sg_result = p2p_cnet_sg_seal_v1(owner->sg_acceptor);
+    if (owner->sg_final) {
+        cnet_handoff *inbox =
+            &owner->sg_final->inboxes[owner->sg_final_index];
+        int sealed = cnet_handoff_seal(inbox);
+        if (sg_result == P2P_OK && sealed != SALTS_OK)
+            sg_result = p2p_error(sealed);
+        if (sg_result == P2P_OK)
+            sg_result = sg_take_owner(owner, 1);
+    }
+    if (sg_result != P2P_OK) {
+        owner->busy = 0;
+        return sg_result; /* Retain all owner + inbox state for retry. */
+    }
     listener_status = close_listener(owner);
     status = owner->client.impl ?
         cnet_client_stop(&owner->client, owner->config.stop_timeout_ms) : SALTS_OK;
     destroyed = cnet_client_destroy(&owner->client);
     if (!owner->client.impl && !owner->listener.impl) owner->stopped = 1;
     owner->busy = 0;
-    sweep(owner);
+    sg_result = sweep(owner);
     if (listener_status != SALTS_OK) return p2p_error(listener_status);
-    return status != SALTS_OK ? p2p_error(status) : p2p_error(destroyed);
+    if (status != SALTS_OK) return p2p_error(status);
+    if (destroyed != SALTS_OK) return p2p_error(destroyed);
+    return sg_result;
 }
 
 int p2p_cnet_owner_destroy(p2p_cnet_owner_t *owner) {
     int result;
     if (!owner) return P2P_OK;
-    if (owner->busy) return P2P_ERR_INVALID_STATE;
+    if (owner->busy || owner->sg_acceptor || owner->sg_final)
+        return P2P_ERR_INVALID_STATE; /* SG retains live owner storage. */
     result = p2p_cnet_owner_stop(owner);
     if (!owner->stopped) return result == P2P_OK ? P2P_ERR_INVALID_STATE : result;
     while (owner->connections) {

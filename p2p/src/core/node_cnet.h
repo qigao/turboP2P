@@ -22,6 +22,12 @@ typedef struct p2p_node_cnet_s p2p_node_cnet_t;
 int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     p2p_node_cnet_t **output);
 int p2p_node_cnet_listen(p2p_node_cnet_t *owner);
+/* Borrow the exact CNet transport Owner for an explicit host-side SG
+ * placement topology. The returned pointer must outlive the SG inbox and
+ * every accepted peer; stop nodes, then destroy SG, then destroy nodes.
+ * No additional Owner/NativeIO backend or implicit callback progress. */
+p2p_cnet_owner_t *p2p_node_cnet_transport_owner(p2p_node_cnet_t *owner);
+
 /* Bounded nonblocking turn: expire, pump worker, progress CNet, maintain peers
  * transfers and DHT. The caller supplies scheduling; no background native timer. */
 int p2p_node_cnet_poll(p2p_node_cnet_t *owner);
