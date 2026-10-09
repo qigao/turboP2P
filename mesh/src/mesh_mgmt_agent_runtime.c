@@ -370,8 +370,14 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_set_client_policy_v2(
   runtime->in_api = 1u;
   runtime->last_endpoint_result =
       mesh_mgmt_endpoint_pool_set_client_policy_v2(&runtime->endpoint_pool, policy);
-  return runtime_fail(runtime, runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_OK
-      ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED);
+  mesh_mgmt_agent_runtime_result_t status = MESH_MGMT_AGENT_RUNTIME_ENDPOINT_FAILED;
+  if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_OK)
+    status = MESH_MGMT_AGENT_RUNTIME_OK;
+  else if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_INVALID_STATE)
+    status = MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  else if (runtime->last_endpoint_result == MESH_MGMT_ENDPOINT_POOL_INVALID_ARG)
+    status = MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  return runtime_fail(runtime, status);
 }
 
 mesh_mgmt_agent_runtime_result_t
