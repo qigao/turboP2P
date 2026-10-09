@@ -74,7 +74,7 @@ static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
            salts_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
         if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     crypto_x25519(output, endpoint->secret, remote);
     return crypto_verify32(output, zero) ? P2P_OK : P2P_ERR_CRYPTO;
@@ -206,7 +206,7 @@ static void connect_pair(pair_t *pair) {
 static void pump(pair_t *pair) {
     if (!pair->client.stopped) check_equal(P2P_OK, p2p_poll(pair->client.node));
     if (!pair->server.stopped) check_equal(P2P_OK, p2p_poll(pair->server.node));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
     uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;

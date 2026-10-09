@@ -177,7 +177,7 @@ static void read_status(void *context) {
             }
         if (invalid) atomic_fetch_add(&reader->errors, 1);
         atomic_fetch_add(&reader->reads, 1);
-        salts_thread_yield();
+        cmeta_thread_yield();
     }
 }
 static void test_status_handoff(void) {
@@ -187,7 +187,7 @@ static void test_status_handoff(void) {
     setup(&pair, 7, 0);
     reader.node = pair.server.node;
     atomic_init(&reader.stop, 0); atomic_init(&reader.reads, 0); atomic_init(&reader.errors, 0);
-    check_equal(0, salts_thread_create(&thread, read_status, &reader));
+    check_equal(0, cmeta_thread_create(&thread, read_status, &reader));
     connect_pair(&pair);
     p2p_node_security_status_v3_t status;
     uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
@@ -212,8 +212,8 @@ static void test_status_handoff(void) {
     check_equal((uint64_t)1, pair.server.node->cookie_verifications_succeeded);
     check_equal((size_t)0, status.security.reserved_send_capacity_bytes);
     atomic_store(&reader.stop, 1);
-    check_equal(0, salts_thread_join(&thread));
-    salts_thread_destroy(&thread);
+    check_equal(0, cmeta_thread_join(&thread));
+    cmeta_thread_destroy(&thread);
     check_true(atomic_load(&reader.reads) > 0);
     check_equal(0, atomic_load(&reader.errors));
     p2p_cnet_config_t transport = config(TEST_SEND_BYTES);

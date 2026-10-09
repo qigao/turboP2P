@@ -146,7 +146,7 @@ static int setup_pair(pair_t *pair, const p2p_cnet_config_t *policy) {
 static void pump(pair_t *pair) {
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->client.owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->server.owner));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 
 static void wait_connected(pair_t *pair) {
@@ -431,7 +431,7 @@ static int blocking_calculate(void *context, const uint8_t remote[32], uint64_t 
     while (salts_monotonic_ms() < until_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
         if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     return p2p_test_x25519(output, pair->provider_identity.secret_key, remote);
 }
@@ -677,7 +677,7 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
             check_equal(P2P_OK, p2p_cnet_connection_pause(pair.server.transport.connection, 0));
             pair.pause_handoff = 0;
         }
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     if (blocking == 2) {
         check_equal(1, cancelled);
