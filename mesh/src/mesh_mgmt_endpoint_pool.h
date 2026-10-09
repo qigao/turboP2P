@@ -3,12 +3,14 @@
 
 #include <p2p.h>
 #include <cstl/vec.h>
+#include <cnet/destination_policy.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define MESH_MGMT_ENDPOINT_POOL_MAX_ENDPOINTS 64u
+#define MESH_MGMT_CLIENT_DESTINATION_POLICY_VERSION 1u
 #define MESH_MGMT_ENDPOINT_HOST_MAX 64u
 #define MESH_MGMT_ENDPOINT_RETRY_MAX_MS 86400000u
 #define MESH_MGMT_ENDPOINT_CONNECT_TIMEOUT_MAX_MS 300000u
@@ -23,6 +25,7 @@ typedef enum {
   MESH_MGMT_ENDPOINT_POOL_CONFLICT = -6,
   MESH_MGMT_ENDPOINT_POOL_STALE = -7,
   MESH_MGMT_ENDPOINT_POOL_EXPIRED = -8,
+  MESH_MGMT_ENDPOINT_POOL_NO_SOURCE = -9,
 } mesh_mgmt_endpoint_pool_result_t;
 
 typedef enum {
@@ -69,6 +72,19 @@ typedef struct {
   void *callback_context;
 } mesh_mgmt_endpoint_pool_config_v1_t;
 
+/** A pre-admitted ACE client destination policy. The signed/full transport
+ * identity, not a hostname or mutable array index, pins an EXPLICIT target.
+ * STRICT_KEY requires key_known and uses CNet rendezvous on stable peer IDs.
+ * Other kinds are rejected until their pressure/weight inputs have contracts. */
+typedef struct {
+  size_t size;
+  uint32_t version;
+  cnet_destination_policy_kind kind;
+  uint64_t key_hash;
+  bool key_known;
+  uint8_t explicit_transport_peer_id[P2P_KEY_SIZE];
+} mesh_mgmt_client_destination_policy_v2_t;
+
 typedef struct {
   mesh_mgmt_endpoint_record_v1_t record;
   mesh_mgmt_endpoint_state_t state;
@@ -80,6 +96,7 @@ typedef struct {
   int last_connect_result;
   uint8_t occupied;
   uint8_t retire_on_close;
+  uint64_t destination_id; /* Stable BLAKE2b-256 identity projection, never socket identity. */
 } mesh_mgmt_endpoint_entry_v1_t;
 
 typedef struct {
@@ -98,6 +115,11 @@ typedef struct {
   uint8_t initialized;
   uint8_t running;
   uint8_t in_api;
+  uint8_t policy_enabled;
+  mesh_mgmt_client_destination_policy_v2_t policy;
+  uint64_t explicit_destination_id;
+  uint64_t selection_generation;
+  uint64_t selection_sequence;
 } mesh_mgmt_endpoint_pool_v1_t;
 
 typedef struct {
@@ -147,7 +169,26 @@ mesh_mgmt_endpoint_pool_start_v1(mesh_mgmt_endpoint_pool_v1_t *pool);
 
 void mesh_mgmt_endpoint_pool_stop_v1(mesh_mgmt_endpoint_pool_v1_t *pool);
 
-/** Run due connect attempts and connect-timeout transitions on the owner loop. */
+/** Configure one immutable Client admission strategy on the stopped pool.
+ * The configured policy is mandatory for tick_v2; no legacy/fallback dial
+ * path is used. The caller must keep this policy on a single network Owner.
+ * Changing policy requires a fresh pool/runtime generation. */
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_set_client_policy_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool,
+    const mesh_mgmt_client_destination_policy_v2_t *policy);
+
+/** Progress all endpoint expiries and outstanding dial timeouts, then choose
+ * at most ONE authorized remote endpoint using CNet's pure destination policy.
+ * Returns NO_SOURCE when strict key's pinned winner is unhealthy, an EXPLICIT
+ * identity is absent, or all candidates are ineligible. No alternative is
+ * dialed on NO_SOURCE; a caller may continue CNet polling normally. The
+ * selected endpoint still passes P2P CNet admission and Noise/MMP auth.
+ * Existing per-peer backoff/quarantine remains the only recovery owner. */
+mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_tick_v2(
+    mesh_mgmt_endpoint_pool_v1_t *pool, uint64_t now_ms);
+
+/** Run due connect attempts and connect-timeout transitions on the owner loop.
+ * The v1 fan-out behavior is retained for existing callers. */
 mesh_mgmt_endpoint_pool_result_t mesh_mgmt_endpoint_pool_tick_v1(mesh_mgmt_endpoint_pool_v1_t *pool,
                                                                  uint64_t now_ms);
 

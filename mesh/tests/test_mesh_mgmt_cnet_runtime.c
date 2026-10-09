@@ -227,6 +227,66 @@ static void test_session_records_reconnect(void) {
   check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE, mesh_mgmt_agent_runtime_start_v1(&client.runtime));
   destroy(&client); destroy(&server);
 }
+
+static void test_explicit_client_strategy_real_noise_mmp(void) {
+  endpoint_t alpha = {0}, beta = {0}, client = {0};
+  mesh_mgmt_agent_bootstrap_v1_t bootstraps[2] = {{0}, {0}};
+  mesh_mgmt_client_destination_policy_v2_t policy = {0};
+  mesh_mgmt_endpoint_snapshot_v1_t snapshot = {0};
+
+  prepare(&alpha, 17); initialize(&alpha); start(&alpha);
+  prepare(&beta, 49); initialize(&beta); start(&beta);
+  prepare(&client, 33);
+  memcpy(bootstraps[0].transport_peer_id, alpha.public_key, P2P_KEY_SIZE);
+  memcpy(bootstraps[1].transport_peer_id, beta.public_key, P2P_KEY_SIZE);
+  bootstraps[0].host = bootstraps[1].host = "127.0.0.1";
+  bootstraps[0].port = (uint16_t)alpha.port;
+  bootstraps[1].port = (uint16_t)beta.port;
+  client.config.bootstraps = bootstraps;
+  client.config.bootstrap_count = 2u;
+  initialize(&client);
+
+  policy.size = sizeof(policy);
+  policy.version = MESH_MGMT_CLIENT_DESTINATION_POLICY_VERSION;
+  policy.kind = CNET_DESTINATION_EXPLICIT;
+  memcpy(policy.explicit_transport_peer_id, beta.public_key, P2P_KEY_SIZE);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_set_client_policy_v2(&client.runtime, &policy));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_set_client_policy_v2(&client.runtime, &policy));
+  client.config.bootstraps = NULL;
+  client.config.bootstrap_count = 0u;
+  start(&client);
+
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while ((beta.established == 0u || client.established == 0u) &&
+         cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&alpha.runtime));
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&beta.runtime));
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&client.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_equal(1u, beta.established);
+  check_equal(1u, client.established);
+  check_equal(0u, alpha.established);
+  check_equal(0u, alpha.admitted);
+  check_equal(0u, client.failures);
+  check_equal(MESH_MGMT_ENDPOINT_POOL_OK,
+      mesh_mgmt_endpoint_pool_snapshot_v1(
+          &client.runtime.endpoint_pool, alpha.public_key, &snapshot));
+  check_equal(MESH_MGMT_ENDPOINT_IDLE, snapshot.state);
+  check_equal(MESH_MGMT_ENDPOINT_POOL_OK,
+      mesh_mgmt_endpoint_pool_snapshot_v1(
+          &client.runtime.endpoint_pool, beta.public_key, &snapshot));
+  check_equal(MESH_MGMT_ENDPOINT_ACTIVE, snapshot.state);
+
+  /* Application MMP readiness, not TCP CONNECTED, was published by router.
+   * The other pinned authority stayed uncontacted throughout real CNet turns. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_set_client_policy_v2(&client.runtime, &policy));
+  destroy(&client); destroy(&beta); destroy(&alpha);
+}
+
 static void test_external_progress_reentry(void) {
   endpoint_t server = {0}, client = {0};
   start_pair(&server, &client);
@@ -423,6 +483,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("uses configured CNet EXPLICIT Client strategy for real Noise and MMP admission") {
+    test_explicit_client_strategy_real_noise_mmp();
+  }
   it("authenticates real MMP sessions, publishes signed discovery, and reconnects") { test_session_records_reconnect(); }
   it("rejects lifecycle reentry when the public node advances outside runtime polling") { test_external_progress_reentry(); }
   it("rejects authenticated transport peers denied by management membership") { test_membership_rejection(); }
