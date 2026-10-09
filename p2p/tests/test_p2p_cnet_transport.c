@@ -146,13 +146,13 @@ static int setup_pair(pair_t *pair, const p2p_cnet_config_t *policy) {
 static void pump(pair_t *pair) {
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->client.owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->server.owner));
-    salts_sleep_ms(1);
+    cmeta_sleep_ms(1);
 }
 
 static void wait_connected(pair_t *pair) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
     while ((!pair->client.connected || !pair->server.connected) &&
-           salts_monotonic_ms() < deadline) pump(pair);
+           cmeta_monotonic_ms() < deadline) pump(pair);
     check_equal(1U, pair->client.connected);
     check_equal(1U, pair->server.connected);
 }
@@ -181,9 +181,9 @@ static void test_fifo_copy_and_hwm(void) {
     check_equal(P2P_ERR_RESOURCE_EXHAUSTED, p2p_connection_send(pair.client.connection, bytes, 1));
     check_equal(P2P_ERR_INVALID_STATE, p2p_cnet_connection_set_send_hwm(pair.client.connection, 59));
     check_equal(0U, pair.client.sends);
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
     while ((pair.server.received_bytes < sizeof(expected) || pair.client.sends != 3) &&
-           salts_monotonic_ms() < deadline) pump(&pair);
+           cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(sizeof(expected), pair.server.received_bytes);
     check_equal(expected, pair.server.bytes, sizeof(expected));
     check_equal(3U, pair.client.sends);
@@ -201,15 +201,15 @@ static void test_pause_preserves_tail(void) {
     pair.server.pause_on_receive = 1;
     pair.server.consume_limit = 3;
     check_equal(P2P_OK, p2p_connection_send(pair.client.connection, payload, sizeof(payload)));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (!pair.server.receives && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!pair.server.receives && cmeta_monotonic_ms() < deadline) pump(&pair);
     for (unsigned index = 0; index < 5; ++index) pump(&pair);
     check_equal((size_t)3, pair.server.received_bytes);
     pair.server.consume_limit = 0;
     check_equal(P2P_OK, p2p_cnet_connection_pause(pair.server.connection, 0));
     check_equal((size_t)3, pair.server.received_bytes);
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (pair.server.received_bytes < sizeof(payload) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (pair.server.received_bytes < sizeof(payload) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(sizeof(payload), pair.server.received_bytes);
     check_equal(payload, pair.server.bytes, sizeof(payload));
     destroy_pair(&pair);
@@ -227,8 +227,8 @@ static void test_pause_with_admitted_receive(void) {
     for (unsigned index = 0; index < 10; ++index) pump(&pair);
     check_equal(0U, pair.server.receives);
     check_equal(P2P_OK, p2p_cnet_connection_pause(pair.server.connection, 0));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (pair.server.received_bytes < sizeof(payload) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (pair.server.received_bytes < sizeof(payload) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(sizeof(payload), pair.server.received_bytes);
     check_equal(payload, pair.server.bytes, sizeof(payload));
     destroy_pair(&pair);
@@ -243,8 +243,8 @@ static void test_destroy_during_receive(void) {
     wait_connected(&pair);
     pair.server.destroy_on_receive = 1;
     check_equal(P2P_OK, p2p_connection_send(pair.client.connection, payload, sizeof(payload)));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (p2p_cnet_owner_connection_count(pair.server.owner) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (p2p_cnet_owner_connection_count(pair.server.owner) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1U, pair.server.receives);
     check_equal(0U, pair.server.closed);
     check_true(pair.server.connection == NULL);
@@ -260,8 +260,8 @@ static void test_stop_during_receive(void) {
     wait_connected(&pair);
     pair.server.stop_on_receive = 1;
     check_equal(P2P_OK, p2p_connection_send(pair.client.connection, "stop", 4));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (!pair.server.receives && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!pair.server.receives && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1U, pair.server.receives);
     check_equal(1U, pair.server.closed);
     check_equal(P2P_ERR_INVALID_STATE, pair.server.recursive_poll);
@@ -279,8 +279,8 @@ static void test_rejected_receive(int zero_consume) {
     pair.server.zero_consume = zero_consume;
     pair.server.reject_receive = !zero_consume;
     check_equal(P2P_OK, p2p_connection_send(pair.client.connection, "reject", 6));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (!pair.server.closed && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!pair.server.closed && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1U, pair.server.closed);
     check_equal(zero_consume ? P2P_ERR_PROTOCOL : P2P_ERR_CRYPTO, pair.server.close_status);
     check_equal(P2P_ERR_NETWORK, p2p_connection_send(pair.server.connection, "x", 1));
@@ -303,15 +303,15 @@ static void test_close_pending_and_reuse(void) {
     p2p_connection_destroy(pair.client.connection);
     pair.client.connection = NULL;
     check_equal((size_t)1, p2p_cnet_owner_connection_count(pair.client.owner));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (p2p_cnet_owner_connection_count(pair.client.owner) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (p2p_cnet_owner_connection_count(pair.client.owner) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal((size_t)0, p2p_cnet_owner_connection_count(pair.client.owner));
     check_equal(0U, pair.client.sends);
     check_equal(0U, pair.client.closed);
     events = callbacks(&pair.client);
     check_equal(P2P_OK, p2p_cnet_owner_connect(pair.client.owner, &pair.remote, &events, &pair.client.connection));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (pair.client.connected < 2 && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (pair.client.connected < 2 && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(2U, pair.client.connected);
     check_equal((size_t)1, p2p_cnet_owner_connection_count(pair.client.owner));
     destroy_pair(&pair);
@@ -325,8 +325,8 @@ static void test_cancel_connect_and_reject_accept(void) {
     pair.server.reject_accept = 1;
     p2p_connection_destroy(pair.client.connection);
     pair.client.connection = NULL;
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (p2p_cnet_owner_connection_count(pair.client.owner) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (p2p_cnet_owner_connection_count(pair.client.owner) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(0U, pair.client.connected);
     check_equal(0U, pair.client.closed);
     check_equal((size_t)0, p2p_cnet_owner_connection_count(pair.client.owner));
@@ -426,12 +426,12 @@ static int blocking_public(void *context, uint8_t output[32]) {
 static int blocking_calculate(void *context, const uint8_t remote[32], uint64_t deadline,
     const p2p_private_key_cancel_v4_t *cancel, uint8_t output[32]) {
     secure_pair_t *pair = context;
-    uint64_t until_ms = salts_monotonic_ms() + 20;
+    uint64_t until_ms = cmeta_monotonic_ms() + 20;
     atomic_fetch_add(&pair->provider_calls, 1);
-    while (salts_monotonic_ms() < until_ms) {
+    while (cmeta_monotonic_ms() < until_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
-        if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
-        salts_sleep_ms(1);
+        if (cmeta_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
+        cmeta_sleep_ms(1);
     }
     return p2p_test_x25519(output, pair->provider_identity.secret_key, remote);
 }
@@ -654,8 +654,8 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
     events.receive = client_cookie_receive;
     check_equal(P2P_OK, p2p_cnet_owner_connect(pair.client.transport.owner, &remote, &events,
         &pair.client.transport.connection));
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (!pair.client.delivered && !pair.server.transport.closed && salts_monotonic_ms() < deadline) {
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!pair.client.delivered && !pair.server.transport.closed && cmeta_monotonic_ms() < deadline) {
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.client.transport.owner));
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.server.transport.owner));
         if (pair.server.work) {
@@ -677,7 +677,7 @@ static void test_cookie_noise_handoff(size_t receive_size, int pause, int corrup
             check_equal(P2P_OK, p2p_cnet_connection_pause(pair.server.transport.connection, 0));
             pair.pause_handoff = 0;
         }
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     if (blocking == 2) {
         check_equal(1, cancelled);
@@ -715,9 +715,9 @@ static void test_rejected_accept(void) {
     uint64_t deadline;
     check_equal(P2P_OK, setup_pair(&pair, &policy));
     pair.server.reject_accept = 1;
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
     while ((!pair.server.accepted || p2p_cnet_owner_connection_count(pair.server.owner)) &&
-           salts_monotonic_ms() < deadline) pump(&pair);
+           cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.server.accepted);
     check_equal(0U, pair.server.connected);
     check_equal(0U, pair.server.closed);
@@ -782,8 +782,8 @@ static void test_close_admission_retry(void) {
     pair.client.connection = NULL;
     check_equal((size_t)1, p2p_cnet_owner_connection_count(pair.client.owner));
     check_equal(1U, rejected_closes);
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (p2p_cnet_owner_connection_count(pair.client.owner) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (p2p_cnet_owner_connection_count(pair.client.owner) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(4U, rejected_closes);
     check_equal((size_t)0, p2p_cnet_owner_connection_count(pair.client.owner));
     check_equal(0U, pair.client.closed);
@@ -839,8 +839,8 @@ static void test_stale_events_and_bad_completion(void) {
     check_equal(P2P_OK, p2p_connection_send(pair.client.connection, "12345678", 8));
     captured_observer.on_send(captured_observer.user, captured_handle, 7);
     check_false(pair.client.connection->is_connected);
-    deadline = salts_monotonic_ms() + TEST_DEADLINE_MS;
-    while (!pair.client.closed && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!pair.client.closed && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(P2P_ERR_PROTOCOL, pair.client.close_status);
     check_equal(1U, pair.client.closed);
     check_equal(0U, pair.client.sends);

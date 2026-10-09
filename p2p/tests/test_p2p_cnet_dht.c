@@ -47,9 +47,9 @@ static void test_replication(int cached) {
     int result = cached ? p2p_dht_put_cached(pair.client.node, cache_key, cache_value, sizeof(cache_value))
                         : p2p_dht_put(pair.client.node, cache_key, cache_value, sizeof(cache_value));
     check_equal(P2P_OK, result);
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
     while ((p2p_dht_get_cached(pair.server.node, cache_key, output, &length) != P2P_OK ||
-            pair.client.node->dht_lookups) && salts_monotonic_ms() < deadline) pump(&pair);
+            pair.client.node->dht_lookups) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_cached(pair.server.node, cache_key, cache_value, sizeof(cache_value));
     check_true(pair.client.node->dht_lookups == NULL);
     teardown(&pair);
@@ -69,7 +69,7 @@ static void remote_loop(void *context) {
     atomic_store(&loop->ready, loop->result == P2P_OK ? 1 : -1);
     while (loop->result == P2P_OK && !atomic_load(&loop->stop)) {
         loop->result = p2p_poll(endpoint->node);
-        salts_sleep_ms(1);
+        cmeta_sleep_ms(1);
     }
     int result = p2p_node_cnet_destroy(endpoint->owner);
     if (loop->result == P2P_OK) loop->result = result;
@@ -78,7 +78,7 @@ static void remote_loop(void *context) {
 static void test_remote_get(int short_buffer, int missing) {
     pair_t pair = {0};
     remote_loop_t loop = {0};
-    salts_thread_t thread = NULL;
+    cmeta_thread_t thread = NULL;
     uint8_t network[P2P_SECURITY_ID_SIZE] = {9};
     uint8_t output[sizeof(cache_value)] = {0};
     size_t length = short_buffer ? 1 : sizeof(output);
@@ -91,22 +91,22 @@ static void test_remote_get(int short_buffer, int missing) {
     loop.endpoint = &pair.server;
     atomic_init(&loop.ready, 0);
     atomic_init(&loop.stop, 0);
-    check_equal(0, salts_thread_create(&thread, remote_loop, &loop));
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&loop.ready) && salts_monotonic_ms() < deadline) salts_sleep_ms(1);
+    check_equal(0, cmeta_thread_create(&thread, remote_loop, &loop));
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!atomic_load(&loop.ready) && cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     int ready = atomic_load(&loop.ready);
     int result = P2P_ERR_INVALID_STATE;
     if (ready == 1) {
         result = p2p_connect(pair.client.node, "127.0.0.1", pair.server.node->port);
-        while (result == P2P_OK && !pair.client.authenticated && salts_monotonic_ms() < deadline)
+        while (result == P2P_OK && !pair.client.authenticated && cmeta_monotonic_ms() < deadline)
             result = p2p_poll(pair.client.node);
         if (result == P2P_OK && pair.client.authenticated)
             result = p2p_dht_get(pair.client.node, missing ? "absent" : cache_key, output, &length);
         else result = P2P_ERR_TIMEOUT;
     }
     atomic_store(&loop.stop, 1);
-    check_equal(0, salts_thread_join(&thread));
-    salts_thread_destroy(&thread);
+    check_equal(0, cmeta_thread_join(&thread));
+    cmeta_thread_destroy(&thread);
     check_equal(1, ready);
     check_equal(P2P_OK, loop.result);
     check_equal(missing ? P2P_ERR_NOT_FOUND : short_buffer ? P2P_ERR_RESOURCE_EXHAUSTED : P2P_OK, result);
@@ -189,8 +189,8 @@ static void test_callback(int stop) {
     pair.client.stop_on_auth = stop;
     p2p_set_message_handler(pair.client.node, query_callback, &pair.client);
     check_equal(P2P_OK, p2p_send(pair.server.node, pair.server.peer, "query", 5));
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.messages && salts_monotonic_ms() < deadline) pump(&pair);
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.messages && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.messages);
     if (stop) {
         check_equal(P2P_ERR_INVALID_STATE, p2p_dht_get(pair.client.node, "stopped", output, &length));

@@ -1,0 +1,60 @@
+name: Set up TurboP2P compiler cache
+description: Configure ccache for C/C++ builds on Windows, Linux and macOS.
+
+inputs:
+  profile:
+    description: Native matrix profile; isolates compiler, architecture and configuration.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install ccache on Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends ccache
+
+    - name: Install ccache on macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew install ccache
+
+    - name: Install ccache on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        choco install ccache --yes --no-progress
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    - name: Configure ccache launcher and storage
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $ccache = (Get-Command ccache -ErrorAction Stop).Source
+        & $ccache --version
+        if ($LASTEXITCODE -ne 0) { throw "ccache is unavailable" }
+        "CCACHE_DIR=$(Join-Path $env:RUNNER_TEMP 'turbop2p-compiler-cache')" >> $env:GITHUB_ENV
+        "CCACHE_MAXSIZE=512M" >> $env:GITHUB_ENV
+        "CCACHE_COMPILERCHECK=content" >> $env:GITHUB_ENV
+        "CCACHE_BASEDIR=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
+        "CCACHE_NODIRECT=true" >> $env:GITHUB_ENV
+        if ($env:RUNNER_OS -eq "Windows") {
+          "CCACHE_COMPILERTYPE=msvc" >> $env:GITHUB_ENV
+        }
+        "CMAKE_C_COMPILER_LAUNCHER=$ccache" >> $env:GITHUB_ENV
+        "CMAKE_CXX_COMPILER_LAUNCHER=$ccache" >> $env:GITHUB_ENV
+
+    - name: Restore ccache compiler objects
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/salts-compiler-cache
+        key: turbop2p-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-${{ env.VCPKG_CACHE_CONTRACT_VERSION }}-${{ env.VCPKG_CACHE_REVISION }}-${{ hashFiles('CMakeLists.txt', 'CMakeOptions.cmake', 'cmake/SaltsDependencies.cmake', 'tests/salts_foundation/CMakeLists.txt', 'vcpkg.json') }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          turbop2p-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.profile }}-${{ env.VCPKG_CACHE_CONTRACT_VERSION }}-${{ env.VCPKG_CACHE_REVISION }}-${{ hashFiles('CMakeUserPresets.json', 'presets/*.json', 'CMakeOptions.cmake', 'cmake/Sanitizers.cmake', 'vcpkg.json', 'vcpkg-configuration.json') }}-
+

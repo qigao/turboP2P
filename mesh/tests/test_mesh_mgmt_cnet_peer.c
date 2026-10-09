@@ -259,7 +259,7 @@ static void init_pair(test_pair_t *pair, size_t receive_bytes, int plaintext) {
   cnet_tls_server_config server_config = {0};
   cnet_tls_client_config tls_config = {0};
   cnet_connect_options options = {0};
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   uint16_t port = 0u;
   char uri[64];
   memset(pair, 0, sizeof(*pair));
@@ -284,7 +284,7 @@ static void init_pair(test_pair_t *pair, size_t receive_bytes, int plaintext) {
   if (!plaintext)
     options.tls = &tls_config;
   check_equal(cnet_connect(&pair->sender.client, &options, &pair->sender.connection), SALTS_OK);
-  while ((!pair->sender.connected || !pair->receiver.connected) && salts_monotonic_ms() < deadline)
+  while ((!pair->sender.connected || !pair->receiver.connected) && cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(pair->sender.connected);
   check_true(pair->receiver.connected);
@@ -336,8 +336,8 @@ static void start_protocol(test_pair_t *pair) {
 }
 
 static void await_established(test_pair_t *pair) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while (!established(pair) && salts_monotonic_ms() < deadline) {
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while (!established(pair) && cmeta_monotonic_ms() < deadline) {
     drive_pair(pair);
     if (pair->sender.mgmt.peer.state == MESH_MGMT_PEER_TERMINAL || pair->receiver.mgmt.peer.state == MESH_MGMT_PEER_TERMINAL)
       break;
@@ -378,8 +378,8 @@ static void test_signed_loopback(size_t receive_bytes) {
   check_equal(mesh_mgmt_cnet_peer_send_v1(&pair.sender.mgmt, MESH_MGMT_KIND_PROBE, payload, sizeof(payload)), MESH_MGMT_CONNECTION_PENDING);
   check_equal(mesh_mgmt_cnet_peer_send_v1(&pair.sender.mgmt, MESH_MGMT_KIND_PROBE, payload, sizeof(payload)), MESH_MGMT_CONNECTION_BUSY);
   check_equal(mesh_mgmt_cnet_peer_send_v1(&pair.receiver.mgmt, MESH_MGMT_KIND_PROBE, payload, sizeof(payload)), MESH_MGMT_CONNECTION_PENDING);
-  deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while ((!pair.sender.application_events || !pair.receiver.application_events) && salts_monotonic_ms() < deadline)
+  deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while ((!pair.sender.application_events || !pair.receiver.application_events) && cmeta_monotonic_ms() < deadline)
     drive_pair(&pair);
   check_equal(pair.sender.application_events, 1u);
   check_equal(pair.receiver.application_events, 1u);
@@ -394,8 +394,8 @@ static void test_delayed_completion(void) {
   init_protocol(&pair);
   pair.sender.hold_send = 1;
   start_protocol(&pair);
-  deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while (!pair.sender.held_bytes && salts_monotonic_ms() < deadline)
+  deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while (!pair.sender.held_bytes && cmeta_monotonic_ms() < deadline)
     drive_pair(&pair);
   check_greater(pair.sender.held_bytes, 0u);
   check_false(pair.sender.mgmt.peer.connection.dispatcher.session.local_hello_sent);
@@ -456,8 +456,8 @@ static void test_rejected_frame(int tamper) {
   pair.receiver.tamper = tamper;
   pair.receiver.reject_event = !tamper;
   start_protocol(&pair);
-  deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while (pair.receiver.mgmt.peer.state != MESH_MGMT_PEER_TERMINAL && salts_monotonic_ms() < deadline)
+  deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while (pair.receiver.mgmt.peer.state != MESH_MGMT_PEER_TERMINAL && cmeta_monotonic_ms() < deadline)
     drive_pair(&pair);
   check_equal(pair.receiver.mgmt.peer.state, MESH_MGMT_PEER_TERMINAL);
   check_false(pair.receiver.mgmt.peer.connection.dispatcher.session.local_ack_sent);
@@ -491,8 +491,8 @@ static void test_inactive_handle_rejected(void) {
   check_equal(mesh_mgmt_cnet_peer_init_v1(&pair.sender.mgmt, &pair.sender.client, stale, &config), MESH_MGMT_PEER_CONNECTION_FAILED);
   check_false(pair.sender.mgmt.initialized);
   check_equal(cnet_close(&pair.sender.client, pair.sender.connection), SALTS_OK);
-  deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while (!pair.sender.terminal && salts_monotonic_ms() < deadline)
+  deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while (!pair.sender.terminal && cmeta_monotonic_ms() < deadline)
     drive_pair(&pair);
   check_true(pair.sender.terminal);
   check_equal(mesh_mgmt_cnet_peer_init_v1(&pair.sender.mgmt, &pair.sender.client, pair.sender.connection, &config), MESH_MGMT_PEER_CONNECTION_FAILED);

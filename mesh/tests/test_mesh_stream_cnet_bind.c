@@ -151,8 +151,8 @@ spec("mesh stream CNet TLS gate") {
                     stale, MESH_STREAM_CNET_ROLE_INITIATOR, NULL),
                 MESH_STREAM_BIND_CHANNEL_EXPORT_FAILED);
     check_equal(cnet_close(&pair.sender.client, pair.sender.connection), SALTS_OK);
-    deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-    while (!pair.sender.terminal && salts_monotonic_ms() < deadline)
+    deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+    while (!pair.sender.terminal && cmeta_monotonic_ms() < deadline)
       drive_pair(&pair);
     check_true(pair.sender.terminal);
     check_equal(mesh_stream_cnet_bind_init_v1(&pair.sender.bind, &pair.sender.client,

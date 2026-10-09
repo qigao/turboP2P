@@ -155,14 +155,14 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
     if (!transfer) {
         return P2P_ERR_NO_MEM;
     }
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     memcpy(transfer->file_id, digest, P2P_HASH_SIZE);
     memcpy(transfer->file_hash, digest, P2P_SHA256_DIGEST_SIZE);
     strncpy(transfer->filepath, output_path, sizeof(transfer->filepath) - 1);
     strncpy(transfer->filename, key, sizeof(transfer->filename) - 1);
     transfer->complete_cb = complete_cb;
     transfer->user_data = user_data;
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
 
     peers = p2p_node_snapshot_connected_peers(node, &peer_count);
     if (peer_count == 0 || !peers) {
@@ -173,14 +173,14 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
     request_peer_count = peer_count < P2P_MAX_SOURCES
         ? peer_count
         : P2P_MAX_SOURCES;
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     transfer->request_peer_count = (uint8_t)request_peer_count;
     for (size_t i = 0; i < request_peer_count; i++) {
         ret = p2p_transfer_hold_peer_locked(transfer, peers[i]);
         if (ret != P2P_OK) break;
         transfer->request_peers[i] = peers[i];
     }
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     if (ret != P2P_OK) {
         for (size_t i = 0; i < peer_count; i++) p2p_peer_release(peers[i]);
         free(peers);
@@ -207,12 +207,12 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
         if (p2p_peer_send(peers[i], request) == P2P_OK) {
             sent_count++;
         } else {
-            salts_mutex_lock(&transfer->mutex);
+            cmeta_mutex_lock(&transfer->mutex);
             if (!transfer->request_peer_done[i]) {
                 transfer->request_peer_done[i] = 1;
                 transfer->response_count++;
             }
-            salts_mutex_unlock(&transfer->mutex);
+            cmeta_mutex_unlock(&transfer->mutex);
         }
     }
     for (size_t i = 0; i < peer_count; i++) {
@@ -226,11 +226,11 @@ int p2p_get_file_async(p2p_node_t *node, const char key[65],
         return P2P_ERR_NETWORK;
     }
 
-    salts_mutex_lock(&transfer->mutex);
+    cmeta_mutex_lock(&transfer->mutex);
     complete_no_source =
         transfer->state == P2P_TRANSFER_STATE_PENDING &&
         transfer->response_count == transfer->request_peer_count;
-    salts_mutex_unlock(&transfer->mutex);
+    cmeta_mutex_unlock(&transfer->mutex);
     if (complete_no_source) {
         p2p_transfer_complete(transfer, 0, "No peer provides the requested object");
     }

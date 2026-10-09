@@ -497,7 +497,7 @@ struct p2p_node_s {
   p2p_dht_lookup_t *dht_lookups;
   p2p_connect_suppression_t *connect_suppressions;
   vivaldi_coord_t coord;
-  salts_mutex_t mutex;
+  cmeta_mutex_t mutex;
 };
 
 /* =============================================================================

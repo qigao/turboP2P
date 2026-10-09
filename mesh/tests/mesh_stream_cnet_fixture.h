@@ -151,10 +151,10 @@ static void on_state(void *user, cnet_connection connection, cnet_connection_sta
     owner->terminal = 1;
     if (owner_channel(owner) && owner_channel(owner)->state != MESH_STREAM_CHANNEL_UNINITIALIZED)
       (void)mesh_stream_cnet_channel_close_v1(&owner->channel, connection,
-          owner_channel(owner)->admission.generation, salts_monotonic_ms());
+          owner_channel(owner)->admission.generation, cmeta_monotonic_ms());
     if (owner->bind.state != MESH_STREAM_CNET_UNINITIALIZED)
       owner->settle_result = mesh_stream_cnet_bind_abort_v1(
-          &owner->bind, connection, salts_monotonic_ms());
+          &owner->bind, connection, cmeta_monotonic_ms());
   }
 }
 
@@ -186,7 +186,7 @@ static void on_send(void *user, cnet_connection connection, size_t bytes) {
     }
     owner->settle_result = mesh_stream_cnet_channel_complete_send_v1(&owner->channel,
         connection, owner_channel(owner)->admission.generation, token, SALTS_OK,
-        bytes, salts_monotonic_ms(), &frames);
+        bytes, cmeta_monotonic_ms(), &frames);
     if (owner->settle_result != owner->expected_channel_result &&
         !(owner_channel(owner)->state != MESH_STREAM_CHANNEL_READY &&
           owner->settle_result == MESH_STREAM_CHANNEL_INVALID_STATE))
@@ -196,7 +196,7 @@ static void on_send(void *user, cnet_connection connection, size_t bytes) {
     return;
   }
   owner->settle_result = mesh_stream_cnet_bind_complete_send_v1(
-      &owner->bind, connection, SALTS_OK, bytes, salts_monotonic_ms());
+      &owner->bind, connection, SALTS_OK, bytes, cmeta_monotonic_ms());
   if (owner->bind.state == MESH_STREAM_CNET_AUTHENTICATED)
     owner->published++;
   if (owner->settle_result != owner->expected_send_result &&
@@ -225,7 +225,7 @@ static void on_receive(void *user, cnet_connection connection, const cnet_receiv
     owner->receive_pending = 0;
     owner->settle_result = mesh_stream_cnet_channel_feed_v1(&owner->channel, connection,
         owner_channel(owner)->admission.generation, view->data, view->size,
-        salts_monotonic_ms(), &frames);
+        cmeta_monotonic_ms(), &frames);
     if (owner->settle_result != owner->expected_channel_result) {
       owner->failed = 1;
       return;
@@ -306,7 +306,7 @@ static void init_pair(test_pair_t *pair, test_peer_kind_t peer_kind) {
   cnet_tls_server_config server_config = {0};
   cnet_tls_client_config tls_config = {0};
   cnet_connect_options options = {0};
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   uint16_t port = 0u;
   char uri[64];
 
@@ -358,7 +358,7 @@ static void init_pair(test_pair_t *pair, test_peer_kind_t peer_kind) {
   options.tls = peer_kind == TEST_CNET_TLS ? &tls_config : NULL;
   check_equal(cnet_connect(&pair->sender.client, &options, &pair->sender.connection), SALTS_OK);
   while ((!pair->sender.connected || !pair->receiver.connected) &&
-         salts_monotonic_ms() < deadline)
+         cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(pair->sender.connected);
   check_true(pair->receiver.connected);
@@ -392,7 +392,7 @@ static const uint8_t RESPONDER_KEY[32] = {2u};
 static void init_bind_generation(test_pair_t *pair, uint64_t generation) {
   mesh_stream_bind_store_config_v1_t config = {2u, TEST_TICKET_TTL_MS};
   mesh_stream_bind_claims_v1_t claims = {0};
-  pair->now = salts_monotonic_ms();
+  pair->now = cmeta_monotonic_ms();
   claims.mesh_id_hash[0] = 1u;
   claims.initiator_node_id[0] = 2u;
   claims.responder_node_id[0] = 3u;
@@ -422,9 +422,9 @@ static void expect_message(test_owner_t *owner, size_t len) {
 }
 
 static void await_message(test_pair_t *pair, test_owner_t *writer, test_owner_t *reader) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   while ((writer->bind.pending_bytes || reader->received_size < reader->expected) &&
-         salts_monotonic_ms() < deadline)
+         cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_equal(writer->bind.pending_bytes, 0u);
   check_equal(reader->received_size, reader->expected);
@@ -472,13 +472,13 @@ static mesh_stream_channel_admission_v1_t admission(test_pair_t *pair, int respo
 }
 
 static void await_closed(test_pair_t *pair, test_owner_t *owner) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   /* Cancel authorization before submitting the asynchronous close command;
    * a queued logical write can still succeed while close is being processed. */
   check_equal(mesh_stream_cnet_bind_abort_v1(&owner->bind, owner->connection,
-                  salts_monotonic_ms()), MESH_STREAM_BIND_IO_FAILED);
+                  cmeta_monotonic_ms()), MESH_STREAM_BIND_IO_FAILED);
   check_equal(cnet_close(&owner->client, owner->connection), SALTS_OK);
-  while (!owner->terminal && salts_monotonic_ms() < deadline)
+  while (!owner->terminal && cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(owner->terminal);
   check_equal(owner->bind.state, MESH_STREAM_CNET_FAILED);

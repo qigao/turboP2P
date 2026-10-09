@@ -216,12 +216,12 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
   size_t fed = 0u;
   size_t got = 0u;
   int finish_sent_flag = 0;
-  uint64_t deadline = salts_monotonic_ms() + 10000u;
+  uint64_t deadline = cmeta_monotonic_ms() + 10000u;
 
   (void)now_ms;
   *out_len = 0u;
   check_equal(MESH_STREAM_DATA_OK, mesh_stream_data_sender_start(sender));
-  while (salts_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
+  while (cmeta_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
     size_t consumed = 0u;
     size_t n = 0u;
 
@@ -237,11 +237,11 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
     (void)mesh_stream_data_receiver_pump(receiver, out + got, out_cap - got, &n);
     got += n;
     if (n == 0u)
-      salts_sleep_ms(1);
+      cmeta_sleep_ms(1);
   }
   if (!finish_sent_flag)
     (void)mesh_stream_data_sender_finish(sender);
-  while (salts_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
+  while (cmeta_monotonic_ms() < deadline && !mesh_stream_data_complete(receiver)) {
     size_t n = 0u;
 
     (void)mesh_stream_data_tick(sender, 0u);
@@ -249,7 +249,7 @@ static void run_stream(mesh_stream_data_t *sender, mesh_stream_data_t *receiver,
     (void)mesh_stream_data_receiver_pump(receiver, out + got, out_cap - got, &n);
     got += n;
     if (n == 0u)
-      salts_sleep_ms(1);
+      cmeta_sleep_ms(1);
   }
   *out_len = got;
 }

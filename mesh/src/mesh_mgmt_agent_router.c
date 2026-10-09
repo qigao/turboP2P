@@ -82,12 +82,12 @@ static mesh_mgmt_agent_router_slot_v1_t *find_free_slot(mesh_mgmt_agent_router_v
 static uint64_t router_now_ms(const mesh_mgmt_agent_router_v1_t *router) {
   return router->signer_template->now_ms
              ? router->signer_template->now_ms(router->signer_template->callback_context)
-             : salts_realtime_ms();
+             : cmeta_realtime_ms();
 }
 
 static int router_random(mesh_mgmt_agent_router_v1_t *router, uint8_t *output, size_t output_len) {
   return router->random_bytes ? router->random_bytes(router->random_context, output, output_len)
-                              : salts_secure_random(output, output_len);
+                              : cmeta_platform_secure_random(output, output_len);
 }
 
 static mesh_mgmt_agent_router_result_t next_connection_id(mesh_mgmt_agent_router_v1_t *router,

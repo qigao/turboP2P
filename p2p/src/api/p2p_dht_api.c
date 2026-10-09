@@ -77,12 +77,12 @@ static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
         return 0;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (lookup->candidate_count > 0) {
         peers = (p2p_peer_t **)calloc((size_t)lookup->candidate_count, sizeof(*peers));
     }
     if (lookup->candidate_count > 0 && !peers) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return 0;
     }
 
@@ -98,7 +98,7 @@ static int p2p_send_dht_store_to_lookup_candidates(p2p_node_t *node,
         }
         peers[count++] = peer;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     for (size_t i = 0; i < count; i++) {
         if (peers[i]) {
@@ -142,9 +142,9 @@ static int p2p_try_get_local_dht_value(p2p_node_t *node,
     }
 
     capacity = *buf_len;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     found = kademlia_find_value(node->kad_dht, key, buf, buf_len);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     if (found != 0 && *buf_len > capacity) return P2P_ERR_RESOURCE_EXHAUSTED;
     return (found == 0) ? P2P_OK : P2P_ERR_NOT_FOUND;
@@ -157,9 +157,9 @@ static int p2p_dht_lookup_is_active(p2p_node_t *node, uint32_t request_id) {
         return 0;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     active = p2p_dht_lookup_find(node, request_id) != NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return active;
 }
@@ -176,11 +176,11 @@ int p2p_dht_put(p2p_node_t *node, const char *key, const void *data, size_t len)
     }
 
     kad_id_from_data(key, strlen(key), &kkey);
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
 
     /* Store locally first */
     ret = kademlia_store(node->kad_dht, &kkey, data, len);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (ret != 0) return P2P_ERR_NO_MEM;
     (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
 
@@ -216,9 +216,9 @@ int p2p_dht_put_cached(p2p_node_t *node, const char *key, const void *data, size
     }
 
     kad_id_from_data(key, strlen(key), &kkey);
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     ret = kademlia_store(node->kad_dht, &kkey, data, len);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (ret != 0) return P2P_ERR_NO_MEM;
 
     (void)p2p_send_dht_store_to_connected_peers(node, &kkey, data, len);
@@ -254,7 +254,7 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
     lookup = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_GET);
     if (!lookup) return node->network_ops ? P2P_ERR_NOT_FOUND : P2P_ERR_INVALID_STATE;
     request_id = lookup->request_id;
-    deadline_ms = salts_monotonic_ms();
+    deadline_ms = cmeta_monotonic_ms();
     deadline_ms = UINT64_MAX - deadline_ms < P2P_DHT_GET_TIMEOUT_MS
         ? UINT64_MAX : deadline_ms + P2P_DHT_GET_TIMEOUT_MS;
     for (;;) {
@@ -263,9 +263,9 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
         if (ret != P2P_OK) break;
         ret = p2p_try_get_local_dht_value(node, &kkey, buf, buf_len);
         if (ret != P2P_ERR_NOT_FOUND || !p2p_dht_lookup_is_active(node, request_id)) break;
-        now_ms = salts_monotonic_ms();
+        now_ms = cmeta_monotonic_ms();
         if (now_ms >= deadline_ms) break;
-        salts_sleep_ms((uint32_t)(deadline_ms - now_ms < P2P_DHT_POLL_INTERVAL_MS
+        cmeta_sleep_ms((uint32_t)(deadline_ms - now_ms < P2P_DHT_POLL_INTERVAL_MS
             ? deadline_ms - now_ms : P2P_DHT_POLL_INTERVAL_MS));
     }
     /* Only this call's lookup is owned here. Completion/stop may already have
@@ -292,8 +292,8 @@ size_t p2p_dht_get_entry_count(p2p_node_t *node) {
         return 0;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     count = kademlia_storage_count(node->kad_dht);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return count;
 }

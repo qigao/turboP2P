@@ -128,7 +128,7 @@ add_test(NAME test_p2p_security COMMAND test_p2p_security)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_security PRIVATE P2P_TEST_WRAP_RANDOM)
   target_link_options(test_p2p_security PRIVATE
-    "-Wl,--wrap=salts_platform_secure_random")
+    "-Wl,--wrap=cmeta_platform_secure_random")
 endif()
 
 add_library(p2p_cnet_transport STATIC
@@ -175,7 +175,7 @@ set_tests_properties(test_p2p_key_worker PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_key_worker PRIVATE P2P_KEY_WORKER_TEST_WRAP)
   target_link_options(test_p2p_key_worker PRIVATE
-    "-Wl,--wrap=salts_threadpool_try_submit_task")
+    "-Wl,--wrap=cmeta_threadpool_try_submit_task")
 endif()
 
 # Compile the actual peer, codec and node-bound executor with CNet. Test doubles
@@ -290,3 +290,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(test_mesh_mgmt_cnet_runtime PRIVATE
     "-Wl,--wrap=cnet_client_stop" "-Wl,--wrap=p2p_destroy_v2")
 endif()
+
+# Qualify the installed Salts 2.3 CNet policy ABI and SaltsUtils 4.3
+# DataBind/CMeta ABI without requiring the legacy TurboNet root build.
+foreach(language IN ITEMS c cpp)
+  set(target test_salts_23_contracts)
+  if(language STREQUAL "cpp")
+    set(target test_salts_23_contracts_cpp)
+  endif()
+  add_executable(${target} "test_salts_23_contracts.${language}")
+  set_property(TARGET ${target} PROPERTY LINKER_LANGUAGE CXX)
+  target_link_libraries(${target} PRIVATE Salts::CNet Salts::DataBind Salts::CMeta)
+  add_test(NAME ${target} COMMAND ${target})
+endforeach()

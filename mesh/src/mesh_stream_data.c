@@ -238,7 +238,7 @@ static int send_open(mesh_stream_data_t *stream) {
 static int send_data(mesh_stream_data_t *stream, uint64_t seq, const uint8_t *block,
                      size_t block_len, uint64_t now_ms) {
   if (now_ms == 0u)
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
   uint8_t frame[MESH_STREAM_DATA_MAX_FRAME];
   uint8_t *payload = frame + LENGTH_PREFIX_SIZE + FRAME_HEADER_SIZE;
   size_t frame_len;
@@ -683,7 +683,7 @@ mesh_stream_data_result_t mesh_stream_data_tick(mesh_stream_data_t *stream, uint
   if (stream->config.resend_timeout_ms == 0u)
     return MESH_STREAM_DATA_OK;
   if (now_ms == 0u)
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
   for (size_t i = 0u; i < stream->config.window_blocks; i++) {
     msd_slot_t *slot = &stream->send_slots[i];
 

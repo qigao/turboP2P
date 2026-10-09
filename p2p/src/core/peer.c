@@ -80,7 +80,7 @@ static void peer_security_transition(p2p_peer_t *peer,
     if (!peer || !peer->node || peer->security_stage == next_stage) {
         return;
     }
-    now_ms = salts_hrtime() / 1000000U;
+    now_ms = cmeta_hrtime() / 1000000U;
     if (peer_security_latency_stage(peer->security_stage, &latency_stage)) {
         p2p_node_record_handshake_latency(
             peer->node,
@@ -103,7 +103,7 @@ static int peer_session_admit_wire_bytes(const p2p_peer_t *peer,
     if (!peer || !peer->node || peer->session_started_ms == 0) {
         return P2P_ERR_INVALID_STATE;
     }
-    now_ms = salts_hrtime() / 1000000U;
+    now_ms = cmeta_hrtime() / 1000000U;
     age_limit = peer->node->security_config.session_max_age_ms;
     byte_limit =
         peer->node->security_config.session_max_bytes_per_direction;
@@ -168,18 +168,18 @@ CXX_C_API void p2p_peer_destroy(p2p_peer_t *peer) {
 
     p2p_node_t *node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     if (peer->destroying) {
-        if (node) salts_mutex_unlock(&node->mutex);
+        if (node) cmeta_mutex_unlock(&node->mutex);
         return;
     }
     peer->destroying = 1;
     should_finalize = (peer->callback_refs == 0);
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     p2p_peer_disconnect(peer);
@@ -233,13 +233,13 @@ int p2p_peer_hold(p2p_peer_t *peer) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     held = p2p_peer_hold_locked(peer);
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     return held;
@@ -255,7 +255,7 @@ void p2p_peer_release(p2p_peer_t *peer) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
 
     if (peer->callback_refs > 0) {
@@ -266,7 +266,7 @@ void p2p_peer_release(p2p_peer_t *peer) {
     }
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
 
     if (should_finalize) {
@@ -298,7 +298,7 @@ int p2p_peer_prepare_connect(p2p_peer_t *peer, int *start) {
         return P2P_OK;
     }
 
-    now_ms = salts_hrtime() / 1000000;
+    now_ms = cmeta_hrtime() / 1000000;
     if (peer->reconnect_after_ms > now_ms) {
         return P2P_OK;
     }
@@ -328,9 +328,9 @@ static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
 
     node = peer->node;
     p2p_endpoint_to_key(key, sizeof(key), peer->ip, peer->port);
-    now_ms = salts_hrtime() / 1000000;
+    now_ms = cmeta_hrtime() / 1000000;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     HASH_FIND_STR(node->connect_suppressions, key, suppression);
     if (suppression) {
         if (suppression->until_ms > now_ms) {
@@ -340,7 +340,7 @@ static int p2p_peer_connect_is_suppressed(p2p_peer_t *peer) {
             free(suppression);
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     return blocked;
 }
@@ -556,7 +556,7 @@ int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {
 
     memcpy(peer->recv_buf + peer->recv_len, data, len);
     peer->recv_len += len;
-    peer->last_seen = salts_hrtime();
+    peer->last_seen = cmeta_hrtime();
 
     return peer_process_buffer(peer);
 }
@@ -764,7 +764,7 @@ static void peer_security_send_complete(void *context, int status) {
         return;
     }
     if (ret == P2P_OK && peer->security_deadline_ms &&
-        salts_monotonic_ms() >= peer->security_deadline_ms) ret = P2P_ERR_TIMEOUT;
+        cmeta_monotonic_ms() >= peer->security_deadline_ms) ret = P2P_ERR_TIMEOUT;
     action = peer->security_send_action;
     wire_bytes = peer->security_send_bytes;
     peer->security_send_action = PEER_SEND_NONE;
@@ -931,7 +931,7 @@ static int peer_finish_noise(p2p_peer_t *peer) {
     free(peer->handshake);
     peer->handshake = NULL;
     peer_security_transition(peer, P2P_SECURITY_STAGE_READY);
-    peer->security_deadline_ms = salts_hrtime() / 1000000U +
+    peer->security_deadline_ms = cmeta_hrtime() / 1000000U +
                                  peer->node->security_config.ready_timeout_ms;
     return peer_send_ready(peer);
 }
@@ -1114,7 +1114,7 @@ int p2p_peer_start_handshake(p2p_peer_t *peer) {
     }
     peer_security_transition(peer, P2P_SECURITY_STAGE_COOKIE);
     peer->state = P2P_PEER_STATE_HANDSHAKING;
-    peer->security_deadline_ms = salts_hrtime() / 1000000U +
+    peer->security_deadline_ms = cmeta_hrtime() / 1000000U +
                                  peer->node->security_config.handshake_timeout_ms;
     p2p_secure_preface_build(peer->node->security_config.network_id_hash,
                              peer->local_preface);
@@ -1138,7 +1138,7 @@ int p2p_peer_start_inbound_handshake_after_cookie(
     p2p_peer_reset_security_state(peer);
     peer->security_initiator = 0;
     peer->state = P2P_PEER_STATE_HANDSHAKING;
-    peer->security_deadline_ms = salts_hrtime() / 1000000U +
+    peer->security_deadline_ms = cmeta_hrtime() / 1000000U +
                                  peer->node->security_config.handshake_timeout_ms;
     memcpy(peer->remote_preface, initiator_preface,
            P2P_SECURE_PREFACE_SIZE);
@@ -1201,7 +1201,7 @@ static int peer_process_ready_frame(p2p_peer_t *peer, const uint8_t *frame,
     peer->received_bytes += (uint64_t)frame_len + 2U;
     peer_security_transition(peer, P2P_SECURITY_STAGE_ESTABLISHED);
     peer->security_deadline_ms = 0;
-    peer->session_started_ms = salts_hrtime() / 1000000U;
+    peer->session_started_ms = cmeta_hrtime() / 1000000U;
     p2p_node_on_peer_authenticated(peer->node, peer);
     return P2P_OK;
 }
@@ -1288,7 +1288,7 @@ void p2p_peer_transport_closed(p2p_peer_t *peer, int destroy_peer) {
         return;
     }
 
-    now_ms = salts_hrtime() / 1000000;
+    now_ms = cmeta_hrtime() / 1000000;
     if (peer->keep_entry && !destroy_peer) {
         peer->reconnect_after_ms = now_ms + P2P_CONNECT_RETRY_MS;
     }
@@ -1305,11 +1305,11 @@ void p2p_peer_transport_closed(p2p_peer_t *peer, int destroy_peer) {
 
 void p2p_peer_transport_connected(p2p_peer_t *peer) {
     p2p_node_t *node = peer->node;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     peer->is_connected = 0;
     peer->reconnect_after_ms = 0;
     peer->state = P2P_PEER_STATE_HANDSHAKING;
-    peer->connect_time = salts_hrtime();
+    peer->connect_time = cmeta_hrtime();
     peer->last_seen = peer->connect_time;
     peer->avg_rtt_ms = 0;
     peer->rttvar_ms = 0;
@@ -1317,6 +1317,6 @@ void p2p_peer_transport_connected(p2p_peer_t *peer) {
     peer->last_ping_sent_ms = 0;
     peer->outstanding_ping_ms = 0;
     peer->rtt_sample_count = 0;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_node_on_peer_connected(node, peer);
 }

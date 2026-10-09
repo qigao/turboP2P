@@ -25,7 +25,7 @@
 
 static uint64_t get_time_ms(void)
 {
-    return salts_monotonic_ms();
+    return cmeta_monotonic_ms();
 }
 
 /* =============================================================================
@@ -346,7 +346,7 @@ tunnel_session_t* tunnel_session_tcp_syn(tunnel_t *tunnel,
     session->state = TUNNEL_SESSION_CONNECTING;
     session->tcp.state = TUNNEL_TCP_SYN_RECEIVED;
     session->tcp.seq_remote = seq;
-    if (salts_platform_secure_random(&session->tcp.seq_local, sizeof(session->tcp.seq_local)) != SALTS_OK) {
+    if (cmeta_platform_secure_random(&session->tcp.seq_local, sizeof(session->tcp.seq_local)) != SALTS_OK) {
         tunnel_session_destroy(session);
         return NULL;
     }

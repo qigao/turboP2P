@@ -695,10 +695,10 @@ cleanup:
 
 #ifdef P2P_TEST_WRAP_RANDOM
 static int fail_random;
-int __real_salts_platform_secure_random(void *buffer, size_t length);
-int __wrap_salts_platform_secure_random(void *buffer, size_t length) {
+int __real_cmeta_platform_secure_random(void *buffer, size_t length);
+int __wrap_cmeta_platform_secure_random(void *buffer, size_t length) {
     if (!fail_random) {
-        return __real_salts_platform_secure_random(buffer, length);
+        return __real_cmeta_platform_secure_random(buffer, length);
     }
     /* Model an OS failure after partially filling the caller's storage. */
     if (buffer && length) memset(buffer, 0xa5, length / 2);

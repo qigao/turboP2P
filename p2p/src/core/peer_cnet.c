@@ -20,7 +20,7 @@ static int connected(p2p_connection_t *connection, void *context) {
         uint8_t preface[P2P_SECURE_PREFACE_SIZE], binding[P2P_COOKIE_BINDING_SIZE];
         memcpy(preface, peer->remote_preface, sizeof(preface));
         memcpy(binding, peer->cookie_binding, sizeof(binding));
-        peer->connect_time = peer->last_seen = salts_hrtime();
+        peer->connect_time = peer->last_seen = cmeta_hrtime();
         result = p2p_peer_start_inbound_handshake_after_cookie(peer, preface, binding);
         p2p_crypto_wipe(preface, sizeof(preface));
         p2p_crypto_wipe(binding, sizeof(binding));
@@ -84,7 +84,7 @@ int p2p_peer_connect_cnet(p2p_peer_t *peer, p2p_cnet_owner_t *owner) {
     result = p2p_cnet_owner_connect(owner, &remote, &events, &peer->conn);
     if (result == P2P_OK) {
         peer->state = P2P_PEER_STATE_CONNECTING;
-        peer->connect_time = salts_hrtime();
+        peer->connect_time = cmeta_hrtime();
     } else p2p_node_release_transport_send_capacity(peer->node, peer);
     return result;
 }

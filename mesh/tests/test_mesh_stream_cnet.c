@@ -148,7 +148,7 @@ static void init_pair(test_pair_t *pair) {
   cnet_tls_server_config server_config = {0};
   cnet_tls_client_config tls_config = {0};
   cnet_connect_options options = {0};
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   uint16_t port = 0u;
   char uri[64];
 
@@ -171,7 +171,7 @@ static void init_pair(test_pair_t *pair) {
   options.tls = &tls_config;
   check_equal(cnet_connect(&pair->sender.client, &options, &pair->sender.connection), SALTS_OK);
   while ((!pair->sender.connected || !pair->receiver.connected) &&
-         salts_monotonic_ms() < deadline)
+         cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(pair->sender.connected);
   check_true(pair->receiver.connected);
@@ -274,7 +274,7 @@ spec("mesh stream CNet TLS send settlement") {
     mesh_stream_frame_view_t frame;
     size_t consumed = 0u;
     size_t required = 0u;
-    uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
     check_equal(cnet_tls_export_channel_binding(&pair.sender.client, pair.sender.connection,
                                                  sender_binding), SALTS_OK);
     check_equal(cnet_tls_export_channel_binding(&pair.receiver.client, pair.receiver.connection,
@@ -283,7 +283,7 @@ spec("mesh stream CNet TLS send settlement") {
     check_equal(cnet_receive(&pair.receiver.client, pair.receiver.connection, 1u), SALTS_OK);
     admit_accept(&pair.sender);
     while ((pair.sender.sent == 0u || pair.receiver.received_size < MESH_STREAM_FIXED_HEADER_SIZE) &&
-           salts_monotonic_ms() < deadline)
+           cmeta_monotonic_ms() < deadline)
       drive_pair(&pair);
     check_equal(pair.sender.sent, 1u);
     check_equal(pair.sender.settle_result, MESH_STREAM_TRANSPORT_OK);
@@ -298,10 +298,10 @@ spec("mesh stream CNet TLS send settlement") {
   }
 
   it("settles close-before-progress as failure without activating ACCEPT") {
-    uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
     admit_accept(&pair.sender);
     check_equal(cnet_close(&pair.sender.client, pair.sender.connection), SALTS_OK);
-    while (!pair.sender.terminal && salts_monotonic_ms() < deadline)
+    while (!pair.sender.terminal && cmeta_monotonic_ms() < deadline)
       drive_pair(&pair);
     check_true(pair.sender.terminal);
     check_equal(pair.sender.sent, 0u);

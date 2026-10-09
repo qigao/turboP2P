@@ -34,14 +34,14 @@ static int connect_peer(p2p_peer_t *peer, void *context) {
     int result = P2P_OK;
     if (owner->stopping) return P2P_ERR_INVALID_STATE;
     if (peer->state == P2P_PEER_STATE_DISCONNECTED) {
-        salts_mutex_lock(&owner->node->mutex);
+        cmeta_mutex_lock(&owner->node->mutex);
         /* The connector has already inserted a new endpoint. Retained failed
          * endpoints count too, so retries cannot grow an unbounded peer table. */
         if ((size_t)peer_table_count(owner->node->peers_table) > owner->peer_limit) {
             owner->node->security_rejection_counts[P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE]++;
             result = P2P_ERR_RESOURCE_EXHAUSTED;
         } else result = capacity_locked(owner->node, peer->ip);
-        salts_mutex_unlock(&owner->node->mutex);
+        cmeta_mutex_unlock(&owner->node->mutex);
     }
     if (result != P2P_OK) return result;
     return p2p_peer_connect_cnet(peer, owner->transport);
@@ -94,11 +94,11 @@ static int admit(const cnet_stream_peer *source, void *context) {
     if (owner->stopping) return P2P_ERR_INVALID_STATE;
     result = source_ip(source, ip);
     if (result != P2P_OK) return result;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     result = capacity_locked(node, ip);
     if (result == P2P_OK)
-        result = p2p_node_source_admission_acquire_locked(node, ip, salts_monotonic_ms());
-    salts_mutex_unlock(&node->mutex);
+        result = p2p_node_source_admission_acquire_locked(node, ip, cmeta_monotonic_ms());
+    cmeta_mutex_unlock(&node->mutex);
     return result;
 }
 
@@ -119,7 +119,7 @@ static int promote(const cnet_stream_peer *source,
         p2p_node_record_security_failure(node, P2P_SECURITY_STAGE_NOISE, P2P_ERR_NO_MEM);
         return P2P_ERR_NO_MEM;
     }
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     result = capacity_locked(node, ip);
     if (result == P2P_OK && (size_t)peer_table_count(node->peers_table) >= owner->peer_limit) {
         node->security_rejection_counts[P2P_SECURITY_REJECTION_HANDSHAKE_RESOURCE]++;
@@ -132,14 +132,14 @@ static int promote(const cnet_stream_peer *source,
         if (p2p_node_find_peer_by_endpoint_locked(node, ip, source->port) != peer)
             result = P2P_ERR_NO_MEM;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (result == P2P_OK)
         result = p2p_peer_prepare_cnet_inbound(peer, preface, binding, output);
     if (result != P2P_OK) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         if (p2p_node_find_peer_by_endpoint_locked(node, ip, source->port) == peer)
             p2p_node_remove_peer_by_endpoint_locked(node, ip, source->port);
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         if (result != P2P_ERR_RESOURCE_EXHAUSTED)
             p2p_node_record_security_failure(node, P2P_SECURITY_STAGE_NOISE, result);
@@ -164,9 +164,9 @@ static void rejected(const cnet_stream_peer *source, int status,
         p2p_node_record_security_failure(owner->node, P2P_SECURITY_STAGE_COOKIE, status);
         return;
     }
-    salts_mutex_lock(&owner->node->mutex);
+    cmeta_mutex_lock(&owner->node->mutex);
     owner->node->security_rejection_counts[reason]++;
-    salts_mutex_unlock(&owner->node->mutex);
+    cmeta_mutex_unlock(&owner->node->mutex);
 }
 
 int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
@@ -218,12 +218,12 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
         free(owner);
         return result;
     }
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     node->network_ops = &network_ops;
     node->network_context = owner;
     node->query_cookie_status_locked = cookie_status_locked;
-    salts_mutex_unlock(&node->mutex);
-    owner->maintenance_ms = salts_monotonic_ms();
+    cmeta_mutex_unlock(&node->mutex);
+    owner->maintenance_ms = cmeta_monotonic_ms();
     *output = owner;
     return P2P_OK;
 }
@@ -249,13 +249,13 @@ static void reap_disconnected(p2p_node_t *node) {
     for (;;) {
         p2p_peer_entry_t *entry, *tmp;
         p2p_peer_t *peer = NULL;
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         HASH_ITER(hh, node->peers_table, entry, tmp) {
             if (!entry->peer->conn && entry->peer->state == P2P_PEER_STATE_DISCONNECTED &&
                 (entry->peer->counted || !entry->peer->keep_entry) &&
                 p2p_peer_hold_locked(entry->peer)) { peer = entry->peer; break; }
         }
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         if (!peer) break;
         int destroy = !peer->keep_entry;
         p2p_node_on_peer_disconnected(node, peer);
@@ -270,7 +270,7 @@ int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
     if (!owner) return P2P_ERR_INVALID_ARG;
     if (owner->busy || owner->stopping) return P2P_ERR_INVALID_STATE;
     owner->busy = 1;
-    now = salts_monotonic_ms();
+    now = cmeta_monotonic_ms();
     result = p2p_cnet_admission_expire(owner->admission, now);
     p2p_node_expire_pending_peers(owner->node, now);
     if (result == P2P_OK && !owner->stopping) {
@@ -296,13 +296,13 @@ static void detach_node(p2p_node_cnet_t *owner) {
     p2p_peer_entry_t *peers, *entry, *tmp;
     p2p_dht_lookup_t *lookups, *lookup, *next;
     /* Detach memberships before shutdown invokes any cancellation cleanup. */
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     peers = node->peers_table;
     node->peers_table = NULL;
     node->peer_count = 0;
     lookups = node->dht_lookups;
     node->dht_lookups = NULL;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     HASH_ITER(hh, peers, entry, tmp) {
         HASH_DEL(peers, entry);
         entry->peer->counted = 0;
@@ -352,14 +352,14 @@ int p2p_node_cnet_destroy(p2p_node_cnet_t *owner) {
     /* Transfer the final, quiescent counters before releasing their owner.
      * A concurrent status reader holds this same mutex and cannot observe a
      * retired query target. No live counter mirror exists during operation. */
-    salts_mutex_lock(&owner->node->mutex);
+    cmeta_mutex_lock(&owner->node->mutex);
     p2p_node_cookie_status_t final_status;
     cookie_status_locked(owner->node, &final_status);
     owner->node->active_cookie_gates = final_status.active;
     owner->node->cookie_challenges_issued = final_status.challenges_issued;
     owner->node->cookie_verifications_succeeded = final_status.verifications_succeeded;
     owner->node->query_cookie_status_locked = p2p_node_saved_cookie_status_locked;
-    salts_mutex_unlock(&owner->node->mutex);
+    cmeta_mutex_unlock(&owner->node->mutex);
     result = p2p_cnet_admission_destroy(owner->admission);
     if (result != P2P_OK) return result;
     owner->node->network_ops = NULL;

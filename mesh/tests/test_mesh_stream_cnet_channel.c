@@ -106,7 +106,7 @@ spec("authenticated CNet receiver channel") {
   }
 
   it("revokes before delivering DATA when live identity authorization is lost") {
-    uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
     start_stream(&pair);
     check_equal(settle_held(&pair, SALTS_OK, pair.receiver.held_bytes, pair.now), MESH_STREAM_CHANNEL_OK);
     check_equal(mesh_stream_cnet_bind_abort_v1(&pair.receiver.bind, pair.receiver.connection, pair.now),
@@ -114,7 +114,7 @@ spec("authenticated CNet receiver channel") {
     pair.receiver.expected_channel_result = MESH_STREAM_CHANNEL_AUTH_REQUIRED;
     send_stream(&pair, MESH_STREAM_FRAME_DATA, 1u, 0u);
     while (receiver_channel(&pair)->state == MESH_STREAM_CHANNEL_READY &&
-           salts_monotonic_ms() < deadline)
+           cmeta_monotonic_ms() < deadline)
       drive_pair(&pair);
     check_equal(receiver_channel(&pair)->state, MESH_STREAM_CHANNEL_REVOKED);
     check_equal(pair.receiver.data_bytes, 0u);

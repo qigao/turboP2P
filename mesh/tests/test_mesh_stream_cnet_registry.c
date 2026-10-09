@@ -265,9 +265,9 @@ spec("authenticated CNet registry routes") {
         pair.receiver.connection, pair.now), MESH_STREAM_BIND_IO_FAILED);
     pair.receiver.expected_channel_result = MESH_STREAM_CHANNEL_AUTH_REQUIRED;
     send_stream(&pair, MESH_STREAM_FRAME_DATA, 1u, 0u);
-    uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
     while (receiver_channel(&pair)->state == MESH_STREAM_CHANNEL_READY &&
-           salts_monotonic_ms() < deadline)
+           cmeta_monotonic_ms() < deadline)
       drive_pair(&pair);
     check_equal(query(&pair, handle).state, MESH_STREAM_CHANNEL_REVOKED);
     check_equal(pair.receiver.data_bytes, 0u);

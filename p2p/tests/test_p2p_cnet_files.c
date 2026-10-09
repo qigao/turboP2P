@@ -24,7 +24,7 @@ static void completed(p2p_transfer_t *transfer, int success, const char *error, 
 }
 static unsigned char file_byte(size_t offset) { return (unsigned char)(offset * 17 + offset / 251); }
 static void setup_files(file_fixture_t *fixture, size_t bytes) {
-    uint64_t stamp = salts_hrtime();
+    uint64_t stamp = cmeta_hrtime();
     snprintf(fixture->source, sizeof(fixture->source), "p2p-cnet-%llu-source.tmp", (unsigned long long)stamp);
     snprintf(fixture->output, sizeof(fixture->output), "p2p-cnet-%llu-output.tmp", (unsigned long long)stamp);
     FILE *source = fopen(fixture->source, "wbx");
@@ -44,8 +44,8 @@ static void start_download(file_fixture_t *fixture) {
         fixture->output, completed, fixture));
 }
 static void wait_complete(file_fixture_t *fixture) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!fixture->completed && salts_monotonic_ms() < deadline) pump(&fixture->pair);
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!fixture->completed && cmeta_monotonic_ms() < deadline) pump(&fixture->pair);
     check_equal(1, fixture->completed);
 }
 static void check_file(const char *path, size_t bytes) {
@@ -68,8 +68,8 @@ static void test_file_roundtrip(size_t bytes, int parallel) {
     wait_complete(&fixture);
     check_equal(1, fixture.success);
     check_file(fixture.output, bytes);
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (fixture.pair.server.node->transfers->count && salts_monotonic_ms() < deadline)
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (fixture.pair.server.node->transfers->count && cmeta_monotonic_ms() < deadline)
         pump(&fixture.pair);
     check_equal(0u, fixture.pair.server.node->transfers->count);
     p2p_transfer_status_t status = {0};
@@ -153,8 +153,8 @@ static void test_peer_disconnect(void) {
     file_fixture_t fixture = {0};
     setup_files(&fixture, FILE_TEST_BYTES);
     start_download(&fixture);
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!fixture.pair.server.node->transfers->count && salts_monotonic_ms() < deadline)
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!fixture.pair.server.node->transfers->count && cmeta_monotonic_ms() < deadline)
         pump(&fixture.pair);
     check_equal(1u, fixture.pair.server.node->transfers->count);
     p2p_peer_t *peer = fixture.pair.server.peer;
@@ -186,8 +186,8 @@ static void test_request_backpressure(void) {
     fail_chunk_request_at = 0;
     check_equal(0, fixture.success);
     check_equal(2, chunk_request_calls);
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (fixture.pair.server.node->transfers->count && salts_monotonic_ms() < deadline)
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (fixture.pair.server.node->transfers->count && cmeta_monotonic_ms() < deadline)
         pump(&fixture.pair);
     check_equal(0u, fixture.pair.server.node->transfers->count);
     check_equal(1, fixture.completed);

@@ -43,13 +43,13 @@ p2p_peer_t **p2p_node_snapshot_connected_peers(p2p_node_t *node, size_t *count_o
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     capacity = (size_t)peer_table_count(node->peers_table);
     if (capacity > 0) {
         peers = (p2p_peer_t **)calloc(capacity, sizeof(*peers));
     }
     if (capacity > 0 && !peers) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return NULL;
     }
 
@@ -62,7 +62,7 @@ p2p_peer_t **p2p_node_snapshot_connected_peers(p2p_node_t *node, size_t *count_o
         }
         peers[count++] = curr->peer;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     *count_out = count;
     return peers;
@@ -82,13 +82,13 @@ p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *cou
         return NULL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     capacity = (size_t)peer_table_count(node->peers_table);
     if (capacity > 0) {
         infos = (p2p_peer_info_ex_t *)calloc(capacity, sizeof(*infos));
     }
     if (capacity > 0 && !infos) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return NULL;
     }
 
@@ -101,7 +101,7 @@ p2p_peer_info_ex_t *p2p_node_snapshot_peer_info_ex(p2p_node_t *node, size_t *cou
         p2p_peer_fill_info_ex_locked(peer, &infos[count]);
         count++;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     *count_out = count;
     return infos;
@@ -237,20 +237,20 @@ int p2p_dht_join_ring(p2p_node_t *node, const char *bootstrap_ip, int bootstrap_
     peer = p2p_peer_create(node, bootstrap_ip, bootstrap_port);
     if (!peer) return P2P_ERR_NO_MEM;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (p2p_node_find_peer_by_endpoint_locked(node, bootstrap_ip, bootstrap_port)) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return P2P_OK;
     }
     p2p_node_add_peer_locked(node, peer);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     ret = p2p_peer_connect(peer);
     if (ret != P2P_OK) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         p2p_node_remove_peer_by_endpoint_locked(node, bootstrap_ip, bootstrap_port);
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return ret;
     }
@@ -258,9 +258,9 @@ int p2p_dht_join_ring(p2p_node_t *node, const char *bootstrap_ip, int bootstrap_
     /* Keep the provisional route ID consistent with other endpoint-derived
      * Kademlia contacts until the authenticated peer ID is learned. */
     p2p_endpoint_to_id(bootstrap_ip, bootstrap_port, &bootstrap_id);
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_node_add_route_locked(node, bootstrap_id.bytes, bootstrap_ip, bootstrap_port);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     /* Start iterative lookup for OUR identity to discover our neighborhood */
     (void)p2p_dht_lookup_start(node, node->id, P2P_MSG_DHT_FIND_NODE);
@@ -300,7 +300,7 @@ int p2p_node_reserve_transport_send_capacity(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     reservation = node->security_config.send_hwm_bytes;
     budget = node->security_config.node_send_budget_bytes;
     if (!node->security_configured) {
@@ -320,7 +320,7 @@ int p2p_node_reserve_transport_send_capacity(p2p_node_t *node,
         node->transport_send_reservations++;
         peer->reserved_send_capacity_bytes = reservation;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -333,7 +333,7 @@ void p2p_node_release_transport_send_capacity(p2p_node_t *node,
         return;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     reservation = peer->reserved_send_capacity_bytes;
     if (reservation != 0) {
         if (node->reserved_send_capacity_bytes < reservation ||
@@ -345,7 +345,7 @@ void p2p_node_release_transport_send_capacity(p2p_node_t *node,
             peer->reserved_send_capacity_bytes = 0;
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     if (accounting_invalid) {
         TLOG_ERROR("[P2P] transport send-capacity accounting invariant failed");
@@ -397,9 +397,9 @@ void p2p_node_record_security_failure(p2p_node_t *node,
         reason = P2P_SECURITY_REJECTION_HANDSHAKE_PROTOCOL;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     node->security_rejection_counts[reason]++;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 }
 
 static uint64_t node_saturating_add_u64(uint64_t left, uint64_t right) {
@@ -453,10 +453,10 @@ void p2p_node_record_handshake_latency(
     if (!node) {
         return;
     }
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_node_record_handshake_latency_locked(node, role, stage, started_ms,
                                          completed_ms);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 }
 
 void p2p_node_on_peer_disconnected(p2p_node_t *node, p2p_peer_t *peer) {
@@ -466,12 +466,12 @@ void p2p_node_on_peer_disconnected(p2p_node_t *node, p2p_peer_t *peer) {
 
     if (!node || !peer) return;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     node_handle_peer_disconnect_locked(node, peer);
     node_capture_peer_event_locked(node, peer, node->on_peer_disconnected,
                                    node->peer_user_data, &on_peer_disconnected,
                                    &peer_user_data, &hold_peer);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     if (on_peer_disconnected) {
         on_peer_disconnected(peer, peer_user_data);
@@ -491,7 +491,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
 
     if (!node || !peer) return;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     should_publish_endpoint = node_activate_authenticated_peer_locked(node, peer,
                                                                       &stale_peer,
                                                                       &duplicate_peer);
@@ -503,7 +503,7 @@ void p2p_node_on_peer_authenticated(p2p_node_t *node, p2p_peer_t *peer) {
                                        node->peer_user_data, &on_peer_connected,
                                        &peer_user_data, &hold_peer);
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     if (stale_peer) {
         p2p_peer_destroy(stale_peer);
@@ -532,11 +532,11 @@ static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!peer->is_connected || peer->state != P2P_PEER_STATE_CONNECTED ||
         !p2p_crypto_session_is_ready(&peer->crypto) ||
         peer->outstanding_ping_ms != 0) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
 
@@ -545,22 +545,22 @@ static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
         strncpy(ping.ip, node->ip, sizeof(ping.ip) - 1);
     }
     ping.port = (uint16_t)node->port;
-    ping.timestamp = salts_hrtime() / 1000000;
+    ping.timestamp = cmeta_hrtime() / 1000000;
     memcpy(ping.coords, node->coord.coords, sizeof(ping.coords));
     ping.height = node->coord.height;
     ping.error = node->coord.error;
     peer->last_ping_sent_ms = ping.timestamp;
     peer->outstanding_ping_ms = ping.timestamp;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     ret = p2p_send_message(node, peer, P2P_MSG_PING, &ping, sizeof(ping));
     if (ret != P2P_OK) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         if (peer->outstanding_ping_ms == ping.timestamp) {
             peer->outstanding_ping_ms = 0;
             peer->last_ping_sent_ms = 0;
         }
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return ret;
 }
@@ -1059,9 +1059,9 @@ void p2p_node_expire_pending_peers(p2p_node_t *node, uint64_t now) {
     p2p_peer_t *expired_peer = NULL;
     if (!node) return;
     for (;;) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         expired_peer = node_take_expired_pending_peer_locked(node, now);
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
 
         if (!expired_peer) {
             break;
@@ -1093,7 +1093,7 @@ void p2p_node_maintain_peers(p2p_node_t *node, uint64_t now) {
             continue;
         }
 
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         last_seen_ms = peer->last_seen / 1000000U;
         stale = now >= last_seen_ms &&
                 now - last_seen_ms > P2P_PEER_TIMEOUT_MS;
@@ -1106,7 +1106,7 @@ void p2p_node_maintain_peers(p2p_node_t *node, uint64_t now) {
         if (stale) {
             p2p_peer_fill_info_ex_locked(peer, &peer_info);
         }
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
 
         if (stale) {
             TLOG_INFOF("[P2P] Pruning stale peer {}:{}", peer_info.ip, peer_info.port);
@@ -1212,12 +1212,12 @@ static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (force_retry) {
         p2p_clear_manual_connect_suppression_locked(node, ip, port);
     }
     peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (peer) {
         return p2p_peer_connect(peer);
     }
@@ -1228,28 +1228,28 @@ static int p2p_connect_internal(p2p_node_t *node, const char *ip, int port,
     }
     peer->keep_entry = 1;
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     existing_peer = p2p_prepare_connect_peer_locked(node, ip, port, force_retry);
     if (existing_peer) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return p2p_peer_connect(existing_peer);
     }
     p2p_node_add_peer_locked(node, peer);
     added_to_table = p2p_node_find_peer_by_endpoint_locked(node, ip, port) == peer;
     if (!added_to_table) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_peer_destroy(peer);
         return P2P_ERR_NO_MEM;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     ret = p2p_peer_connect(peer);
     if (ret != P2P_OK) {
         if (added_to_table) {
-            salts_mutex_lock(&node->mutex);
+            cmeta_mutex_lock(&node->mutex);
             p2p_node_remove_peer_by_endpoint_locked(node, ip, port);
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
         }
         p2p_peer_destroy(peer);
         return ret;
@@ -1274,11 +1274,11 @@ int p2p_peer_get_info_ex(p2p_peer_t *peer, p2p_peer_info_ex_t *info) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
     p2p_peer_fill_info_ex_locked(peer, info);
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
