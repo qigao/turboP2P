@@ -366,10 +366,10 @@ static void test_invalid_and_duplicate(void) {
 
 #ifdef P2P_KEY_WORKER_TEST_WRAP
 static int reject_submit;
-int __real_salts_threadpool_try_submit_task(cmeta_threadpool_t *, const cmeta_threadpool_task_t *);
-int __wrap_salts_threadpool_try_submit_task(cmeta_threadpool_t *pool, const cmeta_threadpool_task_t *task) {
+int __real_cmeta_threadpool_try_submit_task(cmeta_threadpool_t *, const cmeta_threadpool_task_t *);
+int __wrap_cmeta_threadpool_try_submit_task(cmeta_threadpool_t *pool, const cmeta_threadpool_task_t *task) {
     if (reject_submit) { reject_submit = 0; return SALTS_ENOBUFS; }
-    return __real_salts_threadpool_try_submit_task(pool, task);
+    return __real_cmeta_threadpool_try_submit_task(pool, task);
 }
 static void test_pool_rejection(void) {
     provider_t context = {0};
