@@ -183,7 +183,7 @@ static void read_status(void *context) {
 static void test_status_handoff(void) {
     pair_t pair = {0};
     status_reader_t reader = {0};
-    salts_thread_t thread;
+    cmeta_thread_t thread;
     setup(&pair, 7, 0);
     reader.node = pair.server.node;
     atomic_init(&reader.stop, 0); atomic_init(&reader.reads, 0); atomic_init(&reader.errors, 0);

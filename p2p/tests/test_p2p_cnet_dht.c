@@ -78,7 +78,7 @@ static void remote_loop(void *context) {
 static void test_remote_get(int short_buffer, int missing) {
     pair_t pair = {0};
     remote_loop_t loop = {0};
-    salts_thread_t thread = NULL;
+    cmeta_thread_t thread = NULL;
     uint8_t network[P2P_SECURITY_ID_SIZE] = {9};
     uint8_t output[sizeof(cache_value)] = {0};
     size_t length = short_buffer ? 1 : sizeof(output);
