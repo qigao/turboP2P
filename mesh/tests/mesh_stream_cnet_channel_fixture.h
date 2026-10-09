@@ -109,9 +109,9 @@ static void send_stream(test_pair_t *pair, uint8_t type, uint64_t sequence, uint
 }
 
 static void await_held(test_pair_t *pair, size_t peer_bytes) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   while ((!pair->receiver.held_count || pair->sender.received_size < peer_bytes) &&
-         salts_monotonic_ms() < deadline)
+         cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_equal(pair->receiver.held_count, 1u);
   check_equal(pair->sender.received_size, peer_bytes);
@@ -150,12 +150,12 @@ static void close_stream(test_pair_t *pair) {
 }
 
 static void reconnect_pair(test_pair_t *pair) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
   cnet_tls_client_config tls_config = {0};
   cnet_connect_options options = {0};
   uint16_t port = 0u;
   char uri[64];
-  while ((!pair->sender.terminal || !pair->receiver.terminal) && salts_monotonic_ms() < deadline)
+  while ((!pair->sender.terminal || !pair->receiver.terminal) && cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(pair->sender.terminal);
   check_true(pair->receiver.terminal);
@@ -178,8 +178,8 @@ static void reconnect_pair(test_pair_t *pair) {
   options.tls = &tls_config;
   options.observer = observer(&pair->sender);
   check_equal(cnet_connect(&pair->sender.client, &options, &pair->sender.connection), SALTS_OK);
-  deadline = salts_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
-  while ((!pair->sender.connected || !pair->receiver.connected) && salts_monotonic_ms() < deadline)
+  deadline = cmeta_monotonic_ms() + TEST_RUN_TIMEOUT_MS;
+  while ((!pair->sender.connected || !pair->receiver.connected) && cmeta_monotonic_ms() < deadline)
     drive_pair(pair);
   check_true(pair->sender.connected);
   check_true(pair->receiver.connected);
