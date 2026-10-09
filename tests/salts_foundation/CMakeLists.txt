@@ -280,6 +280,7 @@ target_link_libraries(mgmt_agent_runtime PUBLIC foundation p2p_node_core Salts::
 # any network Owner callback; no JSON runtime in the P2P data path.
 add_library(mesh_mgmt_client_config STATIC
   "${mesh_src}/mesh_mgmt_client_config.c")
+target_compile_definitions(mesh_mgmt_client_config PRIVATE MESH_MGMT_CLIENT_CONFIG_DIAGNOSTICS)
 target_include_directories(mesh_mgmt_client_config PUBLIC "${mesh_src}")
 target_link_libraries(mesh_mgmt_client_config PUBLIC mgmt_agent_runtime
   PRIVATE Salts::DataBind)
