@@ -21,6 +21,7 @@ typedef struct sg_lane {
     const void *worker_token;
     size_t observe_calls, observed, settled;
     unsigned cancelled, accepted;
+    unsigned wrong_owner_rejections;
     bool released;
     bool stopped;
     size_t stop_retries;
