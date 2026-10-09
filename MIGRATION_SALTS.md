@@ -1,5 +1,7 @@
 # Salts / SaltsUtils 分阶段迁移
 
+> **当前基线（2026-10）**：Salts 2.3 / SaltsUtils 4.3 的升级、ACE+CNet Owner 策略和 DataBind 契约统一由 [Issue #33](https://github.com/qigao/turboP2P/issues/33) / [PR #34](https://github.com/qigao/turboP2P/pull/34) 跟踪，见 [docs/SALTS_23_MIGRATION.md](docs/SALTS_23_MIGRATION.md)。以下 1.8.x / 4.1.x 版本及运行记录属于历史阶段，不是当前下游依赖/发布基线。根工程尚有 legacy TurboNet/TurboHttp/Parser/Utils 迁移债务，不能根据独立 SDK 通过认定产品完成。
+
 已完成的阶段包括 SHA-256、三个内部容器持有者、异步控制帧发送终态，以及身份绑定核心的加密与随机数迁移、CNet TLS 1.3 三消息身份绑定，以及绑定后的异步 receiver channel、registry 授权路由、tunnel 产品 TCP/TLS 调用方、MMP 异步协议和 CNet TLS 签名 peer。根工程仍需要原有 TurboNet、TurboHttp、TurboParser、TurboUtils SDK；仅安装新 SDK 尚不能构建整个产品。
 
 ## 审查发现

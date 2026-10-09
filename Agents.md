@@ -1,5 +1,16 @@
 # AGENTS.md
 
+## 当前 Native SDK 与模式基线（2026-10）
+
+- **依赖**：消费最新的 Salts.Native `2.3.0-*`、SaltsUtils.Native `4.3.0-*`，记录 CI 实际恢复版本；不固定某个 RC，不容忍缺失 SDK 的静默替代。原 `skills/turboutils.md` / `skills/coronet.md` 仅供旧源码迁移审计，不作为新代码接口来源。
+- **网络**：`Salts::CNet` 是唯一网络 Owner，NativeIO Sharded Graph 是其下层执行机制。ACE Configurator 在应用启动时加载/验证不可变拓扑与内建策略。Server Owner Placement 只在 accept admission 计算；Client Destination/Pool/Reconnect/Retry 分别验证策略选择、真实连接额度、协议 READY 与应用级重试授权，不能互相替代。Manager/Handoff 已包含在 `Salts::CNet`，禁止新建 Manager DSO、CoroNet 后端、Actor/SG 并行运行时或逐包策略求值。
+- **领域与协议**：Noise/MMP 的身份验证和实际发送终态是业务事实源，TCP CONNECTED 不等于协议 READY。安全失败不可降级；文件、DHT、管理写操作禁止由传输重连隐式重放。
+- **类型/配置**：CMeta 描述 ABI/ACE callable；SaltsUtils 4.3 `Salts::DataBind` 负责 IDL、typed config、服务描述和 admission-time 编译计划。控制面解析/校验放在边界，已接纳的数据面不重复遍历反射，也不隐式将 Contract IR 变成 Binary admission。
+- **平台 ABI**：Salts 2.3 的线程、mutex、clock 与安全随机数调用使用 `cmeta_*` 导出，链接和故障注入测试不得继续使用已退役的 `salts_*` Platform 名称。
+- **CI**：优先共享 `qigao/vcpkg-cache` + `ccache`，分别验证 SDK/ABI 基础门禁与完整产品构建/安装消费者；基础门禁绿不得标称根工程完成迁移。
+
+跟踪入口：[#33](https://github.com/qigao/turboP2P/issues/33)；当前迁移边界见 [docs/SALTS_23_MIGRATION.md](docs/SALTS_23_MIGRATION.md)。
+
 ## 宗旨
 
 本文件用于约束本仓库内之开发、调试、文档与审查行为。
