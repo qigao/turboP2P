@@ -263,6 +263,16 @@ target_link_libraries(test_p2p_cnet_sg_host PRIVATE
 add_test(NAME test_p2p_cnet_sg_host COMMAND test_p2p_cnet_sg_host)
 set_tests_properties(test_p2p_cnet_sg_host PROPERTIES TIMEOUT 90)
 
+# Four *actual* SG NativeIO workers, three distinct final P2P Owners,
+# credited cross-shard TCP, and real Noise identity/data callback affinity.
+add_executable(test_p2p_cnet_sg_host_four
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_sg_host_four.c")
+set_property(TARGET test_p2p_cnet_sg_host_four PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_sg_host_four PRIVATE
+  p2p_node_core Salts::CNet Salts::TinyTest)
+add_test(NAME test_p2p_cnet_sg_host_four COMMAND test_p2p_cnet_sg_host_four)
+set_tests_properties(test_p2p_cnet_sg_host_four PROPERTIES TIMEOUT 90)
+
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
 set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_lifecycle PRIVATE p2p_node_core Salts::TinyTest)

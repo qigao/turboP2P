@@ -245,3 +245,29 @@ a stricter gate than merely checking strategy IDs or a mocked completion
 batch, but it is **not** mixed-protocol cohosting nor a 1/2/4-core performance
 qualification. Complete #37 only after SG-host multi-consumer, 4-shard
 workloads, real multicore benchmark and cross-platform installed SDK gates.
+
+
+### Phase S3 — four SG-native P2P shards (#37)
+
+The `test_p2p_cnet_sg_host_four` installed-SDK gate runs **four** real
+`native_io_sharded` workers: one acceptor with a listener and three
+separate final P2P/Noise Owners, each borrowing its own SG Host lease and
+backend. The acceptor applies one CNet `ROUND_ROBIN` placement per accepted
+socket, transfers it through a distinct bounded `cnet_handoff` inbox, and
+the selected Owner alone performs cookie/Noise/credential admission and
+application callbacks.
+
+The three real standalone P2P clients connect in deterministic order; all
+three authenticated sessions then carry distinct concurrent bidirectional
+P2P messages. Each SG callback asserts its actual Owner thread identity,
+and the test refuses a modified host lease generation before observing.
+After terminal events, every taken handoff credit reaches zero. No SG backend
+is freed before the final client, borrowed callback and Host lease drain;
+an asynchronously canceled accept is observed on the **same** SG Owner
+before retrying stop.
+
+This qualifies P2P protocol *placement and correctness*, not scalability
+metrics by itself. The CNet cohosting contract for two+ external clients
+on one shard and repeatable 1/2/4-core latency/throughput/CPU measurements
+remain independently open. Release and focused ASan/UBSan are mandatory,
+and prebuilt SDK binaries remain outside instrumentation.
