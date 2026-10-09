@@ -46,6 +46,9 @@ struct p2p_cnet_owner_s {
     int busy;
     int stopping;
     int stopped;
+    native_io_backend *external_backend; /* borrowed under registered SG host lease */
+    native_io_sharded_host_lease host_lease; /* immutable SG runtime/shard affinity */
+    native_io_sharded_completion *host_batch; /* fixed-capacity scratch */
     p2p_cnet_sg_t *sg_acceptor;
     p2p_cnet_sg_t *sg_final;
     size_t sg_final_index;
@@ -365,8 +368,10 @@ static cnet_observer observer(p2p_cnet_connection_t *connection) {
     return result;
 }
 
-int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
-                          p2p_cnet_owner_t **output) {
+static int create_owner_impl(const p2p_cnet_config_t *config,
+                             native_io_backend *external_backend,
+                             native_io_sharded_host_lease host_lease,
+                             p2p_cnet_owner_t **output) {
     p2p_cnet_owner_t *owner;
     int status;
     if (!output) return P2P_ERR_INVALID_ARG;
@@ -374,14 +379,53 @@ int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
     if (!config || !config->send_hwm_bytes || !config->pending_write_limit ||
         config->pending_write_limit > SIZE_MAX / sizeof(p2p_cnet_write_t) ||
         !config->accept_budget || !config->stop_timeout_ms ||
-        config->client.tls_io_buffer_bytes) return P2P_ERR_INVALID_ARG;
+        config->client.tls_io_buffer_bytes)
+        return P2P_ERR_INVALID_ARG;
+    if (external_backend &&
+        (host_lease.version != NATIVE_IO_SHARDED_HOST_VERSION ||
+         !host_lease.owner_identity || !host_lease.generation))
+        return P2P_ERR_INVALID_ARG;
+    if (external_backend && (!config->client.completion_batch_capacity ||
+        config->client.completion_batch_capacity >
+            SIZE_MAX / sizeof(native_io_sharded_completion)))
+        return P2P_ERR_INVALID_ARG;
     owner = calloc(1, sizeof(*owner));
     if (!owner) return P2P_ERR_NO_MEM;
     owner->config = *config;
-    status = cnet_client_init(&owner->client, &config->client);
-    if (status != SALTS_OK) { free(owner); return p2p_error(status); }
+    owner->external_backend = external_backend;
+    owner->host_lease = host_lease;
+    if (external_backend) {
+        /* One startup allocation for the complete bounded host-observed batch.
+         * No per-shard-turn allocation and no NativeIO observe ownership here. */
+        owner->host_batch = calloc(config->client.completion_batch_capacity,
+                                    sizeof(*owner->host_batch));
+        if (!owner->host_batch) { free(owner); return P2P_ERR_NO_MEM; }
+        status = cnet_client_init_external(&owner->client, &config->client,
+                                           external_backend);
+    } else status = cnet_client_init(&owner->client, &config->client);
+    if (status != SALTS_OK) {
+        free(owner->host_batch);
+        free(owner);
+        return p2p_error(status);
+    }
     *output = owner;
     return P2P_OK;
+}
+
+int p2p_cnet_owner_create(const p2p_cnet_config_t *config,
+                          p2p_cnet_owner_t **output) {
+    return create_owner_impl(config, NULL, (native_io_sharded_host_lease){0}, output);
+}
+
+int p2p_cnet_owner_create_external(const p2p_cnet_config_t *config,
+                                   native_io_backend *borrowed_backend,
+                                   native_io_sharded_host_lease lease,
+                                   p2p_cnet_owner_t **output) {
+    if (!borrowed_backend) {
+        if (output) *output = NULL;
+        return P2P_ERR_INVALID_ARG;
+    }
+    return create_owner_impl(config, borrowed_backend, lease, output);
 }
 
 static int close_listener(p2p_cnet_owner_t *owner) {
@@ -399,7 +443,7 @@ int p2p_cnet_owner_listen(p2p_cnet_owner_t *owner, const char *host,
     cnet_listener_config config = {0};
     int status;
     if (!owner || !host || !accept || !local || !backlog) return P2P_ERR_INVALID_ARG;
-    if (owner->stopping || owner->listener.impl) return P2P_ERR_INVALID_STATE;
+    if (owner->stopping || owner->listener.impl || owner->accept) return P2P_ERR_INVALID_STATE;
     config.backend = owner->config.client.backend;
     config.host = host;
     config.port = port;
@@ -411,6 +455,31 @@ int p2p_cnet_owner_listen(p2p_cnet_owner_t *owner, const char *host,
         close_listener(owner);
         return p2p_error(status);
     }
+    if (owner->external_backend) {
+        native_io_request accepted = {0};
+        status = cnet_listener_attach_external(&owner->listener,
+                                               owner->external_backend);
+        if (status == SALTS_OK)
+            status = cnet_listener_submit_external_accept(&owner->listener,
+                                                          &accepted);
+        if (status != SALTS_OK) {
+            close_listener(owner);
+            return p2p_error(status);
+        }
+    }
+    owner->accept = accept;
+    owner->accept_context = context;
+    return P2P_OK;
+}
+
+int p2p_cnet_owner_bind_handoff_accept(p2p_cnet_owner_t *owner,
+                                       p2p_cnet_accept_fn accept,
+                                       void *context) {
+    if (!owner || !accept) return P2P_ERR_INVALID_ARG;
+    if (!owner->external_backend || !owner->client.impl ||
+        owner->listener.impl || owner->accept ||
+        owner->busy || owner->stopping || owner->stopped)
+        return P2P_ERR_INVALID_STATE;
     owner->accept = accept;
     owner->accept_context = context;
     return P2P_OK;
@@ -757,7 +826,11 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     size_t events = 0;
     int result, progress;
     if (!owner) return P2P_ERR_INVALID_ARG;
-    if (owner->busy || owner->stopped) return P2P_ERR_INVALID_STATE;
+    /* Explicit progress mode is a construction-time ownership contract;
+     * accidentally calling the owned-backend poll on an SG Hosted Owner
+     * must NOT mark it stopping or try to create a second observer. */
+    if (owner->external_backend || owner->busy || owner->stopped)
+        return P2P_ERR_INVALID_STATE;
     if (owner->stopping) return p2p_cnet_owner_stop(owner);
     owner->busy = 1;
     result = sg_take_owner(owner, 0);
@@ -779,6 +852,91 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     if (owner->stopping) {
         int stop_result = p2p_cnet_owner_stop(owner);
         if (result == P2P_OK) result = stop_result;
+    }
+    return result;
+}
+
+/* SG Host owns the only observer on this shard. This transport borrows the
+ * backend under the provided immutable Host lease, so there is no private
+ * NativeIO poll, hidden actor task, backend allocation or second observe.
+ *
+ * The API is intentionally one-transport-per-shard. When multiple CNet
+ * consumers share a shard the host must advance/route them in ONE combined
+ * cnet_sg_host_routes, not invoke this helper once for each consumer. */
+int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
+                                native_io_sharded_context *context,
+                                native_io_sharded_host_lease lease,
+                                size_t *out_observed,
+                                size_t *out_sg_settled) {
+    size_t count = 0u, routed_events = 0u;
+    size_t accepts = 0u, sharded = 0u;
+    cnet_sg_host_routes routes = {0};
+    cnet_client *clients[1];
+    int result = P2P_OK, status;
+    if (out_observed) *out_observed = 0u;
+    if (out_sg_settled) *out_sg_settled = 0u;
+    if (!owner || !context || !out_observed || !out_sg_settled ||
+        !owner->external_backend || !owner->host_batch ||
+        owner->busy || owner->stopped ||
+        lease.version != NATIVE_IO_SHARDED_HOST_VERSION ||
+        owner->host_lease.owner_identity != lease.owner_identity ||
+        owner->host_lease.owner_shard != lease.owner_shard ||
+        owner->host_lease.generation != lease.generation ||
+        native_io_sharded_context_shard(context) != (size_t)lease.owner_shard)
+        return P2P_ERR_INVALID_STATE;
+    owner->busy = 1;
+
+    if (owner->sg_final) {
+        result = sg_take_owner(owner, owner->stopping);
+        if (result != P2P_OK) goto done;
+    }
+    resume_connections(owner);
+    status = cnet_client_advance_external(&owner->client, &routed_events);
+    if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+
+    status = native_io_sharded_context_observe_host(
+        context, lease, owner->host_batch,
+        owner->config.client.completion_batch_capacity, 0u, &count);
+    if (status != SALTS_OK && status != SALTS_ETIMEDOUT) {
+        result = p2p_error(status);
+        goto done;
+    }
+    *out_observed = count;
+    clients[0] = &owner->client;
+    routes.size = sizeof(routes);
+    routes.version = CNET_SG_HOST_ROUTING_VERSION;
+    routes.listener = owner->listener.impl ? &owner->listener : NULL;
+    routes.clients = clients;
+    routes.client_count = 1u;
+    status = cnet_sg_host_route_batch(owner->host_batch, count, &routes,
+                                       &accepts, &sharded);
+    *out_sg_settled = sharded;
+    if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+
+    if (accepts != 0u && !owner->stopping) {
+        result = accept_connections(owner);
+        if (result != P2P_OK) goto done;
+        if (owner->listener.impl) {
+            native_io_request next = {0};
+            status = cnet_listener_submit_external_accept(&owner->listener,
+                                                           &next);
+            if (status != SALTS_OK) {
+                result = p2p_error(status);
+                goto done;
+            }
+        }
+    }
+    status = cnet_client_advance_external(&owner->client, &routed_events);
+    if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+    resume_connections(owner);
+    for (p2p_cnet_connection_t *connection = owner->connections;
+         connection; connection = connection->next)
+        try_close(connection);
+done:
+    owner->busy = 0;
+    {
+        int retire = sweep(owner);
+        if (result == P2P_OK) result = retire;
     }
     return result;
 }
@@ -805,9 +963,24 @@ int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner) {
         return sg_result; /* Retain all owner + inbox state for retry. */
     }
     listener_status = close_listener(owner);
-    status = owner->client.impl ?
-        cnet_client_stop(&owner->client, owner->config.stop_timeout_ms) : SALTS_OK;
-    destroyed = cnet_client_destroy(&owner->client);
+    if (listener_status != SALTS_OK) {
+        /* The SG Host owns the only NativeIO observer. A pending external
+         * accept cancellation must be routed to the listener before it may
+         * be destroyed. Do NOT stop/destroy the borrowed-backend CNet client
+         * here: the host must still progress that shared shard exactly once.
+         * Caller must observe/route and retry stop on the same SG Owner. */
+        owner->busy = 0;
+        return p2p_error(listener_status);
+    }
+    status = owner->client.impl
+        ? (owner->external_backend
+            ? cnet_client_stop_external(&owner->client)
+            : cnet_client_stop(&owner->client, owner->config.stop_timeout_ms))
+        : SALTS_OK;
+    /* An external Owner cannot pump its own backend during stop. Retain all
+     * callback/scratch/lease storage until the SG Host routes terminal events. */
+    destroyed = (status == SALTS_OK || status == SALTS_EALREADY)
+        ? cnet_client_destroy(&owner->client) : status;
     if (!owner->client.impl && !owner->listener.impl) owner->stopped = 1;
     owner->busy = 0;
     sg_result = sweep(owner);
@@ -829,6 +1002,7 @@ int p2p_cnet_owner_destroy(p2p_cnet_owner_t *owner) {
         owner->connections = connection->next;
         free_connection(connection);
     }
+    free(owner->host_batch);
     free(owner);
     return P2P_OK;
 }

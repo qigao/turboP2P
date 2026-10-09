@@ -253,6 +253,16 @@ target_link_libraries(test_p2p_cnet_sg_handoff PRIVATE
 add_test(NAME test_p2p_cnet_sg_handoff COMMAND test_p2p_cnet_sg_handoff)
 set_tests_properties(test_p2p_cnet_sg_handoff PROPERTIES TIMEOUT 60)
 
+# Real NativeIO SG Host with authoritative completion observe/routing and
+# final P2P CNet Owner cookie/Noise, not a second NativeIO backend.
+add_executable(test_p2p_cnet_sg_host
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_sg_host.c")
+set_property(TARGET test_p2p_cnet_sg_host PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_sg_host PRIVATE
+  p2p_node_core Salts::CNet Salts::TinyTest)
+add_test(NAME test_p2p_cnet_sg_host COMMAND test_p2p_cnet_sg_host)
+set_tests_properties(test_p2p_cnet_sg_host PROPERTIES TIMEOUT 90)
+
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
 set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_lifecycle PRIVATE p2p_node_core Salts::TinyTest)
