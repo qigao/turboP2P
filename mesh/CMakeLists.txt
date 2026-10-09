@@ -1080,6 +1080,17 @@ target_link_libraries(mesh_mgmt_endpoint_pool PUBLIC
   PRIVATE Salts::Platform)
 set_property(TARGET mesh_mgmt_endpoint_pool PROPERTY FOLDER "mesh/internal")
 
+# ACE host-side Configurator: DataBind is limited to startup/admission.
+add_library(mesh_mgmt_client_config STATIC
+  src/mesh_mgmt_client_config.c
+  src/mesh_mgmt_client_config.h)
+target_include_directories(mesh_mgmt_client_config PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_client_config
+  PUBLIC mesh_mgmt_endpoint_pool PRIVATE Salts::DataBind)
+set_property(TARGET mesh_mgmt_client_config PROPERTY FOLDER "mesh/internal")
+
+
 # Strict canonical codec and direct-trust verification boundary for signed
 # DHT endpoint records. Raw discovery bytes never enter endpoint dial state.
 add_library(mesh_mgmt_endpoint_record STATIC

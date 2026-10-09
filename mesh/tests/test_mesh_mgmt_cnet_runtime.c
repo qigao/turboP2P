@@ -1,11 +1,13 @@
 #include <tinytest.h>
 #include "mesh_mgmt_agent_runtime.h"
+#include "mesh_mgmt_client_config.h"
 #include "mesh_mgmt_test_identity.h"
 #include "core/node_state.h"
 #include "transfer/transfer.h"
 #include <cnet/cnet.h>
 #include <salts/clock.h>
 #include <salts/thread.h>
+#include <stdio.h>
 
 enum { WAIT_MS = 5000, RETRY_MS = 10, MAX_RETRY_MS = 100, TEST_PEERS = 2 };
 typedef struct {
@@ -246,10 +248,21 @@ static void test_explicit_client_strategy_real_noise_mmp(void) {
   client.config.bootstrap_count = 2u;
   initialize(&client);
 
-  policy.size = sizeof(policy);
-  policy.version = MESH_MGMT_CLIENT_DESTINATION_POLICY_VERSION;
-  policy.kind = CNET_DESTINATION_EXPLICIT;
-  memcpy(policy.explicit_transport_peer_id, beta.public_key, P2P_KEY_SIZE);
+  /* DataBind strict JSON parsing occurs at startup, outside CNet callbacks. */
+  static const char digits[] = "0123456789abcdef";
+  char peer_hex[P2P_KEY_SIZE * 2u + 1u] = {0};
+  char json[256] = {0};
+  for (size_t i = 0u; i < P2P_KEY_SIZE; i++) {
+    peer_hex[i * 2u] = digits[beta.public_key[i] >> 4u];
+    peer_hex[i * 2u + 1u] = digits[beta.public_key[i] & 15u];
+  }
+  int n = snprintf(json, sizeof(json),
+      "{\"schema_version\":1,\"kind\":\"EXPLICIT\",\"key_hash\":0,"
+      "\"transport_peer_id\":\"%s\"}", peer_hex);
+  check_true(n > 0 && (size_t)n < sizeof(json));
+  check_equal(MESH_MGMT_CLIENT_CONFIG_OK,
+      mesh_mgmt_client_policy_from_json_v1(json, (size_t)n, &policy));
+  check_equal(CNET_DESTINATION_EXPLICIT, policy.kind);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_set_client_policy_v2(&client.runtime, &policy));
   check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
