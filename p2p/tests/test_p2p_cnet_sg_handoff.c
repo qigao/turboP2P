@@ -245,9 +245,101 @@ static void test_credited_queue_full_does_not_reroute_pinned_owner(void) {
     finish_node(&client_b);
 }
 
+
+static void pump_four_final_owners(
+    endpoint_t clients[4], endpoint_t servers[4],
+    p2p_cnet_owner_t *acceptor) {
+    for (size_t i = 0u; i < 4u; ++i)
+        check_equal(P2P_OK, p2p_poll(clients[i].node));
+    check_equal(P2P_OK, p2p_cnet_owner_poll(acceptor));
+    for (size_t i = 0u; i < 4u; ++i)
+        check_equal(P2P_OK, p2p_poll(servers[i].node));
+    cmeta_sleep_ms(1u);
+}
+
+/* An explicit 4-owner graph is required in addition to the 2-owner real
+ * test: stable RR index chooses one independent final CNet backend each time.
+ * No Actor worker or fake CNet completion provider participates. */
+static void test_four_distinct_final_owners_cookie_noise_and_data(void) {
+    endpoint_t clients[4] = {{0}}, servers[4] = {{0}};
+    cnet_stream_peer listener = {0};
+    p2p_cnet_sg_t *sg = NULL;
+    for (size_t i = 0u; i < 4u; ++i) {
+        clients[i].remote = &servers[i];
+        servers[i].remote = &clients[i];
+        init_endpoint(&clients[i], 17 + (int)i * 2, 7, 0);
+        init_endpoint(&servers[i], 41 + (int)i * 2, 7, 0);
+    }
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_config_v1_t cfg = policy(
+        acceptor, p2p_node_cnet_transport_owner(servers[0].owner),
+        p2p_node_cnet_transport_owner(servers[1].owner),
+        CNET_OWNER_PLACE_ROUND_ROBIN);
+    cfg.final_owner_count = 4u;
+    cfg.final_owners[2] = p2p_node_cnet_transport_owner(servers[2].owner);
+    cfg.final_owners[3] = p2p_node_cnet_transport_owner(servers[3].owner);
+    cfg.queue_capacity = 4u;
+    cfg.connection_capacity = 4u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&cfg, &sg));
+
+    /* Stage each authenticated connection, ensuring the expected signed
+     * identity stays with its single final Owner without depending on OS
+     * accept ordering among unrelated sockets. */
+    for (size_t i = 0u; i < 4u; ++i) {
+        check_equal(P2P_OK, p2p_connect(clients[i].node,
+            "127.0.0.1", (int)listener.port));
+        uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+        while ((!clients[i].authenticated || !servers[i].authenticated) &&
+               cmeta_monotonic_ms() < deadline)
+            pump_four_final_owners(clients, servers, acceptor);
+        check_equal(1, clients[i].authenticated);
+        check_equal(1, servers[i].authenticated);
+        p2p_cnet_sg_snapshot_v1_t state = snapshot(sg, i);
+        check_equal((uint64_t)(i + 1u), state.routed);
+        check_equal((uint64_t)0u, state.denied);
+        check_equal((size_t)1u, state.handoff.taken);
+    }
+
+    for (size_t i = 0u; i < 4u; ++i) {
+        char payload[5] = {'s', 'g', '-', (char)('0' + i), '\0'};
+        check_equal(P2P_OK, p2p_send_message(clients[i].node, clients[i].peer,
+            P2P_MSG_CUSTOM, payload, sizeof(payload)));
+    }
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (cmeta_monotonic_ms() < deadline) {
+        int all_done = 1;
+        for (size_t i = 0u; i < 4u; ++i)
+            if (!servers[i].messages) all_done = 0;
+        if (all_done) break;
+        pump_four_final_owners(clients, servers, acceptor);
+    }
+    for (size_t i = 0u; i < 4u; ++i) {
+        const char expected[5] = {'s', 'g', '-', (char)('0' + i), '\0'};
+        check_equal(1, servers[i].messages);
+        check_equal(expected, servers[i].received, sizeof(expected));
+    }
+
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    for (size_t i = 0u; i < 4u; ++i) {
+        check_equal(P2P_OK, p2p_node_cnet_stop(servers[i].owner));
+        p2p_cnet_sg_snapshot_v1_t state = snapshot(sg, i);
+        check_true(state.handoff.drained);
+        check_equal((size_t)0u, state.handoff.taken);
+    }
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    for (size_t i = 0u; i < 4u; ++i) {
+        finish_node(&clients[i]);
+        finish_node(&servers[i]);
+    }
+}
+
 spec("P2P real SG cross-Owner credited accepted-stream handoff") {
     it("runs real cookie, Noise, identity and data on two final P2P Owners") {
         test_two_final_owners_real_cookie_noise_and_data();
+    }
+    it("runs four distinct final CNet Owners with authenticated FIFO data") {
+        test_four_distinct_final_owners_cookie_noise_and_data();
     }
     it("rejects unauthenticated STRICT_KEY and malformed topologies without leaks") {
         test_unauthenticated_strict_key_and_owner_alias_rejected();
