@@ -53,10 +53,11 @@ jobs:
           cmake --build build/p2p-sanitize --parallel 2 --target \
             test_p2p_security test_p2p_cnet_transport test_p2p_cnet_admission \
             test_p2p_key_worker test_p2p_cnet_peer test_p2p_cnet_node \
-            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht test_p2p_cnet_lifecycle test_mesh_mgmt_cnet_runtime \\
+            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht \
+            test_p2p_cnet_lifecycle test_mesh_mgmt_cnet_runtime \
             test_salts_23_contracts test_salts_23_contracts_cpp
           ctest --test-dir build/p2p-sanitize --output-on-failure \
-            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle))
+            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle))$'
 
 
       - name: Report ccache compilation statistics
