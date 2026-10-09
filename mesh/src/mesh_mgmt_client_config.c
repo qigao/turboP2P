@@ -3,20 +3,12 @@
 #include <data_bind.h>
 #include <data_bind_validation_plan.h>
 #include <string.h>
-#ifdef MESH_MGMT_CLIENT_CONFIG_DIAGNOSTICS
-#include <stdio.h>
-#define REPORT_DATABIND_ERROR(stage, error) \
-  fprintf(stderr, "mesh-client %s failed: status=%d path=%s message=%s\n", \
-          (stage), (int)(error).code, (error).path, (error).message)
-#else
-#define REPORT_DATABIND_ERROR(stage, error) ((void)0)
-#endif
 
 static const char MESH_CLIENT_SCHEMA[] =
     "message MeshClientPolicy {"
     " @Min(1) @Max(1) uint32 schema_version;"
-    " string kind;"
     " uint64 key_hash;"
+    " string kind;"
     " string transport_peer_id;"
     "}";
 
@@ -69,13 +61,11 @@ mesh_mgmt_client_config_result_t mesh_mgmt_client_policy_from_json_v1(
 
   if (data_bind_create_from_text(MESH_CLIENT_SCHEMA, sizeof(MESH_CLIENT_SCHEMA) - 1u,
                                  &codec, &error) != DATA_BIND_OK) {
-    REPORT_DATABIND_ERROR("schema", error);
     result = MESH_MGMT_CLIENT_CONFIG_SCHEMA_FAILED;
     goto completed;
   }
   if (data_bind_validation_plan_compile(codec, "MeshClientPolicy", &plan, &error) !=
       DATA_BIND_OK) {
-    REPORT_DATABIND_ERROR("plan", error);
     result = MESH_MGMT_CLIENT_CONFIG_SCHEMA_FAILED;
     goto completed;
   }

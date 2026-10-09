@@ -107,6 +107,15 @@ executor, application data, or secret is kept by a CNet Owner or a P2P
 receive/send callback. The full transport public key, not its 64-bit strategy
 projection, remains the Noise/MMP authentication authority.
 
+**Current SaltsUtils 4.3 admission detail:** `data_bind_create_from_text()`
+validates the schema's positional Binary field ordering even when the only
+requested format is JSON. Thus the trusted `MeshClientPolicy` declaration
+places fixed `schema_version`/`key_hash` before the two variable strings,
+while JSON object key order remains unrestricted. We do not request or infer
+Binary runtime layouts, and this loader restriction must not be hidden by a
+second schema parser or format fallback. Track true text-only schema admission
+upstream rather than allowing invalid ordering in this consumer.
+
 An EXPLICIT identity from configuration can only select a matching trusted
 static bootstrap or independently **verified** signed endpoint record.
 Configuration text does not by itself grant remote trust. The adapter accepts
