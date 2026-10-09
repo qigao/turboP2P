@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-salts-sdk
+      - name: Restore native compiler cache
+        uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-foundation-release-sanitize
+
       - name: Configure against installed SDKs
         shell: bash
         run: |
@@ -53,3 +58,8 @@ jobs:
           ctest --test-dir build/p2p-sanitize --output-on-failure \
             -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle))
 
+
+      - name: Report ccache compilation statistics
+        if: always()
+        shell: bash
+        run: ccache --show-stats
