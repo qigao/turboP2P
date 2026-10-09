@@ -99,7 +99,7 @@ static void tunnel_destroy_allocated(tunnel_t *tunnel, int stop_running)
     tunnel_route_rules_free(tunnel->include_rules);
     tunnel_route_rules_free(tunnel->exclude_rules);
 
-    salts_mutex_destroy(&tunnel->mutex);
+    cmeta_mutex_destroy(&tunnel->mutex);
     free(tunnel);
 }
 
@@ -156,7 +156,7 @@ tunnel_t* tunnel_create(const tunnel_config_t *config)
     /* Copy configuration */
     memcpy(&tunnel->config, config, sizeof(tunnel_config_t));
 
-    salts_mutex_init(&tunnel->mutex);
+    cmeta_mutex_init(&tunnel->mutex);
     if (!tunnel->mutex) {
         free(tunnel);
         return NULL;
@@ -355,7 +355,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
 {
     int should_tunnel = 1;
 
-    salts_mutex_lock(&tunnel->mutex);
+    cmeta_mutex_lock(&tunnel->mutex);
 
     /* Check exclude rules first */
     tunnel_route_rule_t *rule = tunnel->exclude_rules;
@@ -372,14 +372,14 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
     }
 
     if (!should_tunnel) {
-        salts_mutex_unlock(&tunnel->mutex);
+        cmeta_mutex_unlock(&tunnel->mutex);
         return 0;  /* Excluded */
     }
 
     /* Check include rules */
     rule = tunnel->include_rules;
     if (!rule) {
-        salts_mutex_unlock(&tunnel->mutex);
+        cmeta_mutex_unlock(&tunnel->mutex);
         return 1;  /* No include rules = tunnel all */
     }
 
@@ -396,7 +396,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
         rule = rule->next;
     }
 
-    salts_mutex_unlock(&tunnel->mutex);
+    cmeta_mutex_unlock(&tunnel->mutex);
     return should_tunnel;
 }
 
@@ -605,7 +605,7 @@ int tunnel_run(tunnel_t *tunnel)
     while (tunnel->running && !tunnel->stopping) {
         int active = tunnel_poll(tunnel, 0);
         if (active < 0) return active;
-        if (!active) salts_sleep_ms(1);
+        if (!active) cmeta_sleep_ms(1);
     }
     return TUNNEL_OK;
 }
@@ -699,7 +699,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
         return ret;
     }
 
-    salts_mutex_lock(&tunnel->mutex);
+    cmeta_mutex_lock(&tunnel->mutex);
     tunnel_route_rule_t *old_include = tunnel->include_rules;
     tunnel_route_rule_t *old_exclude = tunnel->exclude_rules;
     tunnel->include_rules = parsed.include_rules;
@@ -707,7 +707,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
     tunnel->config.route = *route;
     tunnel_route_rules_free(old_include);
     tunnel_route_rules_free(old_exclude);
-    salts_mutex_unlock(&tunnel->mutex);
+    cmeta_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -720,9 +720,9 @@ int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats)
 {
     if (!tunnel || !stats) return TUNNEL_ERR_INVALID_ARG;
 
-    salts_mutex_lock(&tunnel->mutex);
+    cmeta_mutex_lock(&tunnel->mutex);
     memcpy(stats, &tunnel->stats, sizeof(tunnel_stats_t));
-    salts_mutex_unlock(&tunnel->mutex);
+    cmeta_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -731,12 +731,12 @@ void tunnel_reset_stats(tunnel_t *tunnel)
 {
     if (!tunnel) return;
 
-    salts_mutex_lock(&tunnel->mutex);
+    cmeta_mutex_lock(&tunnel->mutex);
     memset(&tunnel->stats, 0, sizeof(tunnel_stats_t));
     tunnel->start_time = salts_monotonic_ms();
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
-    salts_mutex_unlock(&tunnel->mutex);
+    cmeta_mutex_unlock(&tunnel->mutex);
 }
 
 /* =============================================================================

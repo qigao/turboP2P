@@ -351,7 +351,7 @@ struct tunnel_s {
     int stopping;
 
     /* Thread safety */
-    salts_mutex_t mutex;
+    cmeta_mutex_t mutex;
 };
 
 /* =============================================================================
