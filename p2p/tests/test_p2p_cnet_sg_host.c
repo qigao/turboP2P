@@ -1,6 +1,7 @@
 #include "p2p_cnet_node_fixture.h"
 #include <cnet/sg_host.h>
 #include <salts/native_io_sharded.h>
+#include <stdio.h>
 
 enum { HOST_SHARDS = 2u, HOST_BATCH = 16u, HOST_TIMEOUT = 10000u };
 
@@ -18,6 +19,7 @@ typedef struct sg_lane {
     unsigned cancelled, accepted;
     bool released;
     int error;
+    const char *error_site;
 } sg_lane;
 
 struct sg_case {
@@ -42,7 +44,11 @@ static void mark_failed(sg_lane *lane, int rc) {
 }
 #define SG_GO(lane, statement) do { \
     int sg_rc_ = (statement); \
-    if (sg_rc_ != 0) { mark_failed((lane), sg_rc_); return; } \
+    if (sg_rc_ != 0) { \
+        (lane)->error_site = #statement; \
+        mark_failed((lane), sg_rc_); \
+        return; \
+    } \
 } while (0)
 
 static bool worker_quiescent(void *arg) {
@@ -165,8 +171,15 @@ static void submit_lane(sg_case *test, size_t shard,
 }
 static void barrier(sg_case *test) {
     check_equal(SALTS_OK, native_io_sharded_wait(test->runtime));
-    for (size_t i = 0u; i < HOST_SHARDS; ++i)
+    for (size_t i = 0u; i < HOST_SHARDS; ++i) {
+        if (test->lanes[i].error)
+            fprintf(stderr,
+                "SG Host shard=%zu rc=%d at %s observed=%zu progress=%zu\\n",
+                i, test->lanes[i].error,
+                test->lanes[i].error_site ? test->lanes[i].error_site : "(direct)",
+                test->lanes[i].observed, test->lanes[i].observe_calls);
         check_equal(0, test->lanes[i].error);
+    }
 }
 static void progress_once(sg_case *test) {
     check_equal(P2P_OK, p2p_poll(test->client.node));
