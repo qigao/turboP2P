@@ -45,7 +45,7 @@ static int curve25519_generate(NoiseDHState *state,
 
     curve25519_clear_provider(curve);
 
-    if (salts_platform_secure_random(curve->private_key,
+    if (cmeta_platform_secure_random(curve->private_key,
                                      sizeof(curve->private_key)) != 0) {
         noise_clean(curve->private_key, sizeof(curve->private_key));
         noise_clean(curve->public_key, sizeof(curve->public_key));
