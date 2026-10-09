@@ -254,7 +254,7 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
     lookup = p2p_dht_lookup_start(node, kkey.bytes, P2P_MSG_DHT_GET);
     if (!lookup) return node->network_ops ? P2P_ERR_NOT_FOUND : P2P_ERR_INVALID_STATE;
     request_id = lookup->request_id;
-    deadline_ms = salts_monotonic_ms();
+    deadline_ms = cmeta_monotonic_ms();
     deadline_ms = UINT64_MAX - deadline_ms < P2P_DHT_GET_TIMEOUT_MS
         ? UINT64_MAX : deadline_ms + P2P_DHT_GET_TIMEOUT_MS;
     for (;;) {
@@ -263,7 +263,7 @@ int p2p_dht_get(p2p_node_t *node, const char *key, void *buf, size_t *buf_len) {
         if (ret != P2P_OK) break;
         ret = p2p_try_get_local_dht_value(node, &kkey, buf, buf_len);
         if (ret != P2P_ERR_NOT_FOUND || !p2p_dht_lookup_is_active(node, request_id)) break;
-        now_ms = salts_monotonic_ms();
+        now_ms = cmeta_monotonic_ms();
         if (now_ms >= deadline_ms) break;
         cmeta_sleep_ms((uint32_t)(deadline_ms - now_ms < P2P_DHT_POLL_INTERVAL_MS
             ? deadline_ms - now_ms : P2P_DHT_POLL_INTERVAL_MS));

@@ -51,7 +51,7 @@ static void p2p_mark_manual_disconnect_locked(p2p_node_t *node, p2p_peer_t *peer
 
     peer->keep_entry = 0;
     p2p_set_manual_connect_suppression_locked(node, peer->ip, peer->port,
-                                              salts_monotonic_ms() +
+                                              cmeta_monotonic_ms() +
                                                   P2P_MANUAL_DISCONNECT_SUPPRESS_MS);
     p2p_remove_peer_from_routing_locked(node, peer);
 }
@@ -185,7 +185,7 @@ int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
     if (node) {
         cmeta_mutex_lock(&node->mutex);
     }
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
 
     metrics->srtt_ms = peer->avg_rtt_ms > UINT32_MAX
         ? UINT32_MAX

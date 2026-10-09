@@ -8,7 +8,7 @@
 
 static uint64_t publisher_now_ms(mesh_mgmt_endpoint_publisher_v1_t *publisher) {
   return publisher->signer.now_ms ? publisher->signer.now_ms(publisher->signer.callback_context)
-                                  : salts_realtime_ms();
+                                  : cmeta_realtime_ms();
 }
 
 static int publisher_random(mesh_mgmt_endpoint_publisher_v1_t *publisher, uint8_t *output,
@@ -16,7 +16,7 @@ static int publisher_random(mesh_mgmt_endpoint_publisher_v1_t *publisher, uint8_
   return publisher->signer.random_bytes
              ? publisher->signer.random_bytes(publisher->signer.callback_context, output,
                                               output_len)
-             : salts_secure_random(output, output_len);
+             : cmeta_platform_secure_random(output, output_len);
 }
 
 static int bytes_are_zero(const uint8_t *bytes, size_t length) {
@@ -65,7 +65,7 @@ mesh_mgmt_endpoint_publisher_init_v1(mesh_mgmt_endpoint_publisher_v1_t *publishe
     return MESH_MGMT_ENDPOINT_PUBLISHER_IDENTITY_FAILED;
   }
 
-  now_ms = signer.now_ms ? signer.now_ms(signer.callback_context) : salts_realtime_ms();
+  now_ms = signer.now_ms ? signer.now_ms(signer.callback_context) : cmeta_realtime_ms();
   if (mesh_mgmt_certificate_verify_v1(
           signer_config->hello.certificate, sizeof(signer_config->hello.certificate),
           signer_config->trusted_issuer_key, signer_config->expected_mesh_id_hash, now_ms,

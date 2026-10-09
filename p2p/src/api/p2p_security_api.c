@@ -77,7 +77,7 @@ static int p2p_blocking_private_key_provider_self_test(
     static const uint8_t x25519_basepoint[P2P_KEY_SIZE] = {9};
     p2p_private_key_cancel_v4_t cancel = {0};
     uint8_t derived_public_key[P2P_KEY_SIZE] = {0};
-    uint64_t now_ms = salts_monotonic_ms();
+    uint64_t now_ms = cmeta_monotonic_ms();
     uint64_t deadline_ms = now_ms + timeout_ms;
     int ret;
 
@@ -89,7 +89,7 @@ static int p2p_blocking_private_key_provider_self_test(
     ret = provider->calculate_x25519(
         provider->context, x25519_basepoint, deadline_ms, &cancel,
         derived_public_key);
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
     if (ret != P2P_OK) {
         ret = p2p_normalize_private_key_provider_error(ret);
     } else if (now_ms > deadline_ms) {

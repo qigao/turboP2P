@@ -112,12 +112,12 @@ static void start(endpoint_t *endpoint) {
 static void poll_pair(endpoint_t *left, endpoint_t *right) {
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&left->runtime));
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&right->runtime));
-  salts_sleep_ms(1u);
+  cmeta_sleep_ms(1u);
 }
 static void wait_established(endpoint_t *server, endpoint_t *client, unsigned count) {
-  uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
   while ((server->established < count || client->established < count) &&
-         salts_monotonic_ms() < deadline)
+         cmeta_monotonic_ms() < deadline)
     poll_pair(server, client);
   check_equal(count, server->established);
   check_equal(count, client->established);
@@ -145,9 +145,9 @@ static void destroy(endpoint_t *endpoint) {
 }
 static void wait_record(endpoint_t *server, endpoint_t *client, const char *key,
                         uint8_t *frame, size_t *length) {
-  uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
   int result = P2P_ERR_NOT_FOUND;
-  while (salts_monotonic_ms() < deadline) {
+  while (cmeta_monotonic_ms() < deadline) {
     poll_pair(server, client);
     size_t available = *length;
     result = p2p_dht_get_cached(server->runtime.node, key, frame, &available);
@@ -231,14 +231,14 @@ static void test_external_progress_reentry(void) {
   endpoint_t server = {0}, client = {0};
   start_pair(&server, &client);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&client.runtime));
-  uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
   while ((server.established == 0u || client.established == 0u) &&
-         salts_monotonic_ms() < deadline) {
+         cmeta_monotonic_ms() < deadline) {
     /* Exercise router callback guards with runtime.in_api clear, as when
      * a shared owner advances its borrowed P2P node. No mesh is emulated. */
     check_equal(P2P_OK, p2p_poll(server.runtime.node));
     check_equal(P2P_OK, p2p_poll(client.runtime.node));
-    salts_sleep_ms(1u);
+    cmeta_sleep_ms(1u);
   }
   check_equal(1u, server.established); check_equal(1u, client.established);
   destroy(&client); destroy(&server);
@@ -247,8 +247,8 @@ static void test_membership_rejection(void) {
   endpoint_t server = {0}, client = {0};
   server.reject = 1;
   start_pair(&server, &client);
-  uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
-  while (server.failures == 0u && salts_monotonic_ms() < deadline)
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (server.failures == 0u && cmeta_monotonic_ms() < deadline)
     poll_pair(&server, &client);
   check_true(server.admitted > 0u && server.failures > 0u);
   check_equal(0u, server.established);

@@ -23,7 +23,7 @@ int p2p_crypto_random(uint8_t *buf, size_t len) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    if (salts_platform_secure_random(buf, len) != 0) {
+    if (cmeta_platform_secure_random(buf, len) != 0) {
         if (buf && len > 0) {
             crypto_wipe(buf, len);
         }

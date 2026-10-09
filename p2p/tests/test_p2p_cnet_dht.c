@@ -47,9 +47,9 @@ static void test_replication(int cached) {
     int result = cached ? p2p_dht_put_cached(pair.client.node, cache_key, cache_value, sizeof(cache_value))
                         : p2p_dht_put(pair.client.node, cache_key, cache_value, sizeof(cache_value));
     check_equal(P2P_OK, result);
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
     while ((p2p_dht_get_cached(pair.server.node, cache_key, output, &length) != P2P_OK ||
-            pair.client.node->dht_lookups) && salts_monotonic_ms() < deadline) pump(&pair);
+            pair.client.node->dht_lookups) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_cached(pair.server.node, cache_key, cache_value, sizeof(cache_value));
     check_true(pair.client.node->dht_lookups == NULL);
     teardown(&pair);
@@ -92,13 +92,13 @@ static void test_remote_get(int short_buffer, int missing) {
     atomic_init(&loop.ready, 0);
     atomic_init(&loop.stop, 0);
     check_equal(0, cmeta_thread_create(&thread, remote_loop, &loop));
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&loop.ready) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!atomic_load(&loop.ready) && cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     int ready = atomic_load(&loop.ready);
     int result = P2P_ERR_INVALID_STATE;
     if (ready == 1) {
         result = p2p_connect(pair.client.node, "127.0.0.1", pair.server.node->port);
-        while (result == P2P_OK && !pair.client.authenticated && salts_monotonic_ms() < deadline)
+        while (result == P2P_OK && !pair.client.authenticated && cmeta_monotonic_ms() < deadline)
             result = p2p_poll(pair.client.node);
         if (result == P2P_OK && pair.client.authenticated)
             result = p2p_dht_get(pair.client.node, missing ? "absent" : cache_key, output, &length);
@@ -189,8 +189,8 @@ static void test_callback(int stop) {
     pair.client.stop_on_auth = stop;
     p2p_set_message_handler(pair.client.node, query_callback, &pair.client);
     check_equal(P2P_OK, p2p_send(pair.server.node, pair.server.peer, "query", 5));
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.messages && salts_monotonic_ms() < deadline) pump(&pair);
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.messages && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.messages);
     if (stop) {
         check_equal(P2P_ERR_INVALID_STATE, p2p_dht_get(pair.client.node, "stopped", output, &length));

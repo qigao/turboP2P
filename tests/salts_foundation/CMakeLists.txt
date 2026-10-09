@@ -128,7 +128,7 @@ add_test(NAME test_p2p_security COMMAND test_p2p_security)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_security PRIVATE P2P_TEST_WRAP_RANDOM)
   target_link_options(test_p2p_security PRIVATE
-    "-Wl,--wrap=salts_platform_secure_random")
+    "-Wl,--wrap=cmeta_platform_secure_random")
 endif()
 
 add_library(p2p_cnet_transport STATIC

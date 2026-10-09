@@ -115,13 +115,13 @@ static int public_key(void *context, uint8_t output[32]) {
 static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
     const p2p_private_key_cancel_v4_t *cancel, uint8_t output[32]) {
     endpoint_t *endpoint = context;
-    uint64_t started = salts_monotonic_ms();
+    uint64_t started = cmeta_monotonic_ms();
     uint8_t zero[32] = {0};
     atomic_fetch_add(&endpoint->calls, 1);
     while (!atomic_load(&endpoint->released) ||
-           salts_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
+           cmeta_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
-        if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
+        if (cmeta_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
         cmeta_sleep_ms(1);
     }
     crypto_x25519(output, endpoint->secret, remote);
@@ -237,13 +237,13 @@ static void pump(pair_t *pair) {
     p2p_private_key_executor_pump(pair->server.node);
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->client.owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(pair->server.owner));
-    check_equal(P2P_OK, p2p_cnet_admission_expire(pair->server.admission, salts_monotonic_ms()));
+    check_equal(P2P_OK, p2p_cnet_admission_expire(pair->server.admission, cmeta_monotonic_ms()));
     cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
     while ((!pair->client.authenticated || !pair->server.authenticated) &&
-           !pair->client.failures && !pair->server.failures && salts_monotonic_ms() < deadline) pump(pair);
+           !pair->client.failures && !pair->server.failures && cmeta_monotonic_ms() < deadline) pump(pair);
     check_equal(1, pair->client.authenticated);
     check_equal(1, pair->server.authenticated);
     check_equal(0, pair->client.failures);
@@ -292,8 +292,8 @@ static void test_roundtrip(size_t receive_bytes, int blocking) {
     }
     send_message(&pair.client);
     send_message(&pair.server);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while ((!pair.client.messages || !pair.server.messages) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!pair.client.messages || !pair.server.messages) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.messages);
     check_equal(1, pair.server.messages);
     check_equal("authenticated payload", pair.client.received, 21);
@@ -306,8 +306,8 @@ static void test_reject(int ready_mismatch) {
     setup(&pair, TEST_SEND_BYTES, 0);
     if (ready_mismatch) pair.server.node->local_authenticated_identity.principal_id[0] ^= 1;
     else pair.client.reject_credential = 1;
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.failures && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.failures && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_true(pair.client.failures > 0);
     check_equal(P2P_ERR_UNTRUSTED_IDENTITY, pair.client.last_error);
     check_equal(0, pair.client.authenticated);
@@ -319,8 +319,8 @@ static void test_destroy_with_worker(void) {
     uint64_t deadline;
     setup(&pair, 7, 1);
     atomic_store(&pair.server.released, 0);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&pair.server.calls) && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!atomic_load(&pair.server.calls) && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_true(pair.server.peer && pair.server.peer->private_key_operation);
     p2p_peer_destroy(pair.server.peer);
     pair.server.peer = NULL;
@@ -333,8 +333,8 @@ static void test_destroy_pending_preface(void) {
     pair_t pair = {0};
     uint64_t deadline;
     setup(&pair, 7, 0);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.peer->security_send_action && salts_monotonic_ms() < deadline) {
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.peer->security_send_action && cmeta_monotonic_ms() < deadline) {
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.client.owner));
     }
     check_true(pair.client.peer->security_send_action != 0);
@@ -349,8 +349,8 @@ static void test_destroy_on_auth(void) {
     uint64_t deadline;
     setup(&pair, TEST_SEND_BYTES, 0);
     pair.client.destroy_on_auth = 1;
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.authenticated && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.authenticated && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.authenticated);
     check_true(pair.client.peer == NULL);
     teardown(&pair);
@@ -400,9 +400,9 @@ static void test_delayed_ready(int late, int inflight) {
     uint64_t deadline;
     setup(&pair, TEST_SEND_BYTES, 0);
     intercept(&pair.client, inflight);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
     while ((!terminal.native_done || !pair.server.authenticated) &&
-           salts_monotonic_ms() < deadline) pump(&pair);
+           cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, terminal.native_done);
     check_equal(P2P_OK, terminal.native_status);
     check_equal(1, pair.server.authenticated);
@@ -412,7 +412,7 @@ static void test_delayed_ready(int late, int inflight) {
     for (int i = 0; i < 4; ++i) pump(&pair);
     check_equal(0, pair.client.messages);
     if (inflight) check_true(pair.client.peer->recv_len > 0);
-    if (late) pair.client.peer->security_deadline_ms = salts_monotonic_ms();
+    if (late) pair.client.peer->security_deadline_ms = cmeta_monotonic_ms();
     terminal.complete(terminal.context, P2P_OK);
     terminal.complete = NULL;
     if (late) {
@@ -426,8 +426,8 @@ static void test_delayed_ready(int late, int inflight) {
             check_equal(1, pair.client.authenticated);
             check_equal(1, pair.client.messages);
         }
-        deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-        while (!pair.client.messages && salts_monotonic_ms() < deadline) pump(&pair);
+        deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+        while (!pair.client.messages && cmeta_monotonic_ms() < deadline) pump(&pair);
         check_equal(1, pair.client.authenticated);
         check_equal(1, pair.client.messages);
         check_equal("authenticated payload", pair.client.received, 21);
@@ -440,8 +440,8 @@ static void test_preface_rejection(void) {
     setup(&pair, 7, 0);
     intercept(&pair.client, 0);
     terminal.reject = 1;
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.failures && salts_monotonic_ms() < deadline) pump(&pair);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.failures && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(P2P_ERR_RESOURCE_EXHAUSTED, pair.client.last_error);
     check_equal(0, terminal.native_done);
     check_equal(0, pair.client.peer->security_send_action);
@@ -453,12 +453,12 @@ static void test_close_pending_preface(void) {
     pair_t pair = {0};
     uint64_t deadline;
     setup(&pair, 7, 0);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!pair.client.peer->security_send_action && salts_monotonic_ms() < deadline)
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!pair.client.peer->security_send_action && cmeta_monotonic_ms() < deadline)
         check_equal(P2P_OK, p2p_cnet_owner_poll(pair.client.owner));
     check_true(pair.client.peer->security_send_action != 0);
     p2p_connection_close(pair.client.peer->conn);
-    while (!pair.client.disconnected && salts_monotonic_ms() < deadline) pump(&pair);
+    while (!pair.client.disconnected && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.disconnected);
     check_equal(0, pair.client.authenticated);
     check_true(pair.client.peer->conn == NULL);

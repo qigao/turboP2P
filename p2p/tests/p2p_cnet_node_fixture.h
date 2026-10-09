@@ -67,13 +67,13 @@ static int public_key(void *context, uint8_t output[32]) {
 static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
     const p2p_private_key_cancel_v4_t *cancel, uint8_t output[32]) {
     endpoint_t *endpoint = context;
-    uint64_t started = salts_monotonic_ms();
+    uint64_t started = cmeta_monotonic_ms();
     uint8_t zero[32] = {0};
     atomic_fetch_add(&endpoint->calls, 1);
     while (!atomic_load(&endpoint->released) ||
-           salts_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
+           cmeta_monotonic_ms() - started < (uint64_t)endpoint->delay_ms) {
         if (cancel->is_cancelled(cancel->context)) return P2P_ERR_INVALID_STATE;
-        if (salts_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
+        if (cmeta_monotonic_ms() >= deadline) return P2P_ERR_TIMEOUT;
         cmeta_sleep_ms(1);
     }
     crypto_x25519(output, endpoint->secret, remote);
@@ -209,9 +209,9 @@ static void pump(pair_t *pair) {
     cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
     while ((!pair->client.authenticated || !pair->server.authenticated) &&
-        salts_monotonic_ms() < deadline) pump(pair);
+        cmeta_monotonic_ms() < deadline) pump(pair);
     check_equal(1, pair->client.authenticated);
     check_equal(1, pair->server.authenticated);
 }

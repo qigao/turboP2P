@@ -97,7 +97,7 @@ static int admit(const cnet_stream_peer *source, void *context) {
     cmeta_mutex_lock(&node->mutex);
     result = capacity_locked(node, ip);
     if (result == P2P_OK)
-        result = p2p_node_source_admission_acquire_locked(node, ip, salts_monotonic_ms());
+        result = p2p_node_source_admission_acquire_locked(node, ip, cmeta_monotonic_ms());
     cmeta_mutex_unlock(&node->mutex);
     return result;
 }
@@ -223,7 +223,7 @@ int p2p_node_cnet_create(p2p_node_t *node, const p2p_cnet_config_t *config,
     node->network_context = owner;
     node->query_cookie_status_locked = cookie_status_locked;
     cmeta_mutex_unlock(&node->mutex);
-    owner->maintenance_ms = salts_monotonic_ms();
+    owner->maintenance_ms = cmeta_monotonic_ms();
     *output = owner;
     return P2P_OK;
 }
@@ -270,7 +270,7 @@ int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
     if (!owner) return P2P_ERR_INVALID_ARG;
     if (owner->busy || owner->stopping) return P2P_ERR_INVALID_STATE;
     owner->busy = 1;
-    now = salts_monotonic_ms();
+    now = cmeta_monotonic_ms();
     result = p2p_cnet_admission_expire(owner->admission, now);
     p2p_node_expire_pending_peers(owner->node, now);
     if (result == P2P_OK && !owner->stopping) {

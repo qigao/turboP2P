@@ -97,23 +97,23 @@ static void drive(void) {
   check_equal(cnet_client_poll(&f.server, 1u, &events), SALTS_OK);
 }
 static void wait_connect(void) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (!f.connect_events && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (!f.connect_events && cmeta_monotonic_ms() < deadline) drive();
   check_equal(f.connect_events, 1);
 }
 static void wait_requests(size_t size) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (f.requests_size < size && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (f.requests_size < size && cmeta_monotonic_ms() < deadline) drive();
   check_equal(f.requests_size, size);
 }
 static void wait_received(size_t size) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (f.received_size < size && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (f.received_size < size && cmeta_monotonic_ms() < deadline) drive();
   check_equal(f.received_size, size);
 }
 static void wait_retired(void) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (f.tunnel->proxy->connection_count && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (f.tunnel->proxy->connection_count && cmeta_monotonic_ms() < deadline) drive();
   check_equal(f.tunnel->proxy->connection_count, 0u);
 }
 static void send_server(const void *data, size_t size) {
@@ -193,13 +193,13 @@ static void destroy_fixture(void) {
   if (f.tls.impl) check_equal(cnet_tls_server_destroy(&f.tls), SALTS_OK);
 }
 static void wait_request_started(void) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (!f.requests_size && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (!f.requests_size && cmeta_monotonic_ms() < deadline) drive();
   check_true(f.requests_size > 0u);
 }
 static void http_handshake(void) {
-  uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-  while (!f.requests_size && salts_monotonic_ms() < deadline) drive();
+  uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+  while (!f.requests_size && cmeta_monotonic_ms() < deadline) drive();
   check_true(f.requests_size > 0u);
   check_true(strstr((const char *)f.requests, "CONNECT 127.0.0.1:443 HTTP/1.1") != NULL);
   check_true(strstr((const char *)f.requests, "Proxy-Authorization: Basic dXNlcjpzZWNyZXQ=") != NULL);

@@ -545,7 +545,7 @@ static int node_send_identity_ping(p2p_node_t *node, p2p_peer_t *peer) {
         strncpy(ping.ip, node->ip, sizeof(ping.ip) - 1);
     }
     ping.port = (uint16_t)node->port;
-    ping.timestamp = salts_hrtime() / 1000000;
+    ping.timestamp = cmeta_hrtime() / 1000000;
     memcpy(ping.coords, node->coord.coords, sizeof(ping.coords));
     ping.height = node->coord.height;
     ping.error = node->coord.error;

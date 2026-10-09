@@ -87,9 +87,9 @@ static void pump(pair_t *pair) {
     cmeta_sleep_ms(1);
 }
 static void wait_ready(pair_t *pair) {
-    uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
     while ((!pair->client.connected || !pair->server.connected) &&
-        salts_monotonic_ms() < deadline) pump(pair);
+        cmeta_monotonic_ms() < deadline) pump(pair);
     check_equal(1, pair->client.connected);
     check_equal(1, pair->server.connected);
 }
@@ -189,10 +189,10 @@ static void test_roundtrip(void) {
     check_equal(P2P_OK, p2p_send_message(pair.client.node, pair.client.peer, P2P_MSG_CUSTOM, value, sizeof(value)));
     check_equal(P2P_OK, p2p_send_message(pair.server.node, pair.server.peer, P2P_MSG_CUSTOM, value, sizeof(value)));
     check_equal(P2P_OK, p2p_dht_put_cached(pair.client.node, "public:key", value, sizeof(value)));
-    uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
     while ((!pair.client.messages || !pair.server.messages ||
         p2p_dht_get_cached(pair.server.node, "public:key", output, &length) != P2P_OK) &&
-        salts_monotonic_ms() < deadline) pump(&pair);
+        cmeta_monotonic_ms() < deadline) pump(&pair);
     check_equal(1, pair.client.messages); check_equal(1, pair.server.messages);
     check_equal(P2P_OK, p2p_dht_get_cached(pair.server.node, "public:key", output, &length));
     check_equal(value, output, sizeof(value));
@@ -208,8 +208,8 @@ static void test_callback_stop(void) {
     pair_t pair = {0};
     start_pair(&pair, 7);
     pair.server.stop_on_connect = 1;
-    uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
-    while (!pair.server.stopped && salts_monotonic_ms() < deadline) pump(&pair);
+    uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
+    while (!pair.server.stopped && cmeta_monotonic_ms() < deadline) pump(&pair);
     check_true(pair.server.stopped);
     check_equal(P2P_ERR_INVALID_STATE, p2p_poll(pair.server.node));
     destroy_pair(&pair);
@@ -231,7 +231,7 @@ static void file_done(p2p_transfer_t *transfer, int success, const char *error, 
 static void test_file(int stop_on_complete, int retain_lease) {
     file_case_t file = {0};
     char source[128], output[128], key[65];
-    unsigned long long stamp = (unsigned long long)salts_hrtime();
+    unsigned long long stamp = (unsigned long long)cmeta_hrtime();
     snprintf(source, sizeof(source), "public-cnet-%llu-source.tmp", stamp);
     snprintf(output, sizeof(output), "public-cnet-%llu-output.tmp", stamp);
     FILE *stream = fopen(source, "wbx");
@@ -258,8 +258,8 @@ static void test_file(int stop_on_complete, int retain_lease) {
         p2p_transfer_release(lease);
         check_equal(0, file.completed);
     } else {
-        uint64_t deadline = salts_monotonic_ms() + WAIT_MS;
-        while (!file.completed && salts_monotonic_ms() < deadline) pump(&file.pair);
+        uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
+        while (!file.completed && cmeta_monotonic_ms() < deadline) pump(&file.pair);
         check_equal(1, file.completed); check_equal(1, file.success);
         stream = fopen(output, "rb"); check_not_null(stream);
         for (size_t i = 0; i < FILE_BYTES; ++i) check_equal((int)(i % 251), fgetc(stream));

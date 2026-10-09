@@ -57,12 +57,12 @@ static void run_work(void *context) {
     p2p_key_work_t *work = context;
     p2p_private_key_cancel_v4_t cancel = {sizeof(cancel), cancelled, work};
     if (cancelled(work)) work->result = P2P_ERR_INVALID_STATE;
-    else if (salts_monotonic_ms() >= work->deadline_ms) work->result = P2P_ERR_TIMEOUT;
+    else if (cmeta_monotonic_ms() >= work->deadline_ms) work->result = P2P_ERR_TIMEOUT;
     else work->result = p2p_noise_write_message_with_payload_blocking(
         work->handshake, work->payload, work->payload_len, work->deadline_ms, &cancel,
         work->output, &work->output_len, sizeof(work->output));
     if (cancelled(work)) work->result = P2P_ERR_INVALID_STATE;
-    else if (salts_monotonic_ms() >= work->deadline_ms) work->result = P2P_ERR_TIMEOUT;
+    else if (cmeta_monotonic_ms() >= work->deadline_ms) work->result = P2P_ERR_TIMEOUT;
     if (work->result != P2P_OK) discard_output(work);
     p2p_crypto_wipe(work->payload, sizeof(work->payload));
     work->payload_len = 0;
@@ -156,7 +156,7 @@ int p2p_key_worker_submit(p2p_key_worker_t *worker,
     work->context = context;
     work->payload_len = payload_len;
     if (payload_len) memcpy(work->payload, payload, payload_len);
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
     work->deadline_ms = UINT64_MAX - now_ms < worker->status.operation_timeout_ms ?
         UINT64_MAX : now_ms + worker->status.operation_timeout_ms;
     atomic_init(&work->cancelled, 0);
@@ -215,7 +215,7 @@ int p2p_key_worker_poll(p2p_key_worker_t *worker) {
         }
         if (!work) { cmeta_mutex_unlock(&worker->mutex); break; }
         if (cancelled(work)) work->result = P2P_ERR_INVALID_STATE;
-        else if (work->result == P2P_OK && salts_monotonic_ms() >= work->deadline_ms)
+        else if (work->result == P2P_OK && cmeta_monotonic_ms() >= work->deadline_ms)
             work->result = P2P_ERR_TIMEOUT;
         if (work->result != P2P_OK) discard_output(work);
         worker->status.active_operations--;

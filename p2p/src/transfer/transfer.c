@@ -73,7 +73,7 @@ p2p_transfer_t* p2p_transfer_create(p2p_transfer_manager_t *mgr, p2p_transfer_di
     t->direction = dir;
     t->state = P2P_TRANSFER_PENDING;
     t->chunk_size = P2P_DEFAULT_CHUNK_SIZE;
-    t->start_time = salts_hrtime();
+    t->start_time = cmeta_hrtime();
     t->last_activity = t->start_time;
 
     t->next = mgr->active;
@@ -253,7 +253,7 @@ void p2p_transfer_update_progress(p2p_transfer_t *transfer, size_t bytes) {
 
     cmeta_mutex_lock(&transfer->mutex);
     transfer->bytes_transferred += bytes;
-    transfer->last_activity = salts_hrtime();
+    transfer->last_activity = cmeta_hrtime();
     progress_cb = transfer->progress_cb;
     user_data = transfer->user_data;
     bytes_transferred = transfer->bytes_transferred;
@@ -473,7 +473,7 @@ int p2p_transfer_mgr_resume(p2p_transfer_manager_t *mgr, uint32_t transfer_id,
     }
 
     t->state = P2P_TRANSFER_ACTIVE;
-    t->last_activity = salts_hrtime();
+    t->last_activity = cmeta_hrtime();
     cmeta_mutex_unlock(&t->mutex);
 
     TLOG_INFOF("[Transfer] Transfer #{} resumed", transfer_id);
@@ -553,7 +553,7 @@ int p2p_transfer_add_in_flight_locked(p2p_transfer_t *transfer, uint32_t chunk_i
 
     p2p_in_flight_entry_t *entry = &transfer->in_flight[transfer->in_flight_count++];
     entry->chunk_index = chunk_index;
-    entry->request_time = salts_hrtime();
+    entry->request_time = cmeta_hrtime();
     entry->retry_count = 0;
     return 1;
 }
@@ -600,7 +600,7 @@ int p2p_transfer_check_timeouts_locked(p2p_transfer_t *transfer, uint32_t *timed
     if (!transfer || !timed_out_chunks || !count) return 0;
 
     *count = 0;
-    uint64_t now = salts_hrtime();
+    uint64_t now = cmeta_hrtime();
     uint64_t timeout_ns = (uint64_t)P2P_CHUNK_TIMEOUT_MS * 1000000ULL;
 
     for (uint8_t i = 0; i < transfer->in_flight_count && *count < max_count; i++) {
@@ -768,7 +768,7 @@ int p2p_transfer_source_add_locked(p2p_transfer_t *transfer, p2p_peer_t *peer) {
     p2p_transfer_source_t *src = &transfer->sources[transfer->source_count];
     src->peer = peer;
     src->bytes_received = 0;
-    src->last_activity = salts_hrtime();
+    src->last_activity = cmeta_hrtime();
     src->active = 1;
     src->failure_count = 0;
     src->chunks_in_flight = 0;
@@ -828,7 +828,7 @@ void p2p_transfer_source_received_locked(p2p_transfer_t *transfer, p2p_peer_t *p
     for (uint8_t i = 0; i < transfer->source_count; i++) {
         if (transfer->sources[i].peer == peer) {
             transfer->sources[i].bytes_received += bytes;
-            transfer->sources[i].last_activity = salts_hrtime();
+            transfer->sources[i].last_activity = cmeta_hrtime();
             transfer->sources[i].failure_count = 0;
             if (transfer->sources[i].chunks_in_flight > 0) {
                 transfer->sources[i].chunks_in_flight--;

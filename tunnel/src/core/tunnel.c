@@ -482,7 +482,7 @@ static void tunnel_run_maintenance(tunnel_t *tunnel)
         return;
     }
 
-    now_ms = salts_monotonic_ms();
+    now_ms = cmeta_monotonic_ms();
 
     if (now_ms - tunnel->last_session_maintenance_ms >= 1000) {
         tcp_timeout = (uint32_t)tunnel->config.session_timeout * 1000u;
@@ -557,7 +557,7 @@ int tunnel_start(tunnel_t *tunnel)
 
     /* Set TUN read callback */
     tunnel_tun_set_read_cb(tunnel->tun, on_tun_read);
-    tunnel->start_time = salts_monotonic_ms();
+    tunnel->start_time = cmeta_monotonic_ms();
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
     tunnel->running = 1;
@@ -733,7 +733,7 @@ void tunnel_reset_stats(tunnel_t *tunnel)
 
     cmeta_mutex_lock(&tunnel->mutex);
     memset(&tunnel->stats, 0, sizeof(tunnel_stats_t));
-    tunnel->start_time = salts_monotonic_ms();
+    tunnel->start_time = cmeta_monotonic_ms();
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
     cmeta_mutex_unlock(&tunnel->mutex);

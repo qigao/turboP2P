@@ -65,7 +65,7 @@ static int admit(const cnet_stream_peer *source, void *context) {
     fixture->policies++;
     fixture->recursive_stop = p2p_cnet_admission_stop(fixture->admission);
     fixture->recursive_destroy = p2p_cnet_admission_destroy(fixture->admission);
-    fixture->recursive_expire = p2p_cnet_admission_expire(fixture->admission, salts_monotonic_ms());
+    fixture->recursive_expire = p2p_cnet_admission_expire(fixture->admission, cmeta_monotonic_ms());
     return fixture->deny ? P2P_ERR_UNTRUSTED_IDENTITY : P2P_OK;
 }
 
@@ -194,7 +194,7 @@ static int client_receive(p2p_connection_t *connection, const uint8_t *bytes,
 }
 
 static void pump(fixture_t *fixture) {
-    check_equal(P2P_OK, p2p_cnet_admission_expire(fixture->admission, salts_monotonic_ms()));
+    check_equal(P2P_OK, p2p_cnet_admission_expire(fixture->admission, cmeta_monotonic_ms()));
     check_equal(P2P_OK, p2p_cnet_owner_poll(fixture->client_owner));
     check_equal(P2P_OK, p2p_cnet_owner_poll(fixture->server));
     cmeta_sleep_ms(1);
@@ -210,12 +210,12 @@ static void connect_client(fixture_t *fixture, size_t index) {
     client_t *client = &fixture->clients[index];
     p2p_cnet_callbacks_t events = {client_connected, client_receive, NULL, client_closed, client};
     uint64_t target = stats(fixture).accepted + fixture->rejections + 1;
-    uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
     client->fixture = fixture;
     check_equal(P2P_OK, p2p_cnet_owner_connect(fixture->client_owner, &fixture->remote,
         &events, &client->connection));
     while ((!client->connected || stats(fixture).accepted + fixture->rejections < target) &&
-           salts_monotonic_ms() < deadline) pump(fixture);
+           cmeta_monotonic_ms() < deadline) pump(fixture);
     check_equal(target, stats(fixture).accepted + fixture->rejections);
 }
 
@@ -227,9 +227,9 @@ static void preface(fixture_t *fixture, int corrupt) {
 }
 
 static void wait_result(fixture_t *fixture) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
     while (!fixture->rejections && !fixture->peer_closes && fixture->received < sizeof(noise_tail) &&
-           salts_monotonic_ms() < deadline) pump(fixture);
+           cmeta_monotonic_ms() < deadline) pump(fixture);
 }
 
 static void cleanup(fixture_t *fixture) {
@@ -299,8 +299,8 @@ static void test_capacity(size_t gates, size_t sources) {
     check_equal((size_t)1, stats(&fixture).active);
     p2p_connection_destroy(fixture.clients[0].connection);
     fixture.clients[0].connection = NULL;
-    deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-    while (stats(&fixture).active && salts_monotonic_ms() < deadline) pump(&fixture);
+    deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+    while (stats(&fixture).active && cmeta_monotonic_ms() < deadline) pump(&fixture);
     check_equal((size_t)0, stats(&fixture).active);
     connect_client(&fixture, 2);
     check_equal((size_t)1, stats(&fixture).active);
@@ -335,15 +335,15 @@ static void test_timeout(int after_challenge) {
     connect_client(&fixture, 0);
     if (after_challenge) {
         preface(&fixture, 0);
-        deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-        while (fixture.clients[0].used < P2P_COOKIE_PACKET_SIZE && salts_monotonic_ms() < deadline)
+        deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+        while (fixture.clients[0].used < P2P_COOKIE_PACKET_SIZE && cmeta_monotonic_ms() < deadline)
             pump(&fixture);
         check_equal((size_t)P2P_COOKIE_PACKET_SIZE, fixture.clients[0].used);
     }
     check_equal(P2P_OK, p2p_cnet_admission_expire(fixture.admission,
-        salts_monotonic_ms() + TEST_TIMEOUT_MS));
+        cmeta_monotonic_ms() + TEST_TIMEOUT_MS));
     check_equal(P2P_OK, p2p_cnet_admission_expire(fixture.admission,
-        salts_monotonic_ms() + TEST_TIMEOUT_MS));
+        cmeta_monotonic_ms() + TEST_TIMEOUT_MS));
     check_equal(1U, fixture.rejections);
     check_equal(P2P_ERR_TIMEOUT, fixture.last_error);
     check_equal((size_t)0, stats(&fixture).active);
@@ -387,8 +387,8 @@ static void test_delayed_completion(int terminal) {
     fixture.clients[0].respond = 1;
     connect_client(&fixture, 0);
     preface(&fixture, 0);
-    deadline = salts_monotonic_ms() + TEST_TIMEOUT_MS;
-    while ((!held_length || fixture.clients[0].respond) && salts_monotonic_ms() < deadline) pump(&fixture);
+    deadline = cmeta_monotonic_ms() + TEST_TIMEOUT_MS;
+    while ((!held_length || fixture.clients[0].respond) && cmeta_monotonic_ms() < deadline) pump(&fixture);
     check_equal((size_t)P2P_COOKIE_PACKET_SIZE, held_length);
     /* Drive the response into the paused gate while its logical send terminal
      * is withheld, even though the real socket has delivered the challenge. */
@@ -400,7 +400,7 @@ static void test_delayed_completion(int terminal) {
         check_equal(P2P_OK, p2p_cnet_admission_stop(fixture.admission));
     } else if (terminal == 1) {
         check_equal(P2P_OK, p2p_cnet_admission_expire(fixture.admission,
-            salts_monotonic_ms() + TEST_TIMEOUT_MS));
+            cmeta_monotonic_ms() + TEST_TIMEOUT_MS));
     }
     held_observer.on_send(held_observer.user, held_handle, held_length);
     hold_send = 0;

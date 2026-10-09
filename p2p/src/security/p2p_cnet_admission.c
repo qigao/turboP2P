@@ -77,7 +77,7 @@ static void promote(gate_t *gate) {
     gate_t verified;
     int result, produced;
     if (gate->state != GATE_VERIFIED || !gate->challenge_completed) return;
-    if (expired(gate, salts_monotonic_ms())) {
+    if (expired(gate, cmeta_monotonic_ms())) {
         fail_gate(gate, P2P_ERR_TIMEOUT);
         return;
     }
@@ -121,7 +121,7 @@ static int gate_receive(p2p_connection_t *connection, const uint8_t *bytes,
     gate_t *gate = context;
     p2p_cnet_admission_t *admission = gate->admission;
     size_t required, take;
-    uint64_t now_ms = salts_monotonic_ms();
+    uint64_t now_ms = cmeta_monotonic_ms();
     int result = P2P_OK;
     (void)connection;
     *consumed = 0;
@@ -287,7 +287,7 @@ int p2p_cnet_admission_accept(p2p_cnet_owner_t *owner,
     free_gate->connection = connection;
     free_gate->source = *source;
     strcpy(free_gate->source_ip, ip);
-    free_gate->started_ms = salts_monotonic_ms();
+    free_gate->started_ms = cmeta_monotonic_ms();
     free_gate->state = GATE_PREFACE;
     events.receive = gate_receive;
     events.sent = gate_sent;

@@ -270,7 +270,7 @@ int p2p_handle_pong(p2p_node_t *node, p2p_peer_t *peer, const p2p_message_t *msg
 
     if (!node || !peer || !msg) return P2P_ERR_INVALID_ARG;
 
-    now_ms = salts_hrtime() / 1000000U;
+    now_ms = cmeta_hrtime() / 1000000U;
     cmeta_mutex_lock(&node->mutex);
     if (p2p_id_is_zero(msg->payload.ping.node_id) ||
         memcmp(peer->id, msg->payload.ping.node_id,

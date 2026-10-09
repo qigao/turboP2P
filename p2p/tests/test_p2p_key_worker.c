@@ -38,15 +38,15 @@ static int public_key(void *context, uint8_t output[32]) {
 static int calculate(void *context, const uint8_t remote[32], uint64_t deadline,
     const p2p_private_key_cancel_v4_t *cancel, uint8_t output[32]) {
     provider_t *provider = context;
-    uint64_t started = salts_monotonic_ms();
+    uint64_t started = cmeta_monotonic_ms();
     int result;
     atomic_fetch_add(&provider->calls, 1);
-    while (!atomic_load(&provider->release) || salts_monotonic_ms() - started < provider->delay_ms) {
+    while (!atomic_load(&provider->release) || cmeta_monotonic_ms() - started < provider->delay_ms) {
         if (!provider->ignore_cancel && cancel->is_cancelled(cancel->context)) {
             atomic_fetch_add(&provider->finished, 1);
             return P2P_ERR_INVALID_STATE;
         }
-        if (!provider->ignore_cancel && salts_monotonic_ms() >= deadline) {
+        if (!provider->ignore_cancel && cmeta_monotonic_ms() >= deadline) {
             atomic_fetch_add(&provider->finished, 1);
             return P2P_ERR_TIMEOUT;
         }
@@ -128,8 +128,8 @@ static void submit(peer_t *peer, const void *payload, size_t length) {
 }
 
 static void wait_ready(peer_t *peer) {
-    uint64_t deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!p2p_key_work_ready(peer->work) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!p2p_key_work_ready(peer->work) && cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_true(p2p_key_work_ready(peer->work));
 }
 
@@ -235,7 +235,7 @@ static void test_failure(int reason) {
     wait_ready(&peer);
     if (reason == 2) {
         uint64_t deadline = p2p_key_work_deadline(peer.work);
-        while (salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
+        while (cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     }
     check_equal(P2P_OK, p2p_key_worker_poll(worker));
     check_equal(expected, peer.status);
@@ -256,8 +256,8 @@ static void test_stop_queued(void) {
     prepare_peer(&first, &provider, worker);
     prepare_peer(&second, &provider, worker);
     submit(&first, NULL, 0);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&context.calls) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!atomic_load(&context.calls) && cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_equal(1, atomic_load(&context.calls));
     submit(&second, NULL, 0);
     check_equal(P2P_OK, p2p_key_worker_stop(worker));
@@ -297,8 +297,8 @@ static void test_owner_finishes_before_notifier(void) {
     prepare_peer(&peer, &provider, worker);
     submit(&peer, NULL, 0);
     atomic_store(&context.release, 1);
-    deadline = salts_monotonic_ms() + TEST_WAIT_MS;
-    while (!atomic_load(&context.notifications) && salts_monotonic_ms() < deadline) cmeta_sleep_ms(1);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!atomic_load(&context.notifications) && cmeta_monotonic_ms() < deadline) cmeta_sleep_ms(1);
     check_equal(1, atomic_load(&context.notifications));
     check_equal(P2P_OK, p2p_key_worker_poll(worker));
     check_equal(1, peer.completions);
