@@ -108,9 +108,9 @@ int p2p_node_get_id(p2p_node_t *node, uint8_t id_out[P2P_HASH_SIZE]) {
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     memcpy(id_out, node->id, P2P_HASH_SIZE);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -120,9 +120,9 @@ int p2p_node_get_public_key(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     memcpy(public_key_out, node->crypto.identity.public_key, P2P_KEY_SIZE);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -135,7 +135,7 @@ int p2p_node_set_private_key(p2p_node_t *node,
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -145,7 +145,7 @@ int p2p_node_set_private_key(p2p_node_t *node,
             node->private_key_executor = NULL;
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_private_key_executor_destroy(old_executor);
     return ret;
 }
@@ -161,10 +161,10 @@ int p2p_node_set_private_key_provider_v3(
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     ret = p2p_node_identity_is_mutable_locked(node) ? P2P_OK
                                                      : P2P_ERR_INVALID_STATE;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (ret != P2P_OK) {
         return ret;
     }
@@ -184,7 +184,7 @@ int p2p_node_set_private_key_provider_v3(
         return ret;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -195,7 +195,7 @@ int p2p_node_set_private_key_provider_v3(
             node->private_key_executor = NULL;
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_crypto_wipe(public_key, sizeof(public_key));
     p2p_private_key_executor_destroy(old_executor);
     return ret;
@@ -232,10 +232,10 @@ int p2p_node_set_blocking_private_key_provider_v4(
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     ret = p2p_node_identity_is_mutable_locked(node) ? P2P_OK
                                                      : P2P_ERR_INVALID_STATE;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     if (ret != P2P_OK) {
         return ret;
     }
@@ -265,7 +265,7 @@ int p2p_node_set_blocking_private_key_provider_v4(
         return P2P_ERR_NO_MEM;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!p2p_node_identity_is_mutable_locked(node)) {
         ret = P2P_ERR_INVALID_STATE;
     } else {
@@ -277,7 +277,7 @@ int p2p_node_set_blocking_private_key_provider_v4(
             candidate = NULL;
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     p2p_crypto_wipe(public_key, sizeof(public_key));
     p2p_private_key_executor_destroy(candidate);
     p2p_private_key_executor_destroy(old_executor);
@@ -604,13 +604,13 @@ int p2p_node_get_security_status_v2(
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     p2p_node_fill_security_status_v2_locked(node, status);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -623,9 +623,9 @@ int p2p_node_get_security_status_v3(
         return P2P_ERR_INVALID_ARG;
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     memset(status, 0, sizeof(*status));
@@ -658,7 +658,7 @@ int p2p_node_get_security_status_v3(
                    sizeof(destination->buckets));
         }
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -669,14 +669,14 @@ int p2p_node_get_private_key_executor_status_v4(
     if (!node || !status || status->struct_size != sizeof(*status)) {
         return P2P_ERR_INVALID_ARG;
     }
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     executor = node->private_key_executor;
     if (!executor) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
     p2p_node_fill_private_key_executor_status_v4_locked(executor, status);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -689,7 +689,7 @@ static size_t p2p_node_disconnect_all_security_sessions(
         p2p_peer_entry_t *temporary = NULL;
         p2p_peer_t *peer = NULL;
 
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         HASH_ITER(hh, node->peers_table, entry, temporary) {
             if (entry->peer && !entry->peer->destroying &&
                 entry->peer->is_connected && entry->peer->conn &&
@@ -700,7 +700,7 @@ static size_t p2p_node_disconnect_all_security_sessions(
                 break;
             }
         }
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
 
         if (!peer) {
             return disconnected;
@@ -723,21 +723,21 @@ int p2p_node_revalidate_security_v2(
     memset((uint8_t *)result + sizeof(result->struct_size), 0,
            sizeof(*result) - sizeof(result->struct_size));
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (!node->security_configured) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_INVALID_STATE;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     peers = p2p_node_snapshot_connected_peers(node, &peer_count);
     if (peer_count > 0 && !peers) {
         result->disconnected_sessions =
             p2p_node_disconnect_all_security_sessions(node);
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         node->security_rejection_counts[
             P2P_SECURITY_REJECTION_REVALIDATION_FAIL_CLOSED]++;
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         return P2P_ERR_NO_MEM;
     }
 
@@ -755,7 +755,7 @@ int p2p_node_revalidate_security_v2(
         if (!peer) {
             continue;
         }
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
         if (!peer->destroying && peer->is_connected && peer->conn &&
             peer->security_stage == P2P_SECURITY_STAGE_ESTABLISHED &&
             peer->remote_public_key_ready &&
@@ -768,7 +768,7 @@ int p2p_node_revalidate_security_v2(
             previous_identity = peer->authenticated_identity;
             eligible = 1;
         }
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
 
         if (!eligible) {
             p2p_peer_release(peer);
@@ -801,14 +801,14 @@ int p2p_node_revalidate_security_v2(
         p2p_peer_release(peer);
     }
     free(peers);
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     node->security_rejection_counts[
         P2P_SECURITY_REJECTION_REVALIDATION_REJECTED] +=
         result->provider_rejections;
     node->security_rejection_counts[
         P2P_SECURITY_REJECTION_REVALIDATION_IDENTITY_CHANGE] +=
         result->identity_changes;
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return P2P_OK;
 }
 
@@ -819,9 +819,9 @@ int p2p_node_configure_security_v2(
     if (!node) {
         return P2P_ERR_INVALID_ARG;
     }
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     ret = p2p_node_configure_security_locked(node, config);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -847,10 +847,10 @@ int p2p_node_configure_pinned_security_v2(
     memcpy(key_copy, trusted_public_keys,
            trusted_key_count * P2P_KEY_SIZE);
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     if (node->server || node->network_context || node->peers_table || node->peer_count > 0 || node->security_configured ||
         node->pinned_trusted_keys) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
         p2p_crypto_wipe(key_copy, trusted_key_count * P2P_KEY_SIZE);
         free(key_copy);
         return P2P_ERR_INVALID_STATE;
@@ -876,7 +876,7 @@ int p2p_node_configure_pinned_security_v2(
         p2p_crypto_wipe(key_copy, trusted_key_count * P2P_KEY_SIZE);
         free(key_copy);
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
     return ret;
 }
 
@@ -908,7 +908,7 @@ int p2p_node_update_pinned_trust_v2(
                trusted_key_count * P2P_KEY_SIZE);
     }
 
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     pinned_provider =
         node->security_configured &&
         node->security_config.identity_provider.context == node &&
@@ -922,7 +922,7 @@ int p2p_node_update_pinned_trust_v2(
         node->pinned_trusted_keys = key_copy;
         node->pinned_trusted_key_count = trusted_key_count;
     }
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     if (!pinned_provider) {
         if (key_copy) {

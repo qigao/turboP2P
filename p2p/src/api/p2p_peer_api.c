@@ -120,9 +120,9 @@ void p2p_disconnect_peer(p2p_peer_t *peer) {
     }
 
     node = peer->node;
-    salts_mutex_lock(&node->mutex);
+    cmeta_mutex_lock(&node->mutex);
     p2p_mark_manual_disconnect_locked(node, peer);
-    salts_mutex_unlock(&node->mutex);
+    cmeta_mutex_unlock(&node->mutex);
 
     p2p_peer_disconnect(peer);
     p2p_node_on_peer_disconnected(node, peer);
@@ -183,7 +183,7 @@ int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
     metrics->sample_age_ms = UINT32_MAX;
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
     now_ms = salts_monotonic_ms();
 
@@ -206,7 +206,7 @@ int p2p_peer_get_stream_metrics(p2p_peer_t *peer,
     }
 
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -250,17 +250,17 @@ int p2p_peer_get_id(p2p_peer_t *peer, uint8_t id_out[P2P_HASH_SIZE]) {
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
     if (p2p_id_is_zero(peer->id)) {
         if (node) {
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
     memcpy(id_out, peer->id, P2P_HASH_SIZE);
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -275,17 +275,17 @@ int p2p_peer_get_public_key(p2p_peer_t *peer,
 
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
     if (!peer->remote_public_key_ready) {
         if (node) {
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
     memcpy(public_key_out, peer->remote_public_key, P2P_KEY_SIZE);
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
@@ -300,11 +300,11 @@ int p2p_peer_get_security_info_v2(
     }
     node = peer->node;
     if (node) {
-        salts_mutex_lock(&node->mutex);
+        cmeta_mutex_lock(&node->mutex);
     }
     if (!peer->ready_received || peer->state != P2P_PEER_STATE_CONNECTED) {
         if (node) {
-            salts_mutex_unlock(&node->mutex);
+            cmeta_mutex_unlock(&node->mutex);
         }
         return P2P_ERR_NOT_FOUND;
     }
@@ -324,7 +324,7 @@ int p2p_peer_get_security_info_v2(
     snapshot.received_bytes = peer->received_bytes;
     *info = snapshot;
     if (node) {
-        salts_mutex_unlock(&node->mutex);
+        cmeta_mutex_unlock(&node->mutex);
     }
     return P2P_OK;
 }
