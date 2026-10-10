@@ -1,6 +1,7 @@
 #include <tinytest.h>
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_test_identity.h"
+#include "mesh_mgmt_execution_wire.h"
 #include "core/node_cnet.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
@@ -43,6 +44,12 @@ typedef struct {
   uint8_t signed_connection[16];
   cnet_pool_key immutable_key;
   cnet_pool_connection immutable_physical;
+  /* Command continuation storage never leaves its original SG Final. */
+  uint8_t command_payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1];
+  size_t command_payload_len;
+  uint64_t command_ticket;
+  unsigned command_terminals;
+  int command_terminal_status;
 } signed_final;
 
 typedef struct {
@@ -64,6 +71,7 @@ struct sg_multi_case {
    * Strictly a migration/failover test fixture; never a production key
    * distribution recommendation. */
   uint8_t same_signed_identity;
+  uint8_t exercise_command_terminal;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
   sg_multi_lane lanes[SG_MULTI_MAX_SHARDS];
@@ -161,6 +169,40 @@ static void prepare(signed_endpoint *ep, uint8_t seed) {
   ep->config.random_bytes = random_bytes;
   ep->config.random_context = ep;
 }
+/* The default management fixture negotiates MEMBERSHIP only. Execution
+ * is an explicitly granted signed feature, with the issuer anchored to
+ * the existing trusted certificate issuer; do not silently enable it. */
+static void enable_command_status(signed_final *final) {
+  const uint64_t features =
+      MESH_MGMT_FEATURE_MEMBERSHIP | MESH_MGMT_FEATURE_TARGETED_RPC |
+      MESH_MGMT_FEATURE_NODE_EXECUTION;
+  signed_endpoint *pairs[2] = {&final->server, &final->client};
+  mesh_mgmt_execution_status_v1_t status = {0};
+  for (size_t i = 0u; i < 2u; ++i) {
+    signed_endpoint *ep = pairs[i];
+    ep->identity.signer.hello.features = features;
+    ep->identity.dispatch.session.features = features;
+    ep->identity.dispatch.enable_node_execution_shadow = 1u;
+    memcpy(ep->identity.dispatch.node_execution_grant_issuer_key,
+           ep->identity.dispatch.session.trusted_issuer_key,
+           sizeof(ep->identity.dispatch.node_execution_grant_issuer_key));
+    ep->identity.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+    ep->identity.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+  }
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_DISABLED;
+  memset(status.command_id, 0x51, sizeof(status.command_id));
+  memset(status.correlation_id, 0x52, sizeof(status.correlation_id));
+  memset(status.request_digest, 0x53, sizeof(status.request_digest));
+  memcpy(status.responder_node_id,
+         final->server.identity.signer.hello.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_status_encode_v1(
+          &status, final->command_payload,
+          sizeof(final->command_payload), &final->command_payload_len));
+}
+
 static p2p_cnet_config_t transport_settings(void) {
   p2p_cnet_config_t cfg = {0};
   cfg.client.backend = sg_backend();
@@ -385,6 +427,68 @@ static void host_foreign(native_io_sharded_context *ctx, void *arg) {
  * MMP authority/key. Underlying CNet Manager must also reject a premature
  * fabricated physical terminal while still BOUND. Exercise after each
  * Final has already acquired a real Lease and before checked shutdown. */
+/* Only the ORIGINAL signed SG Final worker owns the callback and Pool. */
+static void multi_command_terminal(void *context, uint64_t ticket, int status) {
+  signed_final *f = context;
+  sg_multi_lane *lane = f->lane;
+  if (cmeta_thread_current_token() != lane->worker_token ||
+      !f->command_ticket || ticket != f->command_ticket ||
+      f->command_terminals != 0u) {
+    fail_lane(lane, SALTS_EPERM, "MMP terminal callback wrong final/generation");
+    return;
+  }
+  ++f->command_terminals;
+  f->command_terminal_status = status;
+  if (mesh_mgmt_agent_runtime_stop_v1(&f->server.runtime) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE ||
+      mesh_mgmt_agent_runtime_destroy_v2(&f->server.runtime) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE)
+    fail_lane(lane, SALTS_EPERM, "MMP terminal callback reentered Stop");
+}
+
+static void host_foreign_command(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = arg;
+  sg_multi_case *sc = lane->scenario;
+  if (!lane->shard || lane->error) return;
+  signed_final *foreign = &sc->finals_data[lane->shard % sc->finals];
+  uint64_t denied = 97u;
+  if (mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &foreign->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          foreign->client.identity.signer.hello.managed_node_id,
+          foreign->command_payload, foreign->command_payload_len,
+          multi_command_terminal, foreign, &denied) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE ||
+      denied != 0u || foreign->command_terminals != 0u)
+    fail_lane(lane, SALTS_EPERM, "foreign SG Final admitted MMP command");
+}
+
+static void host_send_command(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = arg;
+  (void)ctx;
+  if (!lane->shard || lane->error) return;
+  signed_final *f = lane_final(lane);
+  uint64_t denied = 97u;
+  cnet_pool_snapshot pool = {0};
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
+      &f->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+      f->client.identity.signer.hello.managed_node_id,
+      f->command_payload, f->command_payload_len,
+      multi_command_terminal, f, &f->command_ticket));
+  if (!f->command_ticket || f->command_terminals != 0u ||
+      f->server.runtime.command_terminal_inflight != 1u ||
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &f->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          f->client.identity.signer.hello.managed_node_id,
+          f->command_payload, f->command_payload_len,
+          multi_command_terminal, f, &denied) !=
+          MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED ||
+      denied != 0u ||
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &f->server.runtime, &pool) != MESH_MGMT_AGENT_RUNTIME_OK ||
+      pool.ready != 1u || pool.active_leases != 1u)
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "SG MMP command credit/terminal admission");
+}
+
 static void host_reject_unsigned_key(native_io_sharded_context *ctx, void *arg) {
   sg_multi_lane *lane = (sg_multi_lane *)arg;
   (void)ctx;
@@ -680,11 +784,12 @@ static void until_terminals(sg_multi_case *sc, size_t first) {
   }
 }
 
-static void test_multi_final(size_t final_count) {
+static void test_multi_final(size_t final_count, int command_mode) {
   sg_multi_case fixture = {0};
   sg_multi_case *sc = &fixture;
   sc->finals = final_count;
   sc->shards = final_count + 1u;
+  sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -695,6 +800,8 @@ static void test_multi_final(size_t final_count) {
     signed_final *f = &sc->finals_data[i];
     prepare(&f->server, (uint8_t)(17u + 2u*i));
     prepare(&f->client, (uint8_t)(33u + 2u*i));
+    f->lane = &sc->lanes[i+1u];
+    if (command_mode) enable_command_status(f);
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
     f->server.config.p2p_private_key = NULL;
@@ -775,6 +882,46 @@ static void test_multi_final(size_t final_count) {
       check_true(memcmp(f->signed_connection, other->signed_connection,
                         sizeof(f->signed_connection)) != 0);
     }
+  }
+
+  if (command_mode) {
+    /* Multiple real authenticated Final owners each hold an independent
+     * command Lease until their OWN NativeIO/CNet completion, with no inline
+     * success and no cross-lane admission/Manager credit mutation. */
+    for (size_t i = 1u; i < sc->shards; ++i)
+      submit(sc, i, host_foreign_command);
+    barrier(sc);
+    for (size_t i = 1u; i < sc->shards; ++i)
+      submit(sc, i, host_send_command);
+    barrier(sc);
+    refresh(sc, 0u);
+    for (size_t i = 0u; i < sc->finals; ++i) {
+      const signed_final *f = &sc->finals_data[i];
+      check_true(f->command_ticket != 0u);
+      check_equal(0u, f->command_terminals);
+      check_equal((size_t)1u, f->pool.active_leases);
+      check_equal((size_t)1u, f->server.runtime.command_terminal_inflight);
+    }
+    const uint64_t wire_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    for (;;) {
+      bool all_completed = true;
+      for (size_t i = 0u; i < sc->finals; ++i)
+        if (!sc->finals_data[i].command_terminals) all_completed = false;
+      if (all_completed || cmeta_monotonic_ms() >= wire_deadline) break;
+      pump(sc);
+    }
+    refresh(sc, 0u);
+    for (size_t i = 0u; i < sc->finals; ++i) {
+      const signed_final *f = &sc->finals_data[i];
+      check_equal(1u, f->command_terminals);
+      check_equal(P2P_OK, f->command_terminal_status);
+      check_equal((size_t)0u, f->server.runtime.command_terminal_inflight);
+      check_equal((size_t)0u, f->pool.active_leases);
+      check_equal((size_t)1u, f->pool.ready);
+    }
+    for (unsigned turn = 0u; turn < 4u; ++turn) pump(sc);
+    for (size_t i = 0u; i < sc->finals; ++i)
+      check_equal(1u, sc->finals_data[i].command_terminals);
   }
 
   /* Every final obtains its own REAL exclusive Pool Lease on its SG worker.
@@ -1074,11 +1221,17 @@ static void test_signed_reconnect_across_finals(size_t final_count) {
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+  it("holds typed MMP command Leases on 2 real SG Final workers until each wire terminal") {
+    test_multi_final(2u, 1);
+  }
+  it("holds typed MMP command Leases on 4 real SG Final workers until each wire terminal") {
+    test_multi_final(4u, 1);
+  }
   it("isolates 2 final Managers, signed READY and leases on 3 actual SG workers") {
-    test_multi_final(2u);
+    test_multi_final(2u, 0);
   }
   it("isolates 4 final Managers, signed READY and leases on 5 actual SG workers") {
-    test_multi_final(4u);
+    test_multi_final(4u, 0);
   }
   it("reconnects one signed identity from Final A to B with old Lease retained (3 SG workers)") {
     test_signed_reconnect_across_finals(2u);
