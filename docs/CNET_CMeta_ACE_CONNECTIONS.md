@@ -94,3 +94,50 @@ identity through CNet destination strategies. CNet Manager, ClientPool,
 ManagedDial integration after authenticated Noise + signed MMP READY is a
 separate delivery (#38). Never equate CONNECTED with protocol READY,
 duplicate reconnect timers or replay MMP commands/DHT writes/files on retry.
+
+## Strict opt-in shared physical connection credits
+
+The SG Host now exposes a narrow **physical Admission Credit** using
+`p2p_cnet_sg_cohost_credit_reserve_v1()` /
+`p2p_cnet_sg_cohost_credit_release_v1()`. This is **not** a new quota
+runtime or CMeta policy engine: the credit is the **same generation-safe
+`cnet_handoff_ticket` in the same bounded upstream CNet Handoff instance**
+used by TCP accepted-stream publication.
+
+For any **participating** independently managed CNet client on the final SG
+Owner, the host must:
+
+1. Call reserve on the **same exact final Owner thread** before
+   `cnet_connect_peer()` or adopting another TCP stream. The credit stays
+   in Handoff's RESERVED state; it does not publish a fake detached stream.
+2. Call the real CNet connector on that owner. If admission fails
+   synchronously, return the credit immediately. If it succeeds, retain
+   the ticket and context across CONNECTING, CONNECTED, receive/send and
+   closing, until the real CNet CLOSED/FAILED terminal callback has returned
+   or a completed owner stop proves quiescence.
+3. Call release **once** from that Owner. Stale/foreign generation, duplicate
+   release and wrong thread fail closed. Release remains possible after SG
+   seal/Owner stop, but never after SG destroy. A live reserved credit blocks
+   `p2p_cnet_sg_destroy_v1()` even after all CNet Owner objects are stopped.
+4. A cohost explicitly sharing this upstream Handoff RESERVED credit must be
+   **excluded** from the separate unreserved extra CNet occupancy publication
+   in `p2p_cnet_owner_publish_sg_host_load()`. Its credit is **already**
+   reflected in the SG selector's `reserved` count. Publishing it twice
+   would double-count admission pressure. Nonparticipating external CNet
+   consumers remain advisory only and must be included there instead.
+
+The same Handoff connection_capacity is therefore an **authoritative shared
+bounded count** for SG-accepted P2P incoming sockets and expressly participating
+external CNet connectors. An inbound P2P stream cannot bypass the full budget:
+EXPLICIT returns capacity denial, while RR/LOWEST_PRESSURE uses their canonical
+one-time Owner-selection admission and may choose a different eligible Owner.
+No hidden retry occurs after the selected Owner's real reserve fails.
+
+This is **not** a strict cap for all sockets sharing a NativeIO backend:
+unregistered external CNet callers, standalone P2P outbound connections,
+same-Owner local bypass paths and raw native sockets do not implicitly obtain
+this token. Total Host physical capacity still needs its authoritative
+admission policy if those workloads are admitted. For the participating
+flows, the SDK Handoff mutex and generation ticket are the only credit
+authority; CMeta remains an ACE typed Strategy for *advisory* owner selection.
+The SG Host retains one NativeIO backend + one observer per shard.
