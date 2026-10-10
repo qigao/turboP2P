@@ -462,6 +462,270 @@ static void test_same_owner_direct_p2p_uses_strict_cohost_credit(void) {
     finish_node(&server);
 }
 
+
+/* Real two-final-Owner contention: an independent CNet Cohost has reserved
+ * the only Handoff credit on Owner 0. Both canonical RR and LOWEST_PRESSURE
+ * must place the first new P2P TCP stream on Owner 1 (not replay/reroute
+ * after reserve failure). When both Owners are full, deny; after exact credit
+ * return, permit an authenticated Noise session on Owner 0. */
+static void test_contended_two_final_owners_real_noise(
+    cnet_owner_placement_kind kind) {
+    endpoint_t clients[2] = {{0}}, servers[2] = {{0}};
+    endpoint_t denied_client = {0};
+    for (size_t i = 0u; i < 2u; ++i) {
+        clients[i].remote = &servers[i];
+        servers[i].remote = &clients[i];
+        init_endpoint(&clients[i], 17 + (int)i * 2, 7u, 0);
+        init_endpoint(&servers[i], 33 + (int)i * 6, 7u, 0);
+    }
+    denied_client.remote = &servers[0];
+    init_endpoint(&denied_client, 23, 7u, 0);
+    cnet_stream_peer listener = {0};
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_t *sg = NULL;
+    p2p_cnet_sg_config_v1_t cfg = policy(
+        acceptor, p2p_node_cnet_transport_owner(servers[0].owner),
+        p2p_node_cnet_transport_owner(servers[1].owner), kind);
+    cfg.connection_capacity = 1u;
+    cfg.queue_capacity = 1u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&cfg, &sg));
+    cnet_handoff_ticket reserved = {0};
+    check_equal(P2P_OK, p2p_cnet_sg_cohost_credit_reserve_v1(
+        sg, 0u, &reserved));
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    /* Neither final Owner is permitted to release another inbox's ticket. */
+    check_equal(P2P_ERR_INVALID_STATE,
+        p2p_cnet_sg_cohost_credit_release_v1(sg, 1u, reserved));
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+
+    check_equal(P2P_OK, p2p_connect(clients[1].node,
+        "127.0.0.1", (int)listener.port));
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!clients[1].authenticated || !servers[1].authenticated) &&
+           cmeta_monotonic_ms() < deadline)
+        pump_four(&clients[0], &clients[1],
+                  &servers[0], &servers[1], acceptor);
+    check_equal(1, clients[1].authenticated);
+    check_equal(1, servers[1].authenticated);
+    check_equal(0, servers[0].authenticated);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).routed);
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    check_equal((size_t)1u, snapshot(sg, 1u).handoff.taken);
+    cnet_handoff_ticket additional = {0};
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED,
+        p2p_cnet_sg_cohost_credit_reserve_v1(sg, 1u, &additional));
+    check_equal((size_t)0u, additional.slot);
+
+    /* No eligible final Owner; denial is a decision at accept, not a new
+     * handshake, a cross-shard stream migration or an alternative pool. */
+    check_equal(P2P_OK, p2p_connect(denied_client.node,
+        "127.0.0.1", (int)listener.port));
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (snapshot(sg, 0u).denied == 0u &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(denied_client.node));
+        pump_four(&clients[0], &clients[1],
+                  &servers[0], &servers[1], acceptor);
+    }
+    check_equal((uint64_t)1u, snapshot(sg, 0u).denied);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).routed);
+    check_equal(0, denied_client.authenticated);
+    check_equal(0, servers[0].authenticated);
+
+    /* Cohost completion releases its original credit, making Owner 0
+     * eligible again. Existing authenticated Owner 1 never migrates. */
+    check_equal(P2P_OK,
+        p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, reserved));
+    check_equal((size_t)0u, snapshot(sg, 0u).handoff.reserved);
+    check_equal(P2P_OK, p2p_connect(clients[0].node,
+        "127.0.0.1", (int)listener.port));
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!clients[0].authenticated || !servers[0].authenticated) &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(denied_client.node));
+        pump_four(&clients[0], &clients[1],
+                  &servers[0], &servers[1], acceptor);
+    }
+    for (size_t i = 0u; i < 2u; ++i) {
+        check_equal(1, clients[i].authenticated);
+        check_equal(1, servers[i].authenticated);
+        check_equal((size_t)1u, snapshot(sg, i).handoff.taken);
+        check_equal((size_t)0u, snapshot(sg, i).handoff.reserved);
+    }
+    check_equal((uint64_t)2u, snapshot(sg, 0u).routed);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).denied);
+    for (size_t i = 0u; i < 2u; ++i) {
+        const char payload[8] = {
+            'o', 'w', 'n', 'e', 'r', '-', (char)('0' + i), '\0'
+        };
+        check_equal(P2P_OK, p2p_send_message(
+            clients[i].node, clients[i].peer,
+            P2P_MSG_CUSTOM, payload, sizeof(payload)));
+    }
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!servers[0].messages || !servers[1].messages) &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(denied_client.node));
+        pump_four(&clients[0], &clients[1],
+                  &servers[0], &servers[1], acceptor);
+    }
+    for (size_t i = 0u; i < 2u; ++i) {
+        const char payload[8] = {
+            'o', 'w', 'n', 'e', 'r', '-', (char)('0' + i), '\0'
+        };
+        check_equal(1, servers[i].messages);
+        check_equal(payload, servers[i].received, sizeof(payload));
+    }
+
+    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    for (size_t i = 0u; i < 2u; ++i) {
+        check_equal(P2P_OK, p2p_node_cnet_stop(servers[i].owner));
+        check_true(snapshot(sg, i).handoff.drained);
+    }
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    for (size_t i = 0u; i < 2u; ++i) {
+        finish_node(&clients[i]);
+        finish_node(&servers[i]);
+    }
+    finish_node(&denied_client);
+}
+
+/* LOWEST_PRESSURE must use actual credited pressure, not merely eligibility
+ * or a guessed modulo of the number of configured Owner shards. Owner 0
+ * still has available headroom (1 of 2 slots RESERVED) but Owner 1 is
+ * genuinely idle, so only Owner 1 should receive the new Noise session. */
+static void test_lowest_pressure_avoids_nonfull_reserved_owner(void) {
+    endpoint_t clients[2] = {{0}}, servers[2] = {{0}};
+    for (size_t i = 0u; i < 2u; ++i) {
+        clients[i].remote = &servers[i];
+        servers[i].remote = &clients[i];
+        init_endpoint(&clients[i], 17 + (int)i * 2, 7u, 0);
+        init_endpoint(&servers[i], 33 + (int)i * 6, 7u, 0);
+    }
+    cnet_stream_peer listener = {0};
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_t *sg = NULL;
+    p2p_cnet_sg_config_v1_t cfg = policy(
+        acceptor, p2p_node_cnet_transport_owner(servers[0].owner),
+        p2p_node_cnet_transport_owner(servers[1].owner),
+        CNET_OWNER_PLACE_LOWEST_PRESSURE);
+    cfg.connection_capacity = 2u;
+    cfg.queue_capacity = 2u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&cfg, &sg));
+    cnet_handoff_ticket reserved = {0};
+    check_equal(P2P_OK,
+        p2p_cnet_sg_cohost_credit_reserve_v1(sg, 0u, &reserved));
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    check_equal((size_t)0u, snapshot(sg, 1u).handoff.reserved);
+    check_equal(P2P_OK, p2p_connect(clients[1].node,
+        "127.0.0.1", (int)listener.port));
+    const uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!clients[1].authenticated || !servers[1].authenticated) &&
+           cmeta_monotonic_ms() < deadline)
+        pump_four(&clients[0], &clients[1],
+                  &servers[0], &servers[1], acceptor);
+    check_equal(1, clients[1].authenticated);
+    check_equal(1, servers[1].authenticated);
+    check_equal(0, servers[0].authenticated);
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    check_equal((size_t)1u, snapshot(sg, 1u).handoff.taken);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).routed);
+    check_equal(P2P_OK,
+        p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, reserved));
+    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    for (size_t i = 0u; i < 2u; ++i) {
+        check_equal(P2P_OK, p2p_node_cnet_stop(servers[i].owner));
+        check_true(snapshot(sg, i).handoff.drained);
+    }
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    for (size_t i = 0u; i < 2u; ++i) {
+        finish_node(&clients[i]);
+        finish_node(&servers[i]);
+    }
+}
+
+/* EXPLICIT is a strict, identity-less pre-Noise Owner pin, not RR with a
+ * hidden fallback. Even with an entirely available second final Owner,
+ * a Cohost reservation saturating Owner 0 must deny the inbound stream. */
+static void test_explicit_pinned_final_owner_refuses_neighbor_fallback(void) {
+    endpoint_t blocked = {0}, admitted = {0}, server_a = {0}, server_b = {0};
+    admitted.remote = &server_a;
+    server_a.remote = &admitted;
+    blocked.remote = &server_a;
+    init_endpoint(&blocked, 23, 7u, 0);
+    init_endpoint(&admitted, 17, 7u, 0);
+    init_endpoint(&server_a, 33, 7u, 0);
+    init_endpoint(&server_b, 39, 7u, 0);
+    cnet_stream_peer listener = {0};
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_t *sg = NULL;
+    p2p_cnet_sg_config_v1_t cfg = policy(
+        acceptor, p2p_node_cnet_transport_owner(server_a.owner),
+        p2p_node_cnet_transport_owner(server_b.owner),
+        CNET_OWNER_PLACE_EXPLICIT);
+    cfg.explicit_owner = 0u;
+    cfg.connection_capacity = 1u;
+    cfg.queue_capacity = 1u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&cfg, &sg));
+    cnet_handoff_ticket reserved = {0};
+    check_equal(P2P_OK,
+        p2p_cnet_sg_cohost_credit_reserve_v1(sg, 0u, &reserved));
+    check_equal(P2P_OK, p2p_connect(blocked.node,
+        "127.0.0.1", (int)listener.port));
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (snapshot(sg, 0u).denied == 0u &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(blocked.node));
+        check_equal(P2P_OK, p2p_poll(admitted.node));
+        check_equal(P2P_OK, p2p_poll(server_a.node));
+        check_equal(P2P_OK, p2p_poll(server_b.node));
+        check_equal(P2P_OK, p2p_cnet_owner_poll(acceptor));
+        cmeta_sleep_ms(1u);
+    }
+    check_equal((uint64_t)1u, snapshot(sg, 0u).denied);
+    check_equal((uint64_t)0u, snapshot(sg, 0u).routed);
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    check_equal((size_t)0u, snapshot(sg, 1u).handoff.taken);
+    check_equal(0, server_b.authenticated);
+    check_equal(P2P_OK,
+        p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, reserved));
+    check_equal(P2P_OK, p2p_connect(admitted.node,
+        "127.0.0.1", (int)listener.port));
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!admitted.authenticated || !server_a.authenticated) &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(blocked.node));
+        check_equal(P2P_OK, p2p_poll(admitted.node));
+        check_equal(P2P_OK, p2p_poll(server_a.node));
+        check_equal(P2P_OK, p2p_poll(server_b.node));
+        check_equal(P2P_OK, p2p_cnet_owner_poll(acceptor));
+        cmeta_sleep_ms(1u);
+    }
+    check_equal(1, admitted.authenticated);
+    check_equal(1, server_a.authenticated);
+    check_equal(0, server_b.authenticated);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).routed);
+    check_equal((uint64_t)1u, snapshot(sg, 0u).denied);
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.taken);
+    check_equal((size_t)0u, snapshot(sg, 1u).handoff.taken);
+    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    check_equal(P2P_OK, p2p_node_cnet_stop(server_a.owner));
+    check_equal(P2P_OK, p2p_node_cnet_stop(server_b.owner));
+    check_true(snapshot(sg, 0u).handoff.drained);
+    check_true(snapshot(sg, 1u).handoff.drained);
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    finish_node(&blocked);
+    finish_node(&admitted);
+    finish_node(&server_a);
+    finish_node(&server_b);
+}
+
 static void pump_four_final_owners(
     endpoint_t clients[4], endpoint_t servers[4],
     p2p_cnet_owner_t *acceptor) {
@@ -577,5 +841,17 @@ spec("P2P real SG cross-Owner credited accepted-stream handoff") {
     }
     it("keeps same-Owner zero-hop P2P accept under strict shared credits") {
         test_same_owner_direct_p2p_uses_strict_cohost_credit();
+    }
+    it("skips a saturated cohost Owner under real RR handoff and Noise") {
+        test_contended_two_final_owners_real_noise(CNET_OWNER_PLACE_ROUND_ROBIN);
+    }
+    it("skips a saturated cohost Owner under real LOWEST_PRESSURE and Noise") {
+        test_contended_two_final_owners_real_noise(CNET_OWNER_PLACE_LOWEST_PRESSURE);
+    }
+    it("prefers an idle Owner over an eligible but credited busy Owner") {
+        test_lowest_pressure_avoids_nonfull_reserved_owner();
+    }
+    it("never reroutes a full EXPLICIT pinned Owner to a free neighbor") {
+        test_explicit_pinned_final_owner_refuses_neighbor_fallback();
     }
 }

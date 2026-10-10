@@ -142,3 +142,38 @@ admission policy if those workloads are admitted. For the participating
 flows, the SDK Handoff mutex and generation ticket are the only credit
 authority; CMeta remains an ACE typed Strategy for *advisory* owner selection.
 The SG Host retains one NativeIO backend + one observer per shard.
+
+
+## Multi-final-Owner credited admission contention conformance
+
+The real P2P SG two-final-Owner tests now cover *simultaneous* canonical CNet
+Handoff capacity on different Owners, not only an isolated pinned inbox.
+The Host explicitly reserves the first Owner's only slot on behalf of an
+independently participating CNet Cohost, then exercises actual TCP admission
+through a distinct SG Acceptor:
+
+- **ROUND_ROBIN** starts at the saturated Owner 0 and selects the only
+  eligible Owner 1 (without an after-the-fact redispatch).
+- **LOWEST_PRESSURE** also selects Owner 1 when Owner 0 is full. A separate
+  case holds one RESERVED credit on an Owner with physical headroom remaining:
+  the other truly idle Owner must still win lowest-pressure placement.
+- With both final Owners occupied, the next incoming socket is denied before
+  Cookie/Noise; no Owner or stream is migrated and neither live Handoff
+  ticket is consumed by the refused connection.
+- After the Cohost's real credit is returned, a new P2P connection is accepted
+  and authenticated on Owner 0 while the already-authenticated Owner 1
+  connection stays on its original Owner. Each session also transfers real
+  application data, and both final inboxes drain on deterministic stop.
+- A separate **EXPLICIT** pinned-Owner profile proves that a full Owner 0
+  rejects connection admission even when Owner 1 is idle; it resumes with
+  Cookie/Noise only after Owner 0's original credit returns.
+
+All results come from real P2P CNet callbacks and Handoff ticket snapshots,
+not from a mock strategy selector. The test creates no new I/O worker, queue,
+Actor, retry loop, or duplicate NativeIO completion observer. CMeta's ACE
+Strategy produces only per-admission hints; original CNet Owner Placement
+and generation-safe Handoff remain the sole selection and reservation owners.
+
+This is multi-final logical CNet Owner contention in the existing installed
+SDK test harness. It is **not** a new dedicated 1/2/4 NativeIO SG Host
+benchmark, and does not itself establish multicore throughput improvement.
