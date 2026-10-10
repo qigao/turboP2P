@@ -36,6 +36,133 @@ jobs:
           set -euo pipefail
           cmake --build build/salts-foundation --parallel 2
           ctest --test-dir build/salts-foundation --output-on-failure
+          # Exact 2/4 signed SG Final Owner lifecycle, repeated on real
+          # CNet/NativeIO workers to catch intermittent handoff/drain races.
+          # This is NOT an equal-load performance benchmark.
+          ctest --test-dir build/salts-foundation --output-on-failure \
+            -R '^test_mesh_mgmt_sg_multi_runtime
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/p2p-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
+          cmake --build build/p2p-sanitize --parallel 2 --target \
+            test_p2p_security test_p2p_cnet_transport test_p2p_cnet_admission \
+            test_p2p_key_worker test_p2p_cnet_peer test_p2p_cnet_node \
+            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht \
+            test_p2p_cnet_lifecycle test_p2p_cnet_sg_handoff \
+            test_p2p_cnet_sg_host \
+            test_p2p_cnet_sg_host_four \
+            test_p2p_cnet_sg_cohost \
+            test_p2p_cnet_ace_placement test_p2p_cnet_ace_placement_cpp \
+            test_mesh_mgmt_cnet_runtime test_mesh_mgmt_sg_runtime test_mesh_mgmt_sg_multi_runtime \
+            test_mesh_mgmt_destination_policy \
+            test_mesh_mgmt_client_config \
+            test_mesh_mgmt_service_config \
+            test_mesh_mgmt_service_config_cpp \
+            test_salts_23_contracts test_salts_23_contracts_cpp
+          ctest --test-dir build/p2p-sanitize --output-on-failure \
+            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_mesh_mgmt_sg_runtime|test_mesh_mgmt_sg_multi_runtime|test_mesh_mgmt_destination_policy|test_mesh_mgmt_client_config|test_mesh_mgmt_service_config(_cpp)?|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle|cnet_sg_handoff|cnet_sg_host(_four)?|cnet_sg_cohost|cnet_ace_placement(_cpp)?))
+        if: always()
+        shell: bash
+        run: ccache --show-stats
+ --repeat until-fail:10
+      - name: P2P sanitizer regression
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/p2p-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
+          cmake --build build/p2p-sanitize --parallel 2 --target \
+            test_p2p_security test_p2p_cnet_transport test_p2p_cnet_admission \
+            test_p2p_key_worker test_p2p_cnet_peer test_p2p_cnet_node \
+            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht \
+            test_p2p_cnet_lifecycle test_p2p_cnet_sg_handoff \
+            test_p2p_cnet_sg_host \
+            test_p2p_cnet_sg_host_four \
+            test_p2p_cnet_sg_cohost \
+            test_p2p_cnet_ace_placement test_p2p_cnet_ace_placement_cpp \
+            test_mesh_mgmt_cnet_runtime test_mesh_mgmt_sg_runtime test_mesh_mgmt_sg_multi_runtime \
+            test_mesh_mgmt_destination_policy \
+            test_mesh_mgmt_client_config \
+            test_mesh_mgmt_service_config \
+            test_mesh_mgmt_service_config_cpp \
+            test_salts_23_contracts test_salts_23_contracts_cpp
+          ctest --test-dir build/p2p-sanitize --output-on-failure \
+            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_mesh_mgmt_sg_runtime|test_mesh_mgmt_sg_multi_runtime|test_mesh_mgmt_destination_policy|test_mesh_mgmt_client_config|test_mesh_mgmt_service_config(_cpp)?|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle|cnet_sg_handoff|cnet_sg_host(_four)?|cnet_sg_cohost|cnet_ace_placement(_cpp)?))$'
+
+
+      - name: Report ccache compilation statistics
+        if: always()
+        shell: bash
+        run: ccache --show-stats
+
+          ctest --test-dir build/p2p-sanitize --output-on-failure \
+            -R '^test_mesh_mgmt_sg_multi_runtime
+        if: always()
+        shell: bash
+        run: ccache --show-stats
+ --repeat until-fail:10
+      - name: P2P sanitizer regression
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/p2p-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
+          cmake --build build/p2p-sanitize --parallel 2 --target \
+            test_p2p_security test_p2p_cnet_transport test_p2p_cnet_admission \
+            test_p2p_key_worker test_p2p_cnet_peer test_p2p_cnet_node \
+            test_p2p_cnet_files test_p2p_cnet_security_config test_p2p_cnet_dht \
+            test_p2p_cnet_lifecycle test_p2p_cnet_sg_handoff \
+            test_p2p_cnet_sg_host \
+            test_p2p_cnet_sg_host_four \
+            test_p2p_cnet_sg_cohost \
+            test_p2p_cnet_ace_placement test_p2p_cnet_ace_placement_cpp \
+            test_mesh_mgmt_cnet_runtime test_mesh_mgmt_sg_runtime test_mesh_mgmt_sg_multi_runtime \
+            test_mesh_mgmt_destination_policy \
+            test_mesh_mgmt_client_config \
+            test_mesh_mgmt_service_config \
+            test_mesh_mgmt_service_config_cpp \
+            test_salts_23_contracts test_salts_23_contracts_cpp
+          ctest --test-dir build/p2p-sanitize --output-on-failure \
+            -R '^(test_salts_23_contracts(_cpp)?|test_mesh_mgmt_cnet_runtime|test_mesh_mgmt_sg_runtime|test_mesh_mgmt_sg_multi_runtime|test_mesh_mgmt_destination_policy|test_mesh_mgmt_client_config|test_mesh_mgmt_service_config(_cpp)?|test_p2p_(security|cnet_transport|cnet_admission|key_worker|cnet_peer|cnet_node|cnet_files|cnet_security_config|cnet_dht|cnet_lifecycle|cnet_sg_handoff|cnet_sg_host(_four)?|cnet_sg_cohost|cnet_ace_placement(_cpp)?))$'
+
+
+      - name: Report ccache compilation statistics
+        if: always()
+        shell: bash
+        run: ccache --show-stats
+ --repeat until-fail:5
+
+      - name: Report ccache compilation statistics
+        if: always()
+        shell: bash
+        run: ccache --show-stats
+ --repeat until-fail:10
       - name: P2P sanitizer regression
         shell: bash
         env:
