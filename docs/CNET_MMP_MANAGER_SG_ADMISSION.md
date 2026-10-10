@@ -203,3 +203,89 @@ once. No ManagedDial READY is signaled and no duplicate
 quarantine/reconnect timeline is installed. The existing Mesh
 endpoint pool still owns its retry policy. Windows/macOS/Android
 installed consumers and performance benchmarks are separate gates.
+
+
+## Signed same-physical MMP → actual CNet ClientPool READY and Lease
+
+Opt-in Mesh Router APIs now implement the **actual upstream CNet Pool**
+`reserve_connecting`, `bind_ready`, and `try_acquire` for real signed,
+authenticated MMP sessions whose **exact P2P CNet physical connection**
+is already CNet Manager BOUND (qualified by the previous stage).
+
+`mesh_mgmt_agent_router_pool_bind_ready_v1()` first revalidates the
+*live* signed Router session and the **same peer's** exact Manager
+connection, checks the explicitly designated borrowed Manager and
+generation, and projects a fully owned CNet Pool compatibility key from
+the signed and configured MMP facts:
+
+- runtime ID: domain-separated digest of Router runtime generation
+- Owner ID: mandatory nonzero, host-assigned Pool Owner identity; upstream
+  Pool enforces equality to its configured owner
+- endpoint ID: authenticated remote managed-node ID digest
+- peer generation: current Router connection_id digest
+- authority ID: configured trusted certificate-issuer public key digest
+- transport ID: authenticated remote Noise static transport key digest
+- client identity: local configured signed managed-node identity digest
+- protocol ID: fixed `MMP_v1` namespace, not generic TCP/HTTP
+- session ID: verified remote MMP session ID + incarnation digest
+- TLS trust/SNI/ALPN IDs: all zero because this is **P2P Noise**, not TLS
+
+CNet Pool uses its compact 64-bit host identity key for compatibility,
+not as a cryptographic replacement for Router certificate verification.
+Keys contain no secret pointers or raw certificates. Every individual
+fact is domain-separated and hashed using Mesh's existing BLAKE2b-256
+provider; the full signed Router proof and exact Manager physical
+generation are *independently revalidated* before **each** lease.
+
+### Why post-auth CONNECTING rather than a guessed pre-auth key
+
+For an *unsolicited inbound* TCP connection the remote signed authority
+and managed-node ID are genuinely unknowable before Noise and HELLO.
+`cnet_pool_reserve_connecting` stores an **immutable** key, and the
+published CNet 2.3 ClientPool API has no authenticated rekey transition.
+This phase therefore reserves a Pool physical/READY slot **only after
+signed MMP authentication** and binds it immediately, with a second
+signed/physical generation recheck between Pool reserve and bind.
+Earlier TCP admission is already strictly bounded by native CNet Manager
+and SG Handoff; **this implementation does not claim pre-auth Pool
+CONNECTING quotas**. No placeholder or echo-test authority is reused.
+
+### Actual leases and terminal discipline
+
+`mesh_mgmt_agent_router_pool_acquire_v1()` reevaluates the live signed
+identity, Router connection generation and its exact Manager BOUND CNet
+connection before acquiring the real upstream Pool lease. The first
+one-slot MMP lease succeeds; a second concurrent lease is refused,
+as are wrong Manager and mismatched authority/session keys. This
+strict `protocol_capacity=1` uses CNet's real single exclusive lease
+budget: it does **not** implement multiplexed protocol callbacks.
+
+The caller must release the borrowed CNet Pool lease **exactly once**
+even after a transport disconnect; `cnet_pool_release` is valid for
+terminal entries still waiting for borrowed resources. A Pool record
+cannot be declared terminal until upstream Manager is RETIRED/recycled.
+Once the real signed P2P connection is closed, the caller explicitly
+calls `cnet_pool_terminal`; an outstanding lease blocks Pool destroy,
+and only release permits final Pool reclamation and Manager/Owner
+shutdown. Wrong/stale duplicate release is rejected.
+
+The real dedicated CNet Mesh test uses two signed enrolled peers over
+real P2P Noise/MMP, the very same inbound Manager BOUND physical stream,
+then disconnects and reconnects. It checks strict wrong Manager,
+wrong Owner ID, authority/session key separation, duplicate acquisition,
+pool-terminal-before-manager-retire refusal, stale Router connection ID
+refusal, terminal wait with one outstanding lease, duplicate settlement,
+and complete Pool drain.
+
+### Boundaries still pending
+
+The available APIs are explicitly **opt-in**; automatic production
+Mesh runtime Pool record enumeration, callback-driven per-session
+lease release and Pool teardown are not installed here. The caller
+owns the Pool and must drain it **before** P2P CNet Owner destruction.
+Outbound numeric P2P continues unmanaged; the separate plaintext
+Cohost Pool remains CONNECTING-only and never gets MMP READY.
+Full per-command/multiplexed protocol-slot operations, unified
+ManagedDial/quarantine ownership and Windows/macOS/Android installed SDK
+qualification remain part of #38. No MMP management, DHT or file
+operation is replayed on transport reconnect.
