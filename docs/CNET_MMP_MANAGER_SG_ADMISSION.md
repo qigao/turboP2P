@@ -55,3 +55,48 @@ fallback, provider-private scheduler or new CMeta interface runtime are
 introduced. Existing CMeta ACE policy remains borrowed and invoked only at
 connection admission. The code must build/test against floating latest
 Salts.Native 2.3.0-* and SaltsUtils.Native 4.3.0-* without exact RC pins.
+
+
+## Next acceptance: ClientPool CONNECTING on the true SG Owner
+
+The same real 2-shard SG Host fixture now creates **CNet ClientPool**
+alongside its already qualified CNet Manager and extra external CNet client,
+all on the **same Owner shard**. This adds only the SDK's bounded physical
+CONNECTING budget, not a new socket runtime or a second recovery timeline.
+
+Physical admission on the SG final Owner is ordered:
+
+    CNet Handoff shared credit reserve
+       -> cnet_pool_reserve_connecting(key)
+       -> cnet_manager_reserve(attachment)
+       -> cnet_manager_connect(real tcp://127.0.0.1:port)
+       -> one NativeIO SG Host observe/routes batch
+       -> cnet_manager_advance (post-transport terminal recycle)
+       -> cnet_pool_terminal (CONNECTING, never READY)
+       -> CNet Handoff credit release
+       -> cnet_pool_destroy -> cnet_manager_destroy -> cnet_client_destroy
+       -> SG Host lease release
+
+The copied **test-only pool key** contains nonzero, stable runtime, Owner,
+endpoint, placeholder authority, transport and echo-protocol identifiers.
+Its provisional authority ID is NOT a signed enrollment fact and it can
+**never authorize reuse**. A copied key is merely CNet's physical CONNECTING
+partition; cross-Owner reserve rejects and capacity cannot be overbooked.
+No MMP protocol callback is fabricated.
+
+A real CNet TCP CONNECTED event, plus fully exchanged echo bytes, must still
+leave the upstream pool snapshot at `connecting=1, ready=0,
+active_leases=0`, and `cnet_pool_try_acquire` must refuse with ENOBUFS.
+`cnet_pool_bind_ready` is **not** called at all. The first real Manager
+`on_recycle` unlocks terminal release, and the now-retired generation
+cannot be released or looked up again. Destroy is blocked until both Pool and
+Manager have genuinely drained and shared SG Handoff credits are returned.
+The main thread has no authority to inspect or mutate the Owner-local Pool.
+
+Production integration of **authenticated** CNet ClientPool leases requires
+binding the **same Manager-owned physical connection** that actually carries
+P2P Noise + signed MMP identity. The unrelated plaintext echo connection
+cannot inherit the already-authenticated P2P neighbor's READY capability.
+No hidden reconnect, MMP command replay or CNet ManagedDial state is added.
+That signed protocol boundary and a single authoritative retry timeline
+remain the subsequent phase of issue #38.
