@@ -45,6 +45,7 @@ mesh_mgmt_execution_rpc_control_init_v1(
     const mesh_mgmt_execution_rpc_control_config_v1_t *config) {
   if (!control || !config || control->initialized || !config->registry ||
       !config->registry->impl || !config->clock_now_ms || !config->send ||
+      !config->resolve_result_signer ||
       bytes_are_zero(config->expected_mesh_id,
                      sizeof(config->expected_mesh_id)) ||
       bytes_are_zero(config->local_principal_key,
@@ -107,6 +108,15 @@ mesh_mgmt_execution_rpc_control_submit_v1(
           &request, binding.request_digest) !=
       MESH_MGMT_EXECUTION_RESULT_OK)
     return MESH_MGMT_EXECUTION_RPC_CONTROL_INVALID_REQUEST;
+  /* Resolve trusted execution signing authority *before* registry admission
+   * and encryption. A result claiming its own public key cannot authorize
+   * itself, including after a reconnect onto another SG Final Owner. */
+  if (control->config.resolve_result_signer(
+          control->config.result_signer_context, binding.target_node_id,
+          binding.result_signer_public_key) != 0 ||
+      bytes_are_zero(binding.result_signer_public_key,
+                     sizeof(binding.result_signer_public_key)))
+    return MESH_MGMT_EXECUTION_RPC_CONTROL_AUTH_FAILED;
 
   *out_binding = binding;
   registry_result = mesh_mgmt_execution_rpc_registry_register_v1(
