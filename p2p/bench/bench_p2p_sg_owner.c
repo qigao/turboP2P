@@ -221,7 +221,8 @@ static void sg4_progress(native_io_sharded_context *context, void *arg) {
 static void sg4_send(native_io_sharded_context *context, void *arg) {
     sg4_lane *lane = (sg4_lane *)arg;
     sg4_server *server = &lane->scenario->servers[sg4_server_index(lane->shard)];
-    char reply[8] = {'r','e','p','l','y','-',(char)('0' + lane->shard),'\0'};
+    char reply[8] = {'r','e','p','l','y','-',
+        (char)('1' + sg4_server_index(lane->shard)),'\0'};
     if (native_io_sharded_context_shard(context) != lane->shard ||
         cmeta_thread_current_token() != lane->worker_token ||
         !server->endpoint.peer) {
