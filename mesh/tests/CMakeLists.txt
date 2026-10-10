@@ -416,9 +416,11 @@ foreach(test_source ${MESH_TEST_SOURCES})
         mesh_mgmt_execution_egress mesh_mgmt_execution_sender)
     endif()
     if(test_name STREQUAL "test_mesh_mgmt_execution_node")
-        add_dependencies(${test_name} mesh_mgmt_execution_test_guest)
+        add_dependencies(${test_name} mesh_mgmt_execution_test_guest
+            mesh_mgmt_execution_test_success_guest)
         target_compile_definitions(${test_name} PRIVATE
-            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}")
+            MESH_TEST_EXECUTION_WASM="${MESH_MGMT_EXECUTION_TEST_WASM}"
+            MESH_TEST_EXECUTION_SUCCESS_WASM="${MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM}")
         list(APPEND extra_test_libs mesh_mgmt_execution_node)
     endif()
     if(test_name STREQUAL "test_meshd_execution_config")
