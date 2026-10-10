@@ -214,6 +214,22 @@ static void host_init(native_io_sharded_context *context, void *arg) {
   trust.now_context = server->identity.signer.callback_context;
   SG_CALL(lane, mesh_mgmt_p2p_security_provider_init_v2(
       &scenario->server_security, &trust, &p2p_security));
+  /* An explicitly constructed SG-native Node does NOT pass through
+   * p2p_start_nonblocking_v2's dedicated default policy conversion.
+   * Supply the same nonzero mandatory Cookie/Noise/source-admission
+   * budgets as the existing P2P SG Node fixtures, without a fallback. */
+  p2p_security.handshake_timeout_ms = 5000u;
+  p2p_security.ready_timeout_ms = 5000u;
+  p2p_security.send_hwm_bytes = cfg.send_hwm_bytes;
+  p2p_security.node_send_budget_bytes = cfg.send_hwm_bytes * 4u;
+  p2p_security.session_max_age_ms = 60000u;
+  p2p_security.session_max_bytes_per_direction = cfg.send_hwm_bytes;
+  p2p_security.cookie_gate_limit = 16u;
+  p2p_security.cookie_lifetime_ms = 5000u;
+  p2p_security.cookie_key_rotation_ms = 10000u;
+  p2p_security.source_admission_burst = 16u;
+  p2p_security.source_admission_refill_per_second = 1u;
+  p2p_security.source_admission_bucket_limit = 16u;
   SG_CALL(lane, p2p_node_configure_security_v2(
       scenario->server_node, &p2p_security));
   SG_CALL(lane, p2p_node_cnet_create_external(
