@@ -1,0 +1,101 @@
+name: P2P SG Host performance profiles
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/p2p-sg-benchmark-23]
+    paths:
+      - 'p2p/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/p2p-sg-benchmark.yml'
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: p2p-sg-bench-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  sg-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-sg-benchmark
+      - name: Configure and build opt-in installed-SDK benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/p2p-sg-benchmark -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DP2P_SG_BUILD_BENCHMARKS=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+          cmake --build build/p2p-sg-benchmark --parallel 2 --target \
+            bench_p2p_sg_1 bench_p2p_sg_2 bench_p2p_sg_4_1 bench_p2p_sg_4
+      - name: Measure real NativeIO SG + P2P Noise traffic
+        shell: bash
+        env:
+          P2P_SG_BENCH_WARMUP: '64'
+          P2P_SG_BENCH_ROUNDS: '1024'
+        run: |
+          set -euo pipefail
+          echo 'shards,sessions,rounds,warmup,payload_bytes,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,echo_batch_p50_us,echo_batch_p95_us,echo_batch_p99_us' > p2p-sg-benchmark.csv
+          {
+            uname -a
+            lscpu
+            cmake --version | head -1
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+            git rev-parse HEAD
+          } > p2p-sg-machine.txt
+          # Each profile is independently initialized and torn down per
+          # repeat. Keep all raw samples, not only a flattering best run.
+          for repeat in 1 2 3 4 5; do
+            for profile in 1 2 4_1 4; do
+              ./build/p2p-sg-benchmark/bench_p2p_sg_"$profile" |
+                tee "p2p-sg-bench-$profile-repeat-$repeat.log"
+              grep '^P2P_SG_BENCH,' "p2p-sg-bench-$profile-repeat-$repeat.log" |
+                sed 's/^P2P_SG_BENCH,//' >> p2p-sg-benchmark.csv
+            done
+          done
+          cat p2p-sg-benchmark.csv
+          python3 - <<'PY'
+          import csv, statistics
+          from collections import defaultdict
+          with open("p2p-sg-benchmark.csv", newline="", encoding="utf-8") as f:
+              rows = list(csv.DictReader(f))
+          groups = defaultdict(list)
+          for row in rows:
+              groups[(int(row["shards"]), int(row["sessions"]))].append(row)
+          expected = {(1, 1), (2, 1), (4, 1), (4, 3)}
+          if set(groups) != expected or any(len(v) != 5 for v in groups.values()):
+              raise SystemExit(f"Incomplete benchmark groups: {dict((k, len(v)) for k, v in groups.items())}")
+          with open("p2p-sg-benchmark-summary.csv", "w", newline="", encoding="utf-8") as out:
+              writer = csv.writer(out)
+              writer.writerow(["shards", "sessions", "repeats",
+                               "median_p50_us", "median_p95_us", "median_p99_us",
+                               "median_app_msgs_per_s", "median_process_cpu_pct"])
+              for (shards, sessions), records in sorted(groups.items()):
+                  metrics = ["echo_batch_p50_us", "echo_batch_p95_us", "echo_batch_p99_us",
+                             "app_msgs_per_s", "process_cpu_pct"]
+                  values = [round(statistics.median(float(r[key]) for r in records), 3)
+                            for key in metrics]
+                  writer.writerow([shards, sessions, len(records), *values])
+          PY
+          cat p2p-sg-benchmark-summary.csv
+          echo "1/2/4 shards at 1 active session compare per-session overhead. 4 shards at 3 sessions is NOT same-load scaling; raw-CNet baseline remains unmeasured."
+      - name: Upload raw performance evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2p-sg-bench-${{ github.sha }}
+          path: |
+            p2p-sg-benchmark.csv
+            p2p-sg-benchmark-summary.csv
+            p2p-sg-machine.txt
+            p2p-sg-bench-*.log
+          if-no-files-found: error
+      - name: Report ccache
+        if: always()
+        shell: bash
+        run: ccache --show-stats
