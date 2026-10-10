@@ -321,6 +321,25 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_bind_ready_v1(
  * Acquires a real one-slot CNet Pool lease only if the same authenticated
  * key is READY; cannot replay MMP/DHT/file sends or select another Owner.
  * Caller must explicitly release each lease even after peer disconnect. */
+/* Unique signed target resolution before a CNet Pool Lease reservation;
+ * no transport side effects, no discovery dial/retry and no fallback. */
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_execution_target_v4(
+    mesh_mgmt_agent_router_v1_t *router,
+    const uint8_t target_node_id[32], p2p_peer_t **out_peer);
+
+/* Sign one canonical execution request/result/status and submit its complete
+ * encrypted P2P frame with a CNet full-wire-write/physical-failure callback.
+ * Caller must first reserve an inbound signed ClientPool Lease and retain the
+ * callback context until one terminal. On rejected send, no callback occurs.
+ * Returns admission only, NEVER remote execution acknowledgement. */
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_send_execution_terminal_v4(
+    mesh_mgmt_agent_router_v1_t *router, uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    p2p_app_send_terminal_fn complete, void *context);
+
 mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_acquire_v1(
     const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
     const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
