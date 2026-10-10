@@ -696,6 +696,172 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_physical_ready_v1(
   return MESH_MGMT_AGENT_ROUTER_OK;
 }
 
+
+/* Domain-separated 64-bit host key projection from authenticated signed
+ * session facts. Hash-to-64 is a compact CNet Pool compatibility key, not a
+ * cryptographic signature or an authorization system of its own. Full signed
+ * proof and CNet Manager generation are rechecked on each acquisition.
+ * Do not use raw pointers, secrets or hostname-only shortcuts as identities. */
+static int pool_fact64(uint8_t domain, const uint8_t *data, size_t length,
+                       uint64_t *out) {
+  uint8_t message[1u + 32u] = {0}, digest[32] = {0};
+  uint64_t value = 0u;
+  if (!data || !length || length > 32u || !out) return 0;
+  message[0] = domain;
+  memcpy(message + 1u, data, length);
+  if (mesh_mgmt_blake2b_256(message, length + 1u, digest) != MESH_MGMT_CRYPTO_OK)
+    return 0;
+  for (size_t i = 0u; i < 8u; ++i)
+    value = (value << 8u) | (uint64_t)digest[i];
+  mesh_mgmt_crypto_wipe(digest, sizeof(digest));
+  if (!value) return 0; /* fail fast on impossible-looking identity */
+  *out = value;
+  return 1;
+}
+
+static int pool_key_from_signed_ready(
+    const mesh_mgmt_agent_router_v1_t *router,
+    const mesh_mgmt_agent_router_physical_ready_v1_t *ready,
+    uint64_t owner_id, cnet_pool_key *out_key) {
+  uint8_t session_generation[24] = {0};
+  cnet_pool_key key = {0};
+  if (!router || !router->signer_template || !router->dispatch_template ||
+      !ready || ready->version != MESH_MGMT_AGENT_ROUTER_PHYSICAL_READY_VERSION ||
+      owner_id == 0u || !out_key)
+    return 0;
+  key.size = sizeof(key);
+  key.version = CNET_CLIENT_POOL_VERSION;
+  key.owner_id = owner_id;
+  key.protocol_id = UINT64_C(0x4d4d505f76310001); /* MMP_v1 only */
+  /* runtime, Owner and endpoint are independent identity domains. */
+  if (!pool_fact64('r', router->connection_namespace,
+                   sizeof(router->connection_namespace), &key.runtime_id) ||
+      !pool_fact64('e', ready->signed_session.remote_managed_node_id,
+                   32u, &key.endpoint_id) ||
+      !pool_fact64('g', ready->signed_session.connection_id,
+                   16u, &key.peer_generation) ||
+      !pool_fact64('a',
+                   router->dispatch_template->session.trusted_issuer_key,
+                   32u, &key.authority_id) ||
+      !pool_fact64('t', ready->signed_session.remote_transport_peer_id,
+                   32u, &key.transport_id) ||
+      !pool_fact64('l',
+                   router->signer_template->hello.managed_node_id,
+                   32u, &key.client_identity_id))
+    return 0;
+  memcpy(session_generation, ready->signed_session.remote_session_id, 16u);
+  for (size_t i = 0u; i < 8u; ++i)
+    session_generation[16u + i] =
+        (uint8_t)(ready->signed_session.remote_incarnation >> (56u - 8u * i));
+  if (!pool_fact64('s', session_generation, sizeof(session_generation),
+                   &key.session_id))
+    return 0;
+  /* Noise transport is neither TLS nor TLS ALPN/SNI. All three TLS
+   * identity fields remain 0 by protocol design, not an omitted check. */
+  *out_key = key;
+  return 1;
+}
+
+static mesh_mgmt_agent_router_result_t pool_admission_error(int error) {
+  if (error == SALTS_ENOBUFS || error == SALTS_ENOMEM)
+    return MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED;
+  if (error == SALTS_EINVAL || error == SALTS_ERANGE)
+    return MESH_MGMT_AGENT_ROUTER_CONFIG_INVALID;
+  return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+}
+
+static int same_managed_identity(cnet_managed_connection a,
+                                 cnet_managed_connection b) {
+  return a.manager == b.manager && a.incarnation == b.incarnation &&
+         a.generation == b.generation && a.slot == b.slot;
+}
+
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_bind_ready_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *manager, cnet_client_pool *pool, uint64_t owner_id,
+    cnet_pool_connection *out_physical, cnet_pool_key *out_key) {
+  mesh_mgmt_agent_router_physical_ready_v1_t ready = {0}, rechecked = {0};
+  cnet_pool_connection physical = {0};
+  cnet_pool_key key = {0};
+  mesh_mgmt_agent_router_result_t result;
+  int status;
+  if (out_physical) *out_physical = (cnet_pool_connection){0};
+  if (out_key) *out_key = (cnet_pool_key){0};
+  if (!pool || !manager || !out_physical || !out_key || owner_id == 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  result = mesh_mgmt_agent_router_physical_ready_v1(
+      router, peer, expected_transport_peer_id,
+      expected_managed_node_id, expected_connection_id, manager, &ready);
+  if (result != MESH_MGMT_AGENT_ROUTER_OK) return result;
+  if (!pool_key_from_signed_ready(router, &ready, owner_id, &key))
+    return MESH_MGMT_AGENT_ROUTER_CONFIG_INVALID;
+
+  /* Incoming address/authority is unknown before signed HELLO; the
+   * *physical* P2P Manager bounded it prior to Noise. Allocate this
+   * security-partitioned CNet Pool record only after authentication. */
+  status = cnet_pool_reserve_connecting(pool, &key, &physical);
+  if (status != SALTS_OK) return pool_admission_error(status);
+  /* No other Router/Owner callback or physical CNet progression occurs
+   * between the two attestation checks, pool reservation and bind. */
+  result = mesh_mgmt_agent_router_physical_ready_v1(
+      router, peer, expected_transport_peer_id,
+      expected_managed_node_id, ready.signed_session.connection_id,
+      manager, &rechecked);
+  if (result == MESH_MGMT_AGENT_ROUTER_OK &&
+      !same_managed_identity(rechecked.managed, ready.managed))
+    result = MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH;
+  if (result != MESH_MGMT_AGENT_ROUTER_OK) {
+    if (cnet_pool_terminal(pool, physical) != SALTS_OK)
+      return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+    return result;
+  }
+  status = cnet_pool_bind_ready(pool, physical, rechecked.managed, 1u);
+  if (status != SALTS_OK) {
+    if (cnet_pool_terminal(pool, physical) != SALTS_OK)
+      return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+    return pool_admission_error(status);
+  }
+  *out_physical = physical;
+  *out_key = key;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_acquire_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *manager, cnet_client_pool *pool, uint64_t owner_id,
+    cnet_pool_lease *out_lease) {
+  mesh_mgmt_agent_router_physical_ready_v1_t ready = {0};
+  cnet_managed_connection leased = {0};
+  cnet_pool_lease lease = {0};
+  cnet_pool_key key = {0};
+  mesh_mgmt_agent_router_result_t result;
+  int status;
+  if (out_lease) *out_lease = (cnet_pool_lease){0};
+  if (!pool || !manager || !out_lease || !owner_id)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  result = mesh_mgmt_agent_router_physical_ready_v1(
+      router, peer, expected_transport_peer_id,
+      expected_managed_node_id, expected_connection_id, manager, &ready);
+  if (result != MESH_MGMT_AGENT_ROUTER_OK) return result;
+  if (!pool_key_from_signed_ready(router, &ready, owner_id, &key))
+    return MESH_MGMT_AGENT_ROUTER_CONFIG_INVALID;
+  status = cnet_pool_try_acquire(pool, &key, NULL, &lease, &leased);
+  if (status != SALTS_OK) return pool_admission_error(status);
+  if (!same_managed_identity(ready.managed, leased)) {
+    if (cnet_pool_release(pool, lease) != SALTS_OK)
+      return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+    return MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH;
+  }
+  *out_lease = lease;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
 mesh_mgmt_execution_consumer_result_t
 mesh_mgmt_agent_router_execution_command_from_event_v1(
     mesh_mgmt_agent_router_v1_t *router,

@@ -8,6 +8,7 @@
 
 #include <cstl/vec.h>
 #include <cnet/manager.h>
+#include <cnet/client_pool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -275,6 +276,45 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_physical_ready_v1(
     const uint8_t expected_connection_id[16],
     cnet_manager *expected_manager,
     mesh_mgmt_agent_router_physical_ready_v1_t *out_ready);
+
+/* Signed, same-physical opt-in ClientPool READY admission.
+ * Precondition: Router peer is live and signed MMP SESSION_ESTABLISHED;
+ * the Manager must own EXACTLY that P2P physical connection (not a Cohost
+ * neighbor). Computes all CNet Pool security key fields from authenticated
+ * Router session and configured trust; caller supplies only a nonzero host
+ * Owner ID matching its initialized Pool. Since an inbound peer is unknown
+ * before its signed HELLO, this reserves a Pool CONNECTING/physical budget
+ * at *post-auth* admission, then binds READY once; earlier TCP admission is
+ * already bounded by CNet Manager and Handoff. Do not claim pre-Noise Pool
+ * connecting quotas. Output is zeroed on error and reservation is rolled
+ * back; no retry or extra network poll is performed.
+ *
+ * Borrowed Pool must be initialized on the same Owner against the exact
+ * Manager BEFORE calling, and drained/destroyed BEFORE its Manager. The
+ * host must explicitly begin_drain and call pool_terminal after physical
+ * Manager RETIRED, release every lease and destroy the Pool before stopping
+ * that borrowed P2P Owner. This API creates no own Pool or socket. */
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_bind_ready_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *manager, cnet_client_pool *pool, uint64_t owner_id,
+    cnet_pool_connection *out_physical, cnet_pool_key *out_key);
+
+/* Rechecks the actual signed Router session, its current connection ID
+ * AND its exact Manager physical BOUND generation on every lease admission,
+ * rather than trusting an earlier copied key or TCP CONNECTED event.
+ * Acquires a real one-slot CNet Pool lease only if the same authenticated
+ * key is READY; cannot replay MMP/DHT/file sends or select another Owner.
+ * Caller must explicitly release each lease even after peer disconnect. */
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_pool_acquire_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *manager, cnet_client_pool *pool, uint64_t owner_id,
+    cnet_pool_lease *out_lease);
 
 mesh_mgmt_execution_consumer_result_t
 mesh_mgmt_agent_router_execution_command_from_event_v1(
