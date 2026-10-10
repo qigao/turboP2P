@@ -104,12 +104,12 @@ static int calculate_snapshot_digest(
 }
 
 static mesh_mgmt_execution_store_result_t write_all(
-    turbo_file_t file, const uint8_t *bytes, size_t size) {
+    cmeta_file_t file, const uint8_t *bytes, size_t size) {
   size_t written = 0u;
 
   while (written < size) {
     int result =
-        turbo_fs_write(file, (const char *)bytes + written, size - written);
+        cmeta_fs_write(file, (const char *)bytes + written, size - written);
     if (result <= 0)
       return MESH_MGMT_EXECUTION_STORE_IO;
     written += (size_t)result;
@@ -123,40 +123,40 @@ static mesh_mgmt_execution_store_result_t read_exact_file(
       EXECUTION_STORE_HEADER_SIZE +
       (uint64_t)MESH_MGMT_EXECUTION_JOURNAL_MAX *
           EXECUTION_STORE_RECORD_SIZE_V2;
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_fs_stat_t stat;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   size_t offset = 0u;
   int read_size;
   uint8_t trailing;
 
-  if (turbo_fs_stat(path, &stat) != 0 || !stat.is_file ||
+  if (cmeta_fs_stat(path, &stat) != 0 || !stat.is_file ||
       stat.size < EXECUTION_STORE_HEADER_SIZE || stat.size > max_size ||
       stat.size > SIZE_MAX)
     return MESH_MGMT_EXECUTION_STORE_CORRUPT;
   bytes = (uint8_t *)malloc((size_t)stat.size);
   if (!bytes)
     return MESH_MGMT_EXECUTION_STORE_RESOURCE_EXHAUSTED;
-  file = turbo_fs_open(path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = cmeta_fs_open(path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     goto failed;
   while (offset < (size_t)stat.size) {
-    read_size = turbo_fs_read(file, (char *)bytes + offset,
+    read_size = cmeta_fs_read(file, (char *)bytes + offset,
                               (size_t)stat.size - offset);
     if (read_size <= 0)
       goto failed;
     offset += (size_t)read_size;
   }
-  read_size = turbo_fs_read(file, (char *)&trailing, 1u);
-  if (read_size != 0 || turbo_fs_close(file) != 0)
+  read_size = cmeta_fs_read(file, (char *)&trailing, 1u);
+  if (read_size != 0 || cmeta_fs_close(file) != 0)
     goto failed_closed;
   *out_bytes = bytes;
   *out_size = offset;
   return MESH_MGMT_EXECUTION_STORE_OK;
 
 failed:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)cmeta_fs_close(file);
 failed_closed:
   free(bytes);
   return MESH_MGMT_EXECUTION_STORE_IO;
@@ -166,7 +166,7 @@ static mesh_mgmt_execution_store_result_t persist_snapshot(
     const mesh_mgmt_execution_store_v1_t *store) {
   uint8_t *bytes = NULL;
   uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   size_t count = 0u;
   size_t size;
   size_t index;
@@ -230,32 +230,32 @@ static mesh_mgmt_execution_store_result_t persist_snapshot(
   }
   memcpy(bytes + EXECUTION_STORE_DIGEST_OFFSET, digest, sizeof(digest));
 
-  file = turbo_fs_open(store->temp_path,
-                       TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT |
-                           TURBO_FS_O_TRUNC,
+  file = cmeta_fs_open(store->temp_path,
+                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT |
+                           SALTS_FS_O_TRUNC,
                        EXECUTION_STORE_MODE);
-  if (file == TURBO_INVALID_FILE)
+  if (file == SALTS_INVALID_FILE)
     goto cleanup;
   result = write_all(file, bytes, size);
   if (result != MESH_MGMT_EXECUTION_STORE_OK)
     goto cleanup;
-  if (turbo_fs_fsync(file) != 0 || turbo_fs_close(file) != 0) {
-    file = TURBO_INVALID_FILE;
+  if (cmeta_fs_fsync(file) != 0 || cmeta_fs_close(file) != 0) {
+    file = SALTS_INVALID_FILE;
     result = MESH_MGMT_EXECUTION_STORE_IO;
     goto cleanup;
   }
-  file = TURBO_INVALID_FILE;
-  if (turbo_fs_rename(store->temp_path, store->path) != 0) {
+  file = SALTS_INVALID_FILE;
+  if (cmeta_fs_rename(store->temp_path, store->path) != 0) {
     result = MESH_MGMT_EXECUTION_STORE_IO;
     goto cleanup;
   }
   result = MESH_MGMT_EXECUTION_STORE_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)cmeta_fs_close(file);
   if (result != MESH_MGMT_EXECUTION_STORE_OK)
-    (void)turbo_fs_unlink(store->temp_path);
+    (void)cmeta_fs_unlink(store->temp_path);
   free(bytes);
   return result;
 }
@@ -427,16 +427,16 @@ static void restore_rollback(mesh_mgmt_execution_store_v1_t *store,
 mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
     mesh_mgmt_execution_store_v1_t *store, const char *path,
     size_t capacity, size_t *out_recovered) {
-  turbo_fs_stat_t stat;
+  cmeta_fs_stat_t stat;
   size_t recovered = 0u;
   int path_length;
   mesh_mgmt_execution_store_result_t result;
 
   if (!store || !path || !path_is_absolute(path) ||
-      strlen(path) >= TURBO_FS_MAX_PATH)
+      strlen(path) >= MESH_MGMT_EXECUTION_STORE_PATH_MAX)
     return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   if (mesh_mgmt_execution_journal_init_v1(&store->journal, capacity) !=
       MESH_MGMT_EXECUTION_OK)
     return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
@@ -469,15 +469,15 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
     result = MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
     goto failed;
   }
-  store->lock_file = turbo_fs_open(
-      store->lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT,
+  store->lock_file = cmeta_fs_open(
+      store->lock_path, SALTS_FS_O_RDWR | SALTS_FS_O_CREAT,
       EXECUTION_STORE_MODE);
-  if (store->lock_file == TURBO_INVALID_FILE) {
+  if (store->lock_file == SALTS_INVALID_FILE) {
     result = MESH_MGMT_EXECUTION_STORE_IO;
     goto failed;
   }
-  if (turbo_fs_lock(store->lock_file,
-                    TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK,
+  if (cmeta_fs_lock(store->lock_file,
+                    SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK,
                     0, 1u) != 0) {
     result = MESH_MGMT_EXECUTION_STORE_LOCKED;
     goto failed;
@@ -485,8 +485,8 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
 
   store->open = 1u;
   /* First open has no journal yet; access() avoids ERROR logs for a missing file. */
-  if (turbo_fs_access(store->path, TURBO_FS_ACCESS_EXISTS) == 0 &&
-      turbo_fs_stat(store->path, &stat) == 0) {
+  if (cmeta_fs_access(store->path, SALTS_FS_ACCESS_EXISTS) == 0 &&
+      cmeta_fs_stat(store->path, &stat) == 0) {
     result = load_snapshot(store);
     if (result != MESH_MGMT_EXECUTION_STORE_OK)
       goto failed;
@@ -519,14 +519,14 @@ void mesh_mgmt_execution_store_close_v1(
     mesh_mgmt_execution_store_v1_t *store) {
   if (!store)
     return;
-  if (store->lock_file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(store->lock_file);
+  if (store->lock_file != SALTS_INVALID_FILE)
+    (void)cmeta_fs_close(store->lock_file);
   free(store->rollback_entries);
   free(store->results);
   free(store->rollback_results);
   mesh_mgmt_execution_journal_destroy_v1(&store->journal);
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
 }
 
 mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_submit_v1(
