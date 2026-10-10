@@ -3,6 +3,7 @@
 #include "mesh_mgmt_client_config.h"
 #include "mesh_mgmt_service_config.h"
 #include "mesh_mgmt_test_identity.h"
+#include "mesh_mgmt_execution_wire.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
 #include "transfer/transfer.h"
@@ -921,6 +922,38 @@ static void on_command_wire_terminal(void *context, uint64_t ticket, int status)
   probe->status = status;
 }
 
+/* The ordinary fixture negotiates MEMBERSHIP ONLY; execution must
+ * be an explicit authenticated capability, not silently enabled by a new
+ * send-terminal function. Keep both P2P signers and dispatchers aligned. */
+static void enable_execution_capability_v4(endpoint_t *endpoint) {
+  const uint64_t features =
+      MESH_MGMT_FEATURE_MEMBERSHIP |
+      MESH_MGMT_FEATURE_TARGETED_RPC |
+      MESH_MGMT_FEATURE_NODE_EXECUTION;
+  endpoint->identity.signer.hello.features = features;
+  endpoint->identity.dispatch.session.features = features;
+  endpoint->identity.dispatch.enable_node_execution_shadow = 1u;
+  endpoint->identity.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  endpoint->identity.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+}
+
+static size_t execution_status_payload_v4(
+    const endpoint_t *server, uint8_t output[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1]) {
+  mesh_mgmt_execution_status_v1_t status = {0};
+  size_t output_size = 0u;
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_DISABLED;
+  memset(status.command_id, 0x41, sizeof(status.command_id));
+  memset(status.correlation_id, 0x42, sizeof(status.correlation_id));
+  memset(status.request_digest, 0x43, sizeof(status.request_digest));
+  memcpy(status.responder_node_id, server->identity.signer.hello.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_status_encode_v1(
+          &status, output, MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1, &output_size));
+  return output_size;
+}
+
 /* Production CNet/Noise path: a signed MMP command reserves its exact
  * inbound Manager/Pool Lease BEFORE encryption, and retains it until the
  * upstream full encrypted wire-write callback, never on enqueue alone.
@@ -929,26 +962,41 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
   endpoint_t server = {0}, client = {0};
   command_terminal_probe_v4_t probe = {0};
   cnet_pool_snapshot pool = {0};
-  uint8_t payload[8] = {'M','M','P','-','T','E','S','T'};
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1] = {0};
+  mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
   uint8_t bad_target[32] = {0};
+  size_t payload_len = 0u;
   uint64_t ticket = 0u, refused = 99u, deadline;
 
   prepare(&server, 17u);
+  enable_execution_capability_v4(&server);
   initialize(&server);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_enable_signed_pool_v3(
           &server.runtime, 7u, 1u, 1u));
   start(&server);
-  start_signed_client(&client, &server, 33u);
+  prepare(&client, 33u);
+  enable_execution_capability_v4(&client);
+  memcpy(bootstrap.transport_peer_id, server.public_key,
+         sizeof(bootstrap.transport_peer_id));
+  bootstrap.host = "127.0.0.1";
+  bootstrap.port = (uint16_t)server.port;
+  client.config.bootstraps = &bootstrap;
+  client.config.bootstrap_count = 1u;
+  initialize(&client);
+  client.config.bootstraps = NULL;
+  client.config.bootstrap_count = 0u;
+  start(&client);
   wait_established(&server, &client, 1u);
+  payload_len = execution_status_payload_v4(&server);
   check_not_null(server.peer);
   probe.server = &server;
 
   memset(bad_target, 0xA5, sizeof(bad_target));
   check_equal(MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED,
       mesh_mgmt_agent_runtime_send_execution_leased_v4(
-          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
-          bad_target, payload, sizeof(payload),
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          bad_target, payload, payload_len,
           on_command_wire_terminal, &probe, &refused));
   check_equal((uint64_t)0u, refused);
   check_equal((unsigned)0u, probe.terminals);
@@ -957,16 +1005,29 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
    * outgoing peer's Runtime cannot accidentally lease the server's Pool. */
   check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
       mesh_mgmt_agent_runtime_send_execution_leased_v4(
-          &client.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          &client.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
           server.identity.signer.hello.managed_node_id,
-          payload, sizeof(payload), on_command_wire_terminal, &probe, &refused));
+          payload, payload_len, on_command_wire_terminal, &probe, &refused));
   check_equal((uint64_t)0u, refused);
 
-  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+  /* A syntactically-valid STATUS payload is NOT a typed COMMAND_REQUEST.
+   * The common outbound Dispatcher preflight must reject it without
+   * encryption, Lease retention, or a terminal callback. */
+  refused = 91u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_SEND_FAILED,
       mesh_mgmt_agent_runtime_send_execution_leased_v4(
           &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
           client.identity.signer.hello.managed_node_id,
-          payload, sizeof(payload),
+          payload, payload_len, on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal((unsigned)0u, probe.terminals);
+
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len,
           on_command_wire_terminal, &probe, &ticket));
   check_true(ticket != 0u);
   check_equal((unsigned)0u, probe.terminals); /* not an enqueue callback */
@@ -978,9 +1039,9 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
   refused = 44u;
   check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
       mesh_mgmt_agent_runtime_send_execution_leased_v4(
-          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
           client.identity.signer.hello.managed_node_id,
-          payload, sizeof(payload),
+          payload, payload_len,
           on_command_wire_terminal, &probe, &refused));
   check_equal((uint64_t)0u, refused);
   check_equal((size_t)1u, server.runtime.command_terminal_inflight);
@@ -1004,12 +1065,13 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
           &server.runtime, &pool));
   check_equal((size_t)0u, pool.active_leases);
 
-  /* Existing request API MUST NOT bypass the signed Pool once enabled:
+  /* Existing response API MUST NOT bypass the signed Pool once enabled:
    * it too holds a bounded operation Lease until definitive send terminal. */
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
-      mesh_mgmt_agent_runtime_send_execution_request_v1(
-          &server.runtime, client.identity.signer.hello.managed_node_id,
-          payload, sizeof(payload)));
+      mesh_mgmt_agent_runtime_send_execution_response_v1(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len));
   check_equal((size_t)1u, server.runtime.command_terminal_inflight);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
