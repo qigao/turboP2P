@@ -1,7 +1,7 @@
 #include "mesh_mgmt_execution_orchestrator.h"
 
 #include "mesh_mgmt_crypto.h"
-#include "turbo_fs.h"
+#include <cmeta_fs.h>
 
 #include <openssl/evp.h>
 #include <string.h>
@@ -139,7 +139,7 @@ mesh_mgmt_execution_orchestrator_execute_v1(
   mesh_mgmt_execution_deployment_v1_t deployment;
   mesh_mgmt_execution_journal_entry_v1_t entry;
   mesh_mgmt_execution_runner_output_v1_t runner_output;
-  char deployment_path[TURBO_FS_MAX_PATH];
+  char deployment_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX];
   uint8_t request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint64_t now_ms;
   uint64_t started_at_ms;
