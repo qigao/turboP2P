@@ -40,9 +40,6 @@ enum {
   BENCH_FINALS = BENCH_MMP_FINALS,
   BENCH_SHARDS = BENCH_FINALS + 1,
   BENCH_PER_FINAL = BENCH_SESSIONS / BENCH_FINALS,
-  /* Identical aggregate physical/Handoff capacity of eight, independent
-   * of shard count; exactly four signed sessions and Pool slots are used. */
-  BENCH_PHYSICAL_PER_FINAL = (BENCH_SESSIONS * 2) / BENCH_FINALS,
   BENCH_BYTES_MAX = 1024,
   BENCH_TIMEOUT_MS = 15000
 };
@@ -352,7 +349,7 @@ static void init_worker(native_io_sharded_context *ctx,void *arg) {
   bench_lane *lane=(bench_lane*)arg;
   benchmark_case *sc=lane->scenario;
   p2p_cnet_config_t cfg=native_config(
-      lane->shard?BENCH_PHYSICAL_PER_FINAL:8u);
+      lane->shard?BENCH_PER_FINAL:8u);
   lane->token=cmeta_thread_current_token();
   BC(lane,native_io_sharded_context_acquire_host(
       ctx,quiescent,lane,&lane->lease,&lane->backend));
@@ -381,8 +378,13 @@ static void init_worker(native_io_sharded_context *ctx,void *arg) {
   security.ready_timeout_ms=5000u;
   security.send_hwm_bytes=cfg.send_hwm_bytes;
   security.node_send_budget_bytes=cfg.send_hwm_bytes*4u;
-  security.session_max_age_ms=60000u;
-  security.session_max_bytes_per_direction=cfg.send_hwm_bytes;
+  /* Encrypted session lifetime is distinct from the 128-KiB SEND HWM.
+   * An earlier fixture wrongly used send_hwm_bytes as the cumulative
+   * Noise wire-byte ceiling, closing sessions halfway through the 1024B
+   * x 256-round workload. Zero uses upstream 24h / 1TiB defaults, also
+   * used by the dedicated signed clients. All topologies match. */
+  security.session_max_age_ms=0u;
+  security.session_max_bytes_per_direction=0u;
   security.cookie_gate_limit=16u;
   security.cookie_lifetime_ms=5000u;
   security.cookie_key_rotation_ms=10000u;
@@ -666,10 +668,10 @@ static void run_benchmark(void) {
   policy.acceptor=sc->lanes[0].acceptor;
   policy.placement=CNET_OWNER_PLACE_ROUND_ROBIN;
   policy.final_owner_count=BENCH_FINALS;
-  /* SG Handoff limits are PER FINAL. Reserve eight aggregate credits
-   * in every topology, with four actual authenticated operations. */
-  policy.queue_capacity=BENCH_PHYSICAL_PER_FINAL;
-  policy.connection_capacity=BENCH_PHYSICAL_PER_FINAL;
+  /* SG Handoff limits are PER FINAL. Exactly four aggregate physical
+   * credits and four signed Pool connection slots in every topology. */
+  policy.queue_capacity=BENCH_PER_FINAL;
+  policy.connection_capacity=BENCH_PER_FINAL;
   for (size_t i=0;i<BENCH_FINALS;++i)
     policy.final_owners[i]=sc->lanes[i+1u].final_transport;
   check_equal(P2P_OK,p2p_cnet_sg_create_v1(&policy,&sc->sg));
