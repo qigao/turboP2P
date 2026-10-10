@@ -435,8 +435,11 @@ static void barrier(noise_case *sc) {
   }
 }
 static void pump(noise_case *sc) {
+  /* Clients are admitted sequentially. Never poll not-yet-created nodes;
+   * each created dedicated Node still has exactly one progress owner. */
   for (size_t i=0u;i<NOISE_SESSIONS;++i)
-    check_equal(P2P_OK,p2p_poll(sc->clients[i].node));
+    if (sc->clients[i].node && sc->clients[i].owner)
+      check_equal(P2P_OK,p2p_poll(sc->clients[i].node));
   for (size_t shard=0u;shard<NOISE_SHARDS;++shard)
     submit(sc,shard,progress);
   barrier(sc);
