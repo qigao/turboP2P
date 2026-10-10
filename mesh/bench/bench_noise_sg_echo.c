@@ -89,6 +89,9 @@ struct noise_case {
   noise_final finals[NOISE_FINALS];
   noise_client clients[NOISE_SESSIONS];
   uint8_t server_key[32];
+  /* Pinned security API borrows a CONTIGUOUS 4x32-byte trusted key array,
+   * never the strided public_key members of noise_client structs. */
+  uint8_t client_allowlist[NOISE_SESSIONS][32];
   size_t bytes,warmup,rounds;
   int stopping;
 };
@@ -270,7 +273,7 @@ static void init_owner(native_io_sharded_context *context,void *arg) {
   f->node=p2p_node_state_create("127.0.0.1",0);
   if (!f->node) {lane_error(lane,P2P_ERR_NO_MEM,"server Node allocation");return;}
   configure_identity(f->node,f->private_key,
-                     sc->clients[0].public_key,NOISE_SESSIONS);
+                     &sc->client_allowlist[0][0],NOISE_SESSIONS);
   p2p_set_peer_callbacks(f->node,server_connected,server_disconnected,f);
   p2p_set_message_handler(f->node,server_echo,f);
   NOISE_CALL(lane,p2p_node_cnet_create_external(
@@ -455,6 +458,7 @@ static void run_noise_baseline(void) {
     c->private_key[0]=(uint8_t)(33u+16u*i);
     check_equal(P2P_OK,p2p_public_key_from_private_key(
         c->private_key,c->public_key));
+    memcpy(sc->client_allowlist[i],c->public_key,32u);
     c->samples=calloc(sc->rounds,sizeof(uint64_t));
     check_not_null(c->samples);
     for(size_t k=0u;k<i;++k)
