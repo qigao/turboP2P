@@ -567,6 +567,25 @@ if(P2P_TURBOWASM_SDK_GATE)
     COMMAND test_mesh_mgmt_execution_node_sdk)
   set_tests_properties(test_mesh_mgmt_execution_node_sdk PROPERTIES TIMEOUT 45)
 
+  # Deterministic fault injection at the production RESULT sender's native
+  # terminal boundary. A single TEST transport stub controls only the async
+  # completion; the actual Sender, SPSC Egress, canonical MMP wire codec and
+  # immutable command identities are linked unchanged. No fake Worker or SDK.
+  add_executable(test_mesh_mgmt_execution_sender_terminal_sdk
+    "${mesh_tests}/test_mesh_mgmt_execution_sender_terminal.c"
+    "${mesh_src}/mesh_mgmt_execution_sender.c"
+    "${mesh_src}/mesh_mgmt_execution_egress.c")
+  set_property(TARGET test_mesh_mgmt_execution_sender_terminal_sdk
+    PROPERTY LINKER_LANGUAGE CXX)
+  target_include_directories(test_mesh_mgmt_execution_sender_terminal_sdk
+    PRIVATE "${mesh_src}")
+  target_link_libraries(test_mesh_mgmt_execution_sender_terminal_sdk PRIVATE
+    foundation Salts::TinyTest Salts::Concurrency Salts::Core OpenSSL::Crypto)
+  add_test(NAME test_mesh_mgmt_execution_sender_terminal_sdk
+    COMMAND test_mesh_mgmt_execution_sender_terminal_sdk)
+  set_tests_properties(test_mesh_mgmt_execution_sender_terminal_sdk
+    PROPERTIES TIMEOUT 30)
+
   # Genuine 3/5 NativeIO SG worker Host with 2/4 independent Final Owner
   # MMP signed ClientPools plus remote Production Execution Node/Worker,
   # prestaged TurboWasm guest and durable Store (NOT a forged RESULT).
