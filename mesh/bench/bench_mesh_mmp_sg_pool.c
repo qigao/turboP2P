@@ -614,8 +614,10 @@ static void run_benchmark(void) {
   policy.acceptor=sc->lanes[0].acceptor;
   policy.placement=CNET_OWNER_PLACE_ROUND_ROBIN;
   policy.final_owner_count=BENCH_FINALS;
-  policy.queue_capacity=4u;
-  policy.connection_capacity=BENCH_SESSIONS;
+  /* SG Handoff limits are PER FINAL. Reserve exactly four total
+   * physical/credit slots across all topologies, never four per shard. */
+  policy.queue_capacity=BENCH_PER_FINAL;
+  policy.connection_capacity=BENCH_PER_FINAL;
   for (size_t i=0;i<BENCH_FINALS;++i)
     policy.final_owners[i]=sc->lanes[i+1u].final_transport;
   check_equal(P2P_OK,p2p_cnet_sg_create_v1(&policy,&sc->sg));
