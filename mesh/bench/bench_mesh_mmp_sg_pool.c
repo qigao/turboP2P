@@ -587,7 +587,9 @@ static void run_benchmark(void) {
   }
   for (size_t i=0;i<BENCH_SESSIONS;++i) {
     bench_client *c=&sc->clients[i];
-    init_identity(c,(uint8_t)(33u+2u*i));
+    /* X25519 clamps the low three scalar bits: adjacent seeds do not
+     * produce distinct transport public keys. Keep four true identities. */
+    init_identity(c,(uint8_t)(33u+16u*i));
     c->cfg.admit_peer=client_admit;
     c->cfg.on_event=client_session;
     c->cfg.on_non_mmp=client_echo;
