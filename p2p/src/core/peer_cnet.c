@@ -106,3 +106,14 @@ int p2p_peer_prepare_cnet_inbound(p2p_peer_t *peer,
     *output = callbacks(peer);
     return P2P_OK;
 }
+
+int p2p_peer_cnet_managed_binding_v1(
+    const p2p_peer_t *peer, p2p_cnet_managed_binding_v1_t *out) {
+    if (out) *out = (p2p_cnet_managed_binding_v1_t){0};
+    if (!peer || !out) return P2P_ERR_INVALID_ARG;
+    if (!peer->conn || peer->destroying) return P2P_ERR_INVALID_STATE;
+    /* Real P2P inbound connection, never the independent SG echo client.
+     * Router separately checks signed MMP READY/identity/generation. */
+    return p2p_cnet_connection_managed_binding_v1(peer->conn, out);
+}
+

@@ -17,6 +17,8 @@ typedef struct p2p_cnet_connection_s {
     p2p_cnet_owner_t *owner;
     struct p2p_cnet_connection_s *next;
     cnet_connection handle;
+    cnet_managed_connection managed; /* exact inbound CNet Manager generation */
+    int manager_owned, manager_recycled;
     p2p_cnet_callbacks_t callbacks;
     p2p_cnet_write_t *writes;
     size_t write_head;
@@ -39,6 +41,7 @@ typedef struct p2p_cnet_connection_s {
 
 struct p2p_cnet_owner_s {
     cnet_client client;
+    cnet_manager inbound_manager; /* borrows this client; no loop/backend */
     const void *thread_owner; /* fixed Owner thread identity from creation */
     cnet_listener listener;
     p2p_cnet_config_t config;
@@ -154,6 +157,19 @@ static void fail(p2p_cnet_connection_t *connection, int error) {
     connection_close(connection);
 }
 
+static void managed_recycled(void *arg) {
+    p2p_cnet_connection_t *connection = (p2p_cnet_connection_t *)arg;
+    /* Runs only after physical CLOSED/FAILED observer and all callbacks. */
+    connection->manager_recycled = 1;
+}
+static int progress_inbound_manager(p2p_cnet_owner_t *owner) {
+    size_t work = 0u;
+    if (!owner->inbound_manager.impl) return P2P_OK;
+    return p2p_error(cnet_manager_advance(
+        &owner->inbound_manager,
+        owner->config.client.connection_capacity, &work));
+}
+
 static void free_connection(p2p_cnet_connection_t *connection) {
     if (connection->paused_buffer) mem_buffer_release(connection->paused_buffer);
     free(connection->writes);
@@ -167,6 +183,12 @@ static int sweep(p2p_cnet_owner_t *owner) {
     p2p_cnet_connection_t **link = &owner->connections;
     while (*link) {
         p2p_cnet_connection_t *connection = *link;
+        /* Manager's borrowed observer.user must be recycled before its
+         * connection storage or Handoff credit can be released. */
+        if (connection->manager_owned && !connection->manager_recycled) {
+            link = &connection->next;
+            continue;
+        }
         if (connection->inbound_credit != NULL &&
             ((connection->detached && connection->terminal) || owner->stopped)) {
             /* A release reduces CNet TAKEN before the acceptor's next
@@ -451,6 +473,23 @@ static int create_owner_impl(const p2p_cnet_config_t *config,
         free(owner);
         return p2p_error(status);
     }
+    /* Canonical CNet Manager owns physical inbound attachments including
+     * P2P Noise / signed MMP; it does NOT create an observer/backend/retry
+     * source. Outbound numeric connects remain separately unmanaged. */
+    const cnet_manager_config mgr_cfg = {
+        sizeof(cnet_manager_config), CNET_MANAGER_VERSION,
+        &owner->client, config->client.connection_capacity,
+        config->client.connection_capacity
+    };
+    status = cnet_manager_init(&owner->inbound_manager, &mgr_cfg);
+    if (status != SALTS_OK) {
+        if (external_backend) (void)cnet_client_stop_external(&owner->client);
+        else (void)cnet_client_stop(&owner->client, config->stop_timeout_ms);
+        (void)cnet_client_destroy(&owner->client);
+        free(owner->host_batch);
+        free(owner);
+        return p2p_error(status);
+    }
     *output = owner;
     return P2P_OK;
 }
@@ -578,13 +617,36 @@ static int adopt_detached(p2p_cnet_owner_t *owner,
             ? P2P_ERR_RESOURCE_EXHAUSTED : P2P_ERR_NO_MEM;
     }
     events = observer(connection);
-    status = cnet_client_adopt_accepted(&owner->client, accepted, &events,
-                                         &connection->handle);
+    const cnet_manager_attachment attachment = {
+        events, managed_recycled, false
+    };
+    status = cnet_manager_reserve(
+        &owner->inbound_manager, &attachment, &connection->managed);
     if (status != SALTS_OK) {
-        if (accepted->internal_active) cnet_accepted_stream_close(accepted);
+        cnet_accepted_stream_close(accepted);
         free_connection(connection);
         if (credit_owner) cnet_handoff_release(credit_owner, credit);
         return p2p_error(status);
+    }
+    connection->manager_owned = 1;
+    /* Actual physical CNet Manager admission consumes the detached TCP
+     * stream; the exact existing P2P observer is bridged through Manager. */
+    status = cnet_manager_adopt(&owner->inbound_manager, connection->managed,
+                                accepted, NULL, &connection->handle);
+    if (status != SALTS_OK) {
+        const int recycle = progress_inbound_manager(owner);
+        if (recycle == P2P_OK && connection->manager_recycled)
+            free_connection(connection);
+        else {
+            /* Retain callback storage while Manager still borrows it; the
+             * next Owner progression runs advance and sweep. */
+            connection->detached = 1;
+            connection->terminal = 1;
+            connection->error = p2p_error(status);
+            publish_connection(owner, connection);
+        }
+        if (credit_owner) cnet_handoff_release(credit_owner, credit);
+        return recycle != P2P_OK ? recycle : p2p_error(status);
     }
     connection->inbound_credit = credit_owner;
     connection->inbound_ticket = credit;
@@ -976,6 +1038,11 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
     for (p2p_cnet_connection_t *connection = owner->connections;
          connection; connection = connection->next) try_close(connection);
     owner->busy = 0;
+    int manager_result = progress_inbound_manager(owner);
+    if (manager_result != P2P_OK) {
+        owner->stopping = 1;
+        if (result == P2P_OK) result = manager_result;
+    }
     int retire_result = sweep(owner);
     if (retire_result != P2P_OK) {
         owner->stopping = 1;
@@ -1140,6 +1207,8 @@ int p2p_cnet_owner_poll_sg_host_cohosted(
 done:
     owner->busy = 0;
     {
+        const int managed = progress_inbound_manager(owner);
+        if (result == P2P_OK) result = managed;
         int retire = sweep(owner);
         if (result == P2P_OK) result = retire;
     }
@@ -1195,13 +1264,26 @@ int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner) {
         : SALTS_OK;
     /* An external Owner cannot pump its own backend during stop. Retain all
      * callback/scratch/lease storage until the SG Host routes terminal events. */
-    destroyed = (status == SALTS_OK || status == SALTS_EALREADY)
-        ? cnet_client_destroy(&owner->client) : status;
-    if (!owner->client.impl && !owner->listener.impl) owner->stopped = 1;
+    /* Manager must retire every observer BEFORE destroying its borrowed
+     * physical client. On drain timeout preserve Manager, Client and SG. */
+    int manager_status = SALTS_OK;
+    if (status == SALTS_OK || status == SALTS_EALREADY) {
+        if (progress_inbound_manager(owner) != P2P_OK)
+            manager_status = SALTS_EBUSY;
+        else if (owner->inbound_manager.impl)
+            manager_status = cnet_manager_destroy(&owner->inbound_manager);
+    }
+    destroyed = (status == SALTS_OK || status == SALTS_EALREADY) &&
+                manager_status == SALTS_OK
+        ? cnet_client_destroy(&owner->client)
+        : (status == SALTS_OK || status == SALTS_EALREADY ? manager_status : status);
+    if (!owner->client.impl && !owner->listener.impl &&
+        !owner->inbound_manager.impl) owner->stopped = 1;
     owner->busy = 0;
     sg_result = sweep(owner);
     if (listener_status != SALTS_OK) return p2p_error(listener_status);
-    if (status != SALTS_OK) return p2p_error(status);
+    if (status != SALTS_OK && status != SALTS_EALREADY) return p2p_error(status);
+    if (manager_status != SALTS_OK) return p2p_error(manager_status);
     if (destroyed != SALTS_OK) return p2p_error(destroyed);
     return sg_result;
 }
@@ -1215,11 +1297,40 @@ int p2p_cnet_owner_destroy(p2p_cnet_owner_t *owner) {
     if (!owner->stopped) return result == P2P_OK ? P2P_ERR_INVALID_STATE : result;
     while (owner->connections) {
         p2p_cnet_connection_t *connection = owner->connections;
+        if (connection->manager_owned && !connection->manager_recycled)
+            return P2P_ERR_INVALID_STATE;
         owner->connections = connection->next;
         free_connection(connection);
     }
     free(owner->host_batch);
     free(owner);
+    return P2P_OK;
+}
+
+
+int p2p_cnet_connection_managed_binding_v1(
+    const p2p_connection_t *base, p2p_cnet_managed_binding_v1_t *out) {
+    const p2p_cnet_connection_t *connection = cnet_connection_from_base(base);
+    cnet_manager_entry entry = {0};
+    if (out) *out = (p2p_cnet_managed_binding_v1_t){0};
+    if (!base || !out) return P2P_ERR_INVALID_ARG;
+    if (!connection || !connection->owner || !connection->manager_owned ||
+        connection->manager_recycled || connection->terminal ||
+        !connection->ready || connection->detached ||
+        connection->owner->stopped || !connection->owner->inbound_manager.impl ||
+        cmeta_thread_current_token() != connection->owner->thread_owner)
+        return P2P_ERR_INVALID_STATE;
+    const int status = cnet_manager_lookup(
+        &connection->owner->inbound_manager, connection->managed, &entry);
+    if (status != SALTS_OK || entry.state != CNET_MANAGER_BOUND ||
+        !same_handle(entry.connection, connection->handle) ||
+        entry.context != connection)
+        return P2P_ERR_INVALID_STATE;
+    out->size = sizeof(*out);
+    out->version = P2P_CNET_MANAGED_BINDING_VERSION;
+    out->manager = &connection->owner->inbound_manager;
+    out->managed = connection->managed;
+    out->physical = connection->handle;
     return P2P_OK;
 }
 

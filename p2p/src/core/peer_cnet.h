@@ -15,4 +15,10 @@ int p2p_peer_connect_cnet(p2p_peer_t *peer, p2p_cnet_owner_t *owner);
 int p2p_peer_prepare_cnet_inbound(p2p_peer_t *peer,
     const uint8_t preface[P2P_SECURE_PREFACE_SIZE],
     const uint8_t binding[P2P_COOKIE_BINDING_SIZE], p2p_cnet_callbacks_t *output);
+/* Borrowed, Owner-local CNet Manager physical binding for exact peer->conn.
+ * Must be combined with the live Router's signed MMP proof before any
+ * ClientPool READY, never with an unrelated Cohost CNet client. */
+int p2p_peer_cnet_managed_binding_v1(
+    const p2p_peer_t *peer, p2p_cnet_managed_binding_v1_t *out);
+
 #endif
