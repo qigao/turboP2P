@@ -21,7 +21,7 @@ typedef struct {
   p2p_runtime_config_v2_t network;
   p2p_peer_t *peer;
   uint8_t secret[P2P_KEY_SIZE], public_key[P2P_KEY_SIZE];
-  unsigned established, failures, closed, admitted;
+  unsigned established, failures, closed, admitted, commands;
   int port, reject, random_fail;
 } endpoint_t;
 
@@ -39,6 +39,9 @@ static int event(void *context, p2p_peer_t *peer, const uint8_t remote[P2P_KEY_S
   if (message->type == MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED) {
     endpoint->peer = peer;
     endpoint->established++;
+  } else if (message->type ==
+             MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW) {
+    ++endpoint->commands;
   }
   return 0;
 }
@@ -959,6 +962,91 @@ static size_t execution_status_payload_v4(
   return output_size;
 }
 
+/* This is the deterministic Ed25519 TEST issuer already used by
+ * mesh_mgmt_test_identity.h for all peer certificates. Production grants
+ * use their configured issuer; this fixture never imports a user secret. */
+static const uint8_t TEST_COMMAND_GRANT_ISSUER_PRIVATE[32] = {
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+    0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69,
+    0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+};
+
+static size_t execution_request_payload_v4(
+    const endpoint_t *server, const endpoint_t *client,
+    uint8_t output[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1]) {
+  mesh_mgmt_execution_grant_v1_t grant = {0};
+  mesh_mgmt_execution_request_v1_t request = {0};
+  uint8_t issuer_public_key[32] = {0};
+  size_t output_size = 0u;
+
+  check_equal(MESH_MGMT_CRYPTO_OK, mesh_mgmt_ed25519_public_from_private(
+      TEST_COMMAND_GRANT_ISSUER_PRIVATE, issuer_public_key));
+  check_equal(server->identity.dispatch.node_execution_grant_issuer_key,
+              issuer_public_key, sizeof(issuer_public_key));
+  check_equal(client->identity.dispatch.node_execution_grant_issuer_key,
+              issuer_public_key, sizeof(issuer_public_key));
+  grant.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  memset(grant.grant_id, 0x11, sizeof(grant.grant_id));
+  memcpy(grant.mesh_id, server->identity.signer.expected_mesh_id_hash,
+         sizeof(grant.mesh_id));
+  grant.policy_epoch = 1u;
+  memcpy(grant.subject_principal,
+         server->identity.signer.hello.management_key,
+         sizeof(grant.subject_principal));
+  memcpy(grant.target_node_id,
+         client->identity.signer.hello.managed_node_id,
+         sizeof(grant.target_node_id));
+  memset(grant.deployment_id, 0x21, sizeof(grant.deployment_id));
+  grant.deployment_generation = 1u;
+  memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
+  grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+  grant.max_limits.module_bytes = 1024u;
+  grant.max_limits.stack_bytes = 1024u;
+  grant.max_limits.linear_memory_bytes = 4096u;
+  grant.max_limits.timeout_ms = 100u;
+  grant.max_limits.control_flow_steps = 1000u;
+  grant.max_limits.host_calls = 4u;
+  grant.max_limits.copied_guest_bytes = 1024u;
+  grant.max_limits.input_bytes = 64u;
+  grant.max_limits.stdout_bytes = 64u;
+  grant.max_limits.stderr_bytes = 64u;
+  grant.not_before_ms = TEST_NOW_MS - 1000u;
+  grant.expires_at_ms = TEST_NOW_MS + 10000u;
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_grant_sign_v1(
+          &grant, TEST_COMMAND_GRANT_ISSUER_PRIVATE));
+
+  request.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  memset(request.command_id, 0x41, sizeof(request.command_id));
+  memcpy(request.grant_id, grant.grant_id, sizeof(request.grant_id));
+  memcpy(request.target_node_id, grant.target_node_id, sizeof(request.target_node_id));
+  memcpy(request.deployment_id, grant.deployment_id, sizeof(request.deployment_id));
+  request.deployment_generation = grant.deployment_generation;
+  memcpy(request.package_digest, grant.package_digest, sizeof(request.package_digest));
+  request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
+  memset(request.input_digest, 0x51, sizeof(request.input_digest));
+  memcpy(request.inline_input, "input", 5u);
+  request.inline_input_size = 5u;
+  request.input_length = 5u;
+  request.output_mode = MESH_MGMT_EXECUTION_OUTPUT_DIGEST;
+  request.deadline_ms = TEST_NOW_MS + 2000u;
+  memset(request.request_nonce, 0x61, sizeof(request.request_nonce));
+  memset(request.correlation_id, 0x71, sizeof(request.correlation_id));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_grant_validate_v1(&grant, TEST_NOW_MS));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_request_validate_v1(&request, TEST_NOW_MS));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_request_bind_v1(&grant, &request));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_request_encode_v1(
+          &grant, &request, output,
+          MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1, &output_size));
+  return output_size;
+}
+
 /* Production CNet/Noise path: a signed MMP command reserves its exact
  * inbound Manager/Pool Lease BEFORE encryption, and retains it until the
  * upstream full encrypted wire-write callback, never on enqueue alone.
@@ -968,9 +1056,10 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
   command_terminal_probe_v4_t probe = {0};
   cnet_pool_snapshot pool = {0};
   uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1] = {0};
+  uint8_t request_payload[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1] = {0};
   mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
   uint8_t bad_target[32] = {0};
-  size_t payload_len = 0u;
+  size_t payload_len = 0u, request_len = 0u;
   uint64_t ticket = 0u, refused = 99u, deadline;
 
   prepare(&server, 17u);
@@ -1100,6 +1189,34 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
     check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
         mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
   check_equal((unsigned)1u, probe.terminals); /* one callback per ticket */
+
+  /* Exercise the production request API with an actual issuer-signed,
+   * typed COMMAND_REQUEST and grant. It cannot bypass dispatch authorization,
+   * cannot release its Pool Lease on enqueue, and the client MUST receive one
+   * real execution shadow event without executing the guest. */
+  request_len = execution_request_payload_v4(
+      &server, &client, request_payload);
+  check_equal((unsigned)0u, client.commands);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_request_v1(
+          &server.runtime, client.identity.signer.hello.managed_node_id,
+          request_payload, request_len));
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(&server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while ((server.runtime.command_terminal_inflight || !client.commands) &&
+         cmeta_monotonic_ms() < deadline)
+    poll_pair(&server, &client);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal((unsigned)1u, client.commands);
+  check_equal((unsigned)0u, client.failures);
+  check_equal((unsigned)0u, server.failures);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(&server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
 
   /* Stop with an ADMITTED but NOT YET COMPLETED signed command. Whether
    * the original CNet write wins or peer close fails it, only the upstream
