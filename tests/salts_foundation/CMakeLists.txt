@@ -316,6 +316,8 @@ if(P2P_MMP_SG_BUILD_BENCHMARKS)
     set_property(TARGET bench_mesh_mmp_sg_${finals} PROPERTY LINKER_LANGUAGE CXX)
     target_compile_definitions(bench_mesh_mmp_sg_${finals}
       PRIVATE BENCH_MMP_FINALS=${finals})
+    target_include_directories(bench_mesh_mmp_sg_${finals} PRIVATE
+      "${mesh_tests}")
     target_link_libraries(bench_mesh_mmp_sg_${finals} PRIVATE
       mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
   endforeach()
