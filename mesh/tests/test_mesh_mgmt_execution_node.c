@@ -46,7 +46,7 @@ remove local key  memset(config, 0, sizeof(*config));
   memset(deployment->deployment_id, 0x21, sizeof(deployment->deployment_id));
   deployment->generation = 1u;
   deployment->module_path = MESH_TEST_EXECUTION_WASM;
-  check_int_eq(mesh_mgmt_execution_runner_module_digest_v1(
+  check_equal(mesh_mgmt_execution_runner_module_digest_v1(
                    deployment->module_path, 1024u * 1024u,
                    deployment->module_digest, NULL),
                MESH_MGMT_EXECUTION_RUNNER_OK);
@@ -60,7 +60,7 @@ remove local key  memset(config, 0, sizeof(*config));
   memset(config->local_node_id, 0x31, sizeof(config->local_node_id));
   memcpy(config->result_private_key, TEST_NODE_EXECUTION_PRIVATE_KEY,
          sizeof(config->result_private_key));
-  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+  check_equal(mesh_mgmt_ed25519_public_from_private(
                    TEST_NODE_EXECUTION_PRIVATE_KEY, config->grant_issuer_key),
                MESH_MGMT_CRYPTO_OK);
   config->host_capabilities = MESH_MGMT_EXECUTION_NODE_RAW_CAPABILITIES;
@@ -83,12 +83,12 @@ static void test_binds_every_prestaged_module_digest(void) {
   (void)remove(store_path);
   fill_config(&config, &deployment, store_path);
   memset(&node, 0, sizeof(node));
-  check_int_eq(mesh_mgmt_execution_node_init_v1(&node, &config),
+  check_equal(mesh_mgmt_execution_node_init_v1(&node, &config),
                MESH_MGMT_EXECUTION_NODE_OK);
   mesh_mgmt_execution_node_destroy_v1(&node);
 
   deployment.module_digest[0] ^= 0xffu;
-  check_int_eq(mesh_mgmt_execution_node_init_v1(&node, &config),
+  check_equal(mesh_mgmt_execution_node_init_v1(&node, &config),
                MESH_MGMT_EXECUTION_NODE_DEPLOYMENT_FAILED);
   mesh_mgmt_execution_node_destroy_v1(&node);
   (void)remove(store_path);
@@ -121,7 +121,7 @@ static void fill_execution_command(
   grant->max_limits = config->host_limits;
   grant->not_before_ms = 900u;
   grant->expires_at_ms = 5000u;
-  check_int_eq(mesh_mgmt_execution_grant_sign_v1(
+  check_equal(mesh_mgmt_execution_grant_sign_v1(
       grant, TEST_NODE_EXECUTION_PRIVATE_KEY), MESH_MGMT_EXECUTION_WIRE_OK);
 
   request->version = MESH_MGMT_EXECUTION_SCHEMA_V1;
@@ -140,14 +140,14 @@ static void fill_execution_command(
   memset(request->request_nonce, 0x55, sizeof(request->request_nonce));
   memset(request->correlation_id, 0x66, sizeof(request->correlation_id));
   memset(command->reply_node_id, 0x77, sizeof(command->reply_node_id));
-  check_int_eq(mesh_mgmt_execution_grant_verify_v1(
+  check_equal(mesh_mgmt_execution_grant_verify_v1(
       grant, config->grant_issuer_key, node_test_now(NULL)),
       MESH_MGMT_EXECUTION_WIRE_OK);
-  check_int_eq(mesh_mgmt_execution_request_validate_v1(
+  check_equal(mesh_mgmt_execution_request_validate_v1(
       request, node_test_now(NULL)), MESH_MGMT_EXECUTION_OK);
-  check_int_eq(mesh_mgmt_execution_request_bind_v1(
+  check_equal(mesh_mgmt_execution_request_bind_v1(
       grant, request), MESH_MGMT_EXECUTION_OK);
-  check_int_eq(mesh_mgmt_execution_request_digest_v1(
+  check_equal(mesh_mgmt_execution_request_digest_v1(
       request, command->request_digest), MESH_MGMT_EXECUTION_RESULT_OK);
 }
 
@@ -184,68 +184,68 @@ static void test_worker_executes_real_prestaged_wasm_once(void) {
   (void)remove(path);
   fill_config(&config, &deployment, path);
   deployment.module_path = MESH_TEST_EXECUTION_SUCCESS_WASM;
-  check_int_eq(mesh_mgmt_execution_runner_module_digest_v1(
+  check_equal(mesh_mgmt_execution_runner_module_digest_v1(
       deployment.module_path, config.hard_limits.module_bytes,
       deployment.module_digest, NULL), MESH_MGMT_EXECUTION_RUNNER_OK);
-  /* NULL runner adapter means the production TurboRuntime Wasm engine
+  /* NULL runner adapter means the production TurboWasm Wasm engine
    * executes the actual prestaged guest, not a test callback. */
   check_true(config.execute_runner == NULL);
-  check_int_eq(mesh_mgmt_execution_node_init_v1(&node, &config),
+  check_equal(mesh_mgmt_execution_node_init_v1(&node, &config),
                MESH_MGMT_EXECUTION_NODE_OK);
   check_true(node.orchestrator.execute_runner == NULL);
   fill_execution_command(&config, &deployment, &command);
-  check_int_eq(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
+  check_equal(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
                MESH_MGMT_EXECUTION_NODE_OK);
   check_true(await_signed_worker_result(&node, &item));
-  check_int_eq(item.service_result, MESH_MGMT_EXECUTION_SERVICE_OK);
-  check_size_eq(item.result_payload_size,
+  check_equal(item.service_result, MESH_MGMT_EXECUTION_SERVICE_OK);
+  check_equal(item.result_payload_size,
                 MESH_MGMT_EXECUTION_COMMAND_RESULT_SIZE_V1);
-  check_int_eq(mesh_mgmt_execution_command_result_decode_v1(
+  check_equal(mesh_mgmt_execution_command_result_decode_v1(
       item.result_payload, item.result_payload_size, &decoded),
       MESH_MGMT_EXECUTION_WIRE_OK);
-  check_int_eq(mesh_mgmt_execution_result_verify_v1(
+  check_equal(mesh_mgmt_execution_result_verify_v1(
       &decoded, node.orchestrator.result_public_key),
       MESH_MGMT_EXECUTION_RESULT_OK);
-  check_int_eq(decoded.state, MESH_MGMT_EXECUTION_STATE_SUCCEEDED);
-  check_int_eq(decoded.guest_exit_code, 0);
+  check_equal(decoded.state, MESH_MGMT_EXECUTION_STATE_SUCCEEDED);
+  check_equal(decoded.guest_exit_code, 0);
   check_true(decoded.usage.invocations > 0u);
-  check_mem_eq(decoded.request_digest, command.request_digest,
+  check_equal(decoded.request_digest, command.request_digest,
                sizeof(command.request_digest));
-  check_mem_eq(decoded.command_id, command.request.command_id,
+  check_equal(decoded.command_id, command.request.command_id,
                sizeof(command.request.command_id));
-  check_mem_eq(decoded.correlation_id, command.request.correlation_id,
+  check_equal(decoded.correlation_id, command.request.correlation_id,
                sizeof(command.request.correlation_id));
-  check_mem_eq(decoded.target_node_id, config.local_node_id,
+  check_equal(decoded.target_node_id, config.local_node_id,
                sizeof(config.local_node_id));
-  check_mem_eq(decoded.package_digest, deployment.module_digest,
+  check_equal(decoded.package_digest, deployment.module_digest,
                sizeof(deployment.module_digest));
   memcpy(original_signature, decoded.signature, sizeof(original_signature));
   generation = node.store.journal.generation;
-  check_int_eq(mesh_mgmt_execution_egress_consume_v1(&node.egress),
+  check_equal(mesh_mgmt_execution_egress_consume_v1(&node.egress),
                MESH_MGMT_EXECUTION_EGRESS_OK);
 
   /* Explicit repeat of the identical operation reads the committed signed
    * result; it does NOT execute a second guest or advance the store journal. */
-  check_int_eq(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
+  check_equal(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
                MESH_MGMT_EXECUTION_NODE_OK);
   check_true(await_signed_worker_result(&node, &item));
-  check_int_eq(item.service_result, MESH_MGMT_EXECUTION_SERVICE_OK);
-  check_mem_eq(original_signature, item.result.signature,
+  check_equal(item.service_result, MESH_MGMT_EXECUTION_SERVICE_OK);
+  check_equal(original_signature, item.result.signature,
                sizeof(original_signature));
-  check_uint_eq(node.store.journal.generation, generation);
-  check_int_eq(mesh_mgmt_execution_egress_consume_v1(&node.egress),
+  check_equal(node.store.journal.generation, generation);
+  check_equal(mesh_mgmt_execution_egress_consume_v1(&node.egress),
                MESH_MGMT_EXECUTION_EGRESS_OK);
 
-  check_int_eq(mesh_mgmt_execution_node_shutdown_v1(&node),
+  check_equal(mesh_mgmt_execution_node_shutdown_v1(&node),
                MESH_MGMT_EXECUTION_NODE_OK);
-  check_int_eq(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
+  check_equal(mesh_mgmt_execution_node_try_submit_v1(&node, &command),
                MESH_MGMT_EXECUTION_NODE_CLOSED);
   mesh_mgmt_execution_node_destroy_v1(&node);
   (void)remove(path);
   free(path);
 }
 
-spec("mesh management TurboRuntime node composition") {
+spec("mesh management TurboWasm node composition") {
   describe("prestaged deployment boundary") {
     it("binds configured digests before accepting work") {
       test_binds_every_prestaged_module_digest();
