@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifndef NOISE_BENCH_FINALS
 #error NOISE_BENCH_FINALS must be 1, 2, or 4
@@ -38,6 +39,13 @@
 #if NOISE_BENCH_FINALS != 1 && NOISE_BENCH_FINALS != 2 && NOISE_BENCH_FINALS != 4
 #error Unsupported NOISE_BENCH_FINALS
 #endif
+#ifndef NOISE_ASYNC_PROGRESS
+#define NOISE_ASYNC_PROGRESS 0
+#endif
+#if NOISE_ASYNC_PROGRESS != 0 && NOISE_ASYNC_PROGRESS != 1
+#error Invalid NOISE_ASYNC_PROGRESS
+#endif
+#define NOISE_DRIVER_LABEL (NOISE_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
 enum { NOISE_SESSIONS=4, NOISE_FINALS=NOISE_BENCH_FINALS,
        NOISE_SHARDS=NOISE_FINALS+1, NOISE_PER_FINAL=NOISE_SESSIONS/NOISE_FINALS,
        NOISE_PAYLOAD_MAX=1024, NOISE_BATCH=16, NOISE_WAIT_MS=15000 };
@@ -92,6 +100,10 @@ struct noise_lane {
   size_t turns,stop_retries;
   int stopped,released,error;
   const char *failed_at;
+#if NOISE_ASYNC_PROGRESS
+  atomic_bool progress_ready;
+  atomic_int cancel_status,owner_failed;
+#endif
 };
 struct noise_case {
   native_io_sharded *sg;
@@ -168,6 +180,9 @@ static p2p_cnet_config_t net_config(size_t capacity) {
 }
 static void lane_error(noise_lane *lane,int error,const char *where) {
   if (!lane->error) {lane->error=error;lane->failed_at=where;}
+#if NOISE_ASYNC_PROGRESS
+  atomic_store_explicit(&lane->owner_failed,error,memory_order_release);
+#endif
 }
 #define NOISE_CALL(lane,expr) do { \
   const int noise_status_=(expr); \
@@ -452,11 +467,66 @@ static void pump(noise_case *sc) {
     submit(sc,shard,progress);
   barrier(sc);
 }
+#if NOISE_ASYNC_PROGRESS
+/* Real SG Host observer remains the only NativeIO progress authority;
+ * at most ONE bounded task may be enqueued per final worker and acceptor.
+ * No global wait between measured echo rounds. */
+static void progress_cancel(void *arg,int status) {
+  noise_lane *lane=(noise_lane*)arg;
+  atomic_store_explicit(&lane->cancel_status,status,memory_order_relaxed);
+}
+static void progress_finalize(void *arg) {
+  noise_lane *lane=(noise_lane*)arg;
+  atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+}
+static void pump_independent(noise_case *sc) {
+  for(size_t i=0u;i<NOISE_SESSIONS;++i)
+    if (sc->clients[i].node && sc->clients[i].owner)
+      check_equal(P2P_OK,p2p_poll(sc->clients[i].node));
+  for(size_t shard=0u;shard<NOISE_SHARDS;++shard) {
+    noise_lane *lane=&sc->lanes[shard];
+    check_equal(0,atomic_load_explicit(
+        &lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(
+        &lane->cancel_status,memory_order_relaxed));
+    if (!atomic_exchange_explicit(
+            &lane->progress_ready,false,memory_order_acq_rel)) continue;
+    native_io_sharded_task task={
+      progress,progress_cancel,progress_finalize,lane
+    };
+    const int rc=native_io_sharded_try_submit_to(sc->sg,shard,&task);
+    if (rc!=SALTS_OK) {
+      atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+      if (rc!=SALTS_ENOBUFS)check_equal(SALTS_OK,rc);
+    }
+  }
+}
+static void finish_independent(noise_case *sc) {
+  barrier(sc);
+  for(size_t shard=0u;shard<NOISE_SHARDS;++shard) {
+    noise_lane *lane=&sc->lanes[shard];
+    check_true(atomic_load_explicit(
+        &lane->progress_ready,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(
+        &lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(
+        &lane->cancel_status,memory_order_relaxed));
+  }
+}
+#define NOISE_MEASURE_PUMP(s) pump_independent(s)
+#define NOISE_MEASURE_BOUNDARY(s) finish_independent(s)
+#define NOISE_MEASURE_FINISH(s) finish_independent(s)
+#else
+#define NOISE_MEASURE_PUMP(s) pump(s)
+#define NOISE_MEASURE_BOUNDARY(s) ((void)0)
+#define NOISE_MEASURE_FINISH(s) ((void)0)
+#endif
 static void run_rounds(noise_case *sc) {
   const size_t total=sc->warmup+sc->rounds;
   uint64_t wall0=0u,cpu0=0u;
   for (size_t round=0u;round<total;++round) {
     if (round==sc->warmup) {
+      NOISE_MEASURE_BOUNDARY(sc);
       wall0=timestamp_ns(CLOCK_MONOTONIC);
       cpu0=timestamp_ns(CLOCK_PROCESS_CPUTIME_ID);
     }
@@ -473,13 +543,24 @@ static void run_rounds(noise_case *sc) {
       for (size_t i=0u;i<NOISE_SESSIONS;++i)
         if (sc->clients[i].received<=round)complete=false;
       if (complete||cmeta_monotonic_ms()>=deadline)break;
-      pump(sc);
+      NOISE_MEASURE_PUMP(sc);
     }
     for (size_t i=0u;i<NOISE_SESSIONS;++i) {
       check_equal(round+1u,sc->clients[i].received);
       check_equal((size_t)0u,sc->clients[i].invalid);
     }
+    /* Validate server-side byte equality and callback counts, not just a
+     * client echo generated accidentally by a different source. */
+    for(size_t f=0u;f<NOISE_FINALS;++f) {
+      const noise_final *final=&sc->finals[f];
+      check_equal((size_t)0u,final->invalid);
+      for(size_t i=f;i<NOISE_SESSIONS;i+=NOISE_FINALS) {
+        check_equal(round+1u,final->received[i]);
+        check_equal(round+1u,final->replied[i]);
+      }
+    }
   }
+  NOISE_MEASURE_FINISH(sc);
   const uint64_t wall1=timestamp_ns(CLOCK_MONOTONIC);
   const uint64_t cpu1=timestamp_ns(CLOCK_PROCESS_CPUTIME_ID);
   const double wall=(double)(wall1-wall0)/1e9;
@@ -490,13 +571,13 @@ static void run_rounds(noise_case *sc) {
     noise_client *c=&sc->clients[i];
     memcpy(all+i*sc->rounds,c->samples,sc->rounds*sizeof(uint64_t));
     for(size_t j=0u;j<sc->rounds;++j)
-      printf("NOISE_SG_RTT,global-barrier,%u,%u,%zu,%zu,%zu,%.3f\n",
-          (unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,i+1u,sc->bytes,j+1u,
+      printf("NOISE_SG_RTT,%s,%u,%u,%zu,%zu,%zu,%.3f\n",
+          NOISE_DRIVER_LABEL,(unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,i+1u,sc->bytes,j+1u,
           (double)c->samples[j]/1000.0);
     qsort(c->samples,sc->rounds,sizeof(uint64_t),compare_u64);
-    printf("NOISE_SG_SESSION,noise-only-p2p-echo,global-barrier,"
+    printf("NOISE_SG_SESSION,noise-only-p2p-echo,%s,"
            "%u,%u,%zu,%zu,%zu,%.3f,%.3f,%.3f\n",
-           (unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,
+           NOISE_DRIVER_LABEL,(unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,
            i+1u,sc->bytes,sc->rounds,
            (double)quantile(c->samples,sc->rounds,50u)/1000.0,
            (double)quantile(c->samples,sc->rounds,95u)/1000.0,
@@ -505,9 +586,9 @@ static void run_rounds(noise_case *sc) {
   qsort(all,sc->rounds*NOISE_SESSIONS,sizeof(uint64_t),compare_u64);
   check_true(wall>0.0);
   const double app_messages=(double)sc->rounds*NOISE_SESSIONS*2.0;
-  printf("NOISE_SG_BENCH,noise-only-p2p-echo,global-barrier,"
+  printf("NOISE_SG_BENCH,noise-only-p2p-echo,%s,"
          "%u,%u,%u,%zu,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.6f,%.3f,%.3f,%.3f\n",
-         (unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,
+         NOISE_DRIVER_LABEL,(unsigned)NOISE_FINALS,(unsigned)NOISE_SHARDS,
          (unsigned)NOISE_SESSIONS,sc->bytes,sc->rounds,sc->warmup,
          wall*1000.0,cpu*1000.0,cpu*100.0/wall,
          app_messages/wall,app_messages*(double)sc->bytes/(1048576.0*wall),
@@ -554,6 +635,11 @@ static void run_noise_baseline(void) {
   for(size_t shard=0u;shard<NOISE_SHARDS;++shard) {
     sc->lanes[shard].scenario=sc;
     sc->lanes[shard].shard=shard;
+#if NOISE_ASYNC_PROGRESS
+    atomic_init(&sc->lanes[shard].progress_ready,true);
+    atomic_init(&sc->lanes[shard].cancel_status,0);
+    atomic_init(&sc->lanes[shard].owner_failed,0);
+#endif
     submit(sc,shard,init_owner);
   }
   barrier(sc);

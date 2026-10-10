@@ -417,6 +417,15 @@ if(P2P_NOISE_SG_BUILD_BENCHMARKS)
     target_link_libraries(bench_noise_sg_${finals}
       PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
   endforeach()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_noise_sg_${finals}_async
+      "${mesh_tests}/../bench/bench_noise_sg_echo.c")
+    set_property(TARGET bench_noise_sg_${finals}_async PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_noise_sg_${finals}_async PRIVATE
+      NOISE_BENCH_FINALS=${finals} NOISE_ASYNC_PROGRESS=1)
+    target_link_libraries(bench_noise_sg_${finals}_async
+      PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
 endif()
 
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
