@@ -134,10 +134,27 @@ endif()
 add_library(p2p_cnet_transport STATIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/connection.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/core/cnet_transport.c"
+  "${TURBOP2P_SOURCE_DIR}/p2p/src/core/cnet_sg_ace.c"
   "${TURBOP2P_SOURCE_DIR}/p2p/src/security/p2p_cnet_admission.c")
 target_include_directories(p2p_cnet_transport PUBLIC
   "${TURBOP2P_SOURCE_DIR}/p2p/src" "${TURBOP2P_SOURCE_DIR}/p2p/include")
-target_link_libraries(p2p_cnet_transport PUBLIC Salts::CNet Salts::Core p2p_security)
+target_link_libraries(p2p_cnet_transport PUBLIC Salts::CNet Salts::CMeta Salts::Core p2p_security)
+# Installed-SDK C11/C++17 conformance for typed CMeta ACE SG admission hints.
+add_executable(test_p2p_cnet_ace_placement
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_ace_placement.c")
+set_property(TARGET test_p2p_cnet_ace_placement PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_ace_placement PRIVATE
+  p2p_cnet_transport Salts::TinyTest)
+add_test(NAME test_p2p_cnet_ace_placement COMMAND test_p2p_cnet_ace_placement)
+add_executable(test_p2p_cnet_ace_placement_cpp
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_ace_placement_cpp.cpp")
+set_property(TARGET test_p2p_cnet_ace_placement_cpp PROPERTY LINKER_LANGUAGE CXX)
+target_include_directories(test_p2p_cnet_ace_placement_cpp PRIVATE
+  "${TURBOP2P_SOURCE_DIR}/p2p/src")
+target_link_libraries(test_p2p_cnet_ace_placement_cpp PRIVATE
+  p2p_cnet_transport)
+add_test(NAME test_p2p_cnet_ace_placement_cpp COMMAND test_p2p_cnet_ace_placement_cpp)
+
 add_executable(test_p2p_cnet_transport
   "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_transport.c")
 set_property(TARGET test_p2p_cnet_transport PROPERTY LINKER_LANGUAGE CXX)
