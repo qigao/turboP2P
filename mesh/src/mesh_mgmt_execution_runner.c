@@ -1,20 +1,24 @@
 #include "mesh_mgmt_execution_runner.h"
 
-#include "turbo_fs.h"
-#include "turbo_runtime.h"
+#include <turbowasm/turbowasm.h>
+#include <salts/clock.h>
 
 #include <ctype.h>
+#include <limits.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define MESH_MGMT_EXECUTION_RUNNER_HASH_CHUNK (16u * 1024u)
+#define MESH_MGMT_EXECUTION_RUNNER_PATH_MAX 4096u
 
 struct mesh_mgmt_execution_deployment_entry_v1_s {
   uint8_t deployment_id[MESH_MGMT_EXECUTION_ID_SIZE];
   uint64_t generation;
   uint8_t module_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  char module_path[TURBO_FS_MAX_PATH];
+  char module_path[MESH_MGMT_EXECUTION_RUNNER_PATH_MAX];
   mesh_mgmt_execution_deployment_runtime_v1_t runtime;
   uint8_t occupied;
 };
@@ -66,55 +70,55 @@ static const mesh_mgmt_execution_deployment_entry_v1_t *find_deployment(
   return NULL;
 }
 
-static void copy_runtime_error(const turbo_runtime_t *runtime,
-                               mesh_mgmt_execution_runner_output_v1_t *out) {
-  const char *error_text = turbo_runtime_last_error(runtime);
 
-  if (!error_text)
-    return;
-  strncpy(out->error_text, error_text, sizeof(out->error_text) - 1u);
-  out->error_text[sizeof(out->error_text) - 1u] = '\0';
+static void describe_runtime_status(
+    mesh_mgmt_execution_runner_output_v1_t *out, turbowasm_status status) {
+  const char *description = turbowasm_status_string(status);
+  out->runtime_code = (int)status;
+  if (description) {
+    strncpy(out->error_text, description, sizeof(out->error_text) - 1u);
+    out->error_text[sizeof(out->error_text) - 1u] = '\0';
+  }
 }
 
-static int write_stdout(const uint8_t *data, size_t size, void *user_data) {
-  runner_io_context_t *context = (runner_io_context_t *)user_data;
-
-  if (EVP_DigestUpdate(context->stdout_hash, data, size) != 1)
-    return -1;
-  context->stdout_bytes += size;
-  if (context->io && context->io->write_stdout)
-    return context->io->write_stdout(data, size, context->io->user_data);
-  return 0;
+/* This runtime's only guest ABI is the import-free, zero-argument
+ * "turbo_main" export returning i32. No ungranted WASI/host providers,
+ * mutable shared stores, or implicit application replay are admitted. */
+static int is_turbo_main(const turbowasm_export_desc *entry) {
+  static const char name[] = "turbo_main";
+  return entry != NULL &&
+         entry->kind == TURBOWASM_EXTERN_FUNCTION &&
+         entry->name.size == sizeof(name) - 1u &&
+         entry->name.bytes != NULL &&
+         memcmp(entry->name.bytes, name, sizeof(name) - 1u) == 0;
 }
 
-static int write_stderr(const uint8_t *data, size_t size, void *user_data) {
-  runner_io_context_t *context = (runner_io_context_t *)user_data;
+typedef struct {
+  uint64_t deadline_ms;
+} runner_deadline_v1_t;
 
-  if (EVP_DigestUpdate(context->stderr_hash, data, size) != 1)
-    return -1;
-  context->stderr_bytes += size;
-  if (context->io && context->io->write_stderr)
-    return context->io->write_stderr(data, size, context->io->user_data);
-  return 0;
+static bool runtime_interrupted(void *context) {
+  const runner_deadline_v1_t *deadline = context;
+  return cmeta_monotonic_ms() >= deadline->deadline_ms;
 }
 
-static mesh_mgmt_execution_runner_result_t finish_output_hashes(
-    runner_io_context_t *context,
-    mesh_mgmt_execution_runner_output_v1_t *out) {
-  unsigned int digest_size = 0u;
-
-  if (EVP_DigestFinal_ex(context->stdout_hash, out->stdout_digest,
-                         &digest_size) != 1 ||
-      digest_size != MESH_MGMT_EXECUTION_DIGEST_SIZE)
-    return MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
-  digest_size = 0u;
-  if (EVP_DigestFinal_ex(context->stderr_hash, out->stderr_digest,
-                         &digest_size) != 1 ||
-      digest_size != MESH_MGMT_EXECUTION_DIGEST_SIZE)
-    return MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
-  out->stdout_bytes = context->stdout_bytes;
-  out->stderr_bytes = context->stderr_bytes;
-  return MESH_MGMT_EXECUTION_RUNNER_OK;
+static int safe_allocation_budget(
+    const mesh_mgmt_execution_limits_v1_t *limits, size_t *out_budget) {
+  size_t module_budget, memory_budget, stack_budget;
+  if (!limits || !out_budget ||
+      limits->module_bytes == 0u || limits->linear_memory_bytes == 0u ||
+      limits->stack_bytes == 0u || limits->control_flow_steps == 0u ||
+      limits->timeout_ms == 0u ||
+      (size_t)limits->module_bytes > SIZE_MAX / 16u)
+    return 0;
+  module_budget = (size_t)limits->module_bytes * 16u;
+  memory_budget = (size_t)limits->linear_memory_bytes;
+  stack_budget = (size_t)limits->stack_bytes;
+  if (SIZE_MAX - module_budget < memory_budget ||
+      SIZE_MAX - module_budget - memory_budget < stack_budget)
+    return 0;
+  *out_budget = module_budget + memory_budget + stack_budget;
+  return 1;
 }
 
 mesh_mgmt_execution_runner_result_t
@@ -122,56 +126,103 @@ mesh_mgmt_execution_runner_module_digest_v1(
     const char *module_path, uint32_t max_module_bytes,
     uint8_t out_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE],
     uint64_t *out_module_bytes) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  FILE *file = NULL;
   EVP_MD_CTX *hash = NULL;
   uint8_t buffer[MESH_MGMT_EXECUTION_RUNNER_HASH_CHUNK];
+  size_t read_bytes;
   uint64_t total = 0u;
   unsigned int digest_size = 0u;
-  int read_size;
   mesh_mgmt_execution_runner_result_t result =
       MESH_MGMT_EXECUTION_RUNNER_IO;
 
+  if (out_module_bytes) *out_module_bytes = 0u;
   if (!module_path || !out_digest || max_module_bytes == 0u)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
   if (!path_is_absolute(module_path) ||
-      strlen(module_path) >= TURBO_FS_MAX_PATH)
+      strlen(module_path) >= MESH_MGMT_EXECUTION_RUNNER_PATH_MAX)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_DEPLOYMENT;
-  if (turbo_fs_stat(module_path, &stat) != 0 || !stat.is_file)
-    return MESH_MGMT_EXECUTION_RUNNER_IO;
-  if (stat.size == 0u || stat.size > max_module_bytes)
-    return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
-
+  file = fopen(module_path, "rb");
+  if (!file) return MESH_MGMT_EXECUTION_RUNNER_IO;
   hash = EVP_MD_CTX_new();
-  if (!hash)
-    return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
+  if (!hash) {
+    result = MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
+    goto cleanup;
+  }
   if (EVP_DigestInit_ex(hash, EVP_sha256(), NULL) != 1)
     goto cleanup;
-  file = turbo_fs_open(module_path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
-    goto cleanup;
-
-  while ((read_size = turbo_fs_read(file, (char *)buffer, sizeof(buffer))) > 0) {
-    total += (uint64_t)read_size;
-    if (total > max_module_bytes ||
-        EVP_DigestUpdate(hash, buffer, (size_t)read_size) != 1) {
+  while ((read_bytes = fread(buffer, 1u, sizeof(buffer), file)) != 0u) {
+    total += (uint64_t)read_bytes;
+    if (total > max_module_bytes) {
       result = MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
       goto cleanup;
     }
+    if (EVP_DigestUpdate(hash, buffer, read_bytes) != 1)
+      goto cleanup;
   }
-  if (read_size < 0 || total != stat.size)
+  if (ferror(file) || total == 0u)
     goto cleanup;
   if (EVP_DigestFinal_ex(hash, out_digest, &digest_size) != 1 ||
       digest_size != MESH_MGMT_EXECUTION_DIGEST_SIZE)
     goto cleanup;
-  if (out_module_bytes)
-    *out_module_bytes = total;
+  if (out_module_bytes) *out_module_bytes = total;
   result = MESH_MGMT_EXECUTION_RUNNER_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE && turbo_fs_close(file) != 0)
+  if (fclose(file) != 0)
     result = MESH_MGMT_EXECUTION_RUNNER_IO;
   EVP_MD_CTX_free(hash);
+  return result;
+}
+
+/* TurboWasm borrows the ENTIRE module buffer. Caller keeps this allocation
+ * immutable until the instance AND module are destroyed. A second digest
+ * check protects the payload actually submitted to TurboWasm from file
+ * replacement between the initial preflight and this read. */
+static mesh_mgmt_execution_runner_result_t read_verified_module(
+    const char *path, const uint8_t expected[32], size_t capacity,
+    uint8_t **out_bytes, size_t *out_size) {
+  FILE *file = NULL;
+  uint8_t *bytes = NULL;
+  uint8_t digest[32] = {0};
+  unsigned int digest_size = 0u;
+  uint64_t source_size = 0u;
+  size_t read_bytes = 0u;
+  mesh_mgmt_execution_runner_result_t result =
+      MESH_MGMT_EXECUTION_RUNNER_IO;
+
+  *out_bytes = NULL;
+  *out_size = 0u;
+  result = mesh_mgmt_execution_runner_module_digest_v1(
+      path, (uint32_t)capacity, digest, &source_size);
+  if (result != MESH_MGMT_EXECUTION_RUNNER_OK) return result;
+  if (CRYPTO_memcmp(expected, digest, 32u) != 0)
+    return MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;
+  bytes = malloc((size_t)source_size);
+  if (!bytes) return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
+  file = fopen(path, "rb");
+  if (!file) goto cleanup;
+  read_bytes = fread(bytes, 1u, (size_t)source_size, file);
+  if (read_bytes != source_size || fgetc(file) != EOF || ferror(file))
+    goto cleanup;
+  if (EVP_Digest(bytes, (size_t)source_size, digest, &digest_size,
+                 EVP_sha256(), NULL) != 1 ||
+      digest_size != sizeof(digest)) {
+    result = MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
+    goto cleanup;
+  }
+  if (CRYPTO_memcmp(digest, expected, sizeof(digest)) != 0) {
+    result = MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;
+    goto cleanup;
+  }
+  *out_bytes = bytes;
+  *out_size = (size_t)source_size;
+  bytes = NULL;
+  result = MESH_MGMT_EXECUTION_RUNNER_OK;
+
+cleanup:
+  if (file && fclose(file) != 0) result = MESH_MGMT_EXECUTION_RUNNER_IO;
+  free(bytes);
+  OPENSSL_cleanse(digest, sizeof(digest));
   return result;
 }
 
@@ -218,7 +269,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_register_v1(
        deployment->runtime !=
            MESH_MGMT_EXECUTION_DEPLOYMENT_NATIVE_PROCESS_V1) ||
       !path_is_absolute(deployment->module_path) || path_size == 0u ||
-      path_size >= TURBO_FS_MAX_PATH)
+      path_size >= MESH_MGMT_EXECUTION_RUNNER_PATH_MAX)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_DEPLOYMENT;
 
   for (index = 0u; index < runner->capacity; ++index) {
