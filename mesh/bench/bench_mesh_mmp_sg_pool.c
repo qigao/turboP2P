@@ -220,6 +220,13 @@ static int server_session(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
   for (size_t i=0;i<BENCH_SESSIONS;++i) {
     if (memcmp(key,f->scenario->clients[i].public_key,32u)) continue;
     if ((i%BENCH_FINALS)!=f->lane->shard-1u || f->peers[i]) {
+      fprintf(stderr,"Signed SG mismatch: final=%zu client=%zu expected_final=%zu "
+              "seen_sessions=%zu existing_peer=%p incoming_peer=%p "
+              "client_auth=%zu transport_key_prefix=%02x%02x\n",
+              f->lane->shard-1u,i,i%BENCH_FINALS,f->signed_ready,
+              (void *)f->peers[i],(void *)peer,
+              f->scenario->clients[i].authenticated,
+              (unsigned)key[0],(unsigned)key[1]);
       bench_error(f->lane,P2P_ERR_INVALID_STATE,"wrong signed Final mapping");
       return -1;
     }
@@ -608,6 +615,8 @@ static void run_benchmark(void) {
     c->bytes=sc->bytes;
     c->samples=calloc(sc->rounds,sizeof(uint64_t));
     check_not_null(c->samples);
+    for (size_t earlier=0u;earlier<i;++earlier)
+      check_true(memcmp(c->public_key,sc->clients[earlier].public_key,32u)!=0);
   }
   check_equal(SALTS_OK,native_io_sharded_create(&settings,&sc->host));
   for (size_t i=0;i<BENCH_SHARDS;++i) {
