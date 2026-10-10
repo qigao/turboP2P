@@ -2,7 +2,7 @@ name: P2P SG Host performance profiles
 on:
   workflow_dispatch:
   push:
-    branches: [feature/p2p-sg-benchmark-23]
+    branches: [feature/p2p-sg-benchmark-23, feature/p2p-sg-independent-progress-23]
     paths:
       - 'p2p/bench/**'
       - 'tests/salts_foundation/CMakeLists.txt'
@@ -33,7 +33,9 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
             -DVCPKG_MANIFEST_MODE=OFF
           cmake --build build/p2p-sg-benchmark --parallel 2 --target \
-            bench_p2p_sg_1 bench_p2p_sg_2 bench_p2p_sg_4_1 bench_p2p_sg_4
+            bench_p2p_sg_1 bench_p2p_sg_2 bench_p2p_sg_4_1 bench_p2p_sg_4 \
+            bench_p2p_sg_1_async bench_p2p_sg_2_async \
+            bench_p2p_sg_4_1_async bench_p2p_sg_4_async
       - name: Measure real NativeIO SG + P2P Noise traffic
         shell: bash
         env:
@@ -41,7 +43,7 @@ jobs:
           P2P_SG_BENCH_ROUNDS: '1024'
         run: |
           set -euo pipefail
-          echo 'shards,sessions,rounds,warmup,payload_bytes,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,echo_batch_p50_us,echo_batch_p95_us,echo_batch_p99_us' > p2p-sg-benchmark.csv
+          echo 'mode,shards,sessions,rounds,warmup,payload_bytes,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,echo_batch_p50_us,echo_batch_p95_us,echo_batch_p99_us' > p2p-sg-benchmark.csv
           {
             uname -a
             lscpu
@@ -53,10 +55,14 @@ jobs:
           # repeat. Keep all raw samples, not only a flattering best run.
           for repeat in 1 2 3 4 5; do
             for profile in 1 2 4_1 4; do
-              ./build/p2p-sg-benchmark/bench_p2p_sg_"$profile" |
-                tee "p2p-sg-bench-$profile-repeat-$repeat.log"
-              grep '^P2P_SG_BENCH,' "p2p-sg-bench-$profile-repeat-$repeat.log" |
-                sed 's/^P2P_SG_BENCH,//' >> p2p-sg-benchmark.csv
+              for mode in barrier async; do
+                exe="bench_p2p_sg_$profile"
+                if [ "$mode" = async ]; then exe="${exe}_async"; fi
+                ./build/p2p-sg-benchmark/"$exe" |
+                  tee "p2p-sg-bench-$profile-$mode-repeat-$repeat.log"
+                grep '^P2P_SG_BENCH,' "p2p-sg-bench-$profile-$mode-repeat-$repeat.log" |
+                  sed 's/^P2P_SG_BENCH,//' >> p2p-sg-benchmark.csv
+              done
             done
           done
           cat p2p-sg-benchmark.csv
@@ -67,24 +73,26 @@ jobs:
               rows = list(csv.DictReader(f))
           groups = defaultdict(list)
           for row in rows:
-              groups[(int(row["shards"]), int(row["sessions"]))].append(row)
-          expected = {(1, 1), (2, 1), (4, 1), (4, 3)}
+              groups[(row["mode"], int(row["shards"]), int(row["sessions"]))].append(row)
+          expected = {(mode, shards, sessions)
+                      for mode in ("global-barrier", "owner-independent")
+                      for (shards, sessions) in ((1, 1), (2, 1), (4, 1), (4, 3))}
           if set(groups) != expected or any(len(v) != 5 for v in groups.values()):
               raise SystemExit(f"Incomplete benchmark groups: {dict((k, len(v)) for k, v in groups.items())}")
           with open("p2p-sg-benchmark-summary.csv", "w", newline="", encoding="utf-8") as out:
               writer = csv.writer(out)
-              writer.writerow(["shards", "sessions", "repeats",
+              writer.writerow(["mode", "shards", "sessions", "repeats",
                                "median_p50_us", "median_p95_us", "median_p99_us",
                                "median_app_msgs_per_s", "median_process_cpu_pct"])
-              for (shards, sessions), records in sorted(groups.items()):
+              for (mode, shards, sessions), records in sorted(groups.items()):
                   metrics = ["echo_batch_p50_us", "echo_batch_p95_us", "echo_batch_p99_us",
                              "app_msgs_per_s", "process_cpu_pct"]
                   values = [round(statistics.median(float(r[key]) for r in records), 3)
                             for key in metrics]
-                  writer.writerow([shards, sessions, len(records), *values])
+                  writer.writerow([mode, shards, sessions, len(records), *values])
           PY
           cat p2p-sg-benchmark-summary.csv
-          echo "1/2/4 shards at 1 active session compare per-session overhead. 4 shards at 3 sessions is NOT same-load scaling; raw-CNet baseline remains unmeasured."
+          echo "Paired barrier and independent SG Owner drivers share identical authenticated sessions. These are application echo batches, not raw-CNet throughput or normalized multicore scaling."
       - name: Upload raw performance evidence
         uses: actions/upload-artifact@v4
         with:
