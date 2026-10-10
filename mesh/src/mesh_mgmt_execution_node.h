@@ -59,7 +59,7 @@ typedef struct {
 } mesh_mgmt_execution_node_config_v1_t;
 
 /**
- * Single-owner composition root for one node's prestaged TurboRuntime
+ * Single-owner composition root for one node's prestaged TurboWasm
  * execution boundary. Submit is called from the MMP event loop; execution and
  * durable store access are serialized by the one-thread worker.
  */
@@ -70,6 +70,10 @@ typedef struct {
   mesh_mgmt_execution_service_v1_t service;
   mesh_mgmt_execution_egress_v1_t egress;
   mesh_mgmt_execution_worker_v1_t worker;
+  /* Address-stable original RESULT native terminal association. Destroy
+   * refuses while in flight or unresolved; it never frees callback storage
+   * that the P2P Owner may still reference after a logical disconnect. */
+  mesh_mgmt_execution_sender_pending_v5_t response_sender;
   mesh_mgmt_execution_authorization_input_v1_t authorization_template;
   uint8_t grant_issuer_key[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t initialized;
@@ -91,6 +95,13 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_send_next_v1(
 mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_shutdown_v1(
     mesh_mgmt_execution_node_v1_t *node);
 
+/* Checked teardown returns BUSY rather than destroying an Egress/Runtime
+ * callback context before the original encrypted wire terminal. */
+mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_destroy_v2(
+    mesh_mgmt_execution_node_v1_t *node);
+
+/* Existing nonreporting entry preserves resources on BUSY. New production
+ * callers must use checked destroy_v2 before releasing the containing owner. */
 void mesh_mgmt_execution_node_destroy_v1(
     mesh_mgmt_execution_node_v1_t *node);
 
