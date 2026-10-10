@@ -162,6 +162,65 @@ static void destroy_pair(pair_t *pair) {
     check_equal(P2P_OK, p2p_cnet_owner_destroy(pair->server.owner));
 }
 
+typedef struct {
+    unsigned terminals;
+    int last_status;
+} durable_probe;
+
+static void terminal_done(void *context, int status) {
+    durable_probe *probe = context;
+    ++probe->terminals;
+    probe->last_status = status;
+}
+
+static void test_durable_cnet_wire_terminal(void) {
+    pair_t pair = {0};
+    p2p_cnet_config_t policy = config(4096);
+    durable_probe probe = {0};
+    uint64_t deadline;
+    check_equal(P2P_OK, setup_pair(&pair, &policy));
+    wait_connected(&pair);
+    check_equal(P2P_ERR_INVALID_ARG, p2p_connection_send_terminal(
+        pair.client.connection, "x", 1, NULL, &probe));
+    check_equal(P2P_OK, p2p_connection_send_terminal(
+        pair.client.connection, "complete", 8, terminal_done, &probe));
+    check_equal(0U, probe.terminals); /* enqueue is not wire terminal */
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((!probe.terminals || pair.server.received_bytes < 8) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1U, probe.terminals);
+    check_equal(P2P_OK, probe.last_status);
+    check_equal((size_t)8, pair.server.received_bytes);
+    for (unsigned pass = 0u; pass < 4u; ++pass) pump(&pair);
+    check_equal(1U, probe.terminals);
+    destroy_pair(&pair);
+}
+
+static void test_durable_terminal_after_logical_detach(void) {
+    pair_t pair = {0};
+    p2p_cnet_config_t policy = config(4096);
+    durable_probe probe = {0};
+    uint8_t payload[TEST_BUFFER_SIZE] = {1};
+    uint64_t deadline;
+    check_equal(P2P_OK, setup_pair(&pair, &policy));
+    wait_connected(&pair);
+    check_equal(P2P_OK, p2p_connection_send_terminal(
+        pair.client.connection, payload, sizeof(payload),
+        terminal_done, &probe));
+    check_equal(0U, probe.terminals);
+    p2p_connection_destroy(pair.client.connection); /* detach before CNet terminal */
+    pair.client.connection = NULL;
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((!probe.terminals || p2p_cnet_owner_connection_count(pair.client.owner)) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1U, probe.terminals);
+    check_true(probe.last_status == P2P_ERR_NETWORK ||
+               probe.last_status == P2P_OK); /* close races full write */
+    check_equal((size_t)0, p2p_cnet_owner_connection_count(pair.client.owner));
+    check_equal(0U, pair.client.closed); /* detached protocol callbacks stay suppressed */
+    destroy_pair(&pair);
+}
+
 static void test_fifo_copy_and_hwm(void) {
     pair_t pair = {0};
     p2p_cnet_config_t policy = config(7);
@@ -872,6 +931,8 @@ spec("P2P CNet connection ownership") {
     it("ignores stale generations and closes a short logical completion") { test_stale_events_and_bad_completion(); }
     it("retains a timed-out owner until a later completed stop") { test_stop_timeout_retains_owner(); }
 #endif
+    it("reports a durable full CNet wire-write only after progress") { test_durable_cnet_wire_terminal(); }
+    it("settles a durable admitted write exactly once after logical detach") { test_durable_terminal_after_logical_detach(); }
     it("retains builder bytes and completes bounded writes in FIFO order") { test_fifo_copy_and_hwm(); }
     it("preserves the unconsumed tail across receive pause") { test_pause_preserves_tail(); }
     it("retains one already-admitted receive while paused") { test_pause_with_admitted_receive(); }

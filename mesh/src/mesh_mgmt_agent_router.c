@@ -971,6 +971,83 @@ mesh_mgmt_agent_router_send_execution_disabled_from_event_v1(
 }
 
 mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_execution_target_v4(
+    mesh_mgmt_agent_router_v1_t *router,
+    const uint8_t target_node_id[32], p2p_peer_t **out_peer) {
+  mesh_mgmt_agent_router_slot_v1_t *slot = NULL;
+  mesh_mgmt_agent_router_result_t result;
+  if (out_peer) *out_peer = NULL;
+  if (!router || !target_node_id || !out_peer)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth != 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  result = find_execution_target(router, target_node_id, &slot);
+  if (result != MESH_MGMT_AGENT_ROUTER_OK) return result;
+  if (!slot->peer || slot->runtime.state != MESH_MGMT_P2P_PEER_READY)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  *out_peer = slot->peer;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t
+mesh_mgmt_agent_router_send_execution_terminal_v4(
+    mesh_mgmt_agent_router_v1_t *router, uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    p2p_app_send_terminal_fn complete, void *context) {
+  mesh_mgmt_agent_router_slot_v1_t *slot = NULL;
+  const uint8_t *frame = NULL;
+  size_t length = 0u;
+  mesh_mgmt_agent_router_result_t find_result;
+  int result;
+  if (!router || !target_node_id || !payload || !payload_len || !complete ||
+      (kind != MESH_MGMT_KIND_COMMAND_REQUEST &&
+       kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+       kind != MESH_MGMT_KIND_COMMAND_STATUS))
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED ||
+      router->callback_depth != 0u)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  find_result = find_execution_target(router, target_node_id, &slot);
+  if (find_result != MESH_MGMT_AGENT_ROUTER_OK) return find_result;
+  if (slot->runtime.state != MESH_MGMT_P2P_PEER_READY ||
+      slot->runtime.protocol_peer.connection.dispatcher.session.state !=
+          MESH_MGMT_SESSION_ESTABLISHED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  router->last_signer_result = mesh_mgmt_peer_signer_build_targeted_v1(
+      &slot->runtime.signer, kind, target_node_id,
+      payload, payload_len, &frame, &length);
+  if (router->last_signer_result != MESH_MGMT_PEER_SIGNER_OK) {
+    router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
+  /* Preserve the complete MMP typed feature, grant/signature, target and
+   * outbound payload validation contract before encrypting or admitting
+   * a CNet write. Same preflight as the ordinary MMP send path. */
+  if (mesh_mgmt_connection_preflight_send_v4(
+          &slot->runtime.protocol_peer.connection, frame, length) !=
+      MESH_MGMT_CONNECTION_OK) {
+    router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
+  /* Encrypted P2P copies frame synchronously before returning admission.
+   * The signer arena is not retained; CNet retains only the callback ticket. */
+  result = p2p_send_message_terminal_v3(
+      router->node, slot->peer, P2P_MSG_CUSTOM,
+      frame, length, complete, context);
+  if (result != P2P_OK) {
+    router->last_peer_result = MESH_MGMT_P2P_PEER_PROTOCOL_FAILED;
+    router->last_error = result == P2P_ERR_RESOURCE_EXHAUSTED
+        ? MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED
+        : MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
+  router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t
 mesh_mgmt_agent_router_send_execution_request_v1(
     mesh_mgmt_agent_router_v1_t *router,
     const uint8_t target_node_id[32],

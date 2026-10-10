@@ -45,6 +45,11 @@ void p2p_peer_disconnect(p2p_peer_t *peer);
  * Handles encryption if crypto session is established
  */
 int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg);
+/* One durable application send result after CNet full wire-write or physical
+ * terminal. Rejected admission never calls complete. Caller owns the callback
+ * context until the original CNet Owner has settled the admitted write. */
+int p2p_peer_send_terminal(p2p_peer_t *peer, const p2p_message_t *msg,
+                           p2p_send_complete_fn complete, void *context);
 
 /**
  * Handle incoming data from peer

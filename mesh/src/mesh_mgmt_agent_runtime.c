@@ -5,6 +5,15 @@
 #include "core/peer_cnet.h"
 #include <salts/thread.h>
 
+struct mesh_mgmt_command_terminal_slot_v4_s {
+  mesh_mgmt_agent_runtime_v1_t *runtime;
+  cnet_pool_lease lease;
+  mesh_mgmt_agent_command_terminal_fn_v4 complete;
+  void *context;
+  uint64_t ticket;
+  uint8_t active;
+};
+
 #include <salts/clock.h>
 
 #include <string.h>
@@ -262,6 +271,11 @@ static void runtime_release_initialized(mesh_mgmt_agent_runtime_v1_t *runtime) {
    * runtime_stop_initialized while the P2P Manager was still alive. */
   free(runtime->signed_pool_records);
   runtime->signed_pool_records = NULL;
+  /* Checked Stop already required Pool drained AND every retained command
+   * send callback settled on its original CNet Owner worker. */
+  free(runtime->command_terminal_slots);
+  runtime->command_terminal_slots = NULL;
+  runtime->command_terminal_capacity = 0u;
   mesh_mgmt_service_publisher_destroy_v1(&runtime->service_publisher);
   mesh_mgmt_endpoint_publisher_destroy_v1(&runtime->endpoint_publisher);
   mesh_mgmt_endpoint_pool_destroy_v1(&runtime->endpoint_pool);
@@ -316,8 +330,11 @@ static mesh_mgmt_agent_runtime_result_t runtime_stop_initialized(
         cnet_pool_get_snapshot(&runtime->signed_pool, &snapshot);
     if (runtime->signed_pool_status != SALTS_OK)
       return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
-    if (!snapshot.drained)
+    if (!snapshot.drained || runtime->command_terminal_inflight)
       return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+    for (size_t i = 0u; i < runtime->command_terminal_capacity; ++i)
+      if (runtime->command_terminal_slots[i].active)
+        return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
     runtime->signed_pool_status = cnet_pool_destroy(&runtime->signed_pool);
     if (runtime->signed_pool_status != SALTS_OK)
       return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
@@ -411,6 +428,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
       runtime->state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED || runtime->node ||
       runtime->router.slots.data || runtime->endpoint_pool.entries.data ||
       runtime->signed_pool.impl || runtime->signed_pool_records ||
+      runtime->command_terminal_slots ||
       runtime->endpoint_publisher.state != MESH_MGMT_ENDPOINT_PUBLISHER_UNINITIALIZED ||
       runtime->service_publisher.state != MESH_MGMT_SERVICE_PUBLISHER_UNINITIALIZED)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
@@ -614,6 +632,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_enable_signed_pool_v3(
     mesh_mgmt_agent_runtime_v1_t *runtime, uint64_t owner_id,
     size_t max_connections, size_t max_leases) {
   mesh_mgmt_runtime_pool_record_v3_t *records;
+  mesh_mgmt_command_terminal_slot_v4_t *terminal_slots;
   if (!runtime || owner_id == 0u || max_connections == 0u ||
       max_leases == 0u || max_connections > MESH_MGMT_AGENT_ROUTER_MAX_PEERS ||
       max_leases > MESH_MGMT_AGENT_ROUTER_MAX_PEERS ||
@@ -628,6 +647,16 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_enable_signed_pool_v3(
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
   records = calloc(max_connections, sizeof(*records));
   if (!records) return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  terminal_slots = calloc(max_leases, sizeof(*terminal_slots));
+  if (!terminal_slots) {
+    free(records);
+    return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  }
+  runtime->command_terminal_slots = terminal_slots;
+  runtime->command_terminal_capacity = max_leases;
+  runtime->next_command_ticket = 1u;
+  for (size_t i = 0u; i < max_leases; ++i)
+    terminal_slots[i].runtime = runtime;
   runtime->signed_pool_records = records;
   runtime->signed_pool_capacity = max_connections;
   runtime->signed_pool_max_leases = max_leases;
@@ -1102,6 +1131,123 @@ mesh_mgmt_agent_runtime_send_execution_disabled_from_event_v1(
       &runtime->router, peer, event, now_ms);
 }
 
+/* This callback runs on the original P2P/CNet final Owner. The admitted
+ * command's bounded ticket storage survives a logical peer detach and any
+ * unsuccessful checked Stop. The physical Manager is not yet necessarily
+ * RETIRED; cnet_pool_release only returns the already-owned operation slot. */
+static void runtime_command_send_terminal(void *context, int p2p_status) {
+  mesh_mgmt_command_terminal_slot_v4_t *slot = context;
+  mesh_mgmt_agent_runtime_v1_t *runtime;
+  mesh_mgmt_agent_command_terminal_fn_v4 complete;
+  void *user_context;
+  uint64_t ticket;
+  int pool_status;
+  if (!slot || !slot->active || !slot->runtime) return;
+  runtime = slot->runtime;
+  complete = slot->complete;
+  user_context = slot->context;
+  ticket = slot->ticket;
+  slot->active = 0u; /* makes any duplicate terminal non-mutating */
+  slot->complete = NULL;
+  slot->context = NULL;
+  if (runtime->command_terminal_inflight)
+    --runtime->command_terminal_inflight;
+  pool_status = cnet_pool_release(&runtime->signed_pool, slot->lease);
+  slot->lease = (cnet_pool_lease){0};
+  runtime->signed_pool_status = pool_status == SALTS_OK
+      ? runtime_pool_advance(runtime) : pool_status;
+  if (runtime->signed_pool_status != SALTS_OK)
+    p2p_status = P2P_ERR_INVALID_STATE;
+  runtime->last_command_ticket = ticket;
+  runtime->last_command_terminal_status = p2p_status;
+  if (complete) {
+    uint8_t was_busy = runtime->in_api;
+    runtime->in_api = 1u; /* reject checked Stop/reentrant send in callback */
+    complete(user_context, ticket, p2p_status);
+    runtime->in_api = was_busy;
+  }
+}
+
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_leased_v4(
+    mesh_mgmt_agent_runtime_v1_t *runtime, uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    mesh_mgmt_agent_command_terminal_fn_v4 complete,
+    void *context, uint64_t *out_ticket) {
+  mesh_mgmt_agent_router_result_t router_result;
+  mesh_mgmt_command_terminal_slot_v4_t *slot = NULL;
+  p2p_peer_t *peer = NULL;
+  cnet_pool_lease lease = {0};
+  mesh_mgmt_agent_runtime_result_t admission;
+  if (out_ticket) *out_ticket = 0u;
+  if (!runtime || !target_node_id || !payload || !payload_len ||
+      (kind != MESH_MGMT_KIND_COMMAND_REQUEST &&
+       kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+       kind != MESH_MGMT_KIND_COMMAND_STATUS))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING ||
+      !runtime->signed_pool_enabled || !runtime->signed_pool.impl ||
+      !runtime->node || runtime_is_busy(runtime))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  router_result = mesh_mgmt_agent_router_execution_target_v4(
+      &runtime->router, target_node_id, &peer);
+  runtime->last_router_result = router_result;
+  if (router_result == MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND)
+    return MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED;
+  if (router_result != MESH_MGMT_AGENT_ROUTER_OK)
+    return MESH_MGMT_AGENT_RUNTIME_SEND_FAILED;
+  admission = mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+      runtime, peer, &lease);
+  if (admission != MESH_MGMT_AGENT_RUNTIME_OK) return admission;
+  /* Reservation is bounded independently of CNet's actual Lease ledger;
+   * it is callback storage, not another connection/pool credit source. */
+  for (size_t i = 0u; i < runtime->command_terminal_capacity; ++i) {
+    if (!runtime->command_terminal_slots[i].active) {
+      slot = &runtime->command_terminal_slots[i];
+      break;
+    }
+  }
+  if (!slot || runtime->next_command_ticket == 0u ||
+      runtime->next_command_ticket == UINT64_MAX) {
+    admission = MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+    goto failed;
+  }
+  slot->ticket = runtime->next_command_ticket++;
+  slot->lease = lease;
+  slot->complete = complete;
+  slot->context = context;
+  slot->active = 1u;
+  ++runtime->command_terminal_inflight;
+  runtime->in_api = 1u;
+  router_result = mesh_mgmt_agent_router_send_execution_terminal_v4(
+      &runtime->router, kind, target_node_id, payload, payload_len,
+      runtime_command_send_terminal, slot);
+  runtime->in_api = 0u;
+  runtime->last_router_result = router_result;
+  if (router_result == MESH_MGMT_AGENT_ROUTER_OK) {
+    if (out_ticket) *out_ticket = slot->ticket;
+    return MESH_MGMT_AGENT_RUNTIME_OK; /* admitted, NOT delivered */
+  }
+  slot->active = 0u;
+  slot->complete = NULL;
+  slot->context = NULL;
+  slot->lease = (cnet_pool_lease){0};
+  --runtime->command_terminal_inflight;
+  if (router_result == MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED)
+    admission = MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  else if (router_result == MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND)
+    admission = MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED;
+  else admission = MESH_MGMT_AGENT_RUNTIME_SEND_FAILED;
+failed:
+  /* Rejected wire admission has NO completion callback; return its Lease
+   * synchronously, without retry or replay of a consumed Noise nonce. */
+  if (mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          runtime, lease) != MESH_MGMT_AGENT_RUNTIME_OK)
+    return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+  return admission;
+}
+
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_send_execution_request_v1(
     mesh_mgmt_agent_runtime_v1_t *runtime,
@@ -1115,6 +1261,11 @@ mesh_mgmt_agent_runtime_send_execution_request_v1(
   if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING || runtime->in_api ||
       !runtime->node)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+
+  if (runtime->signed_pool_enabled)
+    return mesh_mgmt_agent_runtime_send_execution_leased_v4(
+        runtime, MESH_MGMT_KIND_COMMAND_REQUEST, target_node_id,
+        payload, payload_len, NULL, NULL, NULL);
 
   runtime->in_api = 1u;
   router_result = mesh_mgmt_agent_router_send_execution_request_v1(
@@ -1149,6 +1300,11 @@ mesh_mgmt_agent_runtime_send_execution_response_v1(
   if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING || runtime->in_api ||
       !runtime->node)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+
+  if (runtime->signed_pool_enabled)
+    return mesh_mgmt_agent_runtime_send_execution_leased_v4(
+        runtime, kind, target_node_id,
+        payload, payload_len, NULL, NULL, NULL);
 
   runtime->in_api = 1u;
   router_result = mesh_mgmt_agent_router_send_execution_response_v1(

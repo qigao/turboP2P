@@ -111,6 +111,12 @@ typedef struct {
 /* Runtime-owned signed MMP ClientPool association for exactly one physical
  * Manager generation. Lease storage lives upstream in CNet Pool; this
  * record is a bounded local lifecycle index, not a second credit ledger. */
+/* Application-visible result is a local full encrypted CNet write terminal,
+ * NOT remote execution acceptance. No callback for rejected admission. */
+typedef void (*mesh_mgmt_agent_command_terminal_fn_v4)(
+    void *context, uint64_t ticket, int p2p_terminal_status);
+typedef struct mesh_mgmt_command_terminal_slot_v4_s mesh_mgmt_command_terminal_slot_v4_t;
+
 typedef struct {
   p2p_peer_t *peer; /* borrowed only until router close callback */
   cnet_pool_connection physical;
@@ -168,6 +174,14 @@ typedef struct {
   uint64_t signed_pool_owner_id;
   int signed_pool_status;
   uint8_t signed_pool_enabled;
+  /* Command tickets and leases are owned by the original SG Final Owner
+   * until full wire-write or real transport terminal. Bounded at enable. */
+  mesh_mgmt_command_terminal_slot_v4_t *command_terminal_slots;
+  size_t command_terminal_capacity;
+  size_t command_terminal_inflight;
+  uint64_t next_command_ticket;
+  uint64_t last_command_ticket;
+  int last_command_terminal_status;
   /* Borrowed real SG final Node. The SG Host, not Runtime, owns its backend,
    * connection progress and shutdown; lifecycle methods run ONLY on the
    * original shard worker under a live Host lease. */
@@ -263,6 +277,24 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_sg_final_advance_v3(
     mesh_mgmt_agent_runtime_v1_t *runtime,
     native_io_sharded_context *context,
     native_io_sharded_host_lease lease);
+
+/* Send one signed canonical execution request/result/status using the
+ * unique authenticated INBOUND MMP Router target. Reserve one upstream CNet
+ * ClientPool Lease before encryption, and return it only on the definitive
+ * local CNet full-write/terminal callback (including after logical peer
+ * detach and while Runtime is STOPPING). A successful return is merely wire
+ * admission, never remote application ACK. No retries or application replay.
+ * The callback context is borrowed through completion; STOPPING retains
+ * Runtime/Pool/Manager/SG Host for outstanding tickets. Outbound/unmanaged
+ * peers and wrong SG owner workers fail closed. out_ticket is zero on failure.
+ * Callers may pass NULL for callback/out_ticket if they do not need a result. */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_leased_v4(
+    mesh_mgmt_agent_runtime_v1_t *runtime, uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    mesh_mgmt_agent_command_terminal_fn_v4 complete,
+    void *context, uint64_t *out_ticket);
 
 /** Configure an immutable CNet Client destination strategy after init and
  * before start. Supported only by dedicated CNet runtime; no hot reconfiguration

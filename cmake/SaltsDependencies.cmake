@@ -13,6 +13,13 @@ unset(Salts_DIR CACHE)
 unset(Salts_DIR)
 unset(SaltsUtils_DIR CACHE)
 unset(SaltsUtils_DIR)
+# Current latest SaltsUtils native SDK links Salts::Crypto against the
+# REAL canonical GmSSL provider. Import its exported target before consuming
+# SaltsUtilsTargets; no fake alias, optional fallback or older RC pin.
+find_package(GmSSL CONFIG REQUIRED)
+if(NOT TARGET GmSSL::GmSSL)
+  message(FATAL_ERROR "Canonical GmSSL provider did not export GmSSL::GmSSL")
+endif()
 find_package(Salts CONFIG REQUIRED PATHS "${_SALTS_ROOT_PATH}"
              NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
 find_package(SaltsUtils CONFIG REQUIRED PATHS "${_SALTS_UTILS_ROOT_PATH}"

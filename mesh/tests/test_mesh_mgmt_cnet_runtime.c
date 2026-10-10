@@ -3,6 +3,7 @@
 #include "mesh_mgmt_client_config.h"
 #include "mesh_mgmt_service_config.h"
 #include "mesh_mgmt_test_identity.h"
+#include "mesh_mgmt_execution_wire.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
 #include "transfer/transfer.h"
@@ -20,7 +21,7 @@ typedef struct {
   p2p_runtime_config_v2_t network;
   p2p_peer_t *peer;
   uint8_t secret[P2P_KEY_SIZE], public_key[P2P_KEY_SIZE];
-  unsigned established, failures, closed, admitted;
+  unsigned established, failures, closed, admitted, commands;
   int port, reject, random_fail;
 } endpoint_t;
 
@@ -38,6 +39,9 @@ static int event(void *context, p2p_peer_t *peer, const uint8_t remote[P2P_KEY_S
   if (message->type == MESH_MGMT_DISPATCH_EVENT_SESSION_ESTABLISHED) {
     endpoint->peer = peer;
     endpoint->established++;
+  } else if (message->type ==
+             MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_REQUEST_SHADOW) {
+    ++endpoint->commands;
   }
   return 0;
 }
@@ -906,6 +910,362 @@ static void test_runtime_signed_pool_full_keeps_existing_lease(void) {
 }
 
 
+typedef struct {
+  endpoint_t *server;
+  unsigned terminals;
+  uint64_t ticket;
+  int status;
+} command_terminal_probe_v4_t;
+
+static void on_command_wire_terminal(void *context, uint64_t ticket, int status) {
+  command_terminal_probe_v4_t *probe = context;
+  check_reentry(probe->server);
+  ++probe->terminals;
+  probe->ticket = ticket;
+  probe->status = status;
+}
+
+/* The ordinary fixture negotiates MEMBERSHIP ONLY; execution must
+ * be an explicit authenticated capability, not silently enabled by a new
+ * send-terminal function. Keep both P2P signers and dispatchers aligned. */
+static void enable_execution_capability_v4(endpoint_t *endpoint) {
+  const uint64_t features =
+      MESH_MGMT_FEATURE_MEMBERSHIP |
+      MESH_MGMT_FEATURE_TARGETED_RPC |
+      MESH_MGMT_FEATURE_NODE_EXECUTION;
+  endpoint->identity.signer.hello.features = features;
+  endpoint->identity.dispatch.session.features = features;
+  endpoint->identity.dispatch.enable_node_execution_shadow = 1u;
+  /* Dispatcher admission requires a real, pinned issuer public key even
+   * before a command executes; the test's certificate issuer provides it. */
+  memcpy(endpoint->identity.dispatch.node_execution_grant_issuer_key,
+         endpoint->identity.dispatch.session.trusted_issuer_key,
+         sizeof(endpoint->identity.dispatch.node_execution_grant_issuer_key));
+  endpoint->identity.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  endpoint->identity.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+}
+
+static size_t execution_status_payload_v4(
+    const endpoint_t *server, uint8_t output[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1]) {
+  mesh_mgmt_execution_status_v1_t status = {0};
+  size_t output_size = 0u;
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_DISABLED;
+  memset(status.command_id, 0x41, sizeof(status.command_id));
+  memset(status.correlation_id, 0x42, sizeof(status.correlation_id));
+  memset(status.request_digest, 0x43, sizeof(status.request_digest));
+  memcpy(status.responder_node_id, server->identity.signer.hello.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_status_encode_v1(
+          &status, output, MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1, &output_size));
+  return output_size;
+}
+
+/* This is the deterministic Ed25519 TEST issuer already used by
+ * mesh_mgmt_test_identity.h for all peer certificates. Production grants
+ * use their configured issuer; this fixture never imports a user secret. */
+static const uint8_t TEST_COMMAND_GRANT_ISSUER_PRIVATE[32] = {
+    0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+    0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+    0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69,
+    0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+};
+
+static size_t execution_request_payload_v4(
+    const endpoint_t *server, const endpoint_t *client,
+    uint8_t output[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1]) {
+  mesh_mgmt_execution_grant_v1_t grant = {0};
+  mesh_mgmt_execution_request_v1_t request = {0};
+  uint8_t issuer_public_key[32] = {0};
+  size_t output_size = 0u;
+
+  check_equal(MESH_MGMT_CRYPTO_OK, mesh_mgmt_ed25519_public_from_private(
+      TEST_COMMAND_GRANT_ISSUER_PRIVATE, issuer_public_key));
+  check_equal(server->identity.dispatch.node_execution_grant_issuer_key,
+              issuer_public_key, sizeof(issuer_public_key));
+  check_equal(client->identity.dispatch.node_execution_grant_issuer_key,
+              issuer_public_key, sizeof(issuer_public_key));
+  grant.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  memset(grant.grant_id, 0x11, sizeof(grant.grant_id));
+  memcpy(grant.mesh_id, server->identity.signer.expected_mesh_id_hash,
+         sizeof(grant.mesh_id));
+  grant.policy_epoch = 1u;
+  memcpy(grant.subject_principal,
+         server->identity.signer.hello.management_key,
+         sizeof(grant.subject_principal));
+  memcpy(grant.target_node_id,
+         client->identity.signer.hello.managed_node_id,
+         sizeof(grant.target_node_id));
+  memset(grant.deployment_id, 0x21, sizeof(grant.deployment_id));
+  grant.deployment_generation = 1u;
+  memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
+  grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
+  grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+  grant.max_limits.module_bytes = 1024u;
+  grant.max_limits.stack_bytes = 1024u;
+  grant.max_limits.linear_memory_bytes = 4096u;
+  grant.max_limits.timeout_ms = 100u;
+  grant.max_limits.control_flow_steps = 1000u;
+  grant.max_limits.host_calls = 4u;
+  grant.max_limits.copied_guest_bytes = 1024u;
+  grant.max_limits.input_bytes = 64u;
+  grant.max_limits.stdout_bytes = 64u;
+  grant.max_limits.stderr_bytes = 64u;
+  grant.not_before_ms = TEST_NOW_MS - 1000u;
+  grant.expires_at_ms = TEST_NOW_MS + 10000u;
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_grant_sign_v1(
+          &grant, TEST_COMMAND_GRANT_ISSUER_PRIVATE));
+
+  request.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  memset(request.command_id, 0x41, sizeof(request.command_id));
+  memcpy(request.grant_id, grant.grant_id, sizeof(request.grant_id));
+  memcpy(request.target_node_id, grant.target_node_id, sizeof(request.target_node_id));
+  memcpy(request.deployment_id, grant.deployment_id, sizeof(request.deployment_id));
+  request.deployment_generation = grant.deployment_generation;
+  memcpy(request.package_digest, grant.package_digest, sizeof(request.package_digest));
+  request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
+  memset(request.input_digest, 0x51, sizeof(request.input_digest));
+  memcpy(request.inline_input, "input", 5u);
+  request.inline_input_size = 5u;
+  request.input_length = 5u;
+  request.output_mode = MESH_MGMT_EXECUTION_OUTPUT_DIGEST;
+  request.deadline_ms = TEST_NOW_MS + 2000u;
+  memset(request.request_nonce, 0x61, sizeof(request.request_nonce));
+  memset(request.correlation_id, 0x71, sizeof(request.correlation_id));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_grant_validate_v1(&grant, TEST_NOW_MS));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_request_validate_v1(&request, TEST_NOW_MS));
+  check_equal(MESH_MGMT_EXECUTION_OK,
+      mesh_mgmt_execution_request_bind_v1(&grant, &request));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_request_encode_v1(
+          &grant, &request, output,
+          MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1, &output_size));
+  return output_size;
+}
+
+/* Production CNet/Noise path: a signed MMP command reserves its exact
+ * inbound Manager/Pool Lease BEFORE encryption, and retains it until the
+ * upstream full encrypted wire-write callback, never on enqueue alone.
+ * Outbound/unmanaged clients and stale/unknown signed targets fail closed. */
+static void test_signed_execution_command_wire_terminal_v4(void) {
+  endpoint_t server = {0}, client = {0};
+  command_terminal_probe_v4_t probe = {0};
+  cnet_pool_snapshot pool = {0};
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1] = {0};
+  uint8_t request_payload[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1] = {0};
+  mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
+  uint8_t bad_target[32] = {0};
+  size_t payload_len = 0u, request_len = 0u;
+  uint64_t ticket = 0u, refused = 99u, deadline;
+
+  prepare(&server, 17u);
+  enable_execution_capability_v4(&server);
+  initialize(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+  start(&server);
+  prepare(&client, 33u);
+  enable_execution_capability_v4(&client);
+  memcpy(bootstrap.transport_peer_id, server.public_key,
+         sizeof(bootstrap.transport_peer_id));
+  bootstrap.host = "127.0.0.1";
+  bootstrap.port = (uint16_t)server.port;
+  client.config.bootstraps = &bootstrap;
+  client.config.bootstrap_count = 1u;
+  initialize(&client);
+  client.config.bootstraps = NULL;
+  client.config.bootstrap_count = 0u;
+  start(&client);
+  wait_established(&server, &client, 1u);
+  payload_len = execution_status_payload_v4(&server, payload);
+  check_not_null(server.peer);
+  probe.server = &server;
+
+  memset(bad_target, 0xA5, sizeof(bad_target));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          bad_target, payload, payload_len,
+          on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((unsigned)0u, probe.terminals);
+
+  /* Only the inbound signed session is attached to the P2P Manager. An
+   * outgoing peer's Runtime cannot accidentally lease the server's Pool. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &client.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          server.identity.signer.hello.managed_node_id,
+          payload, payload_len, on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+
+  /* A syntactically-valid STATUS payload is NOT a typed COMMAND_REQUEST.
+   * The common outbound Dispatcher preflight must reject it without
+   * encryption, Lease retention, or a terminal callback. */
+  refused = 91u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_SEND_FAILED,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len, on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal((unsigned)0u, probe.terminals);
+
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len,
+          on_command_wire_terminal, &probe, &ticket));
+  check_true(ticket != 0u);
+  check_equal((unsigned)0u, probe.terminals); /* not an enqueue callback */
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  refused = 44u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len,
+          on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+
+  /* Only the SERVER final Owner progresses. No remote-application callback
+   * or command reply is needed to prove the CNet full-write terminal. */
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (!probe.terminals && cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_equal((unsigned)1u, probe.terminals);
+  check_equal(ticket, probe.ticket);
+  check_equal(P2P_OK, probe.status);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(ticket, server.runtime.last_command_ticket);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+
+  /* Existing response API MUST NOT bypass the signed Pool once enabled:
+   * it too holds a bounded operation Lease until definitive send terminal. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_response_v1(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len));
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (server.runtime.command_terminal_inflight &&
+         cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+
+  for (unsigned turn = 0u; turn < 4u; ++turn)
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+  check_equal((unsigned)1u, probe.terminals); /* one callback per ticket */
+
+  /* Exercise the production request API with an actual issuer-signed,
+   * typed COMMAND_REQUEST and grant. It cannot bypass dispatch authorization,
+   * cannot release its Pool Lease on enqueue, and the client MUST receive one
+   * real execution shadow event without executing the guest. */
+  request_len = execution_request_payload_v4(
+      &server, &client, request_payload);
+  check_equal((unsigned)0u, client.commands);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_request_v1(
+          &server.runtime, client.identity.signer.hello.managed_node_id,
+          request_payload, request_len));
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(&server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while ((server.runtime.command_terminal_inflight || !client.commands) &&
+         cmeta_monotonic_ms() < deadline)
+    poll_pair(&server, &client);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal((unsigned)1u, client.commands);
+  check_equal((unsigned)0u, client.failures);
+  check_equal((unsigned)0u, server.failures);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(&server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+
+  /* Stop with an ADMITTED but NOT YET COMPLETED signed command. Whether
+   * the original CNet write wins or peer close fails it, only the upstream
+   * callback may return the Lease; logical Router detach MUST NOT erase the
+   * callback ticket. Checked Stop either settles it during native progress
+   * or remains STOPPING with the original Manager and Pool intact. */
+  uint64_t stop_ticket = 0u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len,
+          on_command_wire_terminal, &probe, &stop_ticket));
+  check_true(stop_ticket > ticket);
+  check_equal((unsigned)1u, probe.terminals);
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  mesh_mgmt_agent_runtime_result_t stop_result =
+      mesh_mgmt_agent_runtime_stop_v1(&server.runtime);
+  if (stop_result == MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPING, server.runtime.state);
+    check_not_null(server.runtime.node);
+    check_not_null(server.runtime.signed_pool_manager);
+    check_true(server.runtime.signed_pool.impl != NULL);
+  }
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (stop_result == MESH_MGMT_AGENT_RUNTIME_INVALID_STATE &&
+         cmeta_monotonic_ms() < deadline) {
+    /* The dedicated composition advances exactly its original CNet Owner
+     * while the borrow remains pinned. This is shutdown progress only, not
+     * a new retry source or replay of the encrypted command. */
+    stop_result = mesh_mgmt_agent_runtime_stop_v1(&server.runtime);
+    cmeta_sleep_ms(1u);
+  }
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK, stop_result);
+  check_equal((unsigned)2u, probe.terminals);
+  check_equal(stop_ticket, probe.ticket);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPED, server.runtime.state);
+  /* Exactly one of the terminal outcomes is legitimate, depending on
+   * whether the real TCP write or the real TCP close settled first. */
+  check_true(probe.status == P2P_OK || probe.status == P2P_ERR_NETWORK);
+  destroy(&server);
+  destroy(&client);
+}
+
 /* Two simultaneous, independently signed inbound MMP connections share
  * exactly one production CNet Manager and Pool, but keep different physical
  * Manager generations, immutable Pool keys and exclusive operation Leases.
@@ -1387,6 +1747,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("retains signed execution ClientPool Lease until real CNet wire terminal") {
+    test_signed_execution_command_wire_terminal_v4();
+  }
   it("keeps two real inbound signed Leases isolated while one Manager generation retires") {
     test_runtime_signed_pool_two_peer_terminal_isolation();
   }

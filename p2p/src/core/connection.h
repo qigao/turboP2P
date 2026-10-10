@@ -29,6 +29,11 @@ typedef struct {
     int (*pause)(void *handle, int paused);
     int (*send_completed)(void *handle, const void *data, size_t len,
                           p2p_send_complete_fn complete, void *context);
+    /* CNet-only durable app send completion. Unlike security's borrowed
+     * callback, the application context stays live after logical detach
+     * until CNet reports full wire-write or physical terminal. */
+    int (*send_terminal)(void *handle, const void *data, size_t len,
+                         p2p_send_complete_fn complete, void *context);
 } p2p_conn_ops_t;
 
 /* Unified connection structure */
@@ -53,6 +58,11 @@ int p2p_connection_pause(p2p_connection_t *conn, int paused);
  * Destroy detaches pending completions together with other protocol callbacks.
  * Context is borrowed until completion or destroy. All calls are owner-thread. */
 int p2p_connection_send_completed(p2p_connection_t *conn, const void *data,
+    size_t len, p2p_send_complete_fn complete, void *context);
+/* CNet full logical wire-write or final failure, including after P2P logical
+ * detach. Exactly one callback after accepted admission; none on rejection.
+ * Only the live CNet Owner may drive progress. Legacy CoroNet fails closed. */
+int p2p_connection_send_terminal(p2p_connection_t *conn, const void *data,
     size_t len, p2p_send_complete_fn complete, void *context);
 
 #endif /* P2P_CONNECTION_H */

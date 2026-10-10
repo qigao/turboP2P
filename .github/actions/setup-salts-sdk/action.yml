@@ -139,3 +139,44 @@ runs:
         test -x "$VCPKG_ROOT/vcpkg"
         test -n "${RE2C_ROOT:-}"
         "$RE2C_ROOT/bin/re2c" --version
+
+    - name: Restore required GmSSL provider from canonical vcpkg cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        # SaltsUtils 4.3's latest floating SDK now exports a GmSSL
+        # find_dependency() contract. Resolve its REAL canonical vcpkg port,
+        # not a fake imported target, SDK copy, fallback or older RC pin.
+        test -f "$VCPKG_OVERLAY_PORTS/gmssl/vcpkg.json"
+        test -x "$VCPKG_ROOT/vcpkg"
+        # vcpkg-cache's public action intentionally materializes ONLY ABI-
+        # relevant ports/triplets/cmake, not its root vcpkg.json. TurboP2P's
+        # checked-in root manifest uses the SAME published registry baseline
+        # as vcpkg-cache's Linux GmSSL warm-cache job. Use that manifest's
+        # baseline to reproduce the cached gmssl/vcpkg-cmake ABI, without
+        # installing the unrelated product manifest dependencies.
+        test -f "$GITHUB_WORKSPACE/vcpkg.json"
+        manifest="$RUNNER_TEMP/qigao-gmssl-sdk-closure"
+        mkdir -p "$manifest"
+        python3 - "$GITHUB_WORKSPACE/vcpkg.json" \
+                    "$manifest/vcpkg.json" <<'PY'
+        import json
+        import sys
+        with open(sys.argv[1], encoding="utf-8") as source:
+            canonical = json.load(source)
+        baseline = canonical["builtin-baseline"]
+        if not baseline or not isinstance(baseline, str):
+            raise SystemExit("missing canonical vcpkg registry baseline")
+        with open(sys.argv[2], "w", encoding="utf-8") as target:
+            json.dump({"name": "qigao-gmssl-sdk-closure",
+                       "version-string": "1",
+                       "dependencies": ["gmssl"],
+                       "builtin-baseline": baseline}, target)
+        PY
+        "$VCPKG_ROOT/vcpkg" install \
+          --x-manifest-root="$manifest" \
+          --x-install-root="$VCPKG_ROOT/installed" \
+          --triplet x64-linux --only-binarycaching
+        config="$VCPKG_ROOT/installed/x64-linux/share/gmssl/GmSSLConfig.cmake"
+        test -f "$config"
+        echo "GmSSL provider: $config"

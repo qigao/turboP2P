@@ -1,6 +1,7 @@
 #include <tinytest.h>
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_test_identity.h"
+#include "mesh_mgmt_execution_wire.h"
 #include "core/node_cnet.h"
 #include "core/node_state.h"
 #include <cnet/sg_host.h>
@@ -51,6 +52,11 @@ struct signed_sg_case {
   p2p_node_cnet_t *server_owner;
   cnet_pool_lease lease;
   cnet_pool_snapshot pool;
+  uint8_t command_payload[MESH_MGMT_EXECUTION_COMMAND_STATUS_SIZE_V1];
+  size_t command_payload_len;
+  uint64_t command_ticket;
+  unsigned command_terminals;
+  int command_terminal_status;
 };
 
 static native_io_backend_kind signed_backend(void) {
@@ -140,6 +146,42 @@ static void prepare_endpoint(signed_endpoint *endpoint, uint8_t seed) {
   endpoint->config.callback_context = endpoint;
   endpoint->config.random_bytes = random_bytes;
   endpoint->config.random_context = endpoint;
+}
+
+/* Real SG Final worker and dedicated client must negotiate the SAME
+ * explicit MMP execution feature and a pinned grant issuer public key.
+ * This fixture never silently enables execution for normal production
+ * management sessions. */
+static void enable_execution_capability(signed_endpoint *endpoint) {
+  const uint64_t features = MESH_MGMT_FEATURE_MEMBERSHIP |
+                            MESH_MGMT_FEATURE_TARGETED_RPC |
+                            MESH_MGMT_FEATURE_NODE_EXECUTION;
+  endpoint->identity.signer.hello.features = features;
+  endpoint->identity.dispatch.session.features = features;
+  endpoint->identity.dispatch.enable_node_execution_shadow = 1u;
+  memcpy(endpoint->identity.dispatch.node_execution_grant_issuer_key,
+         endpoint->identity.dispatch.session.trusted_issuer_key,
+         sizeof(endpoint->identity.dispatch.node_execution_grant_issuer_key));
+  endpoint->identity.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
+  endpoint->identity.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
+}
+
+static void prepare_command_status(signed_sg_case *scenario) {
+  mesh_mgmt_execution_status_v1_t status = {0};
+  size_t bytes = 0u;
+  status.version = MESH_MGMT_EXECUTION_SCHEMA_V1;
+  status.code = MESH_MGMT_EXECUTION_STATUS_DISABLED;
+  memset(status.command_id, 0x51, sizeof(status.command_id));
+  memset(status.correlation_id, 0x52, sizeof(status.correlation_id));
+  memset(status.request_digest, 0x53, sizeof(status.request_digest));
+  memcpy(status.responder_node_id,
+         scenario->server.identity.signer.hello.managed_node_id,
+         sizeof(status.responder_node_id));
+  check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
+      mesh_mgmt_execution_command_status_encode_v1(
+          &status, scenario->command_payload,
+          sizeof(scenario->command_payload), &bytes));
+  scenario->command_payload_len = bytes;
 }
 
 static p2p_cnet_config_t final_transport_config(void) {
@@ -299,6 +341,53 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
   lane->turns++;
 }
 
+/* The command continuation is delivered from the ORIGINAL SG final
+ * worker's CNet full-send/physical terminal. It owns the Lease, not the
+ * acceptor or the initiating thread, and checked Stop must reject reentry. */
+static void command_terminal(void *context, uint64_t ticket, int status) {
+  signed_sg_case *scenario = context;
+  signed_sg_lane *lane = &scenario->lanes[1];
+  if (cmeta_thread_current_token() != lane->worker_token ||
+      ticket != scenario->command_ticket || scenario->command_terminals != 0u) {
+    lane_error(lane, SALTS_EPERM, "SG signed command callback wrong generation/owner");
+    return;
+  }
+  ++scenario->command_terminals;
+  scenario->command_terminal_status = status;
+  if (mesh_mgmt_agent_runtime_stop_v1(&scenario->server.runtime) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE)
+    lane_error(lane, SALTS_EPERM, "SG terminal callback reentered runtime stop");
+}
+
+static void host_wrong_owner_command(native_io_sharded_context *context, void *arg) {
+  signed_sg_lane *lane = arg;
+  signed_sg_case *scenario = lane->scenario;
+  uint64_t denied = UINT64_C(77);
+  if (native_io_sharded_context_shard(context) != 0u || lane->error) return;
+  if (mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &scenario->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          scenario->client.identity.signer.hello.managed_node_id,
+          scenario->command_payload, scenario->command_payload_len,
+          command_terminal, scenario, &denied) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE ||
+      denied != 0u || scenario->command_terminals != 0u)
+    lane_error(lane, SALTS_EPERM, "foreign SG owner admitted signed command");
+}
+
+static void host_send_command(native_io_sharded_context *context, void *arg) {
+  signed_sg_lane *lane = arg;
+  signed_sg_case *scenario = lane->scenario;
+  if (native_io_sharded_context_shard(context) != 1u || lane->error) return;
+  SG_CALL(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
+      &scenario->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+      scenario->client.identity.signer.hello.managed_node_id,
+      scenario->command_payload, scenario->command_payload_len,
+      command_terminal, scenario, &scenario->command_ticket));
+  if (!scenario->command_ticket || scenario->command_terminals != 0u ||
+      scenario->server.runtime.command_terminal_inflight != 1u)
+    lane_error(lane, P2P_ERR_INVALID_STATE, "SG leased MMP command inline completion");
+}
+
 static void host_snapshot(native_io_sharded_context *context, void *arg) {
   signed_sg_lane *lane = (signed_sg_lane *)arg;
   signed_sg_case *scenario = lane->scenario;
@@ -443,6 +532,9 @@ static void test_real_signed_sg_final_runtime(void) {
   mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
   prepare_endpoint(&scenario->server, 17u);
   prepare_endpoint(&scenario->client, 33u);
+  enable_execution_capability(&scenario->server);
+  enable_execution_capability(&scenario->client);
+  prepare_command_status(scenario);
   scenario->server.config.listen_host = NULL;
   scenario->server.config.listen_port = 0u;
   scenario->server.config.p2p_private_key = NULL;
@@ -495,6 +587,30 @@ static void test_real_signed_sg_final_runtime(void) {
   check_equal((size_t)1u, scenario->pool.ready);
   check_equal((size_t)1u, scenario->pool.physical_in_use);
   check_equal((size_t)0u, scenario->pool.active_leases);
+
+  /* Real SG worker sends authenticated typed MMP STATUS, holds CNet Pool
+   * Lease across admission and only returns it on CNet completion. The
+   * acceptor, even with the same CNet SG host, cannot send on this Owner. */
+  submit(scenario, 0u, host_wrong_owner_command);
+  submit(scenario, 1u, host_send_command);
+  barrier(scenario);
+  check_true(scenario->command_ticket != 0u);
+  check_equal(0u, scenario->command_terminals);
+  submit(scenario, 1u, host_snapshot);
+  barrier(scenario);
+  check_equal((size_t)1u, scenario->pool.active_leases);
+  const uint64_t command_deadline = cmeta_monotonic_ms() + SG_MMP_TIMEOUT;
+  while (!scenario->command_terminals &&
+         cmeta_monotonic_ms() < command_deadline)
+    pump(scenario);
+  check_equal(1u, scenario->command_terminals);
+  check_equal(P2P_OK, scenario->command_terminal_status);
+  check_equal((size_t)0u, scenario->server.runtime.command_terminal_inflight);
+  submit(scenario, 1u, host_snapshot);
+  barrier(scenario);
+  check_equal((size_t)0u, scenario->pool.active_leases);
+  for (unsigned turn = 0u; turn < 4u; ++turn) pump(scenario);
+  check_equal(1u, scenario->command_terminals);
 
   submit(scenario, 0u, host_wrong_owner);
   submit(scenario, 1u, host_acquire);

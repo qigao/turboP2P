@@ -1312,6 +1312,30 @@ int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
 }
 
 
+/* CNet owner-affine, one peer only: callback on full encrypted wire-write
+ * or physical terminal, NOT MMP remote application acknowledgement. A
+ * rejected send invokes no callback, even after CipherState failure. */
+int p2p_send_message_terminal_v3(
+    p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
+    const void *payload, size_t len, p2p_app_send_terminal_fn complete,
+    void *context) {
+    p2p_message_t *msg;
+    int result;
+    if (!node || !peer || peer->node != node || !complete ||
+        (!payload && len != 0u) || len > P2P_NOISE_MAX_PLAINTEXT_SIZE - 8U)
+        return P2P_ERR_INVALID_ARG;
+    msg = calloc(1, sizeof(*msg));
+    if (!msg) return P2P_ERR_NO_MEM;
+    p2p_message_init(msg, type);
+    if (len) {
+        memcpy(msg->payload.raw, payload, len);
+        msg->header.payload_len = (uint16_t)len;
+    }
+    result = p2p_peer_send_terminal(peer, msg, complete, context);
+    free(msg);
+    return result;
+}
+
 int p2p_peer_connect(p2p_peer_t *peer) {
     if (!peer || !peer->node) return P2P_ERR_INVALID_ARG;
     if (!peer->node->network_ops || !peer->node->network_ops->connect)

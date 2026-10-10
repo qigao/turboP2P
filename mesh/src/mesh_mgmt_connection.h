@@ -104,6 +104,15 @@ mesh_mgmt_connection_result_t
 mesh_mgmt_connection_send_hello_ack_v1(mesh_mgmt_connection_v1_t *connection, const uint8_t *frame,
                                        size_t frame_len);
 
+/* Exact same typed dispatch, feature, signed envelope, session and payload
+ * authorization as mesh_mgmt_connection_send_v1(), WITHOUT submitting bytes
+ * or mutating the Noise cipher. Use this for terminal-sent wire frames so a
+ * CNet completion callback cannot bypass MMP execution validation. */
+mesh_mgmt_connection_result_t
+mesh_mgmt_connection_preflight_send_v4(
+    mesh_mgmt_connection_v1_t *connection,
+    const uint8_t *frame, size_t frame_len);
+
 /** Send after establishment. Async PENDING admits a write; BUSY admits nothing. */
 mesh_mgmt_connection_result_t mesh_mgmt_connection_send_v1(mesh_mgmt_connection_v1_t *connection,
                                                            const uint8_t *frame, size_t frame_len);

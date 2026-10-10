@@ -273,12 +273,11 @@ mesh_mgmt_connection_send_hello_ack_v1(mesh_mgmt_connection_v1_t *connection, co
 }
 
 static mesh_mgmt_connection_result_t
-send_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
+preflight_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
                          const uint8_t *frame,
-                         size_t frame_len) {
+                         size_t frame_len, uint8_t *out_kind) {
   mesh_mgmt_connection_result_t result;
   mesh_mgmt_dispatch_result_t dispatch_result;
-  mesh_mgmt_transport_result_t transport_result;
   uint8_t kind = 0u;
 
   result = decode_outbound_kind(connection, frame, frame_len, &kind);
@@ -324,6 +323,28 @@ send_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
     connection->last_dispatch_stage = MESH_MGMT_DISPATCH_STAGE_SESSION;
     return MESH_MGMT_CONNECTION_INVALID_STATE;
   }
+
+  *out_kind = kind;
+  return MESH_MGMT_CONNECTION_OK;
+}
+
+mesh_mgmt_connection_result_t mesh_mgmt_connection_preflight_send_v4(
+    mesh_mgmt_connection_v1_t *connection,
+    const uint8_t *frame, size_t frame_len) {
+  uint8_t kind = 0u;
+  mesh_mgmt_connection_result_t ready = require_ready(connection);
+  if (ready != MESH_MGMT_CONNECTION_OK) return ready;
+  return preflight_non_handshake_frame(connection, frame, frame_len, &kind);
+}
+
+static mesh_mgmt_connection_result_t
+send_non_handshake_frame(mesh_mgmt_connection_v1_t *connection,
+                         const uint8_t *frame, size_t frame_len) {
+  uint8_t kind = 0u;
+  mesh_mgmt_connection_result_t result =
+      preflight_non_handshake_frame(connection, frame, frame_len, &kind);
+  mesh_mgmt_transport_result_t transport_result;
+  if (result != MESH_MGMT_CONNECTION_OK) return result;
 
   transport_result = mesh_mgmt_transport_send_v1(&connection->transport, frame, frame_len);
   connection->last_transport_result = transport_result;
