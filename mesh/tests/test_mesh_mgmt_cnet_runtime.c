@@ -933,6 +933,11 @@ static void enable_execution_capability_v4(endpoint_t *endpoint) {
   endpoint->identity.signer.hello.features = features;
   endpoint->identity.dispatch.session.features = features;
   endpoint->identity.dispatch.enable_node_execution_shadow = 1u;
+  /* Dispatcher admission requires a real, pinned issuer public key even
+   * before a command executes; the test's certificate issuer provides it. */
+  memcpy(endpoint->identity.dispatch.node_execution_grant_issuer_key,
+         endpoint->identity.dispatch.session.trusted_issuer_key,
+         sizeof(endpoint->identity.dispatch.node_execution_grant_issuer_key));
   endpoint->identity.signer.hello.max_frame = MESH_MGMT_FRAME_MAX;
   endpoint->identity.dispatch.session.max_frame = MESH_MGMT_FRAME_MAX;
 }
