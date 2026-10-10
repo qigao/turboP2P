@@ -761,6 +761,122 @@ static void test_runtime_signed_pool_reconnect_preserves_old_lease(void) {
   destroy(&client);
 }
 
+
+/* One authenticated inbound MMP stream already owns the real Pool READY
+ * connection and its application Lease. A second, independently signed
+ * transport may reach post-auth admission but must not evict the first
+ * READY, steal its exclusive slot or start a competing retry policy when
+ * the opt-in Pool's physical capacity is FULL. */
+static void test_runtime_signed_pool_full_keeps_existing_lease(void) {
+  endpoint_t server = {0}, first = {0}, second = {0};
+  mesh_mgmt_agent_bootstrap_v1_t first_bootstrap = {0};
+  mesh_mgmt_agent_bootstrap_v1_t second_bootstrap = {0};
+  mesh_mgmt_agent_router_ready_v1_t signed_first = {0};
+  cnet_pool_lease borrowed = {0}, again = {0}, denied = {0};
+  cnet_pool_snapshot pool = {0};
+  p2p_peer_t *first_peer;
+  uint64_t deadline;
+
+  prepare(&server, 17);
+  initialize(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+  start(&server);
+
+  prepare(&first, 33);
+  memcpy(first_bootstrap.transport_peer_id, server.public_key,
+         sizeof(first_bootstrap.transport_peer_id));
+  first_bootstrap.host = "127.0.0.1";
+  first_bootstrap.port = (uint16_t)server.port;
+  first.config.bootstraps = &first_bootstrap;
+  first.config.bootstrap_count = 1u;
+  initialize(&first);
+  first.config.bootstraps = NULL;
+  first.config.bootstrap_count = 0u;
+  start(&first);
+  wait_established(&server, &first, 1u);
+  check_not_null(server.peer);
+  first_peer = server.peer;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, first_peer, &borrowed));
+  check_true(borrowed.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.ready);
+  check_equal((size_t)1u, pool.active_leases);
+
+  /* A different signed client exercises real post-Noise / post-MMP Pool
+   * capacity refusal; it has no privilege to replace the first key.
+   * Only the existing EndpointPool owns any retry/backoff for that peer. */
+  prepare(&second, 49);
+  memcpy(second_bootstrap.transport_peer_id, server.public_key,
+         sizeof(second_bootstrap.transport_peer_id));
+  second_bootstrap.host = "127.0.0.1";
+  second_bootstrap.port = (uint16_t)server.port;
+  second.config.bootstraps = &second_bootstrap;
+  second.config.bootstrap_count = 1u;
+  initialize(&second);
+  second.config.bootstraps = NULL;
+  second.config.bootstrap_count = 0u;
+  start(&second);
+
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (server.closed == 0u && cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&first.runtime));
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&second.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_true(server.admitted >= 2u);
+  check_true(server.closed > 0u);
+  check_equal(1u, server.established);
+  check_equal(0u, first.closed);
+  check_true(server.peer == first_peer);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_ready_peer_v1(
+          &server.runtime.router, first_peer, &signed_first));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(!pool.sealed);
+  check_equal((size_t)1u, pool.ready);
+  check_equal((size_t)1u, pool.physical_in_use);
+  check_equal((size_t)1u, pool.active_leases);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, first_peer, &denied));
+  check_equal((size_t)0u, denied.slot);
+
+  /* Backpressure on the second peer is not a terminal event for the
+   * first generation. Its exactly-once Lease return restores ordinary
+   * acquisition while the signed first MMP session remains live. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, borrowed));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, first_peer, &again));
+  check_true(again.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, again));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+  check_equal((size_t)1u, pool.ready);
+
+  destroy(&second);
+  destroy(&first);
+  destroy(&server);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
@@ -1108,6 +1224,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("does not evict a leased signed MMP connection when another inbound peer hits Pool FULL") {
+    test_runtime_signed_pool_full_keeps_existing_lease();
+  }
   it("keeps old signed leases isolated across real MMP disconnect and reconnect") {
     test_runtime_signed_pool_reconnect_preserves_old_lease();
   }
