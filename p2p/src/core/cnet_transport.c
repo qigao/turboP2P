@@ -1104,6 +1104,7 @@ int p2p_cnet_owner_preflight_sg_host(
     if (!owner || !context ||
         !owner->external_backend || !owner->host_batch ||
         owner->busy || owner->stopped ||
+        owner->thread_owner != cmeta_thread_current_token() ||
         lease.version != NATIVE_IO_SHARDED_HOST_VERSION ||
         owner->host_lease.owner_identity != lease.owner_identity ||
         owner->host_lease.owner_shard != lease.owner_shard ||
@@ -1123,6 +1124,17 @@ int p2p_cnet_owner_preflight_sg_host(
                 return P2P_ERR_INVALID_ARG;
     }
     return P2P_OK;
+}
+
+/* Exact post-handoff final Owner, never the acceptor or a standalone
+ * CNet client. Preflight also checks the immutable SG Host lease and
+ * original worker thread before any Runtime/Pool state is touched. */
+int p2p_cnet_owner_validate_sg_final_v1(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease) {
+    if (!owner || !owner->sg_final) return P2P_ERR_INVALID_STATE;
+    return p2p_cnet_owner_preflight_sg_host(
+        owner, NULL, 0u, context, lease);
 }
 
 int p2p_cnet_owner_poll_sg_host_cohosted(

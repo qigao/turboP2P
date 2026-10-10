@@ -7,7 +7,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v1(
     const mesh_mgmt_agent_runtime_config_v1_t *config) {
   static const mesh_mgmt_agent_mesh_ops_t ops = {
       mesh_mgmt_mesh_router_attach_v1, mesh_mgmt_mesh_router_detach_v1};
-  mesh_mgmt_agent_mesh_binding_t binding;
+  mesh_mgmt_agent_mesh_binding_t binding = {0};
   p2p_runtime_config_v2_t p2p_config;
   int result;
 

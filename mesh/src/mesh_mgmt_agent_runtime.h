@@ -5,6 +5,9 @@
 #include "mesh_mgmt_endpoint_publisher.h"
 #include "mesh_mgmt_p2p_security.h"
 #include "mesh_mgmt_service_publisher.h"
+#include <salts/native_io_sharded.h>
+
+struct p2p_node_cnet_s;
 
 #ifdef __cplusplus
 extern "C" {
@@ -165,6 +168,12 @@ typedef struct {
   uint64_t signed_pool_owner_id;
   int signed_pool_status;
   uint8_t signed_pool_enabled;
+  /* Borrowed real SG final Node. The SG Host, not Runtime, owns its backend,
+   * connection progress and shutdown; lifecycle methods run ONLY on the
+   * original shard worker under a live Host lease. */
+  struct p2p_node_cnet_s *sg_final_owner;
+  const void *sg_owner_thread;
+  uint8_t sg_final_mode;
 } mesh_mgmt_agent_runtime_v1_t;
 
 /** Compatibility entry point: dedicated mode uses CNet v2 defaults and
@@ -185,6 +194,22 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v2(
     mesh_mgmt_agent_runtime_v1_t *runtime,
     const mesh_mgmt_agent_runtime_config_v1_t *config,
     const p2p_runtime_config_v2_t *p2p_config);
+
+/* Opt-in SG Final Owner composition. Called on the selected NativeIO SG
+ * worker AFTER P2P node security configuration, external CNet creation and
+ * credited SG final-owner binding. Borrows the exact original P2P Node,
+ * external CNet Owner and live Host lease; installs only MMP Router callbacks.
+ * The caller must leave the Node/Owner/Host alive until checked Runtime
+ * Stop/Destroy succeeds. No additional backend, observer or retry clock.
+ * Config must not request a listener, P2P key/trust setup or bootstraps:
+ * the borrowed P2P final Node already owns security and inbound handoff. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_sg_final_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_agent_runtime_config_v1_t *config,
+    p2p_node_t *borrowed_node,
+    struct p2p_node_cnet_s *borrowed_final_owner,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease);
 
 /**
  * Dedicated mode installs callbacks and binds its listener. Shared mode
@@ -227,6 +252,17 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_release_v3(
  * authenticated inbound session. Does not run IO or apply retry policy. */
 mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
     mesh_mgmt_agent_runtime_v1_t *runtime, cnet_pool_snapshot *out_snapshot);
+
+/* Call only on the FINAL SG Owner worker AFTER the one authoritative
+ * p2p_node_cnet_poll_sg_host() observed and routed physical callbacks.
+ * In RUNNING/STOPPING, progresses ONLY the upstream Pool terminal association;
+ * it never polls NativeIO or the P2P Node. Wrong shard/lease fails closed.
+ * When Stop reports INVALID_STATE on outstanding physical records, continue
+ * the original SG Host progress and this call before retrying checked Stop. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_sg_final_advance_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease);
 
 /** Configure an immutable CNet Client destination strategy after init and
  * before start. Supported only by dedicated CNet runtime; no hot reconfiguration
