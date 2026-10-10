@@ -1,6 +1,7 @@
 #include "p2p_cnet_node_fixture.h"
 #include <cnet/sg_host.h>
 #include <cnet/manager.h>
+#include <cnet/client_pool.h>
 #include <salts/native_io_sharded.h>
 #include <stdio.h>
 
@@ -16,6 +17,10 @@ typedef struct sg_lane {
     p2p_cnet_owner_t *transport;
     cnet_client extra_client;
     cnet_manager extra_manager; /* borrows extra_client, no backend/observer */
+    cnet_client_pool extra_pool; /* borrows extra_manager, Owner-affine */
+    cnet_pool_key extra_pool_key; /* test-only, never trusted as signed MMP */
+    cnet_pool_connection extra_pool_physical; /* CONNECTING, not protocol READY */
+    bool extra_pool_terminal;
     cnet_managed_connection extra_managed;
     cnet_connection extra_connection;
     cnet_handoff_ticket extra_credit; /* shared SG Handoff RESERVED token */
@@ -75,7 +80,8 @@ static bool worker_quiescent(void *arg) {
     sg_lane *lane = (sg_lane *)arg;
     return lane->released && lane->acceptor == NULL &&
            lane->transport == NULL && lane->extra_client.impl == NULL &&
-           lane->extra_manager.impl == NULL && !lane->extra_credit_held;
+           lane->extra_manager.impl == NULL &&
+           lane->extra_pool.impl == NULL && !lane->extra_credit_held;
 }
 
 static int accept_must_handoff(p2p_cnet_owner_t *owner,
@@ -289,6 +295,26 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
             sizeof(cnet_manager_config), CNET_MANAGER_VERSION,
             &lane->extra_client, 1u, 1u};
         SG_GO(lane, cnet_manager_init(&lane->extra_manager, &manager_cfg));
+        /* This pool is a bounded *connecting budget* only. The test's
+         * plaintext echo has no signed MMP SESSION_ESTABLISHED proof,
+         * therefore bind_ready and ManagedDial protocol_ready are forbidden.
+         * Manager owns physical attachment; Pool owns no I/O/threads. */
+        const cnet_pool_config pool_cfg = {
+            sizeof(cnet_pool_config), CNET_CLIENT_POOL_VERSION,
+            &lane->extra_manager, 2u, 1u, 1u, 1u};
+        SG_GO(lane, cnet_pool_init(&lane->extra_pool, &pool_cfg));
+        lane->extra_pool_key = (cnet_pool_key){
+            .size = sizeof(cnet_pool_key),
+            .version = CNET_CLIENT_POOL_VERSION,
+            .runtime_id = 1u,
+            .owner_id = 2u,
+            .endpoint_id = (uint64_t)test->echo_address.port,
+            .peer_generation = 1u,
+            .authority_id = 0xEE01u, /* test-only placeholder, NOT trust proof */
+            .transport_id = 1u,
+            .protocol_id = 0xEEu, /* plain echo, never signed MMP */
+            .session_id = 1u
+        };
         /* The extra client is initialized, but no external physical
          * connection can be admitted before it obtains a shared CNet
          * Handoff credit. The SG topology is assembled after this task. */
@@ -329,6 +355,36 @@ static void host_connect_extra(native_io_sharded_context *context, void *arg) {
     SG_GO(lane, p2p_cnet_sg_cohost_credit_reserve_v1(
         test->handoff, 0u, &lane->extra_credit));
     lane->extra_credit_held = true;
+    /* The physical pool must reserve BEFORE Manager/CNet admission. Pool's
+     * key is a copied candidate identity, not proof of MMP authentication. */
+    SG_GO(lane, cnet_pool_reserve_connecting(
+        &lane->extra_pool, &lane->extra_pool_key,
+        &lane->extra_pool_physical));
+    cnet_pool_connection excess = {0};
+    if (cnet_pool_reserve_connecting(
+            &lane->extra_pool, &lane->extra_pool_key, &excess)
+            != SALTS_ENOBUFS || excess.slot != 0u) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
+    cnet_pool_key foreign = lane->extra_pool_key;
+    foreign.owner_id++;
+    if (cnet_pool_reserve_connecting(
+            &lane->extra_pool, &foreign, &excess)
+            != SALTS_EINVAL || excess.slot != 0u) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
+    /* CONNECTING never grants a reusable physical Manager capability. */
+    cnet_pool_lease unused_lease = {0};
+    cnet_managed_connection unused_managed = {0};
+    if (cnet_pool_try_acquire(
+            &lane->extra_pool, &lane->extra_pool_key, NULL,
+            &unused_lease, &unused_managed) != SALTS_ENOBUFS ||
+        unused_lease.slot != 0u || unused_managed.slot != 0u) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
 
     /* Wrong/stale generation must never return a live credit. */
     cnet_handoff_ticket forged = lane->extra_credit;
@@ -361,14 +417,22 @@ static void host_connect_extra(native_io_sharded_context *context, void *arg) {
         size_t work = 0u;
         const int advance = cnet_manager_advance(
             &lane->extra_manager, 1u, &work);
+        /* Synchronous physical CNet admission failure: Manager record was
+         * consumed/retired, no READY capability can ever exist, reclaim
+         * the Pool's unique CONNECTING generation before Handoff release. */
+        const int pool_result = cnet_pool_terminal(
+            &lane->extra_pool, lane->extra_pool_physical);
+        if (pool_result == SALTS_OK) lane->extra_pool_terminal = true;
         const int release = p2p_cnet_sg_cohost_credit_release_v1(
             test->handoff, 0u, lane->extra_credit);
         if (release == P2P_OK) {
             lane->extra_credit = (cnet_handoff_ticket){0};
             lane->extra_credit_held = false;
         }
-        mark_failed(lane, advance == SALTS_OK && release == P2P_OK
-            ? status : (advance != SALTS_OK ? advance : release));
+        mark_failed(lane, advance == SALTS_OK &&
+            pool_result == SALTS_OK && release == P2P_OK
+            ? status : (advance != SALTS_OK ? advance :
+                (pool_result != SALTS_OK ? pool_result : release)));
         return;
     }
     cnet_manager_entry bound = {0};
@@ -377,6 +441,36 @@ static void host_connect_extra(native_io_sharded_context *context, void *arg) {
     if (bound.state != CNET_MANAGER_BOUND ||
         bound.connection.slot != lane->extra_connection.slot ||
         bound.connection.generation != lane->extra_connection.generation) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
+}
+
+/* A fully connected, sending/receiving real TCP echo is NOT a signed MMP
+ * protocol-ready connection. Verify that CNet Pool has not accidentally
+ * upgraded this Manager binding and cannot issue any reusable lease. */
+static void host_check_pool_unready(
+    native_io_sharded_context *context, void *arg) {
+    sg_lane *lane = (sg_lane *)arg;
+    if (lane->shard != 1u ||
+        native_io_sharded_context_shard(context) != lane->shard ||
+        cmeta_thread_current_token() != lane->worker_token ||
+        lane->extra_connected != 1u || lane->extra_terminal != 0u) {
+        mark_failed(lane, SALTS_EPERM);
+        return;
+    }
+    cnet_pool_snapshot snap = {0};
+    SG_GO(lane, cnet_pool_get_snapshot(&lane->extra_pool, &snap));
+    if (snap.connecting != 1u || snap.ready != 0u ||
+        snap.active_leases != 0u || snap.physical_in_use != 1u) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
+    cnet_pool_lease lease = {0};
+    cnet_managed_connection managed = {0};
+    if (cnet_pool_try_acquire(&lane->extra_pool,
+            &lane->extra_pool_key, NULL, &lease, &managed) != SALTS_ENOBUFS ||
+        lease.slot != 0u || managed.slot != 0u) {
         mark_failed(lane, SALTS_EPROTO);
         return;
     }
@@ -484,8 +578,18 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
         SG_GO(lane, cnet_manager_advance(
             &lane->extra_manager, 1u, &manager_work));
         if (lane->extra_recycled && lane->extra_credit_held) {
-            /* On recycle means CNet terminal callback already unwound;
-             * now return the original SG Host shared RESERVED credit. */
+            /* No protocol READY was ever granted. Only after the real
+             * physical Manager recycles may CONNECTING be terminated;
+             * that returns the Pool budget and then SG Host Handoff credit. */
+            SG_GO(lane, cnet_pool_terminal(
+                &lane->extra_pool, lane->extra_pool_physical));
+            lane->extra_pool_terminal = true;
+            if (cnet_pool_terminal(
+                    &lane->extra_pool, lane->extra_pool_physical)
+                    != SALTS_ENOENT) {
+                mark_failed(lane, SALTS_EPROTO);
+                return;
+            }
             SG_GO(lane, p2p_cnet_sg_cohost_credit_release_v1(
                 test->handoff, 0u, lane->extra_credit));
             lane->extra_credit = (cnet_handoff_ticket){0};
@@ -541,7 +645,12 @@ static void host_destroy(native_io_sharded_context *context, void *arg) {
         cnet_manager_snapshot snap = {0};
         SG_GO(lane, cnet_manager_get_snapshot(
             &lane->extra_manager, &snap));
-        if (!snap.drained || lane->extra_recycled != 1u ||
+        cnet_pool_snapshot pool_snap = {0};
+        SG_GO(lane, cnet_pool_get_snapshot(
+            &lane->extra_pool, &pool_snap));
+        if (!snap.drained || !pool_snap.drained ||
+            pool_snap.ready != 0u || pool_snap.active_leases != 0u ||
+            lane->extra_recycled != 1u || !lane->extra_pool_terminal ||
             lane->extra_credit_held) {
             mark_failed(lane, SALTS_EBUSY);
             return;
@@ -554,6 +663,7 @@ static void host_destroy(native_io_sharded_context *context, void *arg) {
             mark_failed(lane, SALTS_EPROTO);
             return;
         }
+        SG_GO(lane, cnet_pool_destroy(&lane->extra_pool));
         SG_GO(lane, cnet_manager_destroy(&lane->extra_manager));
         SG_GO(lane, cnet_client_stop_external(&lane->extra_client));
         SG_GO(lane, cnet_client_destroy(&lane->extra_client));
@@ -643,6 +753,9 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     cnet_manager_snapshot foreign = {0};
     check_equal(SALTS_EPERM, cnet_manager_get_snapshot(
         &test->lanes[1].extra_manager, &foreign));
+    cnet_pool_snapshot foreign_pool = {0};
+    check_equal(SALTS_EPERM, cnet_pool_get_snapshot(
+        &test->lanes[1].extra_pool, &foreign_pool));
 
     init_endpoint(&test->client, 17, 7u, 0);
     topology.size = sizeof(topology);
@@ -690,6 +803,10 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((unsigned)1u, test->lanes[1].extra_connected);
     check_equal((unsigned)1u, test->lanes[1].extra_received);
     check_equal((unsigned)1u, test->lanes[1].extra_sent);
+    /* Genuine CONNECTED and completed echo traffic are STILL not
+     * authenticated MMP/Noise READY and cannot grant a ClientPool lease. */
+    submit_lane(test, 1u, host_check_pool_unready);
+    barrier(test);
     check_equal(0, test->client.failures);
     check_equal(0, test->server.failures);
     check_true(test->lanes[0].observe_calls > 0u);
@@ -730,6 +847,8 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((unsigned)1u, test->echo_terminal);
     check_equal((unsigned)1u, test->lanes[1].extra_terminal);
     check_equal((unsigned)1u, test->lanes[1].extra_recycled);
+    check_true(test->lanes[1].extra_pool_terminal);
+    check_true(test->lanes[1].extra_pool_physical.slot != 0u);
     check_true(test->lanes[1].extra_managed.slot != 0u);
     check_false(test->lanes[1].extra_credit_held);
     cnet_manager_entry stale = {0};
