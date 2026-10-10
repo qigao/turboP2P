@@ -630,6 +630,11 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((uint32_t)0u, test->lanes[0].lease.owner_shard);
     check_equal((uint32_t)1u, test->lanes[1].lease.owner_shard);
     check_true(test->lanes[0].listener.port != 0u);
+    /* Manager is strictly Owner-affine even while CNet clients share the
+     * NativeIO SG completion batch. Main-thread inspection is rejected. */
+    cnet_manager_snapshot foreign = {0};
+    check_equal(SALTS_EPERM, cnet_manager_get_snapshot(
+        &test->lanes[1].extra_manager, &foreign));
 
     init_endpoint(&test->client, 17, 7u, 0);
     topology.size = sizeof(topology);
@@ -716,7 +721,13 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
         progress_once(test);
     check_equal((unsigned)1u, test->echo_terminal);
     check_equal((unsigned)1u, test->lanes[1].extra_terminal);
+    check_equal((unsigned)1u, test->lanes[1].extra_recycled);
+    check_true(test->lanes[1].extra_managed.slot != 0u);
     check_false(test->lanes[1].extra_credit_held);
+    cnet_manager_entry stale = {0};
+    check_equal(SALTS_EPERM, cnet_manager_lookup(
+        &test->lanes[1].extra_manager,
+        test->lanes[1].extra_managed, &stale));
     check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
         test->handoff, 0u, &after));
     check_equal((size_t)0u, after.handoff.reserved);
