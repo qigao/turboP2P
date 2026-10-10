@@ -822,7 +822,7 @@ add_library(mesh_mgmt_execution_store STATIC
 target_include_directories(mesh_mgmt_execution_store PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_execution_store
-  PUBLIC mesh_mgmt_execution mesh_mgmt_execution_result TurboUtils::Core
+  PUBLIC mesh_mgmt_execution mesh_mgmt_execution_result Salts::Core
   PRIVATE OpenSSL::Crypto)
 set_property(TARGET mesh_mgmt_execution_store PROPERTY FOLDER "mesh/internal")
 
@@ -847,7 +847,7 @@ target_link_libraries(mesh_mgmt_execution_wire
 set_property(TARGET mesh_mgmt_execution_wire PROPERTY FOLDER "mesh/internal")
 
 option(TURBO_P2P_ENABLE_NODE_EXECUTION
-  "Build the local prestaged TurboRuntime node-execution runner" OFF)
+  "Build the local prestaged TurboWasm node-execution runner" OFF)
 if(TURBO_P2P_ENABLE_NODE_EXECUTION)
   # The old TurboRuntime::Core ABI is retired. A released native TurboWasm SDK
   # is mandatory when node execution is requested: no compatibility shim,
@@ -951,7 +951,7 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
   target_include_directories(mesh_mgmt_execution_worker PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mesh_mgmt_execution_worker
-    PUBLIC mesh_mgmt_execution_service TurboUtils::Core)
+    PUBLIC mesh_mgmt_execution_service Salts::Concurrency)
   set_property(TARGET mesh_mgmt_execution_worker PROPERTY FOLDER "mesh/internal")
 
   add_library(mesh_mgmt_execution_egress STATIC
@@ -960,7 +960,7 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
   target_include_directories(mesh_mgmt_execution_egress PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mesh_mgmt_execution_egress
-    PUBLIC mesh_mgmt_execution_worker TurboUtils::Core)
+    PUBLIC mesh_mgmt_execution_worker Salts::Concurrency)
   set_property(TARGET mesh_mgmt_execution_egress PROPERTY FOLDER "mesh/internal")
 
   add_library(mesh_mgmt_execution_sender STATIC
