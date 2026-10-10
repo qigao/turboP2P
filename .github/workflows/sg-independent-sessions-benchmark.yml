@@ -1,0 +1,144 @@
+name: Raw CNet vs signed SG independent-session smoke
+on:
+  pull_request:
+    branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
+    paths:
+      - 'mesh/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/sg-independent-sessions-benchmark.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  session-independent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-sg-session-independent
+      - name: Build real CNet and signed MMP per-client independent profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/sg-sessions -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DP2P_RAW_CNET_SG_BUILD_BENCHMARKS=ON \
+            -DP2P_MMP_SG_BUILD_BENCHMARKS=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+          cmake --build build/sg-sessions --parallel 2 --target \
+            bench_raw_cnet_sg_1_sessions bench_raw_cnet_sg_2_sessions bench_raw_cnet_sg_4_sessions \
+            bench_raw_cnet_sg_1_async_sessions bench_raw_cnet_sg_2_async_sessions bench_raw_cnet_sg_4_async_sessions \
+            bench_mesh_mmp_sg_1_sessions bench_mesh_mmp_sg_2_sessions bench_mesh_mmp_sg_4_sessions \
+            bench_mesh_mmp_sg_1_async_sessions bench_mesh_mmp_sg_2_async_sessions bench_mesh_mmp_sg_4_async_sessions
+      - name: Validate each client independently progresses equal workload
+        shell: bash
+        env:
+          P2P_MMP_BENCH_WARMUP: '8'
+          P2P_MMP_BENCH_ROUNDS: '32'
+        run: |
+          set -euo pipefail
+          echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-aggregate.csv
+          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-sessions.csv
+          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > session-independent-rtt.csv
+          {
+            uname -a
+            lscpu
+            git rev-parse HEAD
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+            echo "SALTS_ROOT=$SALTS_ROOT"
+            echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
+          } > session-independent-machine.txt
+          for payload in 8 1024; do
+            for finals in 1 2 4; do
+              export P2P_MMP_BENCH_PAYLOAD="$payload"
+              for mode in barrier async; do
+                for protocol in raw signed; do
+                  if [ "$protocol" = raw ]; then
+                    exe="bench_raw_cnet_sg_$finals"
+                    prefix='RAW_CNET_SG'
+                  else
+                    exe="bench_mesh_mmp_sg_$finals"
+                    prefix='P2P_MMP_SG'
+                  fi
+                  if [ "$mode" = async ]; then exe="$exe"_async; fi
+                  exe="$exe"_sessions
+                  log="session-independent-$protocol-$mode-$finals-$payload.log"
+                  "./build/sg-sessions/$exe" | tee "$log"
+                  grep "^$prefix"_BENCH, "$log" |
+                    sed "s/^$prefix\_BENCH,//" >> session-independent-aggregate.csv
+                  grep "^$prefix"_SESSION, "$log" |
+                    sed "s/^$prefix\_SESSION,//" >> session-independent-sessions.csv
+                  if [ "$protocol" = raw ]; then label='raw-cnet-tcp-echo'; else label='sg-signed-ready-data-echo'; fi
+                  grep "^$prefix"_RTT, "$log" |
+                    sed "s/^$prefix\_RTT,/$label,/" >> session-independent-rtt.csv
+                done
+              done
+            done
+          done
+          python3 - <<'PY'
+          import csv, math
+          def load(path):
+              with open(path, newline="",encoding="utf-8") as f:
+                  return list(csv.DictReader(f))
+          aggregate=load("session-independent-aggregate.csv")
+          sessions=load("session-independent-sessions.csv")
+          rtts=load("session-independent-rtt.csv")
+          cases={(protocol,mode,finals,payload)
+                 for protocol in ("raw-cnet-tcp-echo","sg-signed-ready-data-echo")
+                 for mode in ("global-barrier-app-independent","owner-independent-app-independent")
+                 for finals in (1,2,4) for payload in (8,1024)}
+          seen={}
+          for row in aggregate:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),int(row["payload_bytes"]))
+              if (key not in cases or key in seen
+                  or int(row["total_shards"])!=key[2]+1
+                  or int(row["sessions"])!=4 or int(row["rounds"])!=32
+                  or int(row["warmup"])!=8
+                  or any(not math.isfinite(float(row[k])) or float(row[k])<=0
+                         for k in ("app_msgs_per_s","wall_ms","process_cpu_ms","rtt_p95_us"))):
+                  raise SystemExit(f"Invalid app-independent sample: {row}")
+              seen[key]=row
+          if set(seen)!=cases:
+              raise SystemExit(f"Missing app-independent profiles: {cases-set(seen)}")
+          per_client=set()
+          for row in sessions:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["session_id"]))
+              if (key[:4] not in cases or key[4] not in (1,2,3,4) or key in per_client):
+                  raise SystemExit(f"Bad session percentile: {row}")
+              per_client.add(key)
+          if len(per_client)!=24*4:
+              raise SystemExit("Incomplete independent client percentiles")
+          samples=set()
+          for row in rtts:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["session_id"]),int(row["round"]))
+              if (key[:5] not in per_client or key[5] not in range(1,33)
+                  or key in samples or not math.isfinite(float(row["rtt_us"]))
+                  or float(row["rtt_us"])<=0):
+                  raise SystemExit(f"Bad chronological RTT: {row}")
+              samples.add(key)
+          if len(samples)!=24*4*32:
+              raise SystemExit(f"Missing per-client RTTs: {len(samples)}")
+          print("Independent per-client workloads: 24/24 complete; 3072 RTTs present")
+          PY
+      - name: Upload session-independent smoke data
+        uses: actions/upload-artifact@v4
+        with:
+          name: sg-independent-sessions-smoke
+          path: |
+            session-independent-aggregate.csv
+            session-independent-sessions.csv
+            session-independent-rtt.csv
+            session-independent-machine.txt
+            session-independent-*.log
+          if-no-files-found: error
+      - name: Report ccache
+        if: always()
+        shell: bash
+        run: ccache --show-stats
