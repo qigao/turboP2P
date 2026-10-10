@@ -2,10 +2,12 @@
 
 #include "mesh_mgmt_crypto.h"
 #include "mesh_mgmt_agent_runtime_internal.h"
+#include "core/peer_cnet.h"
 
 #include <salts/clock.h>
 
 #include <string.h>
+#include <stdlib.h>
 
 static int runtime_host_is_valid(const char *host) {
   size_t length = 0u;
@@ -22,6 +24,159 @@ static mesh_mgmt_agent_runtime_result_t runtime_fail(mesh_mgmt_agent_runtime_v1_
   runtime->last_error = result;
   runtime->in_api = 0u;
   return result;
+}
+
+
+/* The real CNet Manager and ClientPool are the only physical/lease credit
+ * authorities. Runtime's bounded index owns callback/teardown association,
+ * not a second pool, admission strategy or retry/backoff timer. */
+static mesh_mgmt_runtime_pool_record_v3_t *pool_slot_by_peer(
+    mesh_mgmt_agent_runtime_v1_t *runtime, const p2p_peer_t *peer) {
+  if (!runtime || !runtime->signed_pool_records || !peer) return NULL;
+  for (size_t i = 0u; i < runtime->signed_pool_capacity; ++i) {
+    mesh_mgmt_runtime_pool_record_v3_t *record = &runtime->signed_pool_records[i];
+    if (record->active && record->peer == peer && !record->draining)
+      return record;
+  }
+  return NULL;
+}
+
+static mesh_mgmt_runtime_pool_record_v3_t *pool_free_slot(
+    mesh_mgmt_agent_runtime_v1_t *runtime) {
+  for (size_t i = 0u; i < runtime->signed_pool_capacity; ++i) {
+    mesh_mgmt_runtime_pool_record_v3_t *record = &runtime->signed_pool_records[i];
+    if (!record->active) return record;
+  }
+  return NULL;
+}
+
+static int runtime_pool_init_for_manager(
+    mesh_mgmt_agent_runtime_v1_t *runtime, cnet_manager *manager) {
+  cnet_manager_snapshot snapshot = {0};
+  cnet_pool_config cfg = {0};
+  int status;
+  if (runtime->signed_pool.impl)
+    return runtime->signed_pool_manager == manager ? SALTS_OK : SALTS_EINVAL;
+  status = cnet_manager_get_snapshot(manager, &snapshot);
+  if (status != SALTS_OK) return status;
+  if (snapshot.sealed ||
+      snapshot.connection_capacity < runtime->signed_pool_capacity)
+    return SALTS_ENOBUFS;
+  cfg.size = sizeof(cfg);
+  cfg.version = CNET_CLIENT_POOL_VERSION;
+  cfg.manager = manager;
+  cfg.owner_id = runtime->signed_pool_owner_id;
+  cfg.max_connections = runtime->signed_pool_capacity;
+  cfg.max_connecting = runtime->signed_pool_capacity;
+  cfg.max_leases = runtime->signed_pool_max_leases;
+  status = cnet_pool_init(&runtime->signed_pool, &cfg);
+  if (status == SALTS_OK) runtime->signed_pool_manager = manager;
+  return status;
+}
+
+static int runtime_pool_authenticated(
+    mesh_mgmt_agent_runtime_v1_t *runtime, p2p_peer_t *peer) {
+  mesh_mgmt_agent_router_ready_v1_t signed_ready = {0};
+  p2p_cnet_managed_binding_v1_t exact = {0};
+  cnet_pool_connection physical = {0};
+  cnet_pool_key key = {0};
+  mesh_mgmt_runtime_pool_record_v3_t *record;
+  mesh_mgmt_agent_router_result_t auth;
+  int status;
+  if (!runtime->signed_pool_enabled || runtime->shared_mesh)
+    return SALTS_OK;
+  if (!peer || !peer->conn) return SALTS_EPROTO;
+  /* Outbound P2P numeric CNet is deliberately not Manager-owned yet.
+   * Do NOT silently place it under the incoming-side Pool or deny the
+   * already valid signed MMP endpoint just for not supporting pooling. */
+  if (peer->conn->type == P2P_CONN_OUTBOUND) return SALTS_OK;
+  if (pool_slot_by_peer(runtime, peer)) return SALTS_EALREADY;
+  if (p2p_peer_cnet_managed_binding_v1(peer, &exact) != P2P_OK)
+    return SALTS_EPROTO;
+  auth = mesh_mgmt_agent_router_ready_peer_v1(&runtime->router, peer, &signed_ready);
+  if (auth != MESH_MGMT_AGENT_ROUTER_OK) return SALTS_EPROTO;
+  record = pool_free_slot(runtime);
+  if (!record) return SALTS_ENOBUFS;
+  status = runtime_pool_init_for_manager(runtime, exact.manager);
+  if (status != SALTS_OK) return status;
+  /* Router rechecks the signed READY proof and same Manager BOUND CNet
+   * generation immediately before/after native CNet Pool reservation. */
+  auth = mesh_mgmt_agent_router_pool_bind_ready_v1(
+      &runtime->router, peer, signed_ready.remote_transport_peer_id,
+      signed_ready.remote_managed_node_id, signed_ready.connection_id,
+      exact.manager, &runtime->signed_pool, runtime->signed_pool_owner_id,
+      &physical, &key);
+  if (auth != MESH_MGMT_AGENT_ROUTER_OK)
+    return auth == MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED
+      ? SALTS_ENOBUFS : SALTS_EPROTO;
+  memset(record, 0, sizeof(*record));
+  record->peer = peer;
+  record->physical = physical;
+  record->managed = exact.managed;
+  record->key = key;
+  memcpy(record->connection_id, signed_ready.connection_id,
+         sizeof(record->connection_id));
+  record->active = 1u;
+  return SALTS_OK;
+}
+
+/* Called from the original Router closed callback while peer storage
+ * remains borrowed. Only mark DRAINING here; native Manager may still be
+ * BOUND until its real CNet terminal callback returns. Never fabricate
+ * a transport terminal or release a session's application lease here. */
+static int runtime_pool_drain_record(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    mesh_mgmt_runtime_pool_record_v3_t *record) {
+  int status;
+  if (!record || !record->active || record->draining) return SALTS_OK;
+  status = cnet_pool_begin_drain(&runtime->signed_pool, record->physical);
+  if (status != SALTS_OK) return status;
+  record->draining = 1u;
+  record->peer = NULL; /* cannot dereference after Router returns */
+  return SALTS_OK;
+}
+
+static int runtime_pool_closed(mesh_mgmt_agent_runtime_v1_t *runtime,
+                               p2p_peer_t *peer) {
+  if (!runtime->signed_pool_enabled || !runtime->signed_pool.impl)
+    return SALTS_OK;
+  mesh_mgmt_runtime_pool_record_v3_t *record = pool_slot_by_peer(runtime, peer);
+  return runtime_pool_drain_record(runtime, record);
+}
+
+/* Run only after the one physical P2P/CNet Owner has advanced. The upstream
+ * Manager (not Router's logical close event) authoritatively determines
+ * whether an actual CNet physical record reached RETIRED/recycled. */
+static int runtime_pool_advance(mesh_mgmt_agent_runtime_v1_t *runtime) {
+  if (!runtime->signed_pool.impl) return SALTS_OK;
+  for (size_t i = 0u; i < runtime->signed_pool_capacity; ++i) {
+    mesh_mgmt_runtime_pool_record_v3_t *record = &runtime->signed_pool_records[i];
+    if (!record->active || !record->draining) continue;
+    cnet_manager_entry physical = {0};
+    int status = cnet_manager_lookup(runtime->signed_pool_manager,
+                                    record->managed, &physical);
+    if (status == SALTS_OK && physical.state != CNET_MANAGER_RETIRED)
+      continue; /* TCP still CONNECTING/CONNECTED/CLOSING, not terminal */
+    if (status != SALTS_OK && status != SALTS_ENOENT) return status;
+    status = cnet_pool_terminal(&runtime->signed_pool, record->physical);
+    if (status != SALTS_OK) return status;
+    memset(record, 0, sizeof(*record));
+    /* Pool's real lease records retain the old physical generation if a
+     * caller still borrows a lease, even after this index can be recycled. */
+  }
+  return SALTS_OK;
+}
+
+static int runtime_pool_seal_and_drain(mesh_mgmt_agent_runtime_v1_t *runtime) {
+  int status;
+  if (!runtime->signed_pool.impl) return SALTS_OK;
+  status = cnet_pool_seal(&runtime->signed_pool);
+  if (status != SALTS_OK) return status;
+  for (size_t i = 0u; i < runtime->signed_pool_capacity; ++i) {
+    status = runtime_pool_drain_record(runtime, &runtime->signed_pool_records[i]);
+    if (status != SALTS_OK) return status;
+  }
+  return SALTS_OK;
 }
 
 static int runtime_event(void *context, p2p_peer_t *peer,
@@ -42,6 +197,8 @@ static int runtime_event(void *context, p2p_peer_t *peer,
     } else if (runtime->last_endpoint_result != MESH_MGMT_ENDPOINT_POOL_OK) {
       return -1;
     }
+    runtime->signed_pool_status = runtime_pool_authenticated(runtime, peer);
+    if (runtime->signed_pool_status != SALTS_OK) return -1;
   }
   return runtime->on_event
              ? runtime->on_event(runtime->callback_context, peer, remote_transport_peer_id, event)
@@ -75,6 +232,10 @@ static void runtime_peer_closed(void *context, p2p_peer_t *peer,
 
   if (!runtime)
     return;
+  if (runtime->signed_pool_enabled) {
+    const int status = runtime_pool_closed(runtime, peer);
+    if (status != SALTS_OK) runtime->signed_pool_status = status;
+  }
   if (reason != MESH_MGMT_AGENT_ROUTER_CLOSE_LOCAL_STOP) {
     mesh_mgmt_endpoint_failure_t failure = reason == MESH_MGMT_AGENT_ROUTER_CLOSE_PROTOCOL
                                                ? MESH_MGMT_ENDPOINT_FAILURE_PROTOCOL
@@ -94,6 +255,10 @@ static int runtime_is_busy(const mesh_mgmt_agent_runtime_v1_t *runtime) {
 
 /* Call only after the owned node is gone and the shared router is detached. */
 static void runtime_release_initialized(mesh_mgmt_agent_runtime_v1_t *runtime) {
+  /* All Pool leases and physical entries were drained and destroyed by
+   * runtime_stop_initialized while the P2P Manager was still alive. */
+  free(runtime->signed_pool_records);
+  runtime->signed_pool_records = NULL;
   mesh_mgmt_service_publisher_destroy_v1(&runtime->service_publisher);
   mesh_mgmt_endpoint_publisher_destroy_v1(&runtime->endpoint_publisher);
   mesh_mgmt_endpoint_pool_destroy_v1(&runtime->endpoint_pool);
@@ -105,12 +270,55 @@ static mesh_mgmt_agent_runtime_result_t runtime_stop_initialized(
     mesh_mgmt_agent_runtime_v1_t *runtime) {
   runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPING;
   mesh_mgmt_endpoint_pool_stop_v1(&runtime->endpoint_pool);
+  if (runtime->signed_pool.impl) {
+    runtime->signed_pool_status = runtime_pool_seal_and_drain(runtime);
+    if (runtime->signed_pool_status != SALTS_OK)
+      return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+  }
   if (runtime->router.state == MESH_MGMT_AGENT_ROUTER_INSTALLED) {
     runtime->last_router_result = runtime->shared_mesh
         ? runtime->mesh_ops->detach(runtime->shared_mesh, &runtime->router)
         : mesh_mgmt_agent_router_stop_v1(&runtime->router);
     if (runtime->last_router_result != MESH_MGMT_AGENT_ROUTER_OK)
       return MESH_MGMT_AGENT_RUNTIME_ROUTER_FAILED;
+  }
+  if (runtime->signed_pool.impl) {
+    cnet_pool_snapshot snapshot = {0};
+    /* The Pool borrows the live P2P Manager: real physical terminal MUST
+     * progress, and every application lease MUST be released, before
+     * P2P's CNet Owner/Manager can be destroyed. No new timer or retry
+     * policy; this bounded close-only loop advances the existing Owner.
+     * On still-running IO or outstanding leases retain everything and
+     * let the caller retry stop after returning its borrowed leases. */
+    for (unsigned pass = 0u; pass < 64u; ++pass) {
+      runtime->signed_pool_status = runtime_pool_advance(runtime);
+      if (runtime->signed_pool_status != SALTS_OK)
+        return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+      runtime->signed_pool_status =
+          cnet_pool_get_snapshot(&runtime->signed_pool, &snapshot);
+      if (runtime->signed_pool_status != SALTS_OK)
+        return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+      if (snapshot.drained) break;
+      int pending_physical = 0;
+      for (size_t i = 0u; i < runtime->signed_pool_capacity; ++i)
+        if (runtime->signed_pool_records[i].active) pending_physical = 1;
+      if (!pending_physical) break; /* only borrowed leases remain */
+      if (!runtime->node || !runtime->owns_node)
+        return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+      runtime->last_p2p_result = p2p_poll(runtime->node);
+      if (runtime->last_p2p_result != P2P_OK)
+        return MESH_MGMT_AGENT_RUNTIME_P2P_FAILED;
+    }
+    runtime->signed_pool_status =
+        cnet_pool_get_snapshot(&runtime->signed_pool, &snapshot);
+    if (runtime->signed_pool_status != SALTS_OK)
+      return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+    if (!snapshot.drained)
+      return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+    runtime->signed_pool_status = cnet_pool_destroy(&runtime->signed_pool);
+    if (runtime->signed_pool_status != SALTS_OK)
+      return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+    runtime->signed_pool_manager = NULL;
   }
   if (runtime->node && runtime->owns_node) {
     runtime->last_p2p_result = p2p_destroy_v2(runtime->node);
@@ -188,6 +396,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
   if (runtime_is_busy(runtime) ||
       runtime->state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED || runtime->node ||
       runtime->router.slots.data || runtime->endpoint_pool.entries.data ||
+      runtime->signed_pool.impl || runtime->signed_pool_records ||
       runtime->endpoint_publisher.state != MESH_MGMT_ENDPOINT_PUBLISHER_UNINITIALIZED ||
       runtime->service_publisher.state != MESH_MGMT_SERVICE_PUBLISHER_UNINITIALIZED)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
@@ -197,6 +406,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
   runtime->last_p2p_result = P2P_OK;
   runtime->last_router_result = MESH_MGMT_AGENT_ROUTER_OK;
   runtime->last_endpoint_result = MESH_MGMT_ENDPOINT_POOL_OK;
+  runtime->signed_pool_status = SALTS_OK;
   runtime->last_endpoint_record_result = MESH_MGMT_ENDPOINT_RECORD_OK;
   runtime->last_service_record_result = MESH_MGMT_SERVICE_RECORD_OK;
   runtime->last_publisher_result = MESH_MGMT_ENDPOINT_PUBLISHER_OK;
@@ -358,6 +568,99 @@ mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }
 
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, uint64_t owner_id,
+    size_t max_connections, size_t max_leases) {
+  mesh_mgmt_runtime_pool_record_v3_t *records;
+  if (!runtime || owner_id == 0u || max_connections == 0u ||
+      max_leases == 0u || max_connections > MESH_MGMT_AGENT_ROUTER_MAX_PEERS ||
+      max_leases > MESH_MGMT_AGENT_ROUTER_MAX_PEERS ||
+      max_leases < max_connections)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_READY ||
+      runtime->shared_mesh || !runtime->owns_node ||
+      !runtime->node || runtime_is_busy(runtime) ||
+      runtime->signed_pool_enabled ||
+      max_connections > runtime->router.max_peers)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  records = calloc(max_connections, sizeof(*records));
+  if (!records) return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  runtime->signed_pool_records = records;
+  runtime->signed_pool_capacity = max_connections;
+  runtime->signed_pool_max_leases = max_leases;
+  runtime->signed_pool_owner_id = owner_id;
+  runtime->signed_pool_status = SALTS_OK;
+  runtime->signed_pool_enabled = 1u;
+  return MESH_MGMT_AGENT_RUNTIME_OK;
+}
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, p2p_peer_t *peer,
+    cnet_pool_lease *out_lease) {
+  mesh_mgmt_runtime_pool_record_v3_t *record;
+  mesh_mgmt_agent_router_ready_v1_t signed_ready = {0};
+  mesh_mgmt_agent_router_result_t auth;
+  if (out_lease) *out_lease = (cnet_pool_lease){0};
+  if (!runtime || !peer || !out_lease)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING ||
+      runtime_is_busy(runtime) || !runtime->signed_pool.impl)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  record = pool_slot_by_peer(runtime, peer);
+  if (!record) return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  auth = mesh_mgmt_agent_router_ready_peer_v1(&runtime->router, peer, &signed_ready);
+  if (auth != MESH_MGMT_AGENT_ROUTER_OK ||
+      memcmp(signed_ready.connection_id, record->connection_id,
+             sizeof(record->connection_id)) != 0)
+    return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+  auth = mesh_mgmt_agent_router_pool_acquire_v1(
+      &runtime->router, peer, signed_ready.remote_transport_peer_id,
+      signed_ready.remote_managed_node_id, signed_ready.connection_id,
+      runtime->signed_pool_manager, &runtime->signed_pool,
+      runtime->signed_pool_owner_id, out_lease);
+  if (auth == MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED)
+    return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  return auth == MESH_MGMT_AGENT_ROUTER_OK
+    ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+}
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_release_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, cnet_pool_lease lease) {
+  if (!runtime || lease.slot == 0u)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (!runtime->signed_pool.impl || !runtime->signed_pool_enabled ||
+      (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING &&
+       runtime->state != MESH_MGMT_AGENT_RUNTIME_STOPPING) ||
+      runtime_is_busy(runtime))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  const int status = cnet_pool_release(&runtime->signed_pool, lease);
+  if (status == SALTS_ENOENT)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE; /* duplicate/foreign lease */
+  if (status != SALTS_OK) {
+    runtime->signed_pool_status = status;
+    return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+  }
+  runtime->signed_pool_status = runtime_pool_advance(runtime);
+  return runtime->signed_pool_status == SALTS_OK
+    ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+}
+
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, cnet_pool_snapshot *out_snapshot) {
+  if (out_snapshot) *out_snapshot = (cnet_pool_snapshot){0};
+  if (!runtime || !out_snapshot)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (!runtime->signed_pool_enabled || !runtime->signed_pool.impl)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  if (runtime_is_busy(runtime))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  runtime->signed_pool_status = cnet_pool_get_snapshot(
+      &runtime->signed_pool, out_snapshot);
+  return runtime->signed_pool_status == SALTS_OK
+    ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+}
+
 mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_set_client_policy_v2(
     mesh_mgmt_agent_runtime_v1_t *runtime,
     const mesh_mgmt_client_destination_policy_v2_t *policy) {
@@ -398,7 +701,12 @@ mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
     runtime->last_p2p_result = p2p_poll(runtime->node);
     if (runtime->last_p2p_result != P2P_OK)
       return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_P2P_FAILED);
+    runtime->signed_pool_status = runtime_pool_advance(runtime);
+    if (runtime->signed_pool_status != SALTS_OK)
+      return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_POOL_FAILED);
   }
+  if (runtime->signed_pool_status != SALTS_OK)
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_POOL_FAILED);
   return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
 }
 

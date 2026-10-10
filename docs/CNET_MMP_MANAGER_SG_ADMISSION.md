@@ -289,3 +289,74 @@ Full per-command/multiplexed protocol-slot operations, unified
 ManagedDial/quarantine ownership and Windows/macOS/Android installed SDK
 qualification remain part of #38. No MMP management, DHT or file
 operation is replayed on transport reconnect.
+
+
+## Opt-in production Mesh Runtime-owned signed ClientPool lifecycle
+
+Dedicated CNet Mesh Runtime now supports an explicitly enabled
+`mesh_mgmt_agent_runtime_enable_signed_pool_v3(owner_id, max_connections,
+max_leases)`, called only while the runtime is READY before Start. This
+does **not** install a new NativeIO backend, socket, reconnect timer,
+application-replay loop or ACE selector. Shared-mesh and unstarted or
+already-running reconfiguration fail closed.
+
+Unlike a separately orchestrated test-only Pool, the actual signed MMP
+Router lifecycle drives the SAME Manager-backed upstream CNet ClientPool:
+
+1. The production `SESSION_ESTABLISHED` callback completes the existing
+   endpoint record / membership authorization first. Its verified Router
+   slot produces an internal signed READY snapshot of the actual peer
+   (authenticated transport, signed managed-node identity and exact
+   per-connection generation), with no user-provided READY Boolean.
+2. For a real **inbound P2P CNet** connection only, the runtime retrieves
+   that peer's exact CNet Manager BOUND physical slot+generation. The
+   upstream Pool borrows that SAME Manager. The runtime calls the
+   already-qualified signed `cnet_pool_reserve_connecting/bind_ready`
+   adapter after MMP HELLO authentication and stores only a bounded
+   callback-to-physical identity mapping. Existing unmanaged outbound
+   P2P is not silently upgraded to inbound pooling, nor is legitimate
+   outgoing MMP authentication blocked solely for being unpooled.
+3. Applications explicitly request one real, exclusive Pool Lease through
+   `mesh_mgmt_agent_runtime_signed_pool_acquire_v3`. This requires the
+   runtime RUNNING, the *same* authenticated peer's Router generation and
+   Manager BOUND physical connection, plus the upstream CNet Pool's
+   authoritative free lease slot. No MMP/DHT/file operation is replayed.
+4. The real Router peer-close callback first applies
+   `cnet_pool_begin_drain`: it rejects future leases, forgets the
+   now-ephemeral peer pointer and retains the physical record until
+   upstream Manager becomes RETIRED or generation-recycled. The existing
+   P2P Owner poll then processes native CNet terminal callbacks, after
+   which the runtime calls `cnet_pool_terminal`. Outstanding leases
+   remain upstream-owned; a terminal Pool entry cannot be reclaimed until
+   they are returned **exactly once**, even if a new peer reconnects.
+5. Runtime Stop seals the Pool, stops endpoint dial policy (the **only**
+   retry/backoff/quarantine source), then detaches/disconnects the Router.
+   It advances the original P2P Owner in bounded close-only passes. If
+   physical terminal has not settled or leases remain, Stop/Destroy return
+   INVALID_STATE while preserving Pool, Manager, P2P Owner and all borrowed
+   contexts for explicit caller retry. Once the upstream Pool snapshot is
+   **drained**, Pool.destroy occurs **before** the borrowed native Manager
+   and P2P CNet Owner are destroyed. The runtime's fixed-capacity
+   association array is freed only after checked stop/destroy succeeds.
+
+There is **no** pre-Noise signed Pool admission assumption. For unknown
+inbound TCP, the SDK copies an immutable Pool key and offers no safe
+authenticated rekey, so physical pre-auth bounded admission remains
+CNet Manager + Handoff; signed Pool READY is post-auth by design.
+
+The real two-peer dedicated CNet runtime qualification enables this
+feature on the inbound server, leaves the outbound client unpooled,
+verifies actual signed callback-driven READY and successful exclusive
+lease, refuses a second lease, then performs checked Stop with a
+borrowed lease: Pool and P2P Owner remain allocated, the original
+physical terminal settles without faking callbacks, the lease can
+still be returned in STOPPING state, and only then do repeated
+Stop/Destroy reclaim Pool and Manager in dependency order.
+
+This is **opt-in Runtime lifecycle integration**, not an implicit
+ManagedDial reconnect/multiplexed protocol-slot upgrade. The existing
+`mesh_mgmt_endpoint_pool` still owns the single retry clock. Automatic
+MMP per-operation lease handling and protocol-slot admission beyond
+one exclusive slot, outbound P2P Manager/Pool migration, 1/2/4 shard
+equal-workload CPU/throughput and Windows/macOS/Android installed SDKs
+remain separate #38/#37 acceptance gates.

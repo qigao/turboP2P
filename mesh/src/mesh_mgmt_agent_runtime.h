@@ -23,6 +23,7 @@ typedef enum {
   MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED = -9,
   MESH_MGMT_AGENT_RUNTIME_SERVICE_RECORD_FAILED = -10,
   MESH_MGMT_AGENT_RUNTIME_SEND_FAILED = -11,
+  MESH_MGMT_AGENT_RUNTIME_POOL_FAILED = -12,
 } mesh_mgmt_agent_runtime_result_t;
 
 typedef enum {
@@ -104,6 +105,19 @@ typedef struct {
   void *callback_context;
 } mesh_mgmt_agent_runtime_config_v1_t;
 
+/* Runtime-owned signed MMP ClientPool association for exactly one physical
+ * Manager generation. Lease storage lives upstream in CNet Pool; this
+ * record is a bounded local lifecycle index, not a second credit ledger. */
+typedef struct {
+  p2p_peer_t *peer; /* borrowed only until router close callback */
+  cnet_pool_connection physical;
+  cnet_managed_connection managed;
+  cnet_pool_key key;
+  uint8_t connection_id[16]; /* original signed Router generation */
+  uint8_t active;
+  uint8_t draining;
+} mesh_mgmt_runtime_pool_record_v3_t;
+
 /**
  * Single-event-loop composition root. In dedicated mode it owns the node and
  * listener and derives the mandatory secure-wire v2 provider from the local
@@ -140,6 +154,17 @@ typedef struct {
   uint8_t owns_node;
   p2p_runtime_config_v2_t p2p_config;
   const struct mesh_mgmt_agent_mesh_ops_s *mesh_ops;
+  /* Opt-in, dedicated-CNet-only post-auth MMP Pool: one upstream Pool
+   * borrowing the exact inbound P2P CNet Manager. EndpointPool alone owns
+   * dial selection, backoff and quarantine. No ManagedDial timer/replay. */
+  cnet_client_pool signed_pool;
+  cnet_manager *signed_pool_manager; /* borrowed until Pool fully destroyed */
+  mesh_mgmt_runtime_pool_record_v3_t *signed_pool_records;
+  size_t signed_pool_capacity;
+  size_t signed_pool_max_leases;
+  uint64_t signed_pool_owner_id;
+  int signed_pool_status;
+  uint8_t signed_pool_enabled;
 } mesh_mgmt_agent_runtime_v1_t;
 
 /** Compatibility entry point: dedicated mode uses CNet v2 defaults and
@@ -169,6 +194,39 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_v2(
  */
 mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime);
+
+/* Explicitly enable automatic authenticated ClientPool lifecycle for the
+ * dedicated CNet runtime while it is READY (before start), using positive
+ * bounded max_connections/max_leases and a stable host-assigned Owner ID.
+ * Shared-mesh mode and post-start activation are rejected. Allocates only
+ * the bounded record index; physical upstream Pool is lazily initialized
+ * on the first live inbound signed MMP SESSION_ESTABLISHED.
+ *
+ * Only inbound P2P streams managed by the SAME CNet Owner's physical
+ * Manager become READY. The legitimate unmanaged outbound client does not
+ * inherit inbound ClientPool eligibility. The existing endpoint pool
+ * remains the sole reconnect/backoff/quarantine authority. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    uint64_t owner_id, size_t max_connections, size_t max_leases);
+
+/* Obtain one real exclusive CNet Pool lease only for this exact still-live
+ * signed MMP peer, after rechecking Router generation and Manager physical
+ * connection on the current Owner. Never retries/replays application data.
+ * Output is zeroed on error. A successful lease is caller-owned and MUST
+ * be returned exactly once even if the peer closes or Runtime enters
+ * STOPPING; outstanding leases prevent Pool/Owner destruction. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, p2p_peer_t *peer,
+    cnet_pool_lease *out_lease);
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_release_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, cnet_pool_lease lease);
+
+/* The status is authoritative upstream CNet Pool data, not a second
+ * logical connection counter. The Pool can be absent before the first
+ * authenticated inbound session. Does not run IO or apply retry policy. */
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime, cnet_pool_snapshot *out_snapshot);
 
 /** Configure an immutable CNet Client destination strategy after init and
  * before start. Supported only by dedicated CNet runtime; no hot reconfiguration
