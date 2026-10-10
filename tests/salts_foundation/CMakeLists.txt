@@ -336,6 +336,25 @@ if(P2P_MMP_SG_BUILD_BENCHMARKS)
   endforeach()
 endif()
 
+# Opt-in true raw CNet TCP baseline. Same four accepted physical
+# sessions and 1/2/4 final SG workers (+1 acceptor), but deliberately
+# no Noise/MMP/ClientPool; do not compare to encrypted RPC blindly.
+option(P2P_RAW_CNET_SG_BUILD_BENCHMARKS "Build raw CNet SG TCP baselines" OFF)
+if(P2P_RAW_CNET_SG_BUILD_BENCHMARKS)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "Raw CNet SG baseline requires Linux CPU clock")
+  endif()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_raw_cnet_sg_${finals}
+      "${mesh_tests}/../bench/bench_raw_cnet_sg_echo.c")
+    set_property(TARGET bench_raw_cnet_sg_${finals} PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_raw_cnet_sg_${finals}
+      PRIVATE BENCH_RAW_FINALS=${finals})
+    target_link_libraries(bench_raw_cnet_sg_${finals} PRIVATE
+      Salts::CNet Salts::TinyTest)
+  endforeach()
+endif()
+
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
 # Topologies 1/2/4 have respectively 1/1/3 authenticated connections; use
 # the session column rather than claiming equal-load CPU scaling.
