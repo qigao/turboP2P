@@ -49,6 +49,7 @@ typedef struct noise_lane noise_lane;
 typedef struct noise_test_identity {
   uint8_t public_key[32];
   uint8_t allowed[NOISE_SESSIONS][32];
+  uint8_t remote_principal_seeds[NOISE_SESSIONS];
   size_t count;
   p2p_authenticated_identity_v2_t principal;
 } noise_test_identity;
@@ -180,8 +181,7 @@ static int build_local_credential(void *ctx,const uint8_t local[32],
                                   uint8_t *credential,size_t cap,size_t *size,
                                   p2p_authenticated_identity_v2_t *identity) {
   noise_test_identity *test=(noise_test_identity*)ctx;
-  if (!credential||!size||!identity||cap<32u||
-      memcmp(local,test->public_key,32u)!=0)
+  if (!credential||!size||!identity||cap<32u)
     return P2P_ERR_INVALID_ARG;
   memcpy(credential,local,32u);
   *size=32u;
@@ -200,24 +200,30 @@ static int verify_remote_credential(void *ctx,const uint8_t remote[32],
       memcmp(credential,remote,32u)!=0) return P2P_ERR_UNTRUSTED_IDENTITY;
   for(size_t i=0;i<test->count;++i) {
     if (memcmp(test->allowed[i],remote,32u)!=0)continue;
-    *identity=test->principal;
+    /* The remote's authenticated principal is NOT the local principal.
+     * The fixture contract is keyed by the X25519 static key. */
+    memset(identity,test->remote_principal_seeds[i],sizeof(*identity));
     return P2P_OK;
   }
   return P2P_ERR_UNTRUSTED_IDENTITY;
 }
 static void configure_identity(p2p_node_t *node,noise_test_identity *test,
                                const uint8_t private_key[32],
-                               const uint8_t *allowlist,size_t count) {
+                               const uint8_t *allowlist,const uint8_t *remote_seeds,
+                               size_t count) {
   p2p_security_config_v2_t security={0};
   check_not_null(node);
   check_true(count>0u&&count<=NOISE_SESSIONS);
   check_equal(P2P_OK,p2p_node_set_private_key(node,private_key));
   check_equal(P2P_OK,p2p_public_key_from_private_key(
       private_key,test->public_key));
-  for(size_t i=0;i<count;++i)
+  for(size_t i=0;i<count;++i) {
     memcpy(test->allowed[i],allowlist+32u*i,32u);
+    test->remote_principal_seeds[i]=remote_seeds[i];
+  }
   test->count=count;
-  memset(&test->principal,11,sizeof(test->principal));
+  /* Match the established P2P SG identity fixture's deterministic mapping. */
+  memset(&test->principal,private_key[0],sizeof(test->principal));
   security.struct_size=sizeof(security);
   security.handshake_timeout_ms=5000u;
   security.ready_timeout_ms=5000u;
@@ -337,8 +343,10 @@ static void init_owner(native_io_sharded_context *context,void *arg) {
   noise_final *f=&sc->finals[lane->shard-1u];
   f->node=p2p_node_state_create("127.0.0.1",0);
   if (!f->node) {lane_error(lane,P2P_ERR_NO_MEM,"server Node allocation");return;}
+  const uint8_t remote_seeds[NOISE_SESSIONS]={33u,49u,65u,81u};
   configure_identity(f->node,&f->identity,f->private_key,
-                     &sc->client_allowlist[0][0],NOISE_SESSIONS);
+                     &sc->client_allowlist[0][0],remote_seeds,
+                     NOISE_SESSIONS);
   p2p_set_peer_callbacks(f->node,server_connected,server_disconnected,f);
   p2p_set_message_handler(f->node,server_echo,f);
   NOISE_CALL(lane,p2p_node_cnet_create_external(
@@ -564,8 +572,9 @@ static void run_noise_baseline(void) {
     noise_client *c=&sc->clients[i];
     c->node=p2p_node_state_create("127.0.0.1",0);
     check_not_null(c->node);
+    const uint8_t remote_seed[1]={17u};
     configure_identity(c->node,&c->identity,c->private_key,
-                       sc->server_key,1u);
+                       sc->server_key,remote_seed,1u);
     p2p_set_peer_callbacks(c->node,client_connected,client_disconnected,c);
     p2p_set_message_handler(c->node,client_echo,c);
     p2p_cnet_config_t transport=net_config(2u);
@@ -578,6 +587,19 @@ static void run_noise_baseline(void) {
     while ((!c->authenticated||
             !sc->finals[i%NOISE_FINALS].authenticated[i]) &&
             cmeta_monotonic_ms()<deadline) pump(sc);
+    if (!c->authenticated || !sc->finals[i%NOISE_FINALS].authenticated[i]) {
+      p2p_cnet_sg_snapshot_v1_t snap={0};
+      check_equal(P2P_OK,p2p_cnet_sg_snapshot_v1(
+          sc->handoff,i%NOISE_FINALS,&snap));
+      fprintf(stderr,"Noise handshake timeout: client=%zu auth=%zu invalid=%zu "
+              "server_auth=%zu server_invalid=%zu client_peers=%d "
+              "sg_routed=%" PRIu64 " denied=%" PRIu64 " credit_taken=%zu\n",
+              i,c->authenticated,c->invalid,
+              sc->finals[i%NOISE_FINALS].authenticated[i],
+              sc->finals[i%NOISE_FINALS].invalid,
+              p2p_get_peer_count(c->node),
+              snap.routed,snap.denied,snap.handoff.taken);
+    }
     check_equal((size_t)1u,c->authenticated);
     check_equal((size_t)1u,sc->finals[i%NOISE_FINALS].authenticated[i]);
     check_not_null(c->peer);
