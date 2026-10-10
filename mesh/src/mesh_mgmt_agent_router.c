@@ -1022,6 +1022,15 @@ mesh_mgmt_agent_router_send_execution_terminal_v4(
     router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
     return router->last_error;
   }
+  /* Preserve the complete MMP typed feature, grant/signature, target and
+   * outbound payload validation contract before encrypting or admitting
+   * a CNet write. Same preflight as the ordinary MMP send path. */
+  if (mesh_mgmt_connection_preflight_send_v4(
+          &slot->runtime.protocol_peer.connection, frame, length) !=
+      MESH_MGMT_CONNECTION_OK) {
+    router->last_error = MESH_MGMT_AGENT_ROUTER_PEER_FAILED;
+    return router->last_error;
+  }
   /* Encrypted P2P copies frame synchronously before returning admission.
    * The signer arena is not retained; CNet retains only the callback ticket. */
   result = p2p_send_message_terminal_v3(
