@@ -302,6 +302,17 @@ if(P2P_SG_BUILD_BENCHMARKS)
     target_link_libraries(bench_p2p_sg_${_shards}
       PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
   endforeach()
+  # Same one authenticated session as the 1- and 2-shard rows, but with
+  # three installed final Owners, two deliberately idle during measurement.
+  add_executable(bench_p2p_sg_4_1
+    "${TURBOP2P_SOURCE_DIR}/p2p/bench/bench_p2p_sg_owner.c")
+  set_property(TARGET bench_p2p_sg_4_1 PROPERTY LINKER_LANGUAGE CXX)
+  target_compile_definitions(bench_p2p_sg_4_1
+    PRIVATE BENCH_SG_SHARDS=4 BENCH_ACTIVE_SESSIONS=1)
+  target_include_directories(bench_p2p_sg_4_1 PRIVATE
+    "${TURBOP2P_SOURCE_DIR}/p2p/tests")
+  target_link_libraries(bench_p2p_sg_4_1
+    PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
 endif()
 
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
