@@ -1195,15 +1195,17 @@ static void test_multi_final(size_t final_count, int command_mode) {
       check_equal((size_t)1u, f->pool.ready);
     }
     if (sc->exercise_typed_rpc) {
-      /* Now advance actual remote clients. Their authenticated COMMAND_REQUEST
-       * callback emits STATUS_DISABLED on the SAME signed MMP connection.
-       * This is remote protocol handling, explicitly NOT successful execution. */
+      /* Now progress real authenticated clients. The STATUS fixture replies
+       * in-callback; the signed RESULT fixture first copies the command and
+       * responds on the next client Runtime turn outside the callback. */
       const uint64_t remote_deadline =
           cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
       for (;;) {
         bool replied = true;
         for (size_t i = 0u; i < sc->finals; ++i)
-          if (sc->finals_data[i].rpc_status_events != 1u ||
+          if ((sc->exercise_signed_result
+                   ? sc->finals_data[i].rpc_result_events
+                   : sc->finals_data[i].rpc_status_events) != 1u ||
               sc->finals_data[i].rpc_errors)
             replied = false;
         if (replied || cmeta_monotonic_ms() >= remote_deadline) break;
@@ -1214,17 +1216,50 @@ static void test_multi_final(size_t final_count, int command_mode) {
         const mesh_mgmt_execution_response_v1_t *reply = &f->rpc_response;
         check_equal(0u, f->rpc_errors);
         check_equal(1u, f->rpc_request_events);
-        check_equal(1u, f->rpc_status_events);
-        check_equal(MESH_MGMT_KIND_COMMAND_STATUS, reply->kind);
-        check_equal(MESH_MGMT_EXECUTION_STATUS_DISABLED, reply->status.code);
-        check_equal(f->expected_command_id, reply->status.command_id,
-                    sizeof(f->expected_command_id));
-        check_equal(f->expected_correlation_id, reply->status.correlation_id,
-                    sizeof(f->expected_correlation_id));
-        check_equal(f->expected_request_digest, reply->status.request_digest,
-                    sizeof(f->expected_request_digest));
-        check_equal(f->client.identity.signer.hello.managed_node_id,
-                    reply->status.responder_node_id, 32u);
+        if (sc->exercise_signed_result) {
+          const mesh_mgmt_execution_result_v1_t *result = &reply->result;
+          mesh_mgmt_execution_result_v1_t tampered = *result;
+          check_equal(1u, f->rpc_reply_sent);
+          check_equal(0u, f->rpc_status_events);
+          check_equal(1u, f->rpc_result_events);
+          check_equal(MESH_MGMT_KIND_COMMAND_RESULT, reply->kind);
+          check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
+          check_equal(7, result->guest_exit_code);
+          check_equal((uint64_t)1u, result->usage.invocations);
+          check_equal(f->expected_command_id, result->command_id,
+                      sizeof(f->expected_command_id));
+          check_equal(f->expected_correlation_id, result->correlation_id,
+                      sizeof(f->expected_correlation_id));
+          check_equal(f->expected_request_digest, result->request_digest,
+                      sizeof(f->expected_request_digest));
+          check_equal(f->client.identity.signer.hello.managed_node_id,
+                      result->target_node_id, 32u);
+          check_equal(f->result_signer_public, result->signer_public_key,
+                      sizeof(f->result_signer_public));
+          check_equal(MESH_MGMT_EXECUTION_RESULT_OK,
+              mesh_mgmt_execution_result_verify_v1(
+                  result, f->result_signer_public));
+          /* Tampering with command binding after sign must fail even when
+           * the outer MMP connection itself was fully authenticated. */
+          tampered.request_digest[0] ^= 1u;
+          check_equal(MESH_MGMT_EXECUTION_RESULT_AUTH_FAILED,
+              mesh_mgmt_execution_result_verify_v1(
+                  &tampered, f->result_signer_public));
+        } else {
+          check_equal(0u, f->rpc_reply_sent);
+          check_equal(0u, f->rpc_result_events);
+          check_equal(1u, f->rpc_status_events);
+          check_equal(MESH_MGMT_KIND_COMMAND_STATUS, reply->kind);
+          check_equal(MESH_MGMT_EXECUTION_STATUS_DISABLED, reply->status.code);
+          check_equal(f->expected_command_id, reply->status.command_id,
+                      sizeof(f->expected_command_id));
+          check_equal(f->expected_correlation_id, reply->status.correlation_id,
+                      sizeof(f->expected_correlation_id));
+          check_equal(f->expected_request_digest, reply->status.request_digest,
+                      sizeof(f->expected_request_digest));
+          check_equal(f->client.identity.signer.hello.managed_node_id,
+                      reply->status.responder_node_id, 32u);
+        }
         check_equal(f->client.identity.signer.hello.managed_node_id,
                     reply->origin_node_id, 32u);
         check_equal(f->server.identity.signer.hello.managed_node_id,
@@ -1236,7 +1271,14 @@ static void test_multi_final(size_t final_count, int command_mode) {
       check_equal(1u, sc->finals_data[i].command_terminals);
       if (sc->exercise_typed_rpc) {
         check_equal(1u, sc->finals_data[i].rpc_request_events);
-        check_equal(1u, sc->finals_data[i].rpc_status_events);
+        if (sc->exercise_signed_result) {
+          check_equal(1u, sc->finals_data[i].rpc_result_events);
+          check_equal(0u, sc->finals_data[i].rpc_status_events);
+          check_equal(1u, sc->finals_data[i].rpc_reply_sent);
+        } else {
+          check_equal(1u, sc->finals_data[i].rpc_status_events);
+          check_equal(0u, sc->finals_data[i].rpc_result_events);
+        }
       }
     }
   }
@@ -1611,6 +1653,12 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+  it("verifies authenticated signed COMMAND_RESULT across 2 SG Final Owners") {
+    test_multi_final(2u, 3);
+  }
+  it("verifies authenticated signed COMMAND_RESULT across 4 SG Final Owners") {
+    test_multi_final(4u, 3);
+  }
   it("separates real COMMAND_REQUEST local terminal from remote STATUS on 2 SG Finals") {
     test_multi_final(2u, 2);
   }
