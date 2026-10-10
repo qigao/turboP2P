@@ -60,7 +60,10 @@ struct signed_final {
   uint8_t expected_correlation_id[MESH_MGMT_EXECUTION_ID_SIZE];
   uint8_t expected_request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   mesh_mgmt_execution_response_v1_t rpc_response;
-  unsigned rpc_request_events, rpc_status_events, rpc_errors;
+  mesh_mgmt_execution_shadow_command_v1_t rpc_command;
+  uint8_t result_signer_public[32];
+  unsigned rpc_request_events, rpc_status_events, rpc_result_events;
+  unsigned rpc_reply_sent, rpc_errors;
 };
 
 typedef struct {
@@ -84,6 +87,7 @@ struct sg_multi_case {
   uint8_t same_signed_identity;
   uint8_t exercise_command_terminal;
   uint8_t exercise_typed_rpc;
+  uint8_t exercise_signed_result;
   uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
@@ -134,21 +138,34 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
     if (ep != &f->client || f->rpc_request_events != 1u ||
         mesh_mgmt_agent_runtime_execution_command_from_event_v1(
             &ep->runtime, peer, event, TEST_NOW_MS, &command) !=
-            MESH_MGMT_EXECUTION_CONSUMER_OK ||
-        mesh_mgmt_agent_runtime_send_execution_status_from_command_v1(
+            MESH_MGMT_EXECUTION_CONSUMER_OK) {
+      ++f->rpc_errors;
+      return -1;
+    }
+    if (f->scenario->exercise_signed_result) {
+      /* Owned typed command survives the borrowed dispatcher callback.
+       * A separate client-runtime turn below emits the signed RESULT. */
+      f->rpc_command = command;
+    } else if (mesh_mgmt_agent_runtime_send_execution_status_from_command_v1(
             &ep->runtime, peer, &command,
             MESH_MGMT_EXECUTION_STATUS_DISABLED) !=
             MESH_MGMT_EXECUTION_DISABLED_RESPONDER_OK) {
       ++f->rpc_errors;
       return -1;
     }
-  } else if (event->type ==
-                 MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW &&
+  } else if ((event->type ==
+                  MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW ||
+              event->type ==
+                  MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW) &&
              ep->rpc_final) {
     signed_final *f = ep->rpc_final;
     mesh_mgmt_execution_response_v1_t response = {0};
-    ++f->rpc_status_events;
-    if (ep != &f->server || f->rpc_status_events != 1u ||
+    const int is_result =
+        event->type == MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW;
+    if (is_result) ++f->rpc_result_events;
+    else ++f->rpc_status_events;
+    if (ep != &f->server ||
+        (is_result ? f->rpc_result_events : f->rpc_status_events) != 1u ||
         mesh_mgmt_agent_runtime_execution_response_from_event_v1(
             &ep->runtime, peer, event, &response) !=
             MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK) {
@@ -328,6 +345,66 @@ static void prepare_typed_request(signed_final *f) {
       mesh_mgmt_execution_command_request_encode_v1(
           &grant, &request, f->request_payload,
           sizeof(f->request_payload), &f->request_payload_len));
+}
+
+
+/* This test-only responder constructs a **failed** signed result from the
+ * authenticated typed command. It does NOT execute a Wasm guest or stand in
+ * for mesh_mgmt_execution_node's durable worker. Its purpose is exclusively
+ * to qualify the complete RESULT wire signature/identity/SG dispatch path. */
+static void send_fixture_signed_result(signed_final *f) {
+  const mesh_mgmt_execution_shadow_command_v1_t *command = &f->rpc_command;
+  const mesh_mgmt_execution_request_v1_t *request = &command->request;
+  const mesh_mgmt_execution_grant_v1_t *grant = &command->grant;
+  mesh_mgmt_execution_result_v1_t result = {0};
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_RESULT_SIZE_V1] = {0};
+  uint8_t private_key[32] = {0};
+  size_t payload_size = 0u;
+  if (!f->scenario->exercise_signed_result ||
+      f->rpc_request_events != 1u || f->rpc_reply_sent || f->rpc_errors)
+    return;
+  /* Never reissue on a failed send; an application operation must explicitly
+   * decide a retry with a NEW signed generation. */
+  ++f->rpc_reply_sent;
+  memset(private_key, (int)(0x81u + f->final_index), sizeof(private_key));
+  result.version = MESH_MGMT_EXECUTION_RESULT_VERSION_V1;
+  memcpy(result.command_id, request->command_id, sizeof(result.command_id));
+  memcpy(result.request_digest, command->request_digest,
+         sizeof(result.request_digest));
+  memcpy(result.target_node_id, request->target_node_id,
+         sizeof(result.target_node_id));
+  memcpy(result.deployment_id, grant->deployment_id,
+         sizeof(result.deployment_id));
+  result.deployment_generation = grant->deployment_generation;
+  memcpy(result.package_digest, grant->package_digest,
+         sizeof(result.package_digest));
+  result.policy_epoch = grant->policy_epoch;
+  memcpy(result.grant_id, grant->grant_id, sizeof(result.grant_id));
+  result.state = MESH_MGMT_EXECUTION_STATE_FAILED;
+  result.runtime_code = 7;
+  result.runtime_stage = 7;
+  result.guest_exit_code = 7;
+  result.usage.invocations = 1u;
+  memset(result.stdout_digest, 0x31, sizeof(result.stdout_digest));
+  memset(result.stderr_digest, 0x32, sizeof(result.stderr_digest));
+  result.started_at_ms = TEST_NOW_MS;
+  result.finished_at_ms = TEST_NOW_MS + 1u;
+  result.worker_generation = (uint64_t)(f->final_index + 1u);
+  memcpy(result.correlation_id, request->correlation_id,
+         sizeof(result.correlation_id));
+  if (mesh_mgmt_execution_result_sign_v1(&result, private_key) !=
+          MESH_MGMT_EXECUTION_RESULT_OK ||
+      memcmp(result.signer_public_key, f->result_signer_public,
+             sizeof(result.signer_public_key)) != 0 ||
+      mesh_mgmt_execution_command_result_encode_v1(
+          &result, payload, sizeof(payload), &payload_size) !=
+          MESH_MGMT_EXECUTION_WIRE_OK ||
+      payload_size != sizeof(payload) ||
+      mesh_mgmt_agent_runtime_send_execution_response_v1(
+          &f->client.runtime, MESH_MGMT_KIND_COMMAND_RESULT,
+          command->reply_node_id, payload, payload_size) !=
+          MESH_MGMT_AGENT_RUNTIME_OK)
+    ++f->rpc_errors;
 }
 
 static p2p_cnet_config_t transport_settings(void) {
@@ -896,10 +973,14 @@ static void barrier(sg_multi_case *sc) {
 }
 static void pump(sg_multi_case *sc) {
   for (size_t i = 0u; i < sc->finals; ++i) {
-    signed_endpoint *client = &sc->finals_data[i].client;
-    if (client->runtime.state == MESH_MGMT_AGENT_RUNTIME_RUNNING)
+    signed_final *f = &sc->finals_data[i];
+    signed_endpoint *client = &f->client;
+    if (client->runtime.state == MESH_MGMT_AGENT_RUNTIME_RUNNING) {
+      if (sc->exercise_signed_result)
+        send_fixture_signed_result(f); /* outside any MMP callback */
       check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
           mesh_mgmt_agent_runtime_poll_v1(&client->runtime));
+    }
   }
   for (size_t i = 0u; i < sc->shards; ++i) {
     /* Intentionally suspend ONLY the retiring final's actual SG observer
@@ -945,7 +1026,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
   sc->finals = final_count;
   sc->shards = final_count + 1u;
   sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
-  sc->exercise_typed_rpc = (uint8_t)(command_mode == 2);
+  sc->exercise_typed_rpc = (uint8_t)(command_mode >= 2);
+  sc->exercise_signed_result = (uint8_t)(command_mode == 3);
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -963,6 +1045,13 @@ static void test_multi_final(size_t final_count, int command_mode) {
       f->server.rpc_final = f;
       f->client.rpc_final = f;
       prepare_typed_request(f);
+      if (sc->exercise_signed_result) {
+        uint8_t signer_private[32] = {0};
+        memset(signer_private, (int)(0x81u + i), sizeof(signer_private));
+        check_equal(MESH_MGMT_CRYPTO_OK,
+            mesh_mgmt_ed25519_public_from_private(
+                signer_private, f->result_signer_public));
+      }
     }
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
@@ -1084,6 +1173,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
         check_equal(P2P_OK, f->command_terminal_status);
         check_equal(0u, f->rpc_request_events);
         check_equal(0u, f->rpc_status_events);
+        check_equal(0u, f->rpc_result_events);
+        check_equal(0u, f->rpc_reply_sent);
       }
     }
     const uint64_t wire_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
@@ -1104,15 +1195,17 @@ static void test_multi_final(size_t final_count, int command_mode) {
       check_equal((size_t)1u, f->pool.ready);
     }
     if (sc->exercise_typed_rpc) {
-      /* Now advance actual remote clients. Their authenticated COMMAND_REQUEST
-       * callback emits STATUS_DISABLED on the SAME signed MMP connection.
-       * This is remote protocol handling, explicitly NOT successful execution. */
+      /* Now progress real authenticated clients. The STATUS fixture replies
+       * in-callback; the signed RESULT fixture first copies the command and
+       * responds on the next client Runtime turn outside the callback. */
       const uint64_t remote_deadline =
           cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
       for (;;) {
         bool replied = true;
         for (size_t i = 0u; i < sc->finals; ++i)
-          if (sc->finals_data[i].rpc_status_events != 1u ||
+          if ((sc->exercise_signed_result
+                   ? sc->finals_data[i].rpc_result_events
+                   : sc->finals_data[i].rpc_status_events) != 1u ||
               sc->finals_data[i].rpc_errors)
             replied = false;
         if (replied || cmeta_monotonic_ms() >= remote_deadline) break;
@@ -1123,17 +1216,50 @@ static void test_multi_final(size_t final_count, int command_mode) {
         const mesh_mgmt_execution_response_v1_t *reply = &f->rpc_response;
         check_equal(0u, f->rpc_errors);
         check_equal(1u, f->rpc_request_events);
-        check_equal(1u, f->rpc_status_events);
-        check_equal(MESH_MGMT_KIND_COMMAND_STATUS, reply->kind);
-        check_equal(MESH_MGMT_EXECUTION_STATUS_DISABLED, reply->status.code);
-        check_equal(f->expected_command_id, reply->status.command_id,
-                    sizeof(f->expected_command_id));
-        check_equal(f->expected_correlation_id, reply->status.correlation_id,
-                    sizeof(f->expected_correlation_id));
-        check_equal(f->expected_request_digest, reply->status.request_digest,
-                    sizeof(f->expected_request_digest));
-        check_equal(f->client.identity.signer.hello.managed_node_id,
-                    reply->status.responder_node_id, 32u);
+        if (sc->exercise_signed_result) {
+          const mesh_mgmt_execution_result_v1_t *result = &reply->result;
+          mesh_mgmt_execution_result_v1_t tampered = *result;
+          check_equal(1u, f->rpc_reply_sent);
+          check_equal(0u, f->rpc_status_events);
+          check_equal(1u, f->rpc_result_events);
+          check_equal(MESH_MGMT_KIND_COMMAND_RESULT, reply->kind);
+          check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
+          check_equal(7, result->guest_exit_code);
+          check_equal((uint64_t)1u, result->usage.invocations);
+          check_equal(f->expected_command_id, result->command_id,
+                      sizeof(f->expected_command_id));
+          check_equal(f->expected_correlation_id, result->correlation_id,
+                      sizeof(f->expected_correlation_id));
+          check_equal(f->expected_request_digest, result->request_digest,
+                      sizeof(f->expected_request_digest));
+          check_equal(f->client.identity.signer.hello.managed_node_id,
+                      result->target_node_id, 32u);
+          check_equal(f->result_signer_public, result->signer_public_key,
+                      sizeof(f->result_signer_public));
+          check_equal(MESH_MGMT_EXECUTION_RESULT_OK,
+              mesh_mgmt_execution_result_verify_v1(
+                  result, f->result_signer_public));
+          /* Tampering with command binding after sign must fail even when
+           * the outer MMP connection itself was fully authenticated. */
+          tampered.request_digest[0] ^= 1u;
+          check_equal(MESH_MGMT_EXECUTION_RESULT_AUTH_FAILED,
+              mesh_mgmt_execution_result_verify_v1(
+                  &tampered, f->result_signer_public));
+        } else {
+          check_equal(0u, f->rpc_reply_sent);
+          check_equal(0u, f->rpc_result_events);
+          check_equal(1u, f->rpc_status_events);
+          check_equal(MESH_MGMT_KIND_COMMAND_STATUS, reply->kind);
+          check_equal(MESH_MGMT_EXECUTION_STATUS_DISABLED, reply->status.code);
+          check_equal(f->expected_command_id, reply->status.command_id,
+                      sizeof(f->expected_command_id));
+          check_equal(f->expected_correlation_id, reply->status.correlation_id,
+                      sizeof(f->expected_correlation_id));
+          check_equal(f->expected_request_digest, reply->status.request_digest,
+                      sizeof(f->expected_request_digest));
+          check_equal(f->client.identity.signer.hello.managed_node_id,
+                      reply->status.responder_node_id, 32u);
+        }
         check_equal(f->client.identity.signer.hello.managed_node_id,
                     reply->origin_node_id, 32u);
         check_equal(f->server.identity.signer.hello.managed_node_id,
@@ -1145,7 +1271,14 @@ static void test_multi_final(size_t final_count, int command_mode) {
       check_equal(1u, sc->finals_data[i].command_terminals);
       if (sc->exercise_typed_rpc) {
         check_equal(1u, sc->finals_data[i].rpc_request_events);
-        check_equal(1u, sc->finals_data[i].rpc_status_events);
+        if (sc->exercise_signed_result) {
+          check_equal(1u, sc->finals_data[i].rpc_result_events);
+          check_equal(0u, sc->finals_data[i].rpc_status_events);
+          check_equal(1u, sc->finals_data[i].rpc_reply_sent);
+        } else {
+          check_equal(1u, sc->finals_data[i].rpc_status_events);
+          check_equal(0u, sc->finals_data[i].rpc_result_events);
+        }
       }
     }
   }
@@ -1520,6 +1653,12 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+  it("verifies authenticated signed COMMAND_RESULT across 2 SG Final Owners") {
+    test_multi_final(2u, 3);
+  }
+  it("verifies authenticated signed COMMAND_RESULT across 4 SG Final Owners") {
+    test_multi_final(4u, 3);
+  }
   it("separates real COMMAND_REQUEST local terminal from remote STATUS on 2 SG Finals") {
     test_multi_final(2u, 2);
   }
