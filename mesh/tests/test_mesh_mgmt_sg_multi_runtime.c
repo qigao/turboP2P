@@ -2,6 +2,7 @@
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_test_identity.h"
 #include "mesh_mgmt_execution_wire.h"
+#include "mesh_mgmt_execution_rpc_registry.h"
 #include "core/node_cnet.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
@@ -61,6 +62,9 @@ struct signed_final {
   uint8_t expected_request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   mesh_mgmt_execution_response_v1_t rpc_response;
   mesh_mgmt_execution_shadow_command_v1_t rpc_command;
+  mesh_mgmt_execution_rpc_registry_v1_t rpc_registry;
+  mesh_mgmt_execution_rpc_binding_v1_t rpc_binding;
+  mesh_mgmt_execution_rpc_completion_v1_t rpc_completion;
   uint8_t result_signer_public[32];
   unsigned rpc_request_events, rpc_status_events, rpc_result_events;
   unsigned rpc_reply_sent, rpc_errors;
@@ -169,6 +173,35 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
         mesh_mgmt_agent_runtime_execution_response_from_event_v1(
             &ep->runtime, peer, event, &response) !=
             MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK) {
+      ++f->rpc_errors;
+      return -1;
+    }
+    /* Verify the execution key authority separately; a valid signature
+     * using an arbitrary self-declared key is not a trusted result. */
+    if (is_result &&
+        (memcmp(response.result.signer_public_key,
+                f->result_signer_public, sizeof(f->result_signer_public)) != 0 ||
+         mesh_mgmt_execution_result_verify_v1(
+             &response.result, f->result_signer_public) !=
+             MESH_MGMT_EXECUTION_RESULT_OK)) {
+      ++f->rpc_errors;
+      return -1;
+    }
+    /* The single-owner RPC registry, not CNet's send ticket, supplies the
+     * application-side REQUEST → STATUS/RESULT state transition. */
+    mesh_mgmt_execution_response_v1_t forged = response;
+    if (is_result) forged.result.request_digest[0] ^= 1u;
+    else forged.status.request_digest[0] ^= 1u;
+    if (!f->rpc_registry.impl ||
+        mesh_mgmt_execution_rpc_registry_complete_v1(
+            &f->rpc_registry, &forged, TEST_NOW_MS + 1u) !=
+            MESH_MGMT_EXECUTION_RPC_REGISTRY_AUTH_FAILED ||
+        mesh_mgmt_execution_rpc_registry_complete_v1(
+            &f->rpc_registry, &response, TEST_NOW_MS + 1u) !=
+            MESH_MGMT_EXECUTION_RPC_REGISTRY_OK ||
+        mesh_mgmt_execution_rpc_registry_complete_v1(
+            &f->rpc_registry, &response, TEST_NOW_MS + 1u) !=
+            MESH_MGMT_EXECUTION_RPC_REGISTRY_ALREADY_COMPLETE) {
       ++f->rpc_errors;
       return -1;
     }
@@ -651,6 +684,68 @@ static void multi_command_terminal(void *context, uint64_t ticket, int status) {
       mesh_mgmt_agent_runtime_destroy_v2(&f->server.runtime) !=
           MESH_MGMT_AGENT_RUNTIME_INVALID_STATE)
     fail_lane(lane, SALTS_EPERM, "MMP terminal callback reentered Stop");
+}
+
+
+/* Registry API is single-owner by contract: only its original SG Final
+ * worker registers, completes, snapshots and releases this command. */
+static void host_register_rpc(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = arg;
+  (void)ctx;
+  if (!lane->shard || lane->error ||
+      !lane->scenario->exercise_typed_rpc) return;
+  signed_final *f = lane_final(lane);
+  mesh_mgmt_execution_rpc_completion_v1_t pending = {0};
+  mesh_mgmt_execution_rpc_binding_v1_t *binding = &f->rpc_binding;
+  memcpy(binding->command_id, f->expected_command_id,
+         sizeof(binding->command_id));
+  memcpy(binding->correlation_id, f->expected_correlation_id,
+         sizeof(binding->correlation_id));
+  memcpy(binding->request_digest, f->expected_request_digest,
+         sizeof(binding->request_digest));
+  memcpy(binding->target_node_id,
+         f->client.identity.signer.hello.managed_node_id,
+         sizeof(binding->target_node_id));
+  binding->deadline_ms = TEST_NOW_MS + 2000u;
+  SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_init_v1(
+      &f->rpc_registry, 2u, 1000u));
+  SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_register_v1(
+      &f->rpc_registry, binding, TEST_NOW_MS));
+  if (mesh_mgmt_execution_rpc_registry_release_v1(
+          &f->rpc_registry, binding->correlation_id) !=
+          MESH_MGMT_EXECUTION_RPC_REGISTRY_NOT_READY) {
+    fail_lane(lane, SALTS_EPROTO, "RPC registry early release"); return;
+  }
+  SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_get_v1(
+      &f->rpc_registry, binding->correlation_id,
+      TEST_NOW_MS + 1u, &pending));
+  if (pending.state != MESH_MGMT_EXECUTION_RPC_PENDING)
+    fail_lane(lane, SALTS_EPROTO, "RPC registry already completed");
+}
+static void host_snapshot_rpc(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = arg;
+  (void)ctx;
+  if (!lane->shard || lane->error ||
+      !lane->scenario->exercise_typed_rpc) return;
+  signed_final *f = lane_final(lane);
+  SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_get_v1(
+      &f->rpc_registry, f->rpc_binding.correlation_id,
+      TEST_NOW_MS + 2u, &f->rpc_completion));
+}
+static void host_release_rpc(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = arg;
+  (void)ctx;
+  if (!lane->shard || lane->error ||
+      !lane->scenario->exercise_typed_rpc) return;
+  signed_final *f = lane_final(lane);
+  SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_release_v1(
+      &f->rpc_registry, f->rpc_binding.correlation_id));
+  if (mesh_mgmt_execution_rpc_registry_release_v1(
+          &f->rpc_registry, f->rpc_binding.correlation_id) !=
+          MESH_MGMT_EXECUTION_RPC_REGISTRY_NOT_FOUND) {
+    fail_lane(lane, SALTS_EPROTO, "RPC registry double consume"); return;
+  }
+  mesh_mgmt_execution_rpc_registry_destroy_v1(&f->rpc_registry);
 }
 
 static void host_foreign_command(native_io_sharded_context *ctx, void *arg) {
