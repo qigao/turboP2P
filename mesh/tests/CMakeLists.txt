@@ -542,17 +542,6 @@ foreach(test_source ${MESH_TEST_SOURCES})
         FOLDER "mesh/tests"
         RUNTIME_OUTPUT_DIRECTORY ${test_runtime_output_directory})
 
-    if(WIN32 AND (test_name STREQUAL "test_mesh_mgmt_execution_runner" OR
-                  test_name STREQUAL "test_mesh_mgmt_execution_orchestrator" OR
-                  test_name STREQUAL "test_mesh_mgmt_execution_process" OR
-                  test_name STREQUAL "test_mesh_control_execution_provider"))
-        add_custom_command(TARGET ${test_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${_turbo_p2p_runtime_dlls} $<TARGET_FILE_DIR:${test_name}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${_turbo_p2p_runtime_dlls} $<TARGET_FILE_DIR:${test_name}>)
-    endif()
-
     add_test(NAME ${test_name} COMMAND ${test_name})
     if(TARGET turbo_p2p_copy_runtime_dlls)
         add_dependencies(${test_name} turbo_p2p_copy_runtime_dlls)
