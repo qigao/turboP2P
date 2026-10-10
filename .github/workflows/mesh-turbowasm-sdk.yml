@@ -85,11 +85,11 @@ jobs:
             -DVCPKG_MANIFEST_MODE=OFF \
             -DP2P_TURBOWASM_SDK_GATE=ON
           cmake --build build/wasm-sdk --parallel 2 \
-            --target test_mesh_mgmt_execution_runner_sdk
+            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk
           ctest --test-dir build/wasm-sdk --output-on-failure \
-            -R '^test_mesh_mgmt_execution_runner_sdk$'
+            -R '^test_mesh_mgmt_execution_(runner|node)_sdk$'
           ctest --test-dir build/wasm-sdk --output-on-failure \
-            -R '^test_mesh_mgmt_execution_runner_sdk$' --repeat until-fail:10
+            -R '^test_mesh_mgmt_execution_(runner|node)_sdk$' --repeat until-fail:10
       - name: Real guest local ASan/UBSan qualification
         shell: bash
         env:
@@ -106,11 +106,11 @@ jobs:
             '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
             '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
           cmake --build build/wasm-sdk-sanitize --parallel 2 \
-            --target test_mesh_mgmt_execution_runner_sdk
+            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk
           ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
-            -R '^test_mesh_mgmt_execution_runner_sdk$'
+            -R '^test_mesh_mgmt_execution_(runner|node)_sdk$'
           ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
-            -R '^test_mesh_mgmt_execution_runner_sdk$' --repeat until-fail:5
+            -R '^test_mesh_mgmt_execution_(runner|node)_sdk$' --repeat until-fail:5
       - name: Compiler cache statistics
         if: always()
         shell: bash
