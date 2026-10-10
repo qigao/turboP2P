@@ -156,6 +156,17 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
       ++f->rpc_errors;
       return -1;
     }
+#ifdef MESH_SG_REAL_EXECUTION
+    if (f->scenario->exercise_real_execution) {
+      /* Only nonblocking copied work admission is done from the signed MMP
+       * callback. Durable Store and guest CPU work stay on the CMeta Worker. */
+      if (mesh_mgmt_execution_node_try_submit_v1(
+              &f->execution_node, &command) != MESH_MGMT_EXECUTION_NODE_OK) {
+        ++f->rpc_errors;
+        return -1;
+      }
+    } else
+#endif
     if (f->scenario->exercise_signed_result) {
       /* Owned typed command survives the borrowed dispatcher callback.
        * A separate client-runtime turn below emits the signed RESULT. */
@@ -1179,6 +1190,20 @@ static void pump(sg_multi_case *sc) {
     signed_final *f = &sc->finals_data[i];
     signed_endpoint *client = &f->client;
     if (client->runtime.state == MESH_MGMT_AGENT_RUNTIME_RUNNING) {
+#ifdef MESH_SG_REAL_EXECUTION
+      if (sc->exercise_real_execution) {
+        if (f->rpc_request_events == 1u && !f->rpc_reply_sent &&
+            !f->rpc_errors) {
+          const mesh_mgmt_execution_node_result_t sent =
+              mesh_mgmt_execution_node_send_next_v1(
+                  &f->execution_node, &client->runtime);
+          if (sent == MESH_MGMT_EXECUTION_NODE_OK)
+            ++f->rpc_reply_sent; /* local admission, NOT wire terminal/ACK */
+          else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
+            ++f->rpc_errors;
+        }
+      } else
+#endif
       if (sc->exercise_signed_result)
         send_fixture_signed_result(f); /* outside any MMP callback */
       check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
