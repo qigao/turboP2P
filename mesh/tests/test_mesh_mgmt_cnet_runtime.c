@@ -988,7 +988,7 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
   client.config.bootstrap_count = 0u;
   start(&client);
   wait_established(&server, &client, 1u);
-  payload_len = execution_status_payload_v4(&server);
+  payload_len = execution_status_payload_v4(&server, payload);
   check_not_null(server.peer);
   probe.server = &server;
 
