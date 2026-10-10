@@ -26,6 +26,7 @@ add_library(foundation STATIC
   "${mesh_src}/mesh_mgmt_dispatch.c"
   "${mesh_src}/mesh_mgmt_execution_consumer.c"
   "${mesh_src}/mesh_mgmt_execution_response_consumer.c"
+  "${mesh_src}/mesh_mgmt_execution_rpc_registry.c"
   "${mesh_src}/mesh_mgmt_transport.c"
   "${mesh_src}/mesh_mgmt_connection.c"
   "${mesh_src}/mesh_mgmt_peer.c"
