@@ -316,6 +316,108 @@ static p2p_cnet_sg_snapshot_v1_t sg4_snapshot(sg4_case *scenario, size_t i) {
     return snap;
 }
 
+
+/* Process CPU includes all SG Owner and standalone client threads. A sample
+ * measures one complete parallel request/reply application batch, not TCP
+ * one-way latency; compare session counts before inferring any core scaling. */
+static uint64_t sg4_clock_ns(clockid_t kind) {
+    struct timespec value = {0};
+    check_equal(0, clock_gettime(kind, &value));
+    return (uint64_t)value.tv_sec * 1000000000ull + (uint64_t)value.tv_nsec;
+}
+static int sg4_sort_u64(const void *a, const void *b) {
+    uint64_t lhs = *(const uint64_t *)a, rhs = *(const uint64_t *)b;
+    return (lhs > rhs) - (lhs < rhs);
+}
+static size_t sg4_count_env(const char *name, size_t default_value,
+                             size_t maximum) {
+    const char *input = getenv(name);
+    char *end = NULL;
+    unsigned long value;
+    if (!input || !*input) return default_value;
+    errno = 0;
+    value = strtoul(input, &end, 10);
+    if (errno || end == input || !end || *end || value == 0u ||
+        value > maximum) {
+        fprintf(stderr, "Invalid %s=%s (expect 1..%zu)\n",
+                name, input, maximum);
+        exit(2);
+    }
+    return (size_t)value;
+}
+static uint64_t sg4_percentile(const uint64_t *values, size_t count,
+                               size_t percentile) {
+    size_t rank = (count * percentile + 99u) / 100u;
+    if (rank == 0u) rank = 1u;
+    if (rank > count) rank = count;
+    return values[rank - 1u];
+}
+static void sg4_run_benchmark(sg4_case *scenario) {
+    size_t warmup = sg4_count_env("P2P_SG_BENCH_WARMUP", 16u, 512u);
+    size_t count = sg4_count_env("P2P_SG_BENCH_ROUNDS", 128u, 4096u);
+    uint64_t *samples = calloc(count, sizeof(*samples));
+    uint64_t wall0 = 0u, cpu0 = 0u;
+    check_not_null(samples);
+    for (size_t round = 0u; round < warmup + count; ++round) {
+        int expected = 2 + (int)round; /* preceding one-message proof */
+        uint64_t started = 0u;
+        if (round == warmup) {
+            wall0 = sg4_clock_ns(CLOCK_MONOTONIC);
+            cpu0 = sg4_clock_ns(CLOCK_PROCESS_CPUTIME_ID);
+        }
+        if (round >= warmup) started = sg4_clock_ns(CLOCK_MONOTONIC);
+        for (size_t i = 0u; i < SG4_FINALS; ++i) {
+            const char request[8] = {'h','e','l','l','o','-',(char)('1' + i),'\0'};
+            check_equal(P2P_OK, p2p_send_message(
+                scenario->clients[i].node, scenario->clients[i].peer,
+                P2P_MSG_CUSTOM, request, sizeof(request)));
+        }
+        uint64_t deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
+        for (;;) {
+            bool done = true;
+            for (size_t i = 0u; i < SG4_FINALS; ++i)
+                if (scenario->servers[i].endpoint.messages < expected)
+                    done = false;
+            if (done || cmeta_monotonic_ms() >= deadline) break;
+            sg4_pump(scenario);
+        }
+        for (size_t i = 0u; i < SG4_FINALS; ++i)
+            check_equal(expected, scenario->servers[i].endpoint.messages);
+        for (size_t i = 0u; i < SG4_FINALS; ++i)
+            sg4_submit(scenario, sg4_final_shard(i), sg4_send);
+        sg4_barrier(scenario);
+        deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
+        for (;;) {
+            bool done = true;
+            for (size_t i = 0u; i < SG4_FINALS; ++i)
+                if (scenario->clients[i].messages < expected) done = false;
+            if (done || cmeta_monotonic_ms() >= deadline) break;
+            sg4_pump(scenario);
+        }
+        for (size_t i = 0u; i < SG4_FINALS; ++i)
+            check_equal(expected, scenario->clients[i].messages);
+        if (round >= warmup)
+            samples[round - warmup] =
+                sg4_clock_ns(CLOCK_MONOTONIC) - started;
+    }
+    uint64_t wall1 = sg4_clock_ns(CLOCK_MONOTONIC);
+    uint64_t cpu1 = sg4_clock_ns(CLOCK_PROCESS_CPUTIME_ID);
+    qsort(samples, count, sizeof(*samples), sg4_sort_u64);
+    double wall_s = (double)(wall1 - wall0) / 1e9;
+    double cpu_s = (double)(cpu1 - cpu0) / 1e9;
+    double messages = (double)count * (double)SG4_FINALS * 2.0;
+    check_true(wall_s > 0.0);
+    printf("P2P_SG_BENCH,%u,%u,%zu,%zu,8,%.3f,%.3f,%.2f,%.2f,%.4f,%.3f,%.3f,%.3f\n",
+           (unsigned)SG4_SHARDS, (unsigned)SG4_FINALS, count, warmup,
+           wall_s * 1e3, cpu_s * 1e3, cpu_s * 100.0 / wall_s,
+           messages / wall_s, messages * 8.0 / (1048576.0 * wall_s),
+           (double)sg4_percentile(samples, count, 50u) / 1000.0,
+           (double)sg4_percentile(samples, count, 95u) / 1000.0,
+           (double)sg4_percentile(samples, count, 99u) / 1000.0);
+    fflush(stdout);
+    free(samples);
+}
+
 static void test_four_sg_native_p2p_owners(void) {
     sg4_case fixture = {0};
     sg4_case *scenario = &fixture;
