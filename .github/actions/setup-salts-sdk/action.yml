@@ -110,6 +110,20 @@ runs:
         test -f "$salts_utils_root/lib/cmake/SaltsUtils/SaltsUtilsTargets.cmake"
         test -f "$salts_utils_root/include/salts/crypto.h"
 
+        # The floating Salts 2.3 RC.2 family now owns Unicode 17, whereas
+        # the older SaltsUtils 4.3 RC.1 also exports the same CMake target.
+        # Never mask this partial-import failure by filtering exports, creating
+        # an alias or pinning RC.1. Fail before compilation with a clear
+        # paired-release diagnostic, and require the canonical ownership cutover.
+        salts_export="$salts_root/lib/cmake/Salts/SaltsTargets.cmake"
+        utils_export="$salts_utils_root/lib/cmake/SaltsUtils/SaltsUtilsTargets.cmake"
+        test -f "$salts_export"
+        if grep -Eq '^[[:space:]]*add_library\(Salts::Unicode[[:space:]]' "$salts_export" &&
+           grep -Eq '^[[:space:]]*add_library\(Salts::Unicode[[:space:]]' "$utils_export"; then
+          echo "::error::Incompatible latest released Salts/SaltsUtils SDK pair: both export Salts::Unicode. Complete the SaltsUtils #610 ownership cutover/release; never pin or ignore a duplicate imported target."
+          exit 1
+        fi
+
         {
           echo "SALTS_ROOT=$salts_root"
           echo "SALTS_UTILS_ROOT=$salts_utils_root"
