@@ -481,3 +481,57 @@ foreach(language IN ITEMS c cpp)
   target_link_libraries(${target} PRIVATE Salts::CNet Salts::DataBind Salts::CMeta)
   add_test(NAME ${target} COMMAND ${target})
 endforeach()
+
+
+# Opt-in REAL released TurboWasm SDK gate. Unlike the ordinary native
+# Salts/CNet foundation closure, this builds an import-free wasm32 guest,
+# executes its actual instructions, and asserts the precise call budget.
+# Missing packages, compiler or guest tooling are fatal, never skipped.
+option(P2P_TURBOWASM_SDK_GATE
+  "Compile and execute the real TurboWasm prestaged guest against installed SDK" OFF)
+if(P2P_TURBOWASM_SDK_GATE)
+  if(NOT DEFINED ENV{TURBOWASM_ROOT} OR
+     NOT IS_DIRECTORY "$ENV{TURBOWASM_ROOT}")
+    message(FATAL_ERROR
+      "P2P_TURBOWASM_SDK_GATE requires TURBOWASM_ROOT from released TurboWasm.Native")
+  endif()
+  find_package(TurboWasm CONFIG REQUIRED
+    PATHS "$ENV{TURBOWASM_ROOT}"
+    NO_DEFAULT_PATH)
+  if(NOT TARGET TurboWasm::Runtime)
+    message(FATAL_ERROR
+      "TurboWasm.Native must export TurboWasm::Runtime")
+  endif()
+  include(MeshPrestagedWasmGuest)
+  set(_guest_failure
+    "${CMAKE_CURRENT_BINARY_DIR}/mesh_execution_failure.wasm")
+  set(_guest_success
+    "${CMAKE_CURRENT_BINARY_DIR}/mesh_execution_success.wasm")
+  turbop2p_add_raw_wasm_guest(
+    mesh_wasm_failure_guest
+    SOURCE "${mesh_tests}/data/execution_guest.c"
+    OUTPUT "${_guest_failure}")
+  turbop2p_add_raw_wasm_guest(
+    mesh_wasm_success_guest
+    SOURCE "${mesh_tests}/data/execution_success_guest.c"
+    OUTPUT "${_guest_success}")
+  add_executable(test_mesh_mgmt_execution_runner_sdk
+    "${mesh_tests}/test_mesh_mgmt_execution_runner.c"
+    "${mesh_src}/mesh_mgmt_execution_runner.c")
+  set_property(TARGET test_mesh_mgmt_execution_runner_sdk
+    PROPERTY LINKER_LANGUAGE CXX)
+  add_dependencies(test_mesh_mgmt_execution_runner_sdk
+    mesh_wasm_failure_guest mesh_wasm_success_guest)
+  target_compile_definitions(test_mesh_mgmt_execution_runner_sdk PRIVATE
+    MESH_TEST_EXECUTION_WASM="${_guest_failure}"
+    MESH_TEST_EXECUTION_SUCCESS_WASM="${_guest_success}")
+  target_include_directories(test_mesh_mgmt_execution_runner_sdk PRIVATE
+    "${mesh_src}")
+  target_link_libraries(test_mesh_mgmt_execution_runner_sdk PRIVATE
+    foundation Salts::TinyTest OpenSSL::Crypto Salts::Platform
+    TurboWasm::Runtime)
+  add_test(NAME test_mesh_mgmt_execution_runner_sdk
+    COMMAND test_mesh_mgmt_execution_runner_sdk)
+  set_tests_properties(test_mesh_mgmt_execution_runner_sdk
+    PROPERTIES TIMEOUT 30)
+endif()
