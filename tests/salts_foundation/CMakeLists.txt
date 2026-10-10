@@ -283,6 +283,25 @@ target_link_libraries(test_p2p_cnet_sg_cohost PRIVATE
 add_test(NAME test_p2p_cnet_sg_cohost COMMAND test_p2p_cnet_sg_cohost)
 set_tests_properties(test_p2p_cnet_sg_cohost PROPERTIES TIMEOUT 90)
 
+
+# Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
+# Topologies 1/2/4 have respectively 1/1/3 authenticated connections; use
+# the session column rather than claiming equal-load CPU scaling.
+option(P2P_SG_BUILD_BENCHMARKS "Build opt-in SG NativeIO/Noise benchmarks" OFF)
+if(P2P_SG_BUILD_BENCHMARKS)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "P2P SG benchmark requires Linux process CPU clock")
+  endif()
+  foreach(_shards IN ITEMS 1 2 4)
+    add_executable(bench_p2p_sg_${_shards}
+      "${TURBOP2P_SOURCE_DIR}/p2p/bench/bench_p2p_sg_owner.c")
+    set_property(TARGET bench_p2p_sg_${_shards} PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_p2p_sg_${_shards} PRIVATE BENCH_SG_SHARDS=${_shards})
+    target_link_libraries(bench_p2p_sg_${_shards}
+      PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
+endif()
+
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
 set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_lifecycle PRIVATE p2p_node_core Salts::TinyTest)
