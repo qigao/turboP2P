@@ -5,6 +5,7 @@ on:
     paths:
       - 'mesh/bench/**'
       - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/actions/setup-salts-sdk/action.yml'
       - '.github/workflows/sg-independent-sessions-benchmark.yml'
   workflow_dispatch:
 permissions:
