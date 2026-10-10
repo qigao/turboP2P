@@ -40,6 +40,9 @@ enum {
   BENCH_FINALS = BENCH_MMP_FINALS,
   BENCH_SHARDS = BENCH_FINALS + 1,
   BENCH_PER_FINAL = BENCH_SESSIONS / BENCH_FINALS,
+  /* Identical aggregate physical/Handoff capacity of eight, independent
+   * of shard count; exactly four signed sessions and Pool slots are used. */
+  BENCH_PHYSICAL_PER_FINAL = (BENCH_SESSIONS * 2) / BENCH_FINALS,
   BENCH_BYTES_MAX = 1024,
   BENCH_TIMEOUT_MS = 15000
 };
@@ -47,6 +50,7 @@ typedef struct benchmark_case benchmark_case;
 typedef struct bench_final bench_final;
 
 typedef struct {
+  benchmark_case *scenario;
   mesh_mgmt_agent_runtime_v1_t runtime;
   mesh_mgmt_agent_runtime_config_v1_t cfg;
   mesh_mgmt_p2p_peer_config_v1_t identity;
@@ -57,7 +61,7 @@ typedef struct {
   uint8_t request[BENCH_BYTES_MAX];
   size_t bytes, round, warmup, rounds;
   uint64_t sent_ns, *samples;
-  size_t authenticated, received, invalid;
+  size_t authenticated, received, invalid, unexpected_closes;
 } bench_client;
 
 typedef struct {
@@ -87,7 +91,7 @@ struct bench_final {
   p2p_peer_t *peers[BENCH_SESSIONS];
   uint8_t pending_frame[BENCH_SESSIONS][BENCH_BYTES_MAX];
   size_t pending_size[BENCH_SESSIONS];
-  size_t signed_ready, echo_enqueued, leases;
+  size_t signed_ready, echo_enqueued, leases, unexpected_closes;
   cnet_pool_snapshot pool;
 };
 
@@ -98,6 +102,7 @@ struct benchmark_case {
   bench_final finals[BENCH_FINALS];
   bench_client clients[BENCH_SESSIONS];
   size_t warmup, rounds, bytes;
+  int stopping;
 };
 
 static native_io_backend_kind backend_kind(void) {
@@ -182,6 +187,18 @@ static int client_admit(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
   (void)ctx;(void)peer;(void)key;(void)e;
   return 0;
 }
+static void client_closed(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
+                          mesh_mgmt_agent_router_close_reason_t reason) {
+  bench_client *c=(bench_client*)ctx;
+  if (!c->scenario->stopping && c->authenticated) {
+    ++c->unexpected_closes;
+    ++c->invalid;
+    fprintf(stderr,"Unexpected signed client close: peer=%p reason=%d "
+            "auth_count=%zu key_prefix=%02x%02x\n",
+            (void *)peer,(int)reason,c->authenticated,
+            (unsigned)key[0],(unsigned)key[1]);
+  }
+}
 static int client_session(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
                           const mesh_mgmt_dispatch_event_v1_t *event) {
   bench_client *c=(bench_client*)ctx;
@@ -237,6 +254,21 @@ static int server_session(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
   bench_error(f->lane,P2P_ERR_INVALID_STATE,"unrecognized signed peer");
   return -1;
 }
+static void server_closed(void *ctx,p2p_peer_t *peer,const uint8_t key[32],
+                          mesh_mgmt_agent_router_close_reason_t reason) {
+  bench_final *f=(bench_final*)ctx;
+  if (!f->scenario->stopping && f->signed_ready) {
+    size_t client=BENCH_SESSIONS;
+    for (size_t i=0u;i<BENCH_SESSIONS;++i)
+      if (f->peers[i]==peer) {client=i;break;}
+    ++f->unexpected_closes;
+    fprintf(stderr,"Unexpected signed Final close: final=%zu client=%zu "
+            "peer=%p reason=%d sessions=%zu key_prefix=%02x%02x\n",
+            f->lane->shard-1u,client,(void *)peer,(int)reason,
+            f->signed_ready,(unsigned)key[0],(unsigned)key[1]);
+    bench_error(f->lane,P2P_ERR_INVALID_STATE,"unexpected signed peer close");
+  }
+}
 static void server_echo(void *ctx,p2p_node_t *node,p2p_peer_t *peer,
                         const void *data,size_t length) {
   bench_final *f=(bench_final*)ctx;
@@ -281,6 +313,7 @@ static void init_final(bench_final *f,size_t index) {
   f->cfg.first_service_record_epoch=1u;
   f->cfg.admit_peer=server_admit;
   f->cfg.on_event=server_session;
+  f->cfg.on_peer_closed=server_closed;
   f->cfg.on_non_mmp=server_echo;
   f->cfg.callback_context=f;
   f->cfg.random_bytes=random_bytes;
@@ -318,7 +351,8 @@ static int not_direct(p2p_cnet_owner_t *owner,p2p_connection_t *conn,
 static void init_worker(native_io_sharded_context *ctx,void *arg) {
   bench_lane *lane=(bench_lane*)arg;
   benchmark_case *sc=lane->scenario;
-  p2p_cnet_config_t cfg=native_config(lane->shard?BENCH_PER_FINAL:8u);
+  p2p_cnet_config_t cfg=native_config(
+      lane->shard?BENCH_PHYSICAL_PER_FINAL:8u);
   lane->token=cmeta_thread_current_token();
   BC(lane,native_io_sharded_context_acquire_host(
       ctx,quiescent,lane,&lane->lease,&lane->backend));
@@ -603,9 +637,11 @@ static void run_benchmark(void) {
     bench_client *c=&sc->clients[i];
     /* X25519 clamps the low three scalar bits: adjacent seeds do not
      * produce distinct transport public keys. Keep four true identities. */
+    c->scenario=sc;
     init_identity(c,(uint8_t)(33u+16u*i));
     c->cfg.admit_peer=client_admit;
     c->cfg.on_event=client_session;
+    c->cfg.on_peer_closed=client_closed;
     c->cfg.on_non_mmp=client_echo;
     c->cfg.callback_context=c;
     c->cfg.random_bytes=random_bytes;
@@ -630,10 +666,10 @@ static void run_benchmark(void) {
   policy.acceptor=sc->lanes[0].acceptor;
   policy.placement=CNET_OWNER_PLACE_ROUND_ROBIN;
   policy.final_owner_count=BENCH_FINALS;
-  /* SG Handoff limits are PER FINAL. Reserve exactly four total
-   * physical/credit slots across all topologies, never four per shard. */
-  policy.queue_capacity=BENCH_PER_FINAL;
-  policy.connection_capacity=BENCH_PER_FINAL;
+  /* SG Handoff limits are PER FINAL. Reserve eight aggregate credits
+   * in every topology, with four actual authenticated operations. */
+  policy.queue_capacity=BENCH_PHYSICAL_PER_FINAL;
+  policy.connection_capacity=BENCH_PHYSICAL_PER_FINAL;
   for (size_t i=0;i<BENCH_FINALS;++i)
     policy.final_owners[i]=sc->lanes[i+1u].final_transport;
   check_equal(P2P_OK,p2p_cnet_sg_create_v1(&policy,&sc->sg));
@@ -674,7 +710,13 @@ static void run_benchmark(void) {
     check_equal((size_t)BENCH_PER_FINAL,handoff.handoff.taken);
     check_equal((size_t)0u,handoff.handoff.queued);
   }
+  for (size_t i=0;i<BENCH_FINALS;++i)
+    check_equal((size_t)0u,sc->finals[i].unexpected_closes);
+  for (size_t i=0;i<BENCH_SESSIONS;++i)
+    check_equal((size_t)0u,sc->clients[i].unexpected_closes);
   run_rounds(sc);
+  /* Intentional application shutdown is not a benchmark reconnect. */
+  sc->stopping=1;
   for (size_t i=0;i<BENCH_SESSIONS;++i)
     check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
         mesh_mgmt_agent_runtime_destroy_v2(&sc->clients[i].runtime));
