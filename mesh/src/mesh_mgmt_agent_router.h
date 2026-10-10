@@ -7,6 +7,7 @@
 #include "mesh_mgmt_execution_response_consumer.h"
 
 #include <cstl/vec.h>
+#include <cnet/manager.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,6 +107,22 @@ typedef struct {
   uint8_t remote_session_id[16];
   uint64_t remote_incarnation;
 } mesh_mgmt_agent_router_ready_v1_t;
+
+/* Both proofs name the SAME physical P2P stream:
+ * signed READY belongs to the live Router peer; Manager BOUND identity
+ * belongs to its exact p2p_peer->conn CNet handle, never an unrelated
+ * cohosted TCP connection with the same backend/Owner.
+ * Borrowed manager pointer remains valid only while that P2P owner lives.
+ * This is not itself a ClientPool lease or transport reservation. */
+#define MESH_MGMT_AGENT_ROUTER_PHYSICAL_READY_VERSION 1u
+typedef struct {
+  size_t size;
+  uint32_t version;
+  mesh_mgmt_agent_router_ready_v1_t signed_session;
+  cnet_manager *manager;
+  cnet_managed_connection managed;
+  cnet_connection physical;
+} mesh_mgmt_agent_router_physical_ready_v1_t;
 
 typedef struct {
   uint8_t managed_node_id[32];
@@ -242,6 +259,23 @@ mesh_mgmt_agent_router_send_execution_response_v1(
  * Revalidates and copies an execution request from the dispatcher owned by
  * peer. This is safe only during the router event callback that supplied event.
  */
+/* Combines the canonical signed MMP attestation with the exact
+ * live Manager-owned physical connection of that SAME Router peer.
+ * expected_manager is a required Owner-local capability, not an Owner ID:
+ * another CNet Client/Manager on the same SG backend cannot pass.
+ * No lookup from a physical address or signed identity alone.
+ * The caller must still reserve/associate a CNet ClientPool CONNECTING
+ * record for this precise Manager before calling Pool.bind_ready.
+ * Failure always zeros the entire output, including signed proof. */
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_physical_ready_v1(
+    const mesh_mgmt_agent_router_v1_t *router,
+    const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *expected_manager,
+    mesh_mgmt_agent_router_physical_ready_v1_t *out_ready);
+
 mesh_mgmt_execution_consumer_result_t
 mesh_mgmt_agent_router_execution_command_from_event_v1(
     mesh_mgmt_agent_router_v1_t *router,

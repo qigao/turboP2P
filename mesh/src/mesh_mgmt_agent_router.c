@@ -1,6 +1,7 @@
 #include "mesh_mgmt_agent_router.h"
 
 #include "mesh_mgmt_crypto.h"
+#include "core/peer_cnet.h"
 
 #include <salts/random.h>
 #include <salts/clock.h>
@@ -656,6 +657,42 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_session_v1(
   memcpy(out_ready->remote_session_id, session->remote_session_id,
          sizeof(out_ready->remote_session_id));
   out_ready->remote_incarnation = session->remote_incarnation;
+  return MESH_MGMT_AGENT_ROUTER_OK;
+}
+
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_physical_ready_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16],
+    cnet_manager *expected_manager,
+    mesh_mgmt_agent_router_physical_ready_v1_t *out_ready) {
+  mesh_mgmt_agent_router_ready_v1_t signed_session = {0};
+  p2p_cnet_managed_binding_v1_t physical = {0};
+  mesh_mgmt_agent_router_result_t status;
+
+  if (out_ready) memset(out_ready, 0, sizeof(*out_ready));
+  if (!out_ready || !expected_manager)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  status = mesh_mgmt_agent_router_ready_session_v1(
+      router, peer, expected_transport_peer_id,
+      expected_managed_node_id, expected_connection_id, &signed_session);
+  if (status != MESH_MGMT_AGENT_ROUTER_OK) return status;
+  /* Signed READY is a necessary proof, NOT a physical association.
+   * This call traverses only that live peer's actual P2P transport, checks
+   * the exact CNet Manager BOUND generation and physical handle, and
+   * rejects any independently cohosted client or unmanaged outbound path. */
+  if (p2p_peer_cnet_managed_binding_v1(peer, &physical) != P2P_OK ||
+      physical.version != P2P_CNET_MANAGED_BINDING_VERSION)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  if (physical.manager != expected_manager)
+    return MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH;
+  out_ready->size = sizeof(*out_ready);
+  out_ready->version = MESH_MGMT_AGENT_ROUTER_PHYSICAL_READY_VERSION;
+  out_ready->signed_session = signed_session;
+  out_ready->manager = physical.manager;
+  out_ready->managed = physical.managed;
+  out_ready->physical = physical.physical;
   return MESH_MGMT_AGENT_ROUTER_OK;
 }
 

@@ -180,7 +180,7 @@ set_tests_properties(test_p2p_cnet_admission PROPERTIES TIMEOUT 60)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_p2p_cnet_admission PRIVATE P2P_ADMISSION_TEST_WRAP)
   target_link_options(test_p2p_cnet_admission PRIVATE
-    "-Wl,--wrap=cnet_client_adopt_accepted" "-Wl,--wrap=cnet_send_buffer")
+    "-Wl,--wrap=cnet_manager_reserve" "-Wl,--wrap=cnet_send_buffer")
 endif()
 
 add_executable(test_p2p_key_worker

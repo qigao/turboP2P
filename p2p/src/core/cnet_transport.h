@@ -4,6 +4,7 @@
 #include "connection.h"
 #include "../../include/p2p.h"
 #include <cnet/cnet.h>
+#include <cnet/manager.h>
 #include <cnet/handoff.h>
 #include <cnet/owner_placement.h>
 #include <cnet/sg_host.h>
@@ -135,6 +136,22 @@ int p2p_cnet_owner_poll_sg_host_cohosted(
 int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner);
 int p2p_cnet_owner_destroy(p2p_cnet_owner_t *owner);
 size_t p2p_cnet_owner_connection_count(const p2p_cnet_owner_t *owner);
+
+/* Owner-only, exact live CNet physical/Manager generation for this P2P
+ * inbound connection. Never authorizes protocol READY by itself. Output
+ * is cleared on wrong owner, terminal, detached, stale Manager generation
+ * or unmanaged outbound CNet connection. The Manager pointer is borrowed. */
+#define P2P_CNET_MANAGED_BINDING_VERSION 1u
+typedef struct {
+    size_t size;
+    uint32_t version;
+    cnet_manager *manager;
+    cnet_managed_connection managed;
+    cnet_connection physical;
+} p2p_cnet_managed_binding_v1_t;
+int p2p_cnet_connection_managed_binding_v1(
+    const p2p_connection_t *connection, p2p_cnet_managed_binding_v1_t *out);
+
 
 /*
  * Server SG cross-Owner admission (transport-level phase; NativeIO SG host

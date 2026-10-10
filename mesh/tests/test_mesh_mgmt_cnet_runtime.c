@@ -4,6 +4,7 @@
 #include "mesh_mgmt_service_config.h"
 #include "mesh_mgmt_test_identity.h"
 #include "core/node_state.h"
+#include "core/peer_cnet.h"
 #include "transfer/transfer.h"
 #include <cnet/cnet.h>
 #include <salts/clock.h>
@@ -166,6 +167,10 @@ static void wait_record(endpoint_t *server, endpoint_t *client, const char *key,
 static void test_router_signed_pool_ready_capability(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_agent_router_ready_v1_t proof = {0}, second = {0};
+  mesh_mgmt_agent_router_physical_ready_v1_t same = {0};
+  p2p_cnet_managed_binding_v1_t inbound = {0}, next_inbound = {0};
+  cnet_managed_connection first_managed = {0};
+  cnet_manager *physical_manager = NULL;
   uint8_t first_connection_id[16] = {0};
   uint8_t wrong_id[P2P_KEY_SIZE] = {0};
   uint8_t wrong_node_id[32] = {0};
@@ -187,6 +192,52 @@ static void test_router_signed_pool_ready_capability(void) {
   check_true(memcmp(proof.connection_id, first_connection_id, 16u) != 0);
   check_equal((uint64_t)1u, proof.remote_incarnation);
   memcpy(first_connection_id, proof.connection_id, sizeof(first_connection_id));
+
+  /* This is the REAL inbound P2P TCP stream carrying the same Noise/MMP
+   * peer. The original CNet Manager now owns its physical attachment and
+   * its generation; unrelated cohosted echo Manager can never be substituted. */
+  check_equal(P2P_OK,
+      p2p_peer_cnet_managed_binding_v1(server.peer, &inbound));
+  check_not_null(inbound.manager);
+  check_equal(P2P_CNET_MANAGED_BINDING_VERSION, inbound.version);
+  check_true(inbound.physical.slot != 0u && inbound.managed.slot != 0u);
+  physical_manager = inbound.manager;
+  first_managed = inbound.managed;
+  cnet_manager_entry entry = {0};
+  check_equal(SALTS_OK,
+      cnet_manager_lookup(physical_manager, inbound.managed, &entry));
+  check_equal(CNET_MANAGER_BOUND, entry.state);
+  check_equal(inbound.physical.slot, entry.connection.slot);
+  check_equal(inbound.physical.generation, entry.connection.generation);
+  check_not_null(entry.context);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_physical_ready_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id, first_connection_id,
+          physical_manager, &same));
+  check_equal(sizeof(same), same.size);
+  check_equal(MESH_MGMT_AGENT_ROUTER_PHYSICAL_READY_VERSION, same.version);
+  check_true(same.manager == physical_manager);
+  check_equal(first_managed.generation, same.managed.generation);
+  check_equal(inbound.physical.generation, same.physical.generation);
+  check_equal(first_connection_id, same.signed_session.connection_id, 16u);
+
+  /* A different CNet Manager (even if hosted on the same SG shard) has no
+   * claim on the signed session's P2P physical connection. */
+  cnet_manager unrelated = {0};
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_physical_ready_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          first_connection_id, &unrelated, &same));
+  check_equal((size_t)0u, same.size);
+  check_true(same.manager == NULL);
+
+  /* The client outbound numeric CNet connection has not yet migrated to
+   * Manager; do not borrow the server's inbound physical READY. */
+  check_equal(P2P_ERR_INVALID_STATE,
+      p2p_peer_cnet_managed_binding_v1(client.peer, &inbound));
+  check_equal((size_t)0u, inbound.size);
 
   /* The right signed managed node but the wrong P2P transport key must
    * fail with fully zeroed output; no stale or partial capability leaks. */
@@ -234,6 +285,30 @@ static void test_router_signed_pool_ready_capability(void) {
   check_true(memcmp(first_connection_id, second.connection_id, 16u) != 0);
   check_equal(MESH_MGMT_AGENT_ROUTER_READY_VERSION, second.version);
   check_equal(client.public_key, second.remote_transport_peer_id, P2P_KEY_SIZE);
+
+  /* Physical CNet/Manager is generation-safe too, independently of the
+   * Router-local signed connection_id. Closed transport must recycle the
+   * first attachment; the new authenticated peer must be a new generation. */
+  check_equal(SALTS_ENOENT,
+      cnet_manager_lookup(physical_manager, first_managed, &entry));
+  check_equal(P2P_OK,
+      p2p_peer_cnet_managed_binding_v1(server.peer, &next_inbound));
+  check_true(next_inbound.manager == physical_manager);
+  check_true(next_inbound.managed.generation != first_managed.generation ||
+             next_inbound.managed.slot != first_managed.slot);
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_physical_ready_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id, first_connection_id,
+          physical_manager, &same));
+  check_equal((size_t)0u, same.size);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_physical_ready_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id, second.connection_id,
+          physical_manager, &same));
+  check_equal(next_inbound.managed.generation, same.managed.generation);
+  check_equal(next_inbound.physical.generation, same.physical.generation);
 
   destroy(&client);
   destroy(&server);

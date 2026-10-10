@@ -101,6 +101,24 @@ static void test_two_final_owners_real_cookie_noise_and_data(
     check_equal(1, client_a.authenticated);
     check_equal(1, server_a.authenticated);
     check_equal(0, server_b.authenticated);
+    /* Cross-Owner Handoff is adopted through that FINAL Owner's native
+     * Manager, never through the acceptor nor an unrelated SG client. */
+    p2p_cnet_managed_binding_v1_t managed_a = {0};
+    check_equal(P2P_OK,
+        p2p_peer_cnet_managed_binding_v1(server_a.peer, &managed_a));
+    check_equal(P2P_CNET_MANAGED_BINDING_VERSION, managed_a.version);
+    cnet_manager_entry physical_a = {0};
+    check_equal(SALTS_OK, cnet_manager_lookup(
+        managed_a.manager, managed_a.managed, &physical_a));
+    check_equal(CNET_MANAGER_BOUND, physical_a.state);
+    check_equal(managed_a.physical.generation, physical_a.connection.generation);
+    check_equal(managed_a.physical.slot, physical_a.connection.slot);
+    /* The independent client-initiated stream has no inbound Manager
+     * identity and cannot obtain a signed inbound Pool capability. */
+    check_equal(P2P_ERR_INVALID_STATE,
+        p2p_peer_cnet_managed_binding_v1(client_a.peer, &managed_a));
+    check_equal((size_t)0u, managed_a.size);
+
     p2p_cnet_sg_snapshot_v1_t first = snapshot(sg, 0u);
     check_equal((uint64_t)1u, first.routed);
     check_equal((size_t)1u, first.handoff.taken);
