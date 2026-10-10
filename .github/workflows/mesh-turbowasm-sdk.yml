@@ -5,6 +5,7 @@ on:
     branches:
       - test/mesh-prestaged-wasm-worker-result-gate
       - feature/mesh-execution-turbowasm-native-sdk
+      - feature/mesh-execution-salts-worker-store-sdk
   workflow_dispatch:
 
 permissions:
