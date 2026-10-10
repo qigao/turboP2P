@@ -360,3 +360,34 @@ MMP per-operation lease handling and protocol-slot admission beyond
 one exclusive slot, outbound P2P Manager/Pool migration, 1/2/4 shard
 equal-workload CPU/throughput and Windows/macOS/Android installed SDKs
 remain separate #38/#37 acceptance gates.
+
+
+## Production automatic Pool reconnect generation isolation
+
+The real dedicated Mesh Runtime test extends the callback-owned Pool
+lifecycle to two successive **P2P Noise + signed MMP** sessions with
+true endpoint-pool-driven reconnection. The server enables a bounded
+two-physical/two-exclusive-lease CNet Pool on its original inbound
+Manager. Its first authenticated MMP session automatically binds
+READY and acquires a real old-generation Pool Lease. The client
+disconnects the true P2P peer, and the original Router peer-close
+callback marks that old Pool entry DRAINING. The existing
+`mesh_mgmt_endpoint_pool` alone schedules reconnection; no CNet
+ManagedDial deadline/retry episode or MMP command replay is added.
+
+A new signed MMP Router connection_id and a new Manager-bound physical
+CNet generation automatically receive a **different** ClientPool
+connection record, while the prior record remains
+`TERMINAL_WAITING_FOR_LEASES` until the original lease is returned.
+The new session can receive its own exclusive Pool Lease; a second
+lease for that session is refused. The old borrowed lease cannot
+be reused as the new generation and can be returned **exactly once**
+without stealing the new lease. Upstream Pool snapshots must show
+the authoritative `ready=1, terminal_waiting_for_leases=1,
+active_leases=2` overlap, then after settling old/new leases the
+runtime stops and destroys Pool before physical Manager/P2P Owner.
+
+The test runs native Linux installed-SDK Release and focused
+ASan/UBSan alongside the existing real SG Handoff, Cohost, Cookie
+and MMP suites. It demonstrates session-generation containment,
+not multicore SG throughput scaling or a ManagedDial cutover.
