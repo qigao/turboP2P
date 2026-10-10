@@ -534,4 +534,36 @@ if(P2P_TURBOWASM_SDK_GATE)
     COMMAND test_mesh_mgmt_execution_runner_sdk)
   set_tests_properties(test_mesh_mgmt_execution_runner_sdk
     PROPERTIES TIMEOUT 30)
+
+  # True production composition, not a duplicated test-only implementation.
+  # Caller submits signed COMMAND_REQUEST on its normal owner; CMeta's
+  # single worker performs synchronous durable Store + TurboWasm guest work,
+  # and SPSC Egress alone communicates back to the original owner.
+  add_library(mesh_execution_node_sdk STATIC
+    "${mesh_src}/mesh_mgmt_execution_runner.c"
+    "${mesh_src}/mesh_mgmt_execution_store.c"
+    "${mesh_src}/mesh_mgmt_execution_orchestrator.c"
+    "${mesh_src}/mesh_mgmt_execution_service.c"
+    "${mesh_src}/mesh_mgmt_execution_worker.c"
+    "${mesh_src}/mesh_mgmt_execution_egress.c"
+    "${mesh_src}/mesh_mgmt_execution_sender.c"
+    "${mesh_src}/mesh_mgmt_execution_node.c")
+  target_include_directories(mesh_execution_node_sdk PUBLIC "${mesh_src}")
+  target_link_libraries(mesh_execution_node_sdk PUBLIC
+    mgmt_agent_runtime foundation Salts::Core Salts::Concurrency
+    Salts::Platform OpenSSL::Crypto TurboWasm::Runtime)
+  add_executable(test_mesh_mgmt_execution_node_sdk
+    "${mesh_tests}/test_mesh_mgmt_execution_node.c")
+  set_property(TARGET test_mesh_mgmt_execution_node_sdk
+    PROPERTY LINKER_LANGUAGE CXX)
+  add_dependencies(test_mesh_mgmt_execution_node_sdk
+    mesh_wasm_failure_guest mesh_wasm_success_guest)
+  target_compile_definitions(test_mesh_mgmt_execution_node_sdk PRIVATE
+    MESH_TEST_EXECUTION_WASM="${_guest_failure}"
+    MESH_TEST_EXECUTION_SUCCESS_WASM="${_guest_success}")
+  target_link_libraries(test_mesh_mgmt_execution_node_sdk PRIVATE
+    mesh_execution_node_sdk Salts::TinyTest)
+  add_test(NAME test_mesh_mgmt_execution_node_sdk
+    COMMAND test_mesh_mgmt_execution_node_sdk)
+  set_tests_properties(test_mesh_mgmt_execution_node_sdk PROPERTIES TIMEOUT 45)
 endif()
