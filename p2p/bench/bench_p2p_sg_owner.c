@@ -1,4 +1,10 @@
+/* Experimental only: real SG Host P2P Noise echo; results are not
+ * equal-load scaling claims (1/2/4 shards host 1/1/3 sessions). */
+#define _POSIX_C_SOURCE 200809L
 #include "p2p_cnet_node_fixture.h"
+#include <time.h>
+#include <errno.h>
+#include <inttypes.h>
 
 #include <cnet/sg_host.h>
 #include <salts/native_io_sharded.h>
@@ -9,12 +15,22 @@
  * constructed, progressed and retired ON its NativeIO SG backend worker. A
  * single acceptor on shard 0 transfers real TCP descriptors by credited CNet
  * handoff. Clients are deliberately independent standalone P2P nodes. */
+#if !defined(BENCH_SG_SHARDS) || \
+    (BENCH_SG_SHARDS != 1 && BENCH_SG_SHARDS != 2 && BENCH_SG_SHARDS != 4)
+#error "BENCH_SG_SHARDS must be 1, 2 or 4"
+#endif
 enum {
-    SG4_SHARDS = 4u,
-    SG4_FINALS = 3u,
+    SG4_SHARDS = BENCH_SG_SHARDS,
+    SG4_FINALS = BENCH_SG_SHARDS == 1 ? 1u : BENCH_SG_SHARDS - 1u,
     SG4_BATCH = 16u,
     SG4_TIMEOUT_MS = 12000u
 };
+static size_t sg4_final_shard(size_t index) {
+    return SG4_SHARDS == 1 ? 0u : index + 1u;
+}
+static size_t sg4_server_index(size_t shard) {
+    return SG4_SHARDS == 1 ? 0u : shard - 1u;
+}
 
 typedef struct sg4_case sg4_case;
 typedef struct sg4_lane {
@@ -132,14 +148,14 @@ static void sg4_init(native_io_sharded_context *context, void *arg) {
     lane->worker_token = cmeta_thread_current_token();
     SG4_CALL(lane, native_io_sharded_context_acquire_host(
         context, sg4_quiescent, lane, &lane->lease, &lane->backend));
-    if (lane->shard == 0u) {
+    if (SG4_SHARDS != 1 && lane->shard == 0u) {
         SG4_CALL(lane, p2p_cnet_owner_create_external(
             &settings, lane->backend, lane->lease, &lane->acceptor));
         SG4_CALL(lane, p2p_cnet_owner_listen(
             lane->acceptor, "127.0.0.1", 0u, 8u,
             sg4_unselected_accept, lane, &lane->listener));
     } else {
-        sg4_server *server = &scenario->servers[lane->shard - 1u];
+        sg4_server *server = &scenario->servers[sg4_server_index(lane->shard)];
         server->lane = lane;
         init_node(&server->endpoint, 41 + (int)lane->shard * 2, 0);
         p2p_set_peer_callbacks(server->endpoint.node,
@@ -148,7 +164,13 @@ static void sg4_init(native_io_sharded_context *context, void *arg) {
         SG4_CALL(lane, p2p_node_cnet_create_external(
             server->endpoint.node, &settings, lane->backend, lane->lease,
             &server->endpoint.owner));
-        SG4_CALL(lane, p2p_node_cnet_bind_handoff_accept(server->endpoint.owner));
+        if (SG4_SHARDS == 1) {
+            SG4_CALL(lane, p2p_node_cnet_listen(server->endpoint.owner));
+            lane->listener.port = (uint16_t)server->endpoint.node->port;
+        } else {
+            SG4_CALL(lane,
+                p2p_node_cnet_bind_handoff_accept(server->endpoint.owner));
+        }
         lane->final_transport =
             p2p_node_cnet_transport_owner(server->endpoint.owner);
         if (lane->final_transport == NULL)
@@ -171,25 +193,23 @@ static void sg4_progress(native_io_sharded_context *context, void *arg) {
          * any observe/completion, not treated as an empty progress turn. */
         native_io_sharded_host_lease bad = lane->lease;
         bad.generation++;
-        status = lane->shard == 0u
-            ? p2p_cnet_owner_poll_sg_host(
-                lane->acceptor, context, bad, &observed, &settled)
-            : p2p_cnet_owner_poll_sg_host(
-                lane->final_transport, context, bad, &observed, &settled);
+        status = p2p_cnet_owner_poll_sg_host(
+            lane->acceptor ? lane->acceptor : lane->final_transport,
+            context, bad, &observed, &settled);
         if (status != P2P_ERR_INVALID_STATE || observed || settled) {
             sg4_error(lane, P2P_ERR_INVALID_STATE, "foreign host lease");
             return;
         }
         ++lane->wrong_owner_rejections;
     }
-    if (lane->shard == 0u) {
+    if (lane->acceptor) {
         SG4_CALL(lane, p2p_cnet_owner_poll_sg_host(
             lane->acceptor, context, lane->lease, &observed, &settled));
     } else if (lane->stop_retries != 0u) {
         SG4_CALL(lane, p2p_cnet_owner_poll_sg_host(
             lane->final_transport, context, lane->lease, &observed, &settled));
     } else {
-        sg4_server *server = &lane->scenario->servers[lane->shard - 1u];
+        sg4_server *server = &lane->scenario->servers[sg4_server_index(lane->shard)];
         SG4_CALL(lane, p2p_node_cnet_poll_sg_host(
             server->endpoint.owner, context, lane->lease, &observed, &settled));
     }
@@ -200,7 +220,7 @@ static void sg4_progress(native_io_sharded_context *context, void *arg) {
 
 static void sg4_send(native_io_sharded_context *context, void *arg) {
     sg4_lane *lane = (sg4_lane *)arg;
-    sg4_server *server = &lane->scenario->servers[lane->shard - 1u];
+    sg4_server *server = &lane->scenario->servers[sg4_server_index(lane->shard)];
     char reply[8] = {'r','e','p','l','y','-',(char)('0' + lane->shard),'\0'};
     if (native_io_sharded_context_shard(context) != lane->shard ||
         cmeta_thread_current_token() != lane->worker_token ||
@@ -221,10 +241,10 @@ static void sg4_stop(native_io_sharded_context *context, void *arg) {
         return;
     }
     if (lane->stopped) return;
-    status = lane->shard == 0u
+    status = lane->acceptor
         ? p2p_cnet_owner_stop(lane->acceptor)
         : p2p_node_cnet_stop(
-            lane->scenario->servers[lane->shard - 1u].endpoint.owner);
+            lane->scenario->servers[sg4_server_index(lane->shard)].endpoint.owner);
     if (status == P2P_ERR_INVALID_STATE) {
         /* Canceled external accepts/CNet requests must be observed by this
          * SG worker, then stop retried. No forced context/lease release. */
@@ -245,11 +265,11 @@ static void sg4_destroy(native_io_sharded_context *context, void *arg) {
         sg4_error(lane, SALTS_EPERM, "destroy affinity");
         return;
     }
-    if (lane->shard == 0u) {
+    if (lane->acceptor) {
         SG4_CALL(lane, p2p_cnet_owner_destroy(lane->acceptor));
         lane->acceptor = NULL;
     } else {
-        sg4_server *server = &lane->scenario->servers[lane->shard - 1u];
+        sg4_server *server = &lane->scenario->servers[sg4_server_index(lane->shard)];
         SG4_CALL(lane, p2p_node_cnet_destroy(server->endpoint.owner));
         server->endpoint.owner = NULL;
         lane->final_transport = NULL;
@@ -286,7 +306,7 @@ static void sg4_pump(sg4_case *scenario) {
     for (size_t i = 0u; i < SG4_SHARDS; ++i)
         sg4_submit(scenario, i, sg4_progress);
     sg4_barrier(scenario);
-    cmeta_sleep_ms(1u);
+    /* Saturated bounded SG turns: no fixed artificial 1ms sleep. */
 }
 
 static p2p_cnet_sg_snapshot_v1_t sg4_snapshot(sg4_case *scenario, size_t i) {
