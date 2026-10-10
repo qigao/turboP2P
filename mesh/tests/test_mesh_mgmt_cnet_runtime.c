@@ -118,6 +118,34 @@ static void poll_pair(endpoint_t *left, endpoint_t *right) {
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_poll_v1(&right->runtime));
   cmeta_sleep_ms(1u);
 }
+/* Three independent Owner progresses: no application retry or background
+ * polling is introduced by the test or the signed ClientPool Runtime. */
+static void poll_three(endpoint_t *server, endpoint_t *first, endpoint_t *second) {
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_poll_v1(&server->runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_poll_v1(&first->runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_poll_v1(&second->runtime));
+  cmeta_sleep_ms(1u);
+}
+
+static void start_signed_client(endpoint_t *client, const endpoint_t *server,
+                                uint8_t seed) {
+  mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
+  prepare(client, seed);
+  memcpy(bootstrap.transport_peer_id, server->public_key,
+         sizeof(bootstrap.transport_peer_id));
+  bootstrap.host = "127.0.0.1";
+  bootstrap.port = (uint16_t)server->port;
+  client->config.bootstraps = &bootstrap;
+  client->config.bootstrap_count = 1u;
+  initialize(client);
+  client->config.bootstraps = NULL;
+  client->config.bootstrap_count = 0u;
+  start(client);
+}
+
 static void wait_established(endpoint_t *server, endpoint_t *client, unsigned count) {
   uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
   while ((server->established < count || client->established < count) &&
@@ -877,6 +905,141 @@ static void test_runtime_signed_pool_full_keeps_existing_lease(void) {
   destroy(&server);
 }
 
+
+/* Two simultaneous, independently signed inbound MMP connections share
+ * exactly one production CNet Manager and Pool, but keep different physical
+ * Manager generations, immutable Pool keys and exclusive operation Leases.
+ * Closing the first TCP peer cannot terminal or revoke the second Lease. */
+static void test_runtime_signed_pool_two_peer_terminal_isolation(void) {
+  endpoint_t server = {0}, first = {0}, second = {0};
+  mesh_mgmt_runtime_pool_record_v3_t first_record = {0}, second_record = {0};
+  mesh_mgmt_agent_router_ready_v1_t second_signed = {0};
+  cnet_pool_lease first_lease = {0}, second_lease = {0}, again = {0};
+  cnet_managed_connection unused = {0};
+  cnet_pool_snapshot pool = {0};
+  cnet_manager_entry old_manager = {0};
+  p2p_peer_t *first_server_peer, *second_server_peer;
+  uint64_t deadline;
+
+  prepare(&server, 17);
+  server.config.max_peers = 4u;
+  server.config.endpoint_capacity = 4u;
+  initialize(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 2u, 2u));
+  start(&server);
+
+  start_signed_client(&first, &server, 33u);
+  wait_established(&server, &first, 1u);
+  first_server_peer = server.peer;
+  check_not_null(first_server_peer);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, first_server_peer, &first_lease));
+  check_true(first_lease.slot != 0u);
+
+  start_signed_client(&second, &server, 49u);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while ((server.established < 2u || second.established < 1u) &&
+         cmeta_monotonic_ms() < deadline)
+    poll_three(&server, &first, &second);
+  check_equal(2u, server.established);
+  check_equal(1u, second.established);
+  check_not_null(server.peer);
+  second_server_peer = server.peer;
+  check_true(first_server_peer != second_server_peer);
+
+  for (size_t i = 0u; i < server.runtime.signed_pool_capacity; ++i) {
+    const mesh_mgmt_runtime_pool_record_v3_t *record =
+        &server.runtime.signed_pool_records[i];
+    if (!record->active || record->draining) continue;
+    if (record->peer == first_server_peer) first_record = *record;
+    if (record->peer == second_server_peer) second_record = *record;
+  }
+  check_true(first_record.active && second_record.active);
+  check_true(first_record.physical.slot != second_record.physical.slot ||
+             first_record.physical.generation != second_record.physical.generation);
+  check_true(first_record.managed.slot != second_record.managed.slot ||
+             first_record.managed.generation != second_record.managed.generation);
+  check_true(first_record.key.peer_generation != second_record.key.peer_generation ||
+             first_record.key.session_id != second_record.key.session_id);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, second_server_peer, &second_lease));
+  check_true(second_lease.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)2u, pool.ready);
+  check_equal((size_t)2u, pool.physical_in_use);
+  check_equal((size_t)2u, pool.active_leases);
+  check_equal((size_t)0u, pool.connecting);
+
+  /* The first client deliberately dies while BOTH leases are checked
+   * out. Runtime close revokes only that peer's future lease eligibility;
+   * physical TERMINAL is still governed by CNet Manager's real recycle. */
+  p2p_disconnect_peer(first.peer);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  do {
+    poll_three(&server, &first, &second);
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+            &server.runtime, &pool));
+    if (server.closed > 0u && pool.terminal_waiting_for_leases == 1u &&
+        pool.ready == 1u) break;
+  } while (cmeta_monotonic_ms() < deadline);
+  check_true(server.closed > 0u && first.closed > 0u);
+  check_equal(0u, second.closed);
+  check_equal((size_t)1u, pool.terminal_waiting_for_leases);
+  check_equal((size_t)1u, pool.ready);
+  check_equal((size_t)2u, pool.active_leases);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_ready_peer_v1(
+          &server.runtime.router, second_server_peer, &second_signed));
+  check_equal(second_record.connection_id, second_signed.connection_id, 16u);
+  int lookup = cnet_manager_lookup(server.runtime.signed_pool_manager,
+                                   first_record.managed, &old_manager);
+  check_true(lookup == SALTS_ENOENT ||
+             (lookup == SALTS_OK && old_manager.state == CNET_MANAGER_RETIRED));
+
+  /* Only the first retired physical entry reclaims its capacity. Its
+   * stale key cannot acquire the second connection even when one global
+   * lease slot is free. The other live peer remains exclusively leased. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, first_lease));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, first_lease));
+  check_equal(SALTS_ENOBUFS,
+      cnet_pool_try_acquire(&server.runtime.signed_pool, &first_record.key,
+                            NULL, &again, &unused));
+  check_equal((size_t)0u, again.slot);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, second_server_peer, &again));
+  check_equal((size_t)0u, again.slot);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, second_lease));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, second_server_peer, &again));
+  check_true(again.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, again));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+  check_true(pool.ready >= 1u);
+  destroy(&first);
+  destroy(&second);
+  destroy(&server);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
@@ -1224,6 +1387,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("keeps two real inbound signed Leases isolated while one Manager generation retires") {
+    test_runtime_signed_pool_two_peer_terminal_isolation();
+  }
   it("does not evict a leased signed MMP connection when another inbound peer hits Pool FULL") {
     test_runtime_signed_pool_full_keeps_existing_lease();
   }
