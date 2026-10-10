@@ -73,10 +73,3 @@ jobs:
         if: always()
         shell: bash
         run: ccache --show-stats
-
-
-
-      - name: Report ccache compilation statistics
-        if: always()
-        shell: bash
-        run: ccache --show-stats
