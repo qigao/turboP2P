@@ -311,11 +311,11 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
 }
 
 
-/* This is a real external CNet connector on SG shard 1, not a mocked
- * connection. Take the SAME bounded handoff slot as incoming P2P streams
- * BEFORE physical cnet_connect_peer admission. A synchronous failure returns
- * its RESERVED token immediately; an asynchronous terminal returns it only
- * after the CNet callback has unwound. */
+/* First opt-in physical CNet Manager integration on the existing SG Owner,
+ * not a second connection/protocol lifecycle runtime. This plain TCP echo
+ * is NOT P2P Noise/MMP: no Pool.bind_ready or Dial.protocol_ready is called.
+ * Return the SG Handoff credit only after Manager on_recycle settles all
+ * observer borrows (or after a synchronously failed physical connect). */
 static void host_connect_extra(native_io_sharded_context *context, void *arg) {
     sg_lane *lane = (sg_lane *)arg;
     sg_case *test = lane->test;
@@ -339,17 +339,45 @@ static void host_connect_extra(native_io_sharded_context *context, void *arg) {
         return;
     }
 
-    cnet_observer telemetry = extra_observer(lane);
-    int status = cnet_connect_peer(&lane->extra_client, &test->echo_address,
-                                   NULL, &telemetry, &lane->extra_connection);
+    const cnet_manager_attachment attachment = {
+        extra_observer(lane), extra_on_recycle, false
+    };
+    SG_GO(lane, cnet_manager_reserve(
+        &lane->extra_manager, &attachment, &lane->extra_managed));
+    char uri[128] = {0};
+    const int len = snprintf(uri, sizeof(uri), "tcp://127.0.0.1:%u",
+                             (unsigned)test->echo_address.port);
+    if (len <= 0 || (size_t)len >= sizeof(uri)) {
+        mark_failed(lane, SALTS_ERANGE);
+        return;
+    }
+    /* cnet_manager_connect borrows URI only through admission, consumes a
+     * valid RESERVED record even if the underlying CNet connect fails. */
+    const cnet_connect_options options = {.uri = uri};
+    int status = cnet_manager_connect(
+        &lane->extra_manager, lane->extra_managed,
+        &options, &lane->extra_connection);
     if (status != SALTS_OK) {
-        int release = p2p_cnet_sg_cohost_credit_release_v1(
+        size_t work = 0u;
+        const int advance = cnet_manager_advance(
+            &lane->extra_manager, 1u, &work);
+        const int release = p2p_cnet_sg_cohost_credit_release_v1(
             test->handoff, 0u, lane->extra_credit);
         if (release == P2P_OK) {
             lane->extra_credit = (cnet_handoff_ticket){0};
             lane->extra_credit_held = false;
         }
-        mark_failed(lane, release == P2P_OK ? status : release);
+        mark_failed(lane, advance == SALTS_OK && release == P2P_OK
+            ? status : (advance != SALTS_OK ? advance : release));
+        return;
+    }
+    cnet_manager_entry bound = {0};
+    SG_GO(lane, cnet_manager_lookup(
+        &lane->extra_manager, lane->extra_managed, &bound));
+    if (bound.state != CNET_MANAGER_BOUND ||
+        bound.connection.slot != lane->extra_connection.slot ||
+        bound.connection.generation != lane->extra_connection.generation) {
+        mark_failed(lane, SALTS_EPROTO);
         return;
     }
 }
@@ -450,7 +478,14 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
         /* CNet's terminal callback has returned and no active request still
          * borrows the physical connection. Return its RESERVED credit once,
          * on the exact final Owner, never on close request or CNet CONNECTED. */
-        if (lane->extra_terminal && lane->extra_credit_held) {
+        /* SG Host alone advanced and observed the CNet client. Manager
+         * advance only recycles retired attachments and never polls IO. */
+        size_t manager_work = 0u;
+        SG_GO(lane, cnet_manager_advance(
+            &lane->extra_manager, 1u, &manager_work));
+        if (lane->extra_recycled && lane->extra_credit_held) {
+            /* On recycle means CNet terminal callback already unwound;
+             * now return the original SG Host shared RESERVED credit. */
             SG_GO(lane, p2p_cnet_sg_cohost_credit_release_v1(
                 test->handoff, 0u, lane->extra_credit));
             lane->extra_credit = (cnet_handoff_ticket){0};
@@ -500,6 +535,18 @@ static void host_destroy(native_io_sharded_context *context, void *arg) {
         SG_GO(lane, p2p_cnet_owner_destroy(lane->acceptor));
         lane->acceptor = NULL;
     } else {
+        /* Manager borrows physical CNet client/callbacks: destroy only
+         * after real terminal + explicit advance/on_recycle, before freeing
+         * the CNet client, the P2P Owner or its SG Host lease. */
+        cnet_manager_snapshot snap = {0};
+        SG_GO(lane, cnet_manager_get_snapshot(
+            &lane->extra_manager, &snap));
+        if (!snap.drained || lane->extra_recycled != 1u ||
+            lane->extra_credit_held) {
+            mark_failed(lane, SALTS_EBUSY);
+            return;
+        }
+        SG_GO(lane, cnet_manager_destroy(&lane->extra_manager));
         SG_GO(lane, cnet_client_stop_external(&lane->extra_client));
         SG_GO(lane, cnet_client_destroy(&lane->extra_client));
         SG_GO(lane, p2p_node_cnet_destroy(lane->test->server.owner));
