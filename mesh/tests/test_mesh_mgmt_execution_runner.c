@@ -1,4 +1,5 @@
 #include "mesh_mgmt_execution_runner.h"
+#include <turbowasm/status.h>
 #include "tinytest.h"
 
 #include <string.h>
@@ -51,7 +52,7 @@ static void test_registry_and_digest_binding(void) {
   uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t other_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
 
-  check_int_eq(mesh_mgmt_execution_runner_module_digest_v1(
+  check_equal(mesh_mgmt_execution_runner_module_digest_v1(
                    MESH_TEST_EXECUTION_WASM, 1024u * 1024u, digest, NULL),
                MESH_MGMT_EXECUTION_RUNNER_OK);
   memset(&deployment, 0, sizeof(deployment));
@@ -60,16 +61,16 @@ static void test_registry_and_digest_binding(void) {
   memcpy(deployment.module_digest, digest, sizeof(digest));
   deployment.module_path = MESH_TEST_EXECUTION_WASM;
 
-  check_int_eq(mesh_mgmt_execution_runner_init_v1(&runner, 2u),
+  check_equal(mesh_mgmt_execution_runner_init_v1(&runner, 2u),
                MESH_MGMT_EXECUTION_RUNNER_OK);
-  check_int_eq(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
+  check_equal(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
                MESH_MGMT_EXECUTION_RUNNER_OK);
-  check_int_eq(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
+  check_equal(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
                MESH_MGMT_EXECUTION_RUNNER_OK);
   memcpy(other_digest, digest, sizeof(digest));
   other_digest[0] ^= 0xffu;
   memcpy(deployment.module_digest, other_digest, sizeof(other_digest));
-  check_int_eq(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
+  check_equal(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
                MESH_MGMT_EXECUTION_RUNNER_CONFLICT);
   mesh_mgmt_execution_runner_destroy_v1(&runner);
 }
@@ -82,7 +83,7 @@ static void test_runs_only_the_registered_digest(void) {
   mesh_mgmt_execution_runner_output_v1_t output;
   uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
 
-  check_int_eq(mesh_mgmt_execution_runner_module_digest_v1(
+  check_equal(mesh_mgmt_execution_runner_module_digest_v1(
                    MESH_TEST_EXECUTION_WASM, 1024u * 1024u, digest, NULL),
                MESH_MGMT_EXECUTION_RUNNER_OK);
   memset(&deployment, 0, sizeof(deployment));
@@ -93,21 +94,79 @@ static void test_runs_only_the_registered_digest(void) {
   make_request(&request, deployment.deployment_id, digest);
   make_policy(&policy);
 
-  check_int_eq(mesh_mgmt_execution_runner_init_v1(&runner, 1u),
+  check_equal(mesh_mgmt_execution_runner_init_v1(&runner, 1u),
                MESH_MGMT_EXECUTION_RUNNER_OK);
-  check_int_eq(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
+  check_equal(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
                MESH_MGMT_EXECUTION_RUNNER_OK);
   request.package_digest[0] ^= 0xffu;
-  check_int_eq(mesh_mgmt_execution_runner_run_v1(
+  check_equal(mesh_mgmt_execution_runner_run_v1(
                    &runner, &request, &policy, 1000u, NULL, &output),
                MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH);
   request.package_digest[0] ^= 0xffu;
-  check_int_eq(mesh_mgmt_execution_runner_run_v1(
+  check_equal(mesh_mgmt_execution_runner_run_v1(
                    &runner, &request, &policy, 1000u, NULL, &output),
                MESH_MGMT_EXECUTION_RUNNER_OK);
-  check_int_eq(output.runtime_code, 0);
-  check_int_eq(output.guest_exit_code, 7);
-  check_uint_eq(output.invocations, 1u);
+  check_equal(output.runtime_code, 0);
+  check_equal(output.guest_exit_code, 7);
+  check_equal(output.invocations, 1u);
+  mesh_mgmt_execution_runner_destroy_v1(&runner);
+}
+
+static void test_success_wasm_guest_follows_native_runtime_budget(void) {
+  mesh_mgmt_execution_runner_v1_t runner = {0};
+  mesh_mgmt_execution_deployment_v1_t deployment = {0};
+  mesh_mgmt_execution_request_v1_t request = {0};
+  mesh_mgmt_execution_effective_policy_v1_t policy = {0};
+  mesh_mgmt_execution_runner_output_v1_t output = {0};
+  uint8_t digest[32] = {0};
+  uint8_t empty_hash[32] = {0xe3,0xb0,0xc4,0x42,0x98,0xfc,0x1c,0x14,
+                            0x9a,0xfb,0xf4,0xc8,0x99,0x6f,0xb9,0x24,
+                            0x27,0xae,0x41,0xe4,0x64,0x9b,0x93,0x4c,
+                            0xa4,0x95,0x99,0x1b,0x78,0x52,0xb8,0x55};
+
+  check_equal(mesh_mgmt_execution_runner_module_digest_v1(
+      MESH_TEST_EXECUTION_SUCCESS_WASM, 1024u * 1024u, digest, NULL),
+      MESH_MGMT_EXECUTION_RUNNER_OK);
+  memset(deployment.deployment_id, 0x31, sizeof(deployment.deployment_id));
+  deployment.generation = 1u;
+  deployment.module_path = MESH_TEST_EXECUTION_SUCCESS_WASM;
+  memcpy(deployment.module_digest, digest, sizeof(digest));
+  make_request(&request, deployment.deployment_id, digest);
+  make_policy(&policy);
+  check_equal(mesh_mgmt_execution_runner_init_v1(&runner, 1u),
+              MESH_MGMT_EXECUTION_RUNNER_OK);
+  check_equal(mesh_mgmt_execution_runner_register_v1(&runner, &deployment),
+              MESH_MGMT_EXECUTION_RUNNER_OK);
+  check_equal(mesh_mgmt_execution_runner_run_v1(
+      &runner, &request, &policy, 1000u, NULL, &output),
+      MESH_MGMT_EXECUTION_RUNNER_OK);
+  check_equal(output.runtime_code, 0);
+  check_equal(output.guest_exit_code, 0);
+  check_equal(output.invocations, (uint64_t)1u);
+  check_equal(output.modules_loaded, (uint64_t)1u);
+  check_equal(empty_hash, output.stdout_digest, sizeof(empty_hash));
+  check_equal(empty_hash, output.stderr_digest, sizeof(empty_hash));
+
+  /* Inline input is a different host ABI; failing closed avoids treating
+   * successful execution that ignored caller input as a completed command. */
+  request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
+  memcpy(request.inline_input, "input", 5u);
+  request.inline_input_size = 5u;
+  request.input_length = 5u;
+  memset(request.input_digest, 0x55, sizeof(request.input_digest));
+  check_equal(mesh_mgmt_execution_runner_run_v1(
+      &runner, &request, &policy, 1000u, NULL, &output),
+      MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED);
+  request.input_kind = MESH_MGMT_EXECUTION_INPUT_NONE;
+  request.input_length = 0u;
+  request.inline_input_size = 0u;
+  memset(request.input_digest, 0, sizeof(request.input_digest));
+
+  policy.limits.control_flow_steps = 1u;
+  check_equal(mesh_mgmt_execution_runner_run_v1(
+      &runner, &request, &policy, 1000u, NULL, &output),
+      MESH_MGMT_EXECUTION_RUNNER_RUNTIME);
+  check_equal(output.runtime_code, (int)TURBOWASM_FUEL_EXHAUSTED);
   mesh_mgmt_execution_runner_destroy_v1(&runner);
 }
 
@@ -124,9 +183,9 @@ static void test_rejects_capability_semantic_drift(void) {
   make_request(&request, deployment_id, digest);
   make_policy(&policy);
   policy.capabilities |= MESH_MGMT_EXECUTION_CAP_HTTP;
-  check_int_eq(mesh_mgmt_execution_runner_init_v1(&runner, 1u),
+  check_equal(mesh_mgmt_execution_runner_init_v1(&runner, 1u),
                MESH_MGMT_EXECUTION_RUNNER_OK);
-  check_int_eq(mesh_mgmt_execution_runner_run_v1(
+  check_equal(mesh_mgmt_execution_runner_run_v1(
                    &runner, &request, &policy, 1000u, NULL, &output),
                MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED);
   mesh_mgmt_execution_runner_destroy_v1(&runner);
@@ -138,9 +197,12 @@ spec("mesh management local node execution runner E1") {
       test_registry_and_digest_binding();
     }
   }
-  describe("TurboRuntime execution") {
+  describe("TurboWasm execution") {
     it("runs only the registered generation and digest") {
       test_runs_only_the_registered_digest();
+    }
+    it("executes a genuine successful wasm32 guest with fuel and SHA-256 output accounting") {
+      test_success_wasm_guest_follows_native_runtime_budget();
     }
     it("rejects capabilities outside the raw Wasm profile") {
       test_rejects_capability_semantic_drift();
