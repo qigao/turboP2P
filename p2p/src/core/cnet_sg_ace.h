@@ -25,6 +25,12 @@ typedef struct p2p_sg_ace_capacity {
  *            + RESERVED + QUEUED
  * Eligibility separately checks Handoff credit and CNet client capacities.
  * The final resource reservation is still performed by upstream CNet. */
+#ifdef __cplusplus
+extern "C" {
+#endif
 p2p_sg_ace_hint p2p_sg_ace_capacity_strategy(p2p_sg_ace_capacity *state);
+#ifdef __cplusplus
+}
+#endif
 
 #endif
