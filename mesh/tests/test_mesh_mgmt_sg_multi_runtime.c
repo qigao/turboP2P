@@ -308,8 +308,13 @@ static void host_install(native_io_sharded_context *ctx, void *arg) {
   const uint64_t pool_owner_id =
       lane->scenario->same_signed_identity ? UINT64_C(70)
                                             : (uint64_t)(70u + lane->shard);
+  /* Only in the failover fixture, keep a manual old-generation borrow and
+   * an independently admitted CNet MMP wire-terminal Lease concurrently. */
+  const size_t max_leases =
+      lane->scenario->same_signed_identity &&
+      lane->scenario->exercise_command_terminal ? 2u : 1u;
   SG_CHECK(lane, mesh_mgmt_agent_runtime_enable_signed_pool_v3(
-      &f->server.runtime, pool_owner_id, 1u, 1u));
+      &f->server.runtime, pool_owner_id, 1u, max_leases));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_start_v1(&f->server.runtime));
   if (f->server.runtime.owns_node || !f->server.runtime.sg_final_mode ||
       f->server.runtime.signed_pool.impl != NULL ||
@@ -469,25 +474,30 @@ static void host_send_command(native_io_sharded_context *ctx, void *arg) {
   (void)ctx;
   if (!lane->shard || lane->error) return;
   signed_final *f = lane_final(lane);
+  signed_final *signed_client = lane->scenario->same_signed_identity
+      ? &lane->scenario->finals_data[0] : f;
+  const size_t expected_active =
+      lane->scenario->same_signed_identity &&
+      lane->scenario->exercise_command_terminal ? 2u : 1u;
   uint64_t denied = 97u;
   cnet_pool_snapshot pool = {0};
   SG_CHECK(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
       &f->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
-      f->client.identity.signer.hello.managed_node_id,
+      signed_client->client.identity.signer.hello.managed_node_id,
       f->command_payload, f->command_payload_len,
       multi_command_terminal, f, &f->command_ticket));
   if (!f->command_ticket || f->command_terminals != 0u ||
       f->server.runtime.command_terminal_inflight != 1u ||
       mesh_mgmt_agent_runtime_send_execution_leased_v4(
           &f->server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
-          f->client.identity.signer.hello.managed_node_id,
+          signed_client->client.identity.signer.hello.managed_node_id,
           f->command_payload, f->command_payload_len,
           multi_command_terminal, f, &denied) !=
           MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED ||
       denied != 0u ||
       mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
           &f->server.runtime, &pool) != MESH_MGMT_AGENT_RUNTIME_OK ||
-      pool.ready != 1u || pool.active_leases != 1u)
+      pool.ready != 1u || pool.active_leases != expected_active)
     fail_lane(lane, P2P_ERR_INVALID_STATE, "SG MMP command credit/terminal admission");
 }
 
@@ -1036,12 +1046,13 @@ static void test_multi_final(size_t final_count, int command_mode) {
  * SG-side forced reconnect, fake READY event or artificial TCP terminal.
  * Final A keeps its old application Lease after disconnect, while Round
  * Robin places the automatic next Noise/MMP connection on Final B. */
-static void test_signed_reconnect_across_finals(size_t final_count) {
+static void test_signed_reconnect_across_finals(size_t final_count, int command_mode) {
   sg_multi_case fixture = {0};
   sg_multi_case *sc = &fixture;
   sc->finals = final_count;
   sc->shards = final_count + 1u;
   sc->same_signed_identity = 1u;
+  sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -1057,6 +1068,9 @@ static void test_signed_reconnect_across_finals(size_t final_count) {
     prepare(&f->server, 17u);
     f->server.random.next_message_byte = (uint8_t)(17u + 29u * i);
     prepare(&f->client, (uint8_t)(33u + 2u * i));
+    f->scenario = sc;
+    f->final_index = i;
+    if (command_mode) enable_command_status(f);
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
     f->server.config.p2p_private_key = NULL;
@@ -1110,6 +1124,17 @@ static void test_signed_reconnect_across_finals(size_t final_count) {
   submit(sc, 1u, host_acquire);
   barrier(sc);
   check_true(old->lease.slot != 0u);
+  if (command_mode) {
+    /* Final A retains its manual application Lease while one real signed
+     * MMP wire write occupies the second Pool operation slot. */
+    submit(sc, 1u, host_send_command);
+    barrier(sc);
+    submit(sc, 1u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)2u, old->pool.active_leases);
+    check_equal((size_t)1u, old->server.runtime.command_terminal_inflight);
+    check_equal(0u, old->command_terminals);
+  }
   p2p_cnet_sg_snapshot_v1_t handoff_a = {0};
   check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
       sc->handoff, 0u, &handoff_a));
@@ -1138,6 +1163,38 @@ static void test_signed_reconnect_across_finals(size_t final_count) {
   submit(sc, 2u, host_acquire);
   barrier(sc);
   check_true(next->lease.slot != 0u);
+  if (command_mode) {
+    /* Reauthenticated B owns a NEW signed MMP command/Lease on its own
+     * Manager, while the manual A retired-generation Lease remains held. */
+    submit(sc, 2u, host_send_command);
+    barrier(sc);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)2u, next->pool.active_leases);
+    check_equal((size_t)1u, next->server.runtime.command_terminal_inflight);
+    const uint64_t terminal_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((!old->command_terminals || !next->command_terminals) &&
+           cmeta_monotonic_ms() < terminal_deadline)
+      pump(sc);
+    check_equal(1u, old->command_terminals);
+    check_equal(1u, next->command_terminals);
+    /* A may write completely before the physical close or fail during
+     * real CNet terminal. Either outcome must be reported exactly once. */
+    check_true(old->command_terminal_status == P2P_OK ||
+               old->command_terminal_status == P2P_ERR_NETWORK);
+    check_equal(P2P_OK, next->command_terminal_status);
+    check_equal((size_t)0u, old->server.runtime.command_terminal_inflight);
+    check_equal((size_t)0u, next->server.runtime.command_terminal_inflight);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)1u, old->pool.active_leases);
+    check_equal((size_t)1u, next->pool.active_leases);
+    for (unsigned turn = 0u; turn < 4u; ++turn) pump(sc);
+    check_equal(1u, old->command_terminals);
+    check_equal(1u, next->command_terminals);
+  }
 
   /* Wait for authoritative Manager retirement of A, while B continues
    * to expose a valid signed READY with an independently borrowed Lease. */
@@ -1224,6 +1281,12 @@ static void test_signed_reconnect_across_finals(size_t final_count) {
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+  it("keeps old A and new B MMP send-terminal generations isolated across 2 final SG workers") {
+    test_signed_reconnect_across_finals(2u, 1);
+  }
+  it("keeps old A and new B MMP send-terminal generations isolated across 4 final SG workers") {
+    test_signed_reconnect_across_finals(4u, 1);
+  }
   it("holds typed MMP command Leases on 2 real SG Final workers until each wire terminal") {
     test_multi_final(2u, 1);
   }
@@ -1237,9 +1300,9 @@ spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
     test_multi_final(4u, 0);
   }
   it("reconnects one signed identity from Final A to B with old Lease retained (3 SG workers)") {
-    test_signed_reconnect_across_finals(2u);
+    test_signed_reconnect_across_finals(2u, 0);
   }
   it("reconnects one signed identity from Final A to B with old Lease retained (5 SG workers)") {
-    test_signed_reconnect_across_finals(4u);
+    test_signed_reconnect_across_finals(4u, 0);
   }
 }
