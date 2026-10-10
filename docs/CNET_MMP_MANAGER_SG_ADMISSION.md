@@ -138,3 +138,68 @@ recheck the token against the Router immediately before a
 Pool security key. An unrelated plaintext SG Cohost Manager cannot borrow
 this READY proof by having the same Owner or Host. There is no
 `cnet_pool_bind_ready` call in the plaintext echo fixture.
+
+
+## Exact managed physical P2P stream and signed Router READY
+
+This phase changes **actual incoming P2P CNet Adopt**, not the independent
+plaintext Cohost, to use upstream `cnet_manager_reserve/adopt` on its
+original final Owner. The Manager borrows the *existing P2P CNet client*:
+it creates neither NativeIO backend, observer, thread, reconnect timer nor
+a second physical socket.
+
+- Each final P2P Owner initializes one bounded Manager attachment table
+  alongside its own `cnet_client`. The real cross-Owner or same-Owner TCP
+  accepted descriptor is consumed by `cnet_manager_adopt`, forwarding the
+  existing P2P cookie/Noise callbacks through the Manager's single observer.
+  Outbound P2P remains unmanaged until a later explicit migration; it does
+  not inherit an inbound READY capability.
+- The P2P CNet connection retains its original
+  `cnet_managed_connection` generation. `on_recycle` only marks that
+  the native CNet terminal observer finished and Manager callback storage
+  can be retired; it never releases peer callbacks inside a terminal event.
+  Poll or SG Host progression explicitly calls `cnet_manager_advance`.
+  P2P connection sweep must not release a taken/reserved Handoff credit
+  or free the observer's context before `on_recycle`. On stop/drain,
+  Manager must drain/destroy **before** the borrowed CNet client and
+  final SG Host lease are released; timeout retains context for retry.
+- An exact P2P `p2p_connection_t` exposes its Manager-bound physical
+  identity only via `p2p_cnet_connection_managed_binding_v1`: CNet
+  Manager BOUND record, same native physical `cnet_connection`
+  slot+generation and identical P2P callback context are all verified
+  on the original Owner. `p2p_peer_cnet_managed_binding_v1` obtains
+  only the current live `peer->conn`. Foreign Owner, terminated,
+  detached, recycled, stale or outbound/unmanaged connections cannot
+  return a physical binding.
+- `mesh_mgmt_agent_router_physical_ready_v1` first requires the
+  original signed MMP Router READY attestation (live P2P peer,
+  certificate-verified transport and managed-node IDs, and optional
+  current Router `connection_id` generation). It then requires that
+  exact peer's P2P CNet connection is **Manager BOUND** on the caller's
+  expected Manager, including matching CNet physical slot/generation
+  and attached observer. Only then does it copy the two proofs.
+  A separate plain SG Cohost Manager cannot satisfy this check even
+  when sharing the identical Host backend and Owner shard.
+
+The real dedicated MMP CNet runtime test now verifies positive signing +
+same physical inbound Manager, refusal of an unrelated Manager and
+unmanaged outbound Client, then performs a **real signed reconnect**:
+the prior Router connection_id is stale, the old CNet Manager record
+generation has been recycled, and the fresh Manager-bound physical
+generation can be attested again. A separate real SG cross-Owner
+Noise test validates the same final-Owner Manager binding.
+
+### Still not Pool READY
+
+This binds real signed Router identity to the *same* Manager-owned
+physical P2P connection and is the required prerequisite for
+`cnet_pool_bind_ready`, but it is **not** a Pool lease and does not
+modify the unrelated plaintext SG Cohost Pool into READY. A future
+production Pool integration must reserve CONNECTING **on this exact
+Manager before connecting/Adopting**, build an exact signed-authority
+and connection-generation-bound CNet `cnet_pool_key`, revalidate
+the live Router proof at bind, and settle actual protocol-slot leases
+once. No ManagedDial READY is signaled and no duplicate
+quarantine/reconnect timeline is installed. The existing Mesh
+endpoint pool still owns its retry policy. Windows/macOS/Android
+installed consumers and performance benchmarks are separate gates.
