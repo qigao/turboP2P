@@ -1480,8 +1480,18 @@ static void test_multi_final(size_t final_count, int command_mode) {
           check_equal(0u, f->rpc_status_events);
           check_equal(1u, f->rpc_result_events);
           check_equal(MESH_MGMT_KIND_COMMAND_RESULT, reply->kind);
-          check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
-          check_equal(7, result->guest_exit_code);
+          /* The existing RESULT test explicitly signs an invented FAILED
+           * fixture; the execution-enabled test MUST report the actual
+           * TurboWasm guest's durable SUCCEEDED result. Never conflate. */
+          if (sc->exercise_real_execution) {
+            check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, result->state);
+            check_equal(0, result->guest_exit_code);
+            check_equal((uint64_t)(f->final_index + 1u),
+                        result->worker_generation);
+          } else {
+            check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
+            check_equal(7, result->guest_exit_code);
+          }
           check_equal((uint64_t)1u, result->usage.invocations);
           check_equal(f->expected_command_id, result->command_id,
                       sizeof(f->expected_command_id));
@@ -1632,6 +1642,45 @@ static void test_multi_final(size_t final_count, int command_mode) {
   for (size_t i = 0u; i < sc->finals; ++i)
     check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
         mesh_mgmt_agent_runtime_destroy_v2(&sc->finals_data[i].client.runtime));
+
+#ifdef MESH_SG_REAL_EXECUTION
+  if (sc->exercise_real_execution) {
+    for (size_t i = 0u; i < sc->finals; ++i) {
+      signed_final *f = &sc->finals_data[i];
+      mesh_mgmt_execution_result_v1_t durable = {0};
+      mesh_mgmt_execution_worker_stats_v1_t stats = {0};
+      char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
+      char tmp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
+
+      check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+          mesh_mgmt_execution_node_shutdown_v1(&f->execution_node));
+      check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
+          mesh_mgmt_execution_worker_get_stats_v1(
+              &f->execution_node.worker, &stats));
+      check_equal((uint64_t)1u, stats.submitted);
+      check_equal((uint64_t)1u, stats.completed);
+      check_equal(MESH_MGMT_EXECUTION_STORE_OK,
+          mesh_mgmt_execution_store_get_result_v1(
+              &f->execution_node.store, f->expected_command_id, &durable));
+      check_equal(f->rpc_response.result.signature, durable.signature,
+                  sizeof(durable.signature));
+      check_equal(f->result_signer_public, durable.signer_public_key, 32u);
+      check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, durable.state);
+      check_equal((uint64_t)1u, durable.usage.invocations);
+      mesh_mgmt_execution_node_destroy_v1(&f->execution_node);
+      check_true(f->execution_store_path != NULL);
+      (void)snprintf(lock_path, sizeof(lock_path), "%s.lock",
+                     f->execution_store_path);
+      (void)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+                     f->execution_store_path);
+      (void)remove(f->execution_store_path);
+      (void)remove(lock_path);
+      (void)remove(tmp_path);
+      free(f->execution_store_path);
+      f->execution_store_path = NULL;
+    }
+  }
+#endif
 
   check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sc->handoff));
   for (size_t i = 0u; i < sc->shards; ++i)
@@ -1934,6 +1983,14 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+#ifdef MESH_SG_REAL_EXECUTION
+  it("executes genuine signed remote Wasm on 2 SG Final Worker Owners") {
+    test_multi_final(2u, 4);
+  }
+  it("executes genuine signed remote Wasm on 4 SG Final Worker Owners") {
+    test_multi_final(4u, 4);
+  }
+#endif
   it("verifies authenticated signed COMMAND_RESULT across 2 SG Final Owners") {
     test_multi_final(2u, 3);
   }
