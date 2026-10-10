@@ -461,6 +461,129 @@ static void test_signed_same_physical_cnet_pool_lease(void) {
   destroy(&server);
 }
 
+
+/* Production Mesh Runtime owns automatic signed MMP ClientPool admission:
+ * real P2P Noise and MMP HELLO => exact inbound Manager-bound Pool READY.
+ * User operations own actual one-slot leases; Router close marks DRAINING
+ * and Stop retains every borrowed Manager/Pool object until leases drain.
+ * No new CNet connection, NativeIO observer, retry clock or application
+ * send replay is created by this runtime composition. */
+static void test_runtime_signed_pool_callback_stop_and_lease(void) {
+  endpoint_t server = {0}, client = {0};
+  mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
+  cnet_pool_lease lease = {0}, extra = {0};
+  cnet_pool_snapshot pool = {0};
+  mesh_mgmt_agent_runtime_result_t stop_status;
+
+  prepare(&server, 17);
+  initialize(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_ARG,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 0u, 1u, 1u));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_ARG,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 0u, 1u));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(server.runtime.signed_pool.impl == NULL);
+  start(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+
+  prepare(&client, 33);
+  memcpy(bootstrap.transport_peer_id, server.public_key,
+         sizeof(bootstrap.transport_peer_id));
+  bootstrap.host = "127.0.0.1";
+  bootstrap.port = (uint16_t)server.port;
+  client.config.bootstraps = &bootstrap;
+  client.config.bootstrap_count = 1u;
+  initialize(&client);
+  client.config.bootstraps = NULL;
+  client.config.bootstrap_count = 0u;
+  start(&client);
+  wait_established(&server, &client, 1u);
+  check_not_null(server.peer);
+  /* The Router itself delivered signed SESSION_ESTABLISHED, after the
+   * endpoint membership/admission decision. The inbound physical Manager
+   * and ClientPool now share the SAME exact P2P connection. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(server.runtime.signed_pool_manager != NULL);
+  check_equal((size_t)1u, pool.ready);
+  check_equal((size_t)1u, pool.physical_in_use);
+  check_equal((size_t)0u, pool.active_leases);
+  check_equal((size_t)0u, pool.connecting);
+  check_equal((size_t)0u, server.runtime.signed_pool_records[0].draining);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &client.runtime, &pool)); /* client is unmanaged outbound */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, server.peer, &lease));
+  check_true(lease.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, server.peer, &extra));
+  check_equal((size_t)0u, extra.slot);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+
+  /* Server Stop disconnects the authenticated peer. The close callback
+   * immediately revokes future Pool eligibility but must NOT fabricate
+   * CNet physical terminal or confiscate the operation's lease. Owner
+   * drain remains retryable while that lease is still borrowed. */
+  stop_status = mesh_mgmt_agent_runtime_stop_v1(&server.runtime);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE, stop_status);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPING, server.runtime.state);
+  check_not_null(server.runtime.node);
+  check_true(server.runtime.signed_pool.impl != NULL);
+  check_true(server.runtime.signed_pool_manager != NULL);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_destroy_v2(&server.runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+          &server.runtime, server.peer, &extra));
+  check_equal((size_t)0u, extra.slot);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(pool.sealed);
+  check_equal((size_t)0u, pool.ready);
+  check_equal((size_t)1u, pool.active_leases);
+  check_equal((size_t)1u, pool.terminal_waiting_for_leases);
+
+  /* The caller returns the original operation lease after Router close;
+   * pool is now drained, so the real Manager/P2P Owner may be destroyed. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, lease));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, lease));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(pool.drained);
+  check_equal((size_t)0u, pool.active_leases);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_stop_v1(&server.runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPED, server.runtime.state);
+  check_true(server.runtime.node == NULL);
+  destroy(&server);
+  destroy(&client);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
@@ -808,6 +931,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("automatically binds signed MMP Pool READY and retains owner on outstanding Stop leases") {
+    test_runtime_signed_pool_callback_stop_and_lease();
+  }
   it("binds real signed MMP READY to the same CNet Manager physical Pool lease") {
     test_signed_same_physical_cnet_pool_lease();
   }
