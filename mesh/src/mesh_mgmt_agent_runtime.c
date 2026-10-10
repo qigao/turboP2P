@@ -3,6 +3,7 @@
 #include "mesh_mgmt_crypto.h"
 #include "mesh_mgmt_agent_runtime_internal.h"
 #include "core/peer_cnet.h"
+#include <salts/thread.h>
 
 #include <salts/clock.h>
 
@@ -248,7 +249,9 @@ static void runtime_peer_closed(void *context, p2p_peer_t *peer,
 }
 
 static int runtime_is_busy(const mesh_mgmt_agent_runtime_v1_t *runtime) {
-  return runtime->in_api || runtime->router.callback_depth != 0u ||
+  return (runtime->sg_final_mode &&
+          runtime->sg_owner_thread != cmeta_thread_current_token()) ||
+         runtime->in_api || runtime->router.callback_depth != 0u ||
          runtime->endpoint_pool.in_api || runtime->endpoint_publisher.in_api ||
          runtime->service_publisher.in_api;
 }
@@ -329,6 +332,9 @@ static mesh_mgmt_agent_runtime_result_t runtime_stop_initialized(
   runtime->shared_mesh = NULL;
   runtime->mesh_ops = NULL;
   runtime->owns_node = 0u;
+  runtime->sg_final_owner = NULL;
+  runtime->sg_owner_thread = NULL;
+  runtime->sg_final_mode = 0u;
   runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPED;
   return MESH_MGMT_AGENT_RUNTIME_OK;
 }
@@ -364,15 +370,23 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
   mesh_mgmt_endpoint_pool_config_v1_t endpoint_config;
   mesh_mgmt_p2p_security_config_v2_t security_config;
   p2p_security_config_v2_t p2p_security_config;
-  int shared_mode;
+  int shared_mode, sg_mode;
   size_t index;
 
   if (!runtime || !config)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
   shared_mode = config->shared_mesh != NULL;
-  if ((!shared_mode &&
+  sg_mode = !shared_mode && binding && binding->sg_final_owner != NULL;
+  if ((!shared_mode && !sg_mode &&
        (!runtime_host_is_valid(config->listen_host) || !config->p2p_private_key ||
         !p2p_config || p2p_config->struct_size != sizeof(*p2p_config))) ||
+      (sg_mode &&
+       (!binding->node || p2p_config || config->listen_host ||
+        config->listen_port != 0u || config->p2p_private_key ||
+        config->bootstrap_count != 0u ||
+        config->p2p_minimum_principal_epoch != 0u ||
+        config->p2p_required_remote_roles != 0u ||
+        config->p2p_revoked_certificate_serial_count != 0u)) ||
       (shared_mode &&
        (!binding || !binding->node || !binding->ops ||
         !binding->ops->attach || !binding->ops->detach || config->listen_host ||
@@ -415,6 +429,11 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
     runtime->shared_mesh = config->shared_mesh;
     runtime->node = binding->node;
     runtime->mesh_ops = binding->ops;
+  } else if (sg_mode) {
+    runtime->node = binding->node;
+    runtime->sg_final_owner = binding->sg_final_owner;
+    runtime->sg_owner_thread = cmeta_thread_current_token();
+    runtime->sg_final_mode = 1u;
   } else {
     runtime->p2p_config = *p2p_config;
     runtime->owns_node = 1u;
@@ -532,6 +551,28 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
 }
 
 mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_init_sg_final_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    const mesh_mgmt_agent_runtime_config_v1_t *config,
+    p2p_node_t *borrowed_node,
+    p2p_node_cnet_t *borrowed_final_owner,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease) {
+  mesh_mgmt_agent_mesh_binding_t binding = {0};
+  if (!runtime || !config || !borrowed_node || !borrowed_final_owner ||
+      !context)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  /* Validate the REAL final P2P Owner while on its SG worker, before any
+   * Router allocation or borrowed provider/callback lifetime begins. */
+  if (p2p_node_cnet_validate_sg_final_v1(
+          borrowed_final_owner, borrowed_node, context, lease) != P2P_OK)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  binding.node = borrowed_node;
+  binding.sg_final_owner = borrowed_final_owner;
+  return mesh_mgmt_agent_runtime_init_bound(runtime, config, NULL, &binding);
+}
+
+mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_start_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (!runtime)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
@@ -579,7 +620,8 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_enable_signed_pool_v3(
       max_leases < max_connections)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
   if (runtime->state != MESH_MGMT_AGENT_RUNTIME_READY ||
-      runtime->shared_mesh || !runtime->owns_node ||
+      runtime->shared_mesh ||
+      (!runtime->owns_node && !runtime->sg_final_mode) ||
       !runtime->node || runtime_is_busy(runtime) ||
       runtime->signed_pool_enabled ||
       max_connections > runtime->router.max_peers)
@@ -661,6 +703,26 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_snapshot_v3
     ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
 }
 
+mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_sg_final_advance_v3(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    native_io_sharded_context *context, native_io_sharded_host_lease lease) {
+  if (!runtime || !context) return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (!runtime->sg_final_mode || !runtime->sg_final_owner || !runtime->node ||
+      (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING &&
+       runtime->state != MESH_MGMT_AGENT_RUNTIME_STOPPING) ||
+      runtime_is_busy(runtime))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  if (p2p_node_cnet_validate_sg_final_v1(
+          runtime->sg_final_owner, runtime->node, context, lease) != P2P_OK)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  runtime->in_api = 1u;
+  /* This must follow the host's exactly-once observe + CNet Manager
+   * progress. SG Runtime owns only post-auth Pool lifecycle association. */
+  runtime->signed_pool_status = runtime_pool_advance(runtime);
+  return runtime_fail(runtime, runtime->signed_pool_status == SALTS_OK
+      ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED);
+}
+
 mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_set_client_policy_v2(
     mesh_mgmt_agent_runtime_v1_t *runtime,
     const mesh_mgmt_client_destination_policy_v2_t *policy) {
@@ -687,7 +749,8 @@ mesh_mgmt_agent_runtime_result_t
 mesh_mgmt_agent_runtime_poll_v1(mesh_mgmt_agent_runtime_v1_t *runtime) {
   if (!runtime)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
-  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING || runtime->in_api || !runtime->node)
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING || runtime->in_api ||
+      !runtime->node || runtime->sg_final_mode)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
 
   runtime->in_api = 1u;

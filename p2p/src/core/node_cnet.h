@@ -38,6 +38,13 @@ int p2p_node_cnet_create_external(p2p_node_t *node,
  * callbacks for cnet_handoff_take -> cnet_client_adopt_accepted only. */
 int p2p_node_cnet_bind_handoff_accept(p2p_node_cnet_t *owner);
 
+/* Side-effect-free Owner/lease admission for a preconfigured, borrowed
+ * native SG final Node. Requires the ORIGINAL node_cnet transport, a
+ * final-Owner SG group, and the actual worker/shard/Host lease. */
+int p2p_node_cnet_validate_sg_final_v1(
+    p2p_node_cnet_t *owner, p2p_node_t *node,
+    native_io_sharded_context *context, native_io_sharded_host_lease lease);
+
 /* One P2P Owner per SG shard in this helper. Progresses P2P domain state,
  * advances external CNet, performs precisely ONE SG host-observe and routes
  * the complete batch. Never call p2p_poll() concurrently or externally

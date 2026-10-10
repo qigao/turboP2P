@@ -252,6 +252,20 @@ int p2p_node_cnet_create_external(p2p_node_t *node,
     return node_cnet_create_impl(node, config, borrowed_backend, lease, output);
 }
 
+/* Validate an externally hosted final P2P Node without acquiring a second
+ * network backend or changing callbacks. Must be invoked ON the native
+ * SG worker after the CNet SG group has selected its final Owners. */
+int p2p_node_cnet_validate_sg_final_v1(
+    p2p_node_cnet_t *owner, p2p_node_t *node,
+    native_io_sharded_context *context, native_io_sharded_host_lease lease) {
+    if (!owner || !node || !context || owner->node != node ||
+        node->network_context != owner || !owner->externally_hosted ||
+        owner->stopping || owner->stopped || !owner->transport)
+        return P2P_ERR_INVALID_STATE;
+    return p2p_cnet_owner_validate_sg_final_v1(
+        owner->transport, context, lease);
+}
+
 int p2p_node_cnet_bind_handoff_accept(p2p_node_cnet_t *owner) {
     if (!owner || owner->busy || owner->stopping || !owner->admission)
         return P2P_ERR_INVALID_STATE;

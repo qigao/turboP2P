@@ -123,6 +123,11 @@ int p2p_cnet_owner_publish_sg_host_load(
 int p2p_cnet_owner_preflight_sg_host(
     p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
     native_io_sharded_context *context, native_io_sharded_host_lease lease);
+/* Owner-thread + exact Host-lease check for a selected SG final P2P Owner.
+ * Rejects an acceptor, unhosted Owner or foreign/shard-stale lease. */
+int p2p_cnet_owner_validate_sg_final_v1(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease);
 int p2p_cnet_owner_poll_sg_host_cohosted(
     p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
     native_io_sharded_context *context,
