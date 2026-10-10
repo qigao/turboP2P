@@ -542,6 +542,13 @@ static void run_rounds(benchmark_case *sc) {
     bench_client *c=&sc->clients[i];
     memcpy(combined+i*sc->rounds,c->samples,
            sc->rounds*sizeof(uint64_t));
+    /* Preserve chronological raw roundtrips BEFORE percentile sort.
+     * Emitted after the measured wall/CPU boundary: no printf in hot path. */
+    for (size_t round=0u;round<sc->rounds;++round)
+      printf("P2P_MMP_SG_RTT,%u,%u,%u,%zu,%zu,%.3f\n",
+          (unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
+          (unsigned)(i+1u),sc->bytes,round+1u,
+          (double)c->samples[round]/1000.0);
     qsort(c->samples,sc->rounds,sizeof(uint64_t),cmp_u64);
     printf("P2P_MMP_SG_SESSION,sg-signed-ready-data-echo,global-barrier,"
            "%u,%u,%u,%zu,%zu,%.3f,%.3f,%.3f\n",

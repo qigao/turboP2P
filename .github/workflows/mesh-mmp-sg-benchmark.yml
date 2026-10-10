@@ -1,11 +1,5 @@
 name: Signed MMP SG equal-load echo benchmark
 on:
-  push:
-    branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
-    paths:
-      - 'mesh/bench/**'
-      - 'tests/salts_foundation/CMakeLists.txt'
-      - '.github/workflows/mesh-mmp-sg-benchmark.yml'
   pull_request:
     branches: [feature/mesh-signed-pool-sg-final-owner-23]
     paths:
@@ -40,12 +34,13 @@ jobs:
       - name: Validate four-session equal-load profiles
         shell: bash
         env:
-          P2P_MMP_BENCH_WARMUP: '8'
-          P2P_MMP_BENCH_ROUNDS: '32'
+          P2P_MMP_BENCH_WARMUP: '32'
+          P2P_MMP_BENCH_ROUNDS: '256'
         run: |
           set -euo pipefail
           echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-aggregate.csv
           echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-sessions.csv
+          echo 'repeat,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > mmp-sg-rtt.csv
           {
             uname -a
             lscpu
@@ -55,7 +50,7 @@ jobs:
             echo "SALTS_ROOT=$SALTS_ROOT"
             echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
           } > mmp-sg-machine.txt
-          repeats=1
+          repeats=5
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             repeats=5
             export P2P_MMP_BENCH_WARMUP=64 P2P_MMP_BENCH_ROUNDS=512
@@ -70,6 +65,8 @@ jobs:
                   sed 's/^P2P_MMP_SG_BENCH,//' >> mmp-sg-aggregate.csv
                 grep '^P2P_MMP_SG_SESSION,' "$log" |
                   sed 's/^P2P_MMP_SG_SESSION,//' >> mmp-sg-sessions.csv
+                grep '^P2P_MMP_SG_RTT,' "$log" |
+                  sed "s/^P2P_MMP_SG_RTT,/$repeat,/" >> mmp-sg-rtt.csv
               done
             done
           done
@@ -80,7 +77,9 @@ jobs:
               aggregate = list(csv.DictReader(stream))
           with open("mmp-sg-sessions.csv", newline="", encoding="utf-8") as stream:
               sessions = list(csv.DictReader(stream))
-          repeats = 5 if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" else 1
+          with open("mmp-sg-rtt.csv", newline="", encoding="utf-8") as stream:
+              raw_rtt = list(csv.DictReader(stream))
+          repeats = 5
           expected = {(n, b) for n in (1, 2, 4) for b in (8, 1024)}
           actual = defaultdict(list)
           metrics = ("wall_ms", "process_cpu_ms", "process_cpu_pct",
@@ -111,16 +110,40 @@ jobs:
               grouped[(n,size,client)].append(row)
           if len(grouped) != 24 or any(len(g)!=repeats for g in grouped.values()):
               raise SystemExit("Incomplete four-client per-session RTT profiles")
+          counts = defaultdict(set)
+          rounds = int(os.environ["P2P_MMP_BENCH_ROUNDS"])
+          expected_raw = {(repeat,n,size,client)
+                          for repeat in range(1,repeats+1)
+                          for n,size in expected for client in (1,2,3,4)}
+          for row in raw_rtt:
+              key = (int(row["repeat"]),int(row["final_owners"]),
+                     int(row["payload_bytes"]),int(row["session_id"]))
+              round_no = int(row["round"])
+              if (key not in expected_raw or
+                  int(row["total_shards"]) != key[1]+1 or
+                  round_no<1 or round_no>rounds or
+                  not math.isfinite(float(row["rtt_us"])) or
+                  float(row["rtt_us"])<=0 or round_no in counts[key]):
+                  raise SystemExit(f"Invalid/duplicate raw RTT: {row}")
+              counts[key].add(round_no)
+          if set(counts)!=expected_raw or any(len(v)!=rounds for v in counts.values()):
+              raise SystemExit("Incomplete per-round, per-session raw RTT evidence")
           with open("mmp-sg-summary.csv", "w", newline="", encoding="utf-8") as stream:
               out=csv.writer(stream)
               out.writerow(["protocol","driver","final_owners","total_shards","sessions",
                             "payload_bytes","repeats","rounds",
-                            *["median_"+k for k in metrics]])
+                            *["median_"+k for k in metrics],
+                            "app_msgs_per_s_min","app_msgs_per_s_max",
+                            "process_cpu_pct_min","process_cpu_pct_max"])
               for (n,size), rows in sorted(actual.items()):
                   out.writerow(["sg-signed-ready-data-echo","global-barrier",
                                 n,n+1,4,size,len(rows),int(rows[0]["rounds"]),
                                 *[round(statistics.median(float(r[k]) for r in rows),4)
-                                  for k in metrics]])
+                                  for k in metrics],
+                                round(min(float(r["app_msgs_per_s"]) for r in rows),4),
+                                round(max(float(r["app_msgs_per_s"]) for r in rows),4),
+                                round(min(float(r["process_cpu_pct"]) for r in rows),4),
+                                round(max(float(r["process_cpu_pct"]) for r in rows),4)])
           PY
           cat mmp-sg-summary.csv
           echo 'Signed MMP READY gates P2P custom echo; Lease covers enqueue only. NOT raw CNet or management RPC measurements.'
@@ -131,6 +154,7 @@ jobs:
           path: |
             mmp-sg-aggregate.csv
             mmp-sg-sessions.csv
+            mmp-sg-rtt.csv
             mmp-sg-summary.csv
             mmp-sg-machine.txt
             mmp-sg-finals-*.log
