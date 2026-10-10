@@ -370,6 +370,72 @@ static void host_foreign(native_io_sharded_context *ctx, void *arg) {
       local_snapshot.ready != 1u || local_snapshot.active_leases != 1u)
     fail_lane(lane, SALTS_EPERM, "cross-final Pool/Manager isolation");
 }
+/* An application's single-slot Lease is NEVER a substitute for a signed
+ * MMP authority/key. Underlying CNet Manager must also reject a premature
+ * fabricated physical terminal while still BOUND. Exercise after each
+ * Final has already acquired a real Lease and before checked shutdown. */
+static void host_reject_unsigned_key(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = (sg_multi_lane *)arg;
+  (void)ctx;
+  if (!lane->shard || lane->error) return;
+  signed_final *f = lane_final(lane);
+  mesh_mgmt_runtime_pool_record_v3_t *record =
+      &f->server.runtime.signed_pool_records[0];
+  cnet_pool_key wrong_key = {0};
+  cnet_pool_lease denied = {0}, reacquired = {0};
+  cnet_managed_connection denied_managed = {0};
+  const cnet_pool_lease original = f->lease;
+  if (!record->active || record->draining ||
+      cnet_pool_terminal(&f->server.runtime.signed_pool,
+                         record->physical) != SALTS_EBUSY) {
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "live Manager early-terminal");
+    return;
+  }
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_release_v3(
+      &f->server.runtime, original));
+  if (mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &f->server.runtime, original) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "duplicate old Lease");
+    return;
+  }
+
+  wrong_key = record->key;
+  wrong_key.authority_id ^= UINT64_C(1);
+  if (cnet_pool_try_acquire(&f->server.runtime.signed_pool, &wrong_key,
+                            NULL, &denied, &denied_managed) != SALTS_ENOBUFS ||
+      denied.slot != 0u || denied_managed.slot != 0u) {
+    fail_lane(lane, SALTS_EPROTO, "wrong signed authority granted Lease");
+    return;
+  }
+  wrong_key = record->key;
+  wrong_key.session_id ^= UINT64_C(1);
+  if (cnet_pool_try_acquire(&f->server.runtime.signed_pool, &wrong_key,
+                            NULL, &denied, &denied_managed) != SALTS_ENOBUFS ||
+      denied.slot != 0u || denied_managed.slot != 0u) {
+    fail_lane(lane, SALTS_EPROTO, "stale signed session granted Lease");
+    return;
+  }
+  wrong_key = record->key;
+  wrong_key.owner_id ^= UINT64_C(1);
+  if (cnet_pool_try_acquire(&f->server.runtime.signed_pool, &wrong_key,
+                            NULL, &denied, &denied_managed) != SALTS_EINVAL ||
+      denied.slot != 0u || denied_managed.slot != 0u) {
+    fail_lane(lane, SALTS_EPROTO, "foreign Pool owner granted Lease");
+    return;
+  }
+
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+      &f->server.runtime, f->server.peer, &reacquired));
+  if (!reacquired.slot ||
+      (reacquired.slot == original.slot &&
+       reacquired.generation == original.generation)) {
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "Lease generation recycled");
+    return;
+  }
+  f->lease = reacquired;
+}
+
 static void host_stop_retaining(native_io_sharded_context *ctx, void *arg) {
   sg_multi_lane *lane = (sg_multi_lane *)arg;
   (void)ctx;
@@ -601,6 +667,11 @@ static void test_multi_final(size_t final_count) {
   barrier(sc);
   for (size_t i = 1u; i < sc->shards; ++i)
     submit(sc, i, host_foreign);
+  barrier(sc);
+  /* Same-worker false signed authority/session/owner and early terminal
+   * must reject with free lease budget; fresh genuine Lease must still work. */
+  for (size_t i = 1u; i < sc->shards; ++i)
+    submit(sc, i, host_reject_unsigned_key);
   barrier(sc);
   refresh(sc, 0u);
   for (size_t i = 0u; i < sc->finals; ++i)
