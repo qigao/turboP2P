@@ -24,8 +24,8 @@ typedef struct p2p_sg_ace_capacity {
 } p2p_sg_ace_capacity;
 
 /* Exact borrowed view. Caller retains state for the synchronous invocation.
- * P2P occupancy = (live P2P - already adopted TAKEN) +
- *                  TAKEN + RESERVED + QUEUED
+ * P2P occupancy = (live P2P - live connections holding Handoff credit)
+ *                  + TAKEN + RESERVED + QUEUED
  * Host pressure = P2P occupancy + other CNet physical slots.
  * Eligibility separately checks Handoff credit, P2P client capacity, and
  * (when published) overall shared Host capacity. No other-client private

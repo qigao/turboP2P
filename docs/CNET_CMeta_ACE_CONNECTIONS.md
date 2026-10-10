@@ -26,21 +26,22 @@ special case added the live count to TAKEN, which can double-count the same
 established incoming connection.
 
 The exact calculation requires two facts published from one P2P Owner:
-live physical connections and how many of those still retain an *adopted*
-Handoff TAKEN ticket. They are atomically packed into one release/acquire
+live physical connections and how many of those still retain a canonical
+Handoff credit. Cross-Owner adoption retains TAKEN, while same-Owner direct
+adoption retains RESERVED. They are atomically packed into one release/acquire
 publication to avoid cross-shard torn counts. CNet HandOff separately
 publishes RESERVED/QUEUED/TAKEN.
 
-    uncredited_p2p_live = p2p_live - p2p_adopted_taken
+    uncredited_p2p_live = p2p_live - p2p_adopted_handoff_credits
     p2p_occupancy = uncredited_p2p_live
                   + handoff_taken + handoff_reserved + handoff_queued
     shared_host_pressure = p2p_occupancy + other_cnet_slots
 
 Unlike max(live, TAKEN), this also counts TAKEN tickets still awaiting Adopt
-alongside unrelated outbound P2P connections. Impossible published intersections (adopted > live) and malformed CNet
+alongside unrelated outbound P2P connections. Impossible published intersections (credited > live) and malformed CNet
 Handoff capacity snapshots fail fast, never becoming negative or wrapped
-occupancy. Unlike these permanent corruptions, adopted > observed TAKEN
-can be a valid race between two separate atomic snapshot authorities.
+occupancy. Unlike these permanent corruptions, credited > observed total
+Handoff credits can be a valid race between two independent snapshot authorities.
 That candidate returns ENOBUFS with an ineligible hint; RR/LOWEST_PRESSURE
 still performs its original upstream one-time selection, while EXPLICIT
 fails closed without rerouting. The final CNet reserve remains authoritative.
@@ -127,15 +128,15 @@ Owner, the host must:
    consumers remain advisory only and must be included there instead.
 
 The same Handoff connection_capacity is therefore an **authoritative shared
-bounded count** for SG-accepted P2P incoming sockets and expressly participating
-external CNet connectors. An inbound P2P stream cannot bypass the full budget:
+bounded count** for SG-accepted cross-Owner TCP streams, same-Owner direct
+P2P adoption, and expressly participating external CNet connectors. An inbound P2P stream cannot bypass the full budget:
 EXPLICIT returns capacity denial, while RR/LOWEST_PRESSURE uses their canonical
 one-time Owner-selection admission and may choose a different eligible Owner.
 No hidden retry occurs after the selected Owner's real reserve fails.
 
 This is **not** a strict cap for all sockets sharing a NativeIO backend:
 unregistered external CNet callers, standalone P2P outbound connections,
-same-Owner local bypass paths and raw native sockets do not implicitly obtain
+non-SG direct P2P traffic and raw native sockets do not implicitly obtain
 this token. Total Host physical capacity still needs its authoritative
 admission policy if those workloads are admitted. For the participating
 flows, the SDK Handoff mutex and generation ticket are the only credit

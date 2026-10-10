@@ -44,10 +44,11 @@ struct p2p_cnet_owner_s {
     p2p_cnet_config_t config;
     p2p_cnet_connection_t *connections;
     size_t connection_count;
-    size_t handed_off_connections;
+    size_t credited_connections;
     /* Coherent Owner-published snapshot: high 32 live P2P connections,
-     * low 32 adopted TAKEN credits still retained by P2P callbacks.
-     * One release store avoids cross-shard torn pairs. */
+     * low 32 real Handoff credits retained by those connections.
+     * A credit may be RESERVED for same-Owner direct adoption or TAKEN after
+     * cross-Owner publication. One release store avoids torn pairs. */
     atomic_uint_fast64_t published_occupancy;
     /* Explicit Host-owned advisory only: high 32 shared SG connection limit,
      * low 32 other cohosted CNet occupied/connecting slots. Zero means absent.
@@ -84,7 +85,7 @@ static void publish_owner_occupancy(p2p_cnet_owner_t *owner) {
      * Both values stay within uint32_t, and one atomic release publishes
      * them as one generation-coherent advisory value to SG acceptor. */
     uint64_t counts = ((uint64_t)owner->connection_count << 32) |
-                      (uint64_t)owner->handed_off_connections;
+                      (uint64_t)owner->credited_connections;
     atomic_store_explicit(&owner->published_occupancy, counts,
                           memory_order_release);
 }
@@ -172,15 +173,15 @@ static int sweep(p2p_cnet_owner_t *owner) {
              * placement snapshot. Decrement our published adopted subset
              * FIRST: the brief conservative overcount is safe; the reverse
              * order could create a false credited > TAKEN mismatch. */
-            if (!owner->handed_off_connections)
+            if (!owner->credited_connections)
                 return P2P_ERR_INVALID_STATE;
-            --owner->handed_off_connections;
+            --owner->credited_connections;
             publish_owner_occupancy(owner);
             int status = cnet_handoff_release(connection->inbound_credit,
                                               connection->inbound_ticket);
             if (status != SALTS_OK) {
                 /* Failed CNet release did not consume this TAKEN credit. */
-                ++owner->handed_off_connections;
+                ++owner->credited_connections;
                 publish_owner_occupancy(owner);
                 return p2p_error(status);
             }
@@ -587,7 +588,7 @@ static int adopt_detached(p2p_cnet_owner_t *owner,
     }
     connection->inbound_credit = credit_owner;
     connection->inbound_ticket = credit;
-    if (credit_owner) ++owner->handed_off_connections;
+    if (credit_owner) ++owner->credited_connections;
     publish_connection(owner, connection);
     status = owner->accept(owner, &connection->base, &peer,
                             owner->accept_context);
@@ -678,7 +679,21 @@ static int sg_route_accepted(p2p_cnet_owner_t *owner,
         return P2P_ERR_INVALID_STATE;
     }
     if (sg->finals[selected] == owner) {
-        status = adopt_detached(owner, accepted, NULL, ticket);
+        /* Same-owner ACE Acceptor/Connector is a true zero-hop direct
+         * adopt, but it must NOT bypass the capacity ledger also used by
+         * cross-Owner incoming TCP and credited Cohost clients. Reserve a
+         * normal CNet Handoff RESERVED ticket; do not enqueue/retake a fake
+         * detached stream just to manufacture a TAKEN credit. */
+        status = cnet_handoff_reserve(&sg->inboxes[selected], &ticket);
+        if (status != SALTS_OK) {
+            cnet_accepted_stream_close(accepted);
+            if (status == SALTS_ENOBUFS || status == SALTS_ESHUTDOWN) {
+                atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
+                return P2P_OK;
+            }
+            return p2p_error(status);
+        }
+        status = adopt_detached(owner, accepted, &sg->inboxes[selected], ticket);
         if (status == P2P_OK) {
             atomic_fetch_add_explicit(&sg->routed, 1u, memory_order_relaxed);
             return P2P_OK;
