@@ -301,6 +301,41 @@ add_test(NAME test_p2p_cnet_sg_cohost COMMAND test_p2p_cnet_sg_cohost)
 set_tests_properties(test_p2p_cnet_sg_cohost PROPERTIES TIMEOUT 90)
 
 
+# Opt-in signed-MMP READY-gated encrypted data echo: exactly FOUR distinct
+# authenticated clients at 1 / 2 / 4 Final SG Owners plus one acceptor.
+# All profiles reserve exactly four total Final CNet/Pool connections.
+# Benchmarks are NOT Release CTest and do NOT imply raw CNet/MMP RPC latency.
+option(P2P_MMP_SG_BUILD_BENCHMARKS "Build equal-load signed SG Pool benchmarks" OFF)
+if(P2P_MMP_SG_BUILD_BENCHMARKS)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "Signed SG benchmark requires Linux process CPU clock")
+  endif()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_mesh_mmp_sg_${finals}
+      "${mesh_tests}/../bench/bench_mesh_mmp_sg_pool.c")
+    set_property(TARGET bench_mesh_mmp_sg_${finals} PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_mesh_mmp_sg_${finals}
+      PRIVATE BENCH_MMP_FINALS=${finals})
+    target_include_directories(bench_mesh_mmp_sg_${finals} PRIVATE
+      "${mesh_tests}")
+    target_link_libraries(bench_mesh_mmp_sg_${finals} PRIVATE
+      mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
+  # Paired independent SG progress against the EXACT same signed identity
+  # fixture, payloads, warmup, message counts, and original CNet credit policy.
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_mesh_mmp_sg_${finals}_async
+      "${mesh_tests}/../bench/bench_mesh_mmp_sg_pool.c")
+    set_property(TARGET bench_mesh_mmp_sg_${finals}_async PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_mesh_mmp_sg_${finals}_async
+      PRIVATE BENCH_MMP_FINALS=${finals} BENCH_ASYNC_PROGRESS=1)
+    target_include_directories(bench_mesh_mmp_sg_${finals}_async PRIVATE
+      "${mesh_tests}")
+    target_link_libraries(bench_mesh_mmp_sg_${finals}_async PRIVATE
+      mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
+endif()
+
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
 # Topologies 1/2/4 have respectively 1/1/3 authenticated connections; use
 # the session column rather than claiming equal-load CPU scaling.
