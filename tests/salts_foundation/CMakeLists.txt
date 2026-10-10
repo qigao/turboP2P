@@ -353,6 +353,15 @@ if(P2P_RAW_CNET_SG_BUILD_BENCHMARKS)
     target_link_libraries(bench_raw_cnet_sg_${finals} PRIVATE
       Salts::CNet Salts::TinyTest)
   endforeach()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_raw_cnet_sg_${finals}_async
+      "${mesh_tests}/../bench/bench_raw_cnet_sg_echo.c")
+    set_property(TARGET bench_raw_cnet_sg_${finals}_async PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_raw_cnet_sg_${finals}_async
+      PRIVATE BENCH_RAW_FINALS=${finals} BENCH_RAW_ASYNC_PROGRESS=1)
+    target_link_libraries(bench_raw_cnet_sg_${finals}_async PRIVATE
+      Salts::CNet Salts::TinyTest)
+  endforeach()
 endif()
 
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.

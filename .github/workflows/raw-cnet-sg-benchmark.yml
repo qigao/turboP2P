@@ -30,17 +30,18 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
             -DVCPKG_MANIFEST_MODE=OFF
           cmake --build build/raw-cnet-sg-bench --parallel 2 --target \
-            bench_raw_cnet_sg_1 bench_raw_cnet_sg_2 bench_raw_cnet_sg_4
+            bench_raw_cnet_sg_1 bench_raw_cnet_sg_2 bench_raw_cnet_sg_4 \
+            bench_raw_cnet_sg_1_async bench_raw_cnet_sg_2_async bench_raw_cnet_sg_4_async
       - name: Verify raw TCP 1/2/4 Final Owner same-work gate
         shell: bash
         env:
-          P2P_MMP_BENCH_WARMUP: '8'
-          P2P_MMP_BENCH_ROUNDS: '32'
+          P2P_MMP_BENCH_WARMUP: '32'
+          P2P_MMP_BENCH_ROUNDS: '256'
         run: |
           set -euo pipefail
           echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-aggregate.csv
           echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-sessions.csv
-          echo 'final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > raw-sg-rtt.csv
+          echo 'repeat,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > raw-sg-rtt.csv
           {
             uname -a
             lscpu
@@ -49,40 +50,87 @@ jobs:
             echo "SALTS_ROOT=$SALTS_ROOT"
             echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
           } > raw-sg-machine.txt
-          for bytes in 8 1024; do
-            for finals in 1 2 4; do
-              export P2P_MMP_BENCH_PAYLOAD="$bytes"
-              log="raw-cnet-sg-$finals-final-$bytes-B.log"
-              "./build/raw-cnet-sg-bench/bench_raw_cnet_sg_$finals" | tee "$log"
-              grep '^RAW_CNET_SG_BENCH,' "$log" |
-                sed 's/^RAW_CNET_SG_BENCH,//' >> raw-sg-aggregate.csv
-              grep '^RAW_CNET_SG_SESSION,' "$log" |
-                sed 's/^RAW_CNET_SG_SESSION,//' >> raw-sg-sessions.csv
-              grep '^RAW_CNET_SG_RTT,' "$log" |
-                sed 's/^RAW_CNET_SG_RTT,global-barrier,//' >> raw-sg-rtt.csv
+          for repeat in 1 2 3 4 5; do
+            for bytes in 8 1024; do
+              for finals in 1 2 4; do
+                export P2P_MMP_BENCH_PAYLOAD="$bytes"
+                for mode in barrier async; do
+                  exe="bench_raw_cnet_sg_$finals"
+                  if [ "$mode" = async ]; then exe="${exe}_async"; fi
+                  log="raw-cnet-sg-$finals-final-$bytes-B-$mode-repeat-$repeat.log"
+                  "./build/raw-cnet-sg-bench/$exe" | tee "$log"
+                  grep '^RAW_CNET_SG_BENCH,' "$log" |
+                    sed 's/^RAW_CNET_SG_BENCH,//' >> raw-sg-aggregate.csv
+                  grep '^RAW_CNET_SG_SESSION,' "$log" |
+                    sed 's/^RAW_CNET_SG_SESSION,//' >> raw-sg-sessions.csv
+                  grep '^RAW_CNET_SG_RTT,' "$log" |
+                    sed "s/^RAW_CNET_SG_RTT,/$repeat,/" >> raw-sg-rtt.csv
+                done
+              done
             done
           done
           python3 - <<'PY'
-          import csv, math
+          import csv, math, statistics
           from collections import defaultdict
           rows=list(csv.DictReader(open('raw-sg-aggregate.csv',encoding='utf8')))
           clients=list(csv.DictReader(open('raw-sg-sessions.csv',encoding='utf8')))
           raw=list(csv.DictReader(open('raw-sg-rtt.csv',encoding='utf8')))
-          expected={(n,b) for n in (1,2,4) for b in (8,1024)}
-          got=set()
+          expected={(mode,n,b)
+                    for mode in ('global-barrier','owner-independent')
+                    for n in (1,2,4) for b in (8,1024)}
+          got=defaultdict(list)
           for row in rows:
+              mode=row['driver']
               n,b=int(row['final_owners']),int(row['payload_bytes'])
-              if ((n,b) not in expected or (n,b) in got or
+              if ((mode,n,b) not in expected or
                   int(row['total_shards']) != n+1 or int(row['sessions']) != 4 or
-                  int(row['rounds']) != 32 or int(row['warmup']) != 8 or
-                  row['protocol']!='raw-cnet-tcp-echo' or row['driver']!='global-barrier'
+                  int(row['rounds']) != 256 or int(row['warmup']) != 32 or
+                  row['protocol']!='raw-cnet-tcp-echo'
                   or any(not math.isfinite(float(row[k])) or float(row[k])<=0
                          for k in ('app_msgs_per_s','wall_ms','rtt_p95_us'))):
-                  raise SystemExit(f'Invalid or duplicate raw CNet profile: {row}')
-              got.add((n,b))
-          if got!=expected or len(clients)!=24 or len(raw)!=6*4*32:
-              raise SystemExit(f'Incomplete raw SG work: profiles {got} sessions {len(clients)} RTT {len(raw)}')
-          print('Raw SG four-session smoke profiles PASS:',sorted(got))
+                  raise SystemExit(f'Invalid raw CNet profile: {row}')
+              got[(mode,n,b)].append(row)
+          if set(got)!=expected or any(len(v)!=5 for v in got.values()):
+              raise SystemExit(f'Incomplete raw SG aggregate: {dict((k,len(v)) for k,v in got.items())}')
+          groups=defaultdict(list)
+          for row in clients:
+              key=(row['driver'],int(row['final_owners']),
+                   int(row['payload_bytes']),int(row['session_id']))
+              if (key[:3] not in expected or key[3] not in (1,2,3,4)
+                  or int(row['total_shards'])!=key[1]+1):
+                  raise SystemExit(f'Invalid per-session raw RTT: {row}')
+              groups[key].append(row)
+          if len(groups)!=48 or any(len(v)!=5 for v in groups.values()):
+              raise SystemExit('Incomplete raw 4-session percentile evidence')
+          samples=defaultdict(set)
+          for row in raw:
+              key=(int(row['repeat']),row['driver'],int(row['final_owners']),
+                   int(row['payload_bytes']),int(row['session_id']))
+              rd=int(row['round'])
+              if (key[0] not in range(1,6) or key[1:4] not in expected
+                  or key[4] not in (1,2,3,4) or
+                  int(row['total_shards'])!=key[2]+1 or
+                  rd not in range(1,257) or rd in samples[key] or
+                  not math.isfinite(float(row['rtt_us'])) or float(row['rtt_us'])<=0):
+                  raise SystemExit(f'Invalid/duplicate raw CNet RTT: {row}')
+              samples[key].add(rd)
+          if len(samples)!=5*2*3*2*4 or any(len(x)!=256 for x in samples.values()):
+              raise SystemExit('Missing raw CNet per-round RTT evidence')
+          with open('raw-sg-summary.csv','w',newline='',encoding='utf8') as out:
+              writer=csv.writer(out)
+              writer.writerow(['protocol','driver','final_owners','total_shards',
+                  'sessions','payload_bytes','repeats','rounds','median_app_msgs_per_s',
+                  'median_process_cpu_pct','median_rtt_p95_us',
+                  'min_app_msgs_per_s','max_app_msgs_per_s'])
+              for (mode,n,b),records in sorted(got.items()):
+                  writer.writerow(['raw-cnet-tcp-echo',mode,n,n+1,4,b,5,256,
+                      round(statistics.median(float(x['app_msgs_per_s']) for x in records),3),
+                      round(statistics.median(float(x['process_cpu_pct']) for x in records),3),
+                      round(statistics.median(float(x['rtt_p95_us']) for x in records),3),
+                      round(min(float(x['app_msgs_per_s']) for x in records),3),
+                      round(max(float(x['app_msgs_per_s']) for x in records),3)])
+          print('Raw SG four-session paired profiles PASS:',sorted(got))
+          print(open('raw-sg-summary.csv',encoding='utf8').read())
           PY
           echo 'Raw TCP/CNet echo is NOT Noise, MMP, Pool, or encrypted RPC. Matched session/SG/Handoff work only.'
       - name: Upload raw CNet baseline evidence
@@ -93,6 +141,7 @@ jobs:
             raw-sg-aggregate.csv
             raw-sg-sessions.csv
             raw-sg-rtt.csv
+            raw-sg-summary.csv
             raw-sg-machine.txt
             raw-cnet-sg-*.log
           if-no-files-found: error

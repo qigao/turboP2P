@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifndef BENCH_RAW_FINALS
 #error BENCH_RAW_FINALS must be 1, 2, or 4
@@ -33,6 +34,13 @@
 #if BENCH_RAW_FINALS != 1 && BENCH_RAW_FINALS != 2 && BENCH_RAW_FINALS != 4
 #error Invalid BENCH_RAW_FINALS
 #endif
+#ifndef BENCH_RAW_ASYNC_PROGRESS
+#define BENCH_RAW_ASYNC_PROGRESS 0
+#endif
+#if BENCH_RAW_ASYNC_PROGRESS != 0 && BENCH_RAW_ASYNC_PROGRESS != 1
+#error Invalid BENCH_RAW_ASYNC_PROGRESS
+#endif
+#define RAW_DRIVER_LABEL (BENCH_RAW_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
 enum { RAW_SESSIONS=4, RAW_FINALS=BENCH_RAW_FINALS,
        RAW_SHARDS=RAW_FINALS+1, RAW_PER_FINAL=RAW_SESSIONS/RAW_FINALS,
        RAW_BATCH=16, RAW_BYTES_MAX=1024, RAW_TIMEOUT_MS=15000 };
@@ -75,6 +83,10 @@ struct raw_lane {
   const void *owner_thread;
   int error,stopped,released,closing;
   const char *failed_at;
+#if BENCH_RAW_ASYNC_PROGRESS
+  atomic_bool progress_ready;
+  atomic_int cancel_status,owner_failed;
+#endif
 };
 
 struct raw_case {
@@ -147,6 +159,9 @@ static cnet_client_config client_cfg(size_t connections) {
 }
 static void lane_error(raw_lane *lane,int rc,const char *where) {
   if (lane->error==SALTS_OK) {lane->error=rc;lane->failed_at=where;}
+#if BENCH_RAW_ASYNC_PROGRESS
+  atomic_store_explicit(&lane->owner_failed,rc,memory_order_release);
+#endif
 }
 #define RAW_CHECK(lane, expr) do { \
   const int rc_=(expr); \
@@ -418,7 +433,7 @@ static void barrier(raw_case *sc) {
     check_equal(SALTS_OK,lane->error);
   }
 }
-static void pump(raw_case *sc) {
+static void pump_clients(raw_case *sc) {
   for (size_t i=0u;i<RAW_SESSIONS;++i) {
     raw_client *c=&sc->clients[i];
     if (!c->client.impl) continue;
@@ -431,15 +446,71 @@ static void pump(raw_case *sc) {
       c->sent_ns=1u; /* set to a real timestamp before measured request */
     }
   }
+}
+static void pump(raw_case *sc) {
+  pump_clients(sc);
   for (size_t shard=0u;shard<RAW_SHARDS;++shard)
     submit(sc,shard,progress);
   barrier(sc);
 }
+#if BENCH_RAW_ASYNC_PROGRESS
+static void progress_cancel(void *ctx,int status) {
+  raw_lane *lane=(raw_lane *)ctx;
+  atomic_store_explicit(&lane->cancel_status,status,memory_order_relaxed);
+}
+static void progress_finalized(void *ctx) {
+  raw_lane *lane=(raw_lane *)ctx;
+  atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+}
+static void pump_independent(raw_case *sc) {
+  pump_clients(sc);
+  for (size_t shard=0u;shard<RAW_SHARDS;++shard) {
+    raw_lane *lane=&sc->lanes[shard];
+    check_equal(SALTS_OK,atomic_load_explicit(
+        &lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(
+        &lane->cancel_status,memory_order_relaxed));
+    if (!atomic_exchange_explicit(
+            &lane->progress_ready,false,memory_order_acq_rel))
+      continue;
+    native_io_sharded_task task={
+      progress,progress_cancel,progress_finalized,lane
+    };
+    const int status=native_io_sharded_try_submit_to(sc->sg,shard,&task);
+    if (status!=SALTS_OK) {
+      /* One in-flight SG Host task, never a second per-shard observer. */
+      atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+      if (status!=SALTS_ENOBUFS) check_equal(SALTS_OK,status);
+    }
+  }
+}
+static void finish_independent(raw_case *sc) {
+  /* One native SG wait AFTER measured operations, not per echo round. */
+  barrier(sc);
+  for (size_t shard=0u;shard<RAW_SHARDS;++shard) {
+    raw_lane *lane=&sc->lanes[shard];
+    check_true(atomic_load_explicit(
+        &lane->progress_ready,memory_order_acquire));
+    check_equal(SALTS_OK,atomic_load_explicit(
+        &lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(
+        &lane->cancel_status,memory_order_relaxed));
+  }
+}
+#define RAW_MEASURE_PUMP(s) pump_independent(s)
+#define RAW_MEASURE_BOUNDARY(s) finish_independent(s)
+#define RAW_MEASURE_FINISH(s) finish_independent(s)
+#else
+#define RAW_MEASURE_PUMP(s) pump(s)
+#define RAW_MEASURE_BOUNDARY(s) ((void)0)
+#define RAW_MEASURE_FINISH(s) ((void)0)
+#endif
 static void run_rounds(raw_case *sc) {
   const size_t total=sc->warmup+sc->rounds;
   uint64_t wall0=0u,cpu0=0u;
   for (size_t round=0u;round<total;++round) {
     if (round==sc->warmup) {
+      RAW_MEASURE_BOUNDARY(sc);
       wall0=mono_ns(CLOCK_MONOTONIC);
       cpu0=mono_ns(CLOCK_PROCESS_CPUTIME_ID);
     }
@@ -456,13 +527,14 @@ static void run_rounds(raw_case *sc) {
       for (size_t i=0u;i<RAW_SESSIONS;++i)
         if (sc->clients[i].received<=round) complete=false;
       if (complete||cmeta_monotonic_ms()>=deadline) break;
-      pump(sc);
+      RAW_MEASURE_PUMP(sc);
     }
     for (size_t i=0u;i<RAW_SESSIONS;++i) {
       check_equal(round+1u,sc->clients[i].received);
       check_equal((size_t)0u,sc->clients[i].invalid);
     }
   }
+  RAW_MEASURE_FINISH(sc);
   uint64_t wall1=mono_ns(CLOCK_MONOTONIC),cpu1=mono_ns(CLOCK_PROCESS_CPUTIME_ID);
   const double elapsed=(double)(wall1-wall0)/1e9;
   const double cpu=(double)(cpu1-cpu0)/1e9;
@@ -473,13 +545,13 @@ static void run_rounds(raw_case *sc) {
     raw_client *c=&sc->clients[i];
     memcpy(combined+i*sc->rounds,c->samples,sc->rounds*sizeof(uint64_t));
     for (size_t j=0u;j<sc->rounds;++j)
-      printf("RAW_CNET_SG_RTT,global-barrier,%u,%u,%zu,%zu,%zu,%.3f\n",
-          (unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,i+1u,sc->bytes,j+1u,
+      printf("RAW_CNET_SG_RTT,%s,%u,%u,%zu,%zu,%zu,%.3f\n",
+          RAW_DRIVER_LABEL,(unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,i+1u,sc->bytes,j+1u,
           (double)c->samples[j]/1000.0);
     qsort(c->samples,sc->rounds,sizeof(uint64_t),sort_u64);
-    printf("RAW_CNET_SG_SESSION,raw-cnet-tcp-echo,global-barrier,"
+    printf("RAW_CNET_SG_SESSION,raw-cnet-tcp-echo,%s,"
            "%u,%u,%zu,%zu,%zu,%.3f,%.3f,%.3f\n",
-           (unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,
+           RAW_DRIVER_LABEL,(unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,
            i+1u,sc->bytes,sc->rounds,
            (double)percentile(c->samples,sc->rounds,50u)/1000.0,
            (double)percentile(c->samples,sc->rounds,95u)/1000.0,
@@ -488,9 +560,9 @@ static void run_rounds(raw_case *sc) {
   qsort(combined,sample_count,sizeof(uint64_t),sort_u64);
   check_true(elapsed>0u);
   const double messages=(double)sc->rounds*RAW_SESSIONS*2.0;
-  printf("RAW_CNET_SG_BENCH,raw-cnet-tcp-echo,global-barrier,"
+  printf("RAW_CNET_SG_BENCH,raw-cnet-tcp-echo,%s,"
          "%u,%u,%u,%zu,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.6f,%.3f,%.3f,%.3f\n",
-         (unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,(unsigned)RAW_SESSIONS,
+         RAW_DRIVER_LABEL,(unsigned)RAW_FINALS,(unsigned)RAW_SHARDS,(unsigned)RAW_SESSIONS,
          sc->bytes,sc->rounds,sc->warmup,
          elapsed*1000.0,cpu*1000.0,cpu*100.0/elapsed,
          messages/elapsed,messages*(double)sc->bytes/(1048576.0*elapsed),
@@ -561,6 +633,11 @@ static void run_raw_cnet_benchmark(void) {
   for (size_t i=0u;i<RAW_SHARDS;++i) {
     sc->lanes[i].scenario=sc;
     sc->lanes[i].shard=i;
+#if BENCH_RAW_ASYNC_PROGRESS
+    atomic_init(&sc->lanes[i].progress_ready,true);
+    atomic_init(&sc->lanes[i].cancel_status,0);
+    atomic_init(&sc->lanes[i].owner_failed,SALTS_OK);
+#endif
     submit(sc,i,init_host);
   }
   barrier(sc);
