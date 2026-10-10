@@ -41,6 +41,8 @@ typedef struct {
   cnet_manager *manager; /* copied borrowed identity, never accessed off-owner */
   cnet_managed_connection managed;
   uint8_t signed_connection[16];
+  cnet_pool_key immutable_key;
+  cnet_pool_connection immutable_physical;
 } signed_final;
 
 typedef struct {
@@ -58,6 +60,10 @@ typedef struct {
 
 struct sg_multi_case {
   size_t finals, shards;
+  /* Synthetic SAME signed endpoint identity on distinct real SG workers.
+   * Strictly a migration/failover test fixture; never a production key
+   * distribution recommendation. */
+  uint8_t same_signed_identity;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
   sg_multi_lane lanes[SG_MULTI_MAX_SHARDS];
@@ -255,8 +261,11 @@ static void host_install(native_io_sharded_context *ctx, void *arg) {
   SG_CHECK(lane, mesh_mgmt_agent_runtime_init_sg_final_v3(
       &f->server.runtime, &f->server.config, f->node, f->owner,
       ctx, lane->lease));
+  const uint64_t pool_owner_id =
+      lane->scenario->same_signed_identity ? UINT64_C(70)
+                                            : (uint64_t)(70u + lane->shard);
   SG_CHECK(lane, mesh_mgmt_agent_runtime_enable_signed_pool_v3(
-      &f->server.runtime, (uint64_t)(70u + lane->shard), 1u, 1u));
+      &f->server.runtime, pool_owner_id, 1u, 1u));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_start_v1(&f->server.runtime));
   if (f->server.runtime.owns_node || !f->server.runtime.sg_final_mode ||
       f->server.runtime.signed_pool.impl != NULL ||
@@ -317,6 +326,8 @@ static void host_snapshot(native_io_sharded_context *ctx, void *arg) {
     f->managed = record->managed;
     memcpy(f->signed_connection, record->connection_id,
            sizeof(f->signed_connection));
+    f->immutable_key = record->key;
+    f->immutable_physical = record->physical;
   }
 }
 static void host_acquire(native_io_sharded_context *ctx, void *arg) {
@@ -434,6 +445,113 @@ static void host_reject_unsigned_key(native_io_sharded_context *ctx, void *arg) 
     return;
   }
   f->lease = reacquired;
+}
+
+/* Called from Final B after a real reconnection of the SAME signed
+ * client/server identity from Final A. A still has a TERMINAL old physical
+ * generation and outstanding Lease, while B has its own new READY/Lease.
+ * Both CNet Pools use the same application owner_id in this fixture:
+ * denying A's old key here MUST rely on actual runtime/session generation. */
+static void host_migration_probe(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = (sg_multi_lane *)arg;
+  (void)ctx;
+  if (lane->shard != 2u || lane->error) return;
+  signed_final *old = &lane->scenario->finals_data[0];
+  signed_final *current = lane_final(lane);
+  cnet_pool_lease denied = {0}, reacquired = {0};
+  cnet_managed_connection managed = {0};
+  mesh_mgmt_agent_router_ready_v1_t stale_proof = {0};
+  cnet_pool_snapshot snapshot = {0};
+  if (!old->manager || !current->manager ||
+      old->manager == current->manager ||
+      old->immutable_key.owner_id != current->immutable_key.owner_id ||
+      (old->immutable_key.runtime_id == current->immutable_key.runtime_id &&
+       old->immutable_key.session_id == current->immutable_key.session_id) ||
+      memcmp(old->signed_connection, current->signed_connection,
+             sizeof(old->signed_connection)) == 0) {
+    fail_lane(lane, SALTS_EPROTO, "old/new authenticated SG identity aliased");
+    return;
+  }
+  /* Return just B's Lease, so the upstream B Pool has FREE lease budget:
+   * stale key denial cannot be explained by capacity exhaustion. */
+  const cnet_pool_lease original = current->lease;
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_release_v3(
+      &current->server.runtime, original));
+  if (cnet_pool_try_acquire(&current->server.runtime.signed_pool,
+                            &old->immutable_key, NULL, &denied, &managed) !=
+          SALTS_ENOBUFS ||
+      denied.slot || managed.slot ||
+      mesh_mgmt_agent_router_ready_session_v1(
+          &current->server.runtime.router, current->server.peer,
+          old->client.public_key,
+          old->client.identity.signer.hello.managed_node_id,
+          old->signed_connection, &stale_proof) !=
+          MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH ||
+      stale_proof.size) {
+    fail_lane(lane, SALTS_EPROTO, "stale Final A READY accepted by Final B");
+    return;
+  }
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
+      &current->server.runtime, current->server.peer, &reacquired));
+  if (!reacquired.slot ||
+      (reacquired.slot == original.slot &&
+       reacquired.generation == original.generation)) {
+    fail_lane(lane, SALTS_EPROTO, "Final B Lease generation did not advance");
+    return;
+  }
+  current->lease = reacquired;
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+      &current->server.runtime, &snapshot));
+  if (snapshot.ready != 1u || snapshot.active_leases != 1u ||
+      snapshot.sealed)
+    fail_lane(lane, SALTS_EPROTO, "new Final B readiness changed");
+}
+
+/* A's real physical terminal must have been observed by its OWN Manager.
+ * Releasing the old Lease and checked-destroying A's Pool must not alter
+ * the live B's borrowed Pool/Manager/SG Host. */
+static void host_migration_retire_old(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = (sg_multi_lane *)arg;
+  (void)ctx;
+  if (lane->shard != 1u || lane->error) return;
+  signed_final *old = lane_final(lane);
+  cnet_pool_snapshot snapshot = {0};
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+      &old->server.runtime, &snapshot));
+  if (snapshot.terminal_waiting_for_leases != 1u ||
+      snapshot.ready != 0u || snapshot.active_leases != 1u) {
+    fail_lane(lane, SALTS_EBUSY, "old Final A not terminal with borrowed Lease");
+    return;
+  }
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_release_v3(
+      &old->server.runtime, old->lease));
+  if (mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &old->server.runtime, old->lease) !=
+          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
+    fail_lane(lane, SALTS_EPROTO, "duplicate old Final A Lease");
+    return;
+  }
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_stop_v1(&old->server.runtime));
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_destroy_v2(&old->server.runtime));
+  if (!old->node || !old->owner || old->server.runtime.node)
+    fail_lane(lane, SALTS_EPROTO, "old Final A borrowed P2P Owner destroyed");
+}
+
+/* Unselected Final C/D have no signed Pool, but still borrow their SG
+ * transport and MUST detach their Routers before native SG teardown. */
+static void host_migration_stop_idle(native_io_sharded_context *ctx, void *arg) {
+  sg_multi_lane *lane = (sg_multi_lane *)arg;
+  (void)ctx;
+  if (lane->shard < 3u || lane->error) return;
+  signed_final *f = lane_final(lane);
+  if (f->server.runtime.signed_pool.impl || f->server.established) {
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "unexpected MMP connection on idle final");
+    return;
+  }
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_stop_v1(&f->server.runtime));
+  SG_CHECK(lane, mesh_mgmt_agent_runtime_destroy_v2(&f->server.runtime));
+  if (!f->node || !f->owner || f->server.runtime.node)
+    fail_lane(lane, P2P_ERR_INVALID_STATE, "idle final borrowed owner destroyed");
 }
 
 static void host_stop_retaining(native_io_sharded_context *ctx, void *arg) {
@@ -761,11 +879,211 @@ static void test_multi_final(size_t final_count) {
   check_equal(SALTS_OK, native_io_sharded_destroy(sc->host));
 }
 
+
+/* Real signed session migration/failover: Final A and Final B borrow distinct
+ * physical SG Manager/Host workers but represent the same test transport
+ * identity. The only endpoint dial clock is the CLIENT EndpointPool; no
+ * SG-side forced reconnect, fake READY event or artificial TCP terminal.
+ * Final A keeps its old application Lease after disconnect, while Round
+ * Robin places the automatic next Noise/MMP connection on Final B. */
+static void test_signed_reconnect_across_finals(size_t final_count) {
+  sg_multi_case fixture = {0};
+  sg_multi_case *sc = &fixture;
+  sc->finals = final_count;
+  sc->shards = final_count + 1u;
+  sc->same_signed_identity = 1u;
+  check_true(final_count == 2u || final_count == 4u);
+  const native_io_sharded_config cfg = {
+      sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
+  p2p_cnet_sg_config_v1_t policy = {0};
+  mesh_mgmt_agent_bootstrap_v1_t bootstrap = {0};
+  signed_final *old = &sc->finals_data[0];
+  signed_final *next = &sc->finals_data[1];
+  for (size_t i = 0u; i < sc->finals; ++i) {
+    signed_final *f = &sc->finals_data[i];
+    /* Identical SYNTHETIC test identity across SG worker nodes simulates
+     * failover of one authenticated endpoint; each Router gets its own
+     * random connection namespace and each Final keeps its own Manager. */
+    prepare(&f->server, 17u);
+    f->server.random.next_message_byte = (uint8_t)(17u + 29u * i);
+    prepare(&f->client, (uint8_t)(33u + 2u * i));
+    f->server.config.listen_host = NULL;
+    f->server.config.listen_port = 0u;
+    f->server.config.p2p_private_key = NULL;
+    check_equal(old->server.public_key, f->server.public_key, 32u);
+  }
+  old->client.config.retry_base_ms = 10u;
+  old->client.config.retry_max_ms = 10u;
+  check_equal(SALTS_OK, native_io_sharded_create(&cfg, &sc->host));
+  for (size_t i = 0u; i < sc->shards; ++i) {
+    sc->lanes[i].scenario = sc;
+    sc->lanes[i].shard = i;
+    submit(sc, i, host_init);
+  }
+  barrier(sc);
+  policy.size = sizeof(policy);
+  policy.version = P2P_CNET_SG_VERSION;
+  policy.acceptor = sc->lanes[0].acceptor;
+  policy.placement = CNET_OWNER_PLACE_ROUND_ROBIN;
+  policy.final_owner_count = sc->finals;
+  policy.queue_capacity = 2u;
+  policy.connection_capacity = 4u;
+  for (size_t i = 0u; i < sc->finals; ++i)
+    policy.final_owners[i] = sc->lanes[i+1u].final_transport;
+  check_equal(P2P_OK, p2p_cnet_sg_create_v1(&policy, &sc->handoff));
+  for (size_t i = 1u; i < sc->shards; ++i)
+    submit(sc, i, host_install);
+  barrier(sc);
+
+  memcpy(bootstrap.transport_peer_id, old->server.public_key, 32u);
+  bootstrap.host = "127.0.0.1";
+  bootstrap.port = sc->lanes[0].listener.port;
+  old->client.config.bootstraps = &bootstrap;
+  old->client.config.bootstrap_count = 1u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_init_v2(
+          &old->client.runtime, &old->client.config, &old->client.network));
+  old->client.config.bootstraps = NULL;
+  old->client.config.bootstrap_count = 0u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_start_v1(&old->client.runtime));
+  const uint64_t initial_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+  while ((!old->server.established || !old->client.established) &&
+         cmeta_monotonic_ms() < initial_deadline)
+    pump(sc);
+  check_equal(1u, old->server.established);
+  check_equal(1u, old->client.established);
+  check_equal(0u, next->server.established);
+  submit(sc, 1u, host_snapshot);
+  barrier(sc);
+  check_equal((size_t)1u, old->pool.ready);
+  submit(sc, 1u, host_acquire);
+  barrier(sc);
+  check_true(old->lease.slot != 0u);
+  p2p_cnet_sg_snapshot_v1_t handoff_a = {0};
+  check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
+      sc->handoff, 0u, &handoff_a));
+  check_equal((size_t)1u, handoff_a.handoff.taken);
+
+  /* Real disconnect, then only EndpointPool retries. The acceptor
+   * Round-Robin selection moves the REAUTHENTICATED same transport key
+   * to a different final CNet Owner without moving any existing socket. */
+  check_not_null(old->client.peer);
+  p2p_disconnect_peer(old->client.peer);
+  const uint64_t reconnect_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+  while ((!next->server.established || old->client.established < 2u ||
+          !old->server.closed) &&
+         cmeta_monotonic_ms() < reconnect_deadline)
+    pump(sc);
+  check_equal(1u, old->server.established);
+  check_equal(1u, next->server.established);
+  check_equal(2u, old->client.established);
+  check_true(old->server.closed > 0u && old->client.closed > 0u);
+  check_not_null(next->server.peer);
+  submit(sc, 2u, host_snapshot);
+  barrier(sc);
+  check_equal((size_t)1u, next->pool.ready);
+  check_true(next->manager != old->manager);
+  check_equal(old->immutable_key.owner_id, next->immutable_key.owner_id);
+  submit(sc, 2u, host_acquire);
+  barrier(sc);
+  check_true(next->lease.slot != 0u);
+
+  /* Wait for authoritative Manager retirement of A, while B continues
+   * to expose a valid signed READY with an independently borrowed Lease. */
+  const uint64_t drain_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+  for (;;) {
+    pump(sc);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)1u, next->pool.ready);
+    check_equal((size_t)1u, next->pool.active_leases);
+    if (old->pool.terminal_waiting_for_leases == 1u ||
+        cmeta_monotonic_ms() >= drain_deadline) break;
+  }
+  check_equal((size_t)1u, old->pool.terminal_waiting_for_leases);
+  check_equal((size_t)1u, old->pool.active_leases);
+  check_equal((size_t)0u, old->pool.ready);
+  p2p_cnet_sg_snapshot_v1_t old_ticket = {0}, new_ticket = {0};
+  check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
+      sc->handoff, 0u, &old_ticket));
+  check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
+      sc->handoff, 1u, &new_ticket));
+  check_equal((size_t)0u, old_ticket.handoff.taken);
+  check_equal((size_t)1u, new_ticket.handoff.taken);
+  submit(sc, 2u, host_migration_probe);
+  barrier(sc);
+  submit(sc, 1u, host_migration_retire_old);
+  barrier(sc);
+  submit(sc, 2u, host_snapshot);
+  barrier(sc);
+  check_equal((size_t)1u, next->pool.ready);
+  check_equal((size_t)1u, next->pool.active_leases);
+  check_true(!next->pool.sealed);
+
+  /* Shut down the ONLY dialing client before stopping the new signed
+   * Final B. This avoids another round-robin reauthentication while the
+   * test qualifies B's checked Stop/Destroy with its Lease outstanding. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_destroy_v2(&old->client.runtime));
+  submit(sc, 2u, host_stop_retaining);
+  barrier(sc);
+  const uint64_t final_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+  for (;;) {
+    pump(sc);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    if (next->pool.terminal_waiting_for_leases == 1u ||
+        cmeta_monotonic_ms() >= final_deadline) break;
+  }
+  check_equal((size_t)1u, next->pool.terminal_waiting_for_leases);
+  submit(sc, 2u, host_finish_runtime);
+  for (size_t i = 3u; i < sc->shards; ++i)
+    submit(sc, i, host_migration_stop_idle);
+  barrier(sc);
+
+  check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sc->handoff));
+  for (size_t i = 0u; i < sc->shards; ++i)
+    submit(sc, i, host_stop_owner);
+  barrier(sc);
+  const uint64_t teardown_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+  for (;;) {
+    bool stopped = true;
+    for (size_t i = 0u; i < sc->shards; ++i) {
+      if (sc->lanes[i].stopped) continue;
+      stopped = false;
+      submit(sc, i, host_progress);
+    }
+    if (stopped || cmeta_monotonic_ms() >= teardown_deadline) break;
+    barrier(sc);
+    for (size_t i = 0u; i < sc->shards; ++i)
+      if (!sc->lanes[i].stopped) submit(sc, i, host_stop_owner);
+    barrier(sc);
+    cmeta_sleep_ms(1u);
+  }
+  for (size_t i = 0u; i < sc->shards; ++i)
+    check_true(sc->lanes[i].stopped);
+  check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sc->handoff));
+  sc->handoff = NULL;
+  for (size_t i = 0u; i < sc->shards; ++i)
+    submit(sc, i, host_destroy);
+  barrier(sc);
+  check_equal(SALTS_OK, native_io_sharded_shutdown(sc->host));
+  check_equal(SALTS_OK, native_io_sharded_destroy(sc->host));
+}
+
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
   it("isolates 2 final Managers, signed READY and leases on 3 actual SG workers") {
     test_multi_final(2u);
   }
   it("isolates 4 final Managers, signed READY and leases on 5 actual SG workers") {
     test_multi_final(4u);
+  }
+  it("reconnects one signed identity from Final A to B with old Lease retained (3 SG workers)") {
+    test_signed_reconnect_across_finals(2u);
+  }
+  it("reconnects one signed identity from Final A to B with old Lease retained (5 SG workers)") {
+    test_signed_reconnect_across_finals(4u);
   }
 }
