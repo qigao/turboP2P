@@ -906,6 +906,137 @@ static void test_runtime_signed_pool_full_keeps_existing_lease(void) {
 }
 
 
+typedef struct {
+  endpoint_t *server;
+  unsigned terminals;
+  uint64_t ticket;
+  int status;
+} command_terminal_probe_v4_t;
+
+static void on_command_wire_terminal(void *context, uint64_t ticket, int status) {
+  command_terminal_probe_v4_t *probe = context;
+  check_reentry(probe->server);
+  ++probe->terminals;
+  probe->ticket = ticket;
+  probe->status = status;
+}
+
+/* Production CNet/Noise path: a signed MMP command reserves its exact
+ * inbound Manager/Pool Lease BEFORE encryption, and retains it until the
+ * upstream full encrypted wire-write callback, never on enqueue alone.
+ * Outbound/unmanaged clients and stale/unknown signed targets fail closed. */
+static void test_signed_execution_command_wire_terminal_v4(void) {
+  endpoint_t server = {0}, client = {0};
+  command_terminal_probe_v4_t probe = {0};
+  cnet_pool_snapshot pool = {0};
+  uint8_t payload[8] = {'M','M','P','-','T','E','S','T'};
+  uint8_t bad_target[32] = {0};
+  uint64_t ticket = 0u, refused = 99u, deadline;
+
+  prepare(&server, 17u);
+  initialize(&server);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_enable_signed_pool_v3(
+          &server.runtime, 7u, 1u, 1u));
+  start(&server);
+  start_signed_client(&client, &server, 33u);
+  wait_established(&server, &client, 1u);
+  check_not_null(server.peer);
+  probe.server = &server;
+
+  memset(bad_target, 0xA5, sizeof(bad_target));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          bad_target, payload, sizeof(payload),
+          on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((unsigned)0u, probe.terminals);
+
+  /* Only the inbound signed session is attached to the P2P Manager. An
+   * outgoing peer's Runtime cannot accidentally lease the server's Pool. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &client.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          server.identity.signer.hello.managed_node_id,
+          payload, sizeof(payload), on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          client.identity.signer.hello.managed_node_id,
+          payload, sizeof(payload),
+          on_command_wire_terminal, &probe, &ticket));
+  check_true(ticket != 0u);
+  check_equal((unsigned)0u, probe.terminals); /* not an enqueue callback */
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  refused = 44u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_REQUEST,
+          client.identity.signer.hello.managed_node_id,
+          payload, sizeof(payload),
+          on_command_wire_terminal, &probe, &refused));
+  check_equal((uint64_t)0u, refused);
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+
+  /* Only the SERVER final Owner progresses. No remote-application callback
+   * or command reply is needed to prove the CNet full-write terminal. */
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (!probe.terminals && cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_equal((unsigned)1u, probe.terminals);
+  check_equal(ticket, probe.ticket);
+  check_equal(P2P_OK, probe.status);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(ticket, server.runtime.last_command_ticket);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+
+  /* Existing request API MUST NOT bypass the signed Pool once enabled:
+   * it too holds a bounded operation Lease until definitive send terminal. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_request_v1(
+          &server.runtime, client.identity.signer.hello.managed_node_id,
+          payload, sizeof(payload)));
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (server.runtime.command_terminal_inflight &&
+         cmeta_monotonic_ms() < deadline) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+    cmeta_sleep_ms(1u);
+  }
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(P2P_OK, server.runtime.last_command_terminal_status);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)0u, pool.active_leases);
+
+  for (unsigned turn = 0u; turn < 4u; ++turn)
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
+  check_equal((unsigned)1u, probe.terminals); /* one callback per ticket */
+  destroy(&server);
+  destroy(&client);
+}
+
 /* Two simultaneous, independently signed inbound MMP connections share
  * exactly one production CNet Manager and Pool, but keep different physical
  * Manager generations, immutable Pool keys and exclusive operation Leases.
@@ -1387,6 +1518,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("retains signed execution ClientPool Lease until real CNet wire terminal") {
+    test_signed_execution_command_wire_terminal_v4();
+  }
   it("keeps two real inbound signed Leases isolated while one Manager generation retires") {
     test_runtime_signed_pool_two_peer_terminal_isolation();
   }
