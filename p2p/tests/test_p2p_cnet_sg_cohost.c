@@ -1,5 +1,6 @@
 #include "p2p_cnet_node_fixture.h"
 #include <cnet/sg_host.h>
+#include <cnet/manager.h>
 #include <salts/native_io_sharded.h>
 #include <stdio.h>
 
@@ -14,10 +15,13 @@ typedef struct sg_lane {
     p2p_cnet_owner_t *acceptor;
     p2p_cnet_owner_t *transport;
     cnet_client extra_client;
+    cnet_manager extra_manager; /* borrows extra_client, no backend/observer */
+    cnet_managed_connection extra_managed;
     cnet_connection extra_connection;
     cnet_handoff_ticket extra_credit; /* shared SG Handoff RESERVED token */
     bool extra_credit_held;
     unsigned extra_connected, extra_received, extra_sent, extra_terminal;
+    unsigned extra_recycled; /* after real CNet terminal and Manager callbacks */
     size_t extra_received_bytes;
     cnet_stream_peer listener;
     const void *worker_token;
@@ -71,7 +75,7 @@ static bool worker_quiescent(void *arg) {
     sg_lane *lane = (sg_lane *)arg;
     return lane->released && lane->acceptor == NULL &&
            lane->transport == NULL && lane->extra_client.impl == NULL &&
-           !lane->extra_credit_held;
+           lane->extra_manager.impl == NULL && !lane->extra_credit_held;
 }
 
 static int accept_must_handoff(p2p_cnet_owner_t *owner,
@@ -140,6 +144,20 @@ static void extra_on_send(void *context, cnet_connection handle, size_t length) 
         mark_failed(lane, SALTS_EPROTO);
     else ++lane->extra_sent;
 }
+static void extra_on_recycle(void *context) {
+    sg_lane *lane = (sg_lane *)context;
+    /* Manager retires only after the real CNet terminal callback. Advance
+     * invokes this cleanup on the same fixed SG Owner, never from an
+     * extra event worker, after all observer borrows have completed. */
+    if (cmeta_thread_current_token() != lane->worker_token ||
+        !lane->extra_terminal || !lane->extra_credit_held ||
+        lane->extra_recycled != 0u) {
+        mark_failed(lane, SALTS_EPROTO);
+        return;
+    }
+    ++lane->extra_recycled;
+}
+
 static cnet_observer extra_observer(sg_lane *lane) {
     cnet_observer result = {0};
     result.on_state = extra_on_state;
@@ -265,6 +283,12 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
         }
         SG_GO(lane, cnet_client_init_external(
             &lane->extra_client, &cfg.client, lane->backend));
+        /* Explicit bounded CNet Manager attachment; no retry loop, second
+         * NativeIO backend, polling, or implicit protocol readiness. */
+        const cnet_manager_config manager_cfg = {
+            sizeof(cnet_manager_config), CNET_MANAGER_VERSION,
+            &lane->extra_client, 1u, 1u};
+        SG_GO(lane, cnet_manager_init(&lane->extra_manager, &manager_cfg));
         /* The extra client is initialized, but no external physical
          * connection can be admitted before it obtains a shared CNet
          * Handoff credit. The SG topology is assembled after this task. */
