@@ -356,22 +356,27 @@ static cnet_observer held_observer;
 static cnet_connection held_handle;
 static size_t held_length;
 static int hold_send, fail_send;
-int __real_cnet_client_adopt_accepted(cnet_client *, cnet_accepted_stream *,
-                                      const cnet_observer *, cnet_connection *);
+int __real_cnet_manager_reserve(cnet_manager *, const cnet_manager_attachment *,
+                                cnet_managed_connection *);
 int __real_cnet_send_buffer(cnet_client *, cnet_connection, mem_buffer_t *);
 static void delayed_send(void *context, cnet_connection handle, size_t length) {
     check_true(context == held_observer.user);
     held_handle = handle;
     held_length = length;
 }
-int __wrap_cnet_client_adopt_accepted(cnet_client *client, cnet_accepted_stream *accepted,
-                                      const cnet_observer *observer, cnet_connection *output) {
-    cnet_observer events = *observer;
+int __wrap_cnet_manager_reserve(cnet_manager *manager,
+                                const cnet_manager_attachment *attachment,
+                                cnet_managed_connection *output) {
+    cnet_manager_attachment copied = *attachment;
     if (hold_send) {
-        held_observer = events;
-        events.on_send = delayed_send;
+        /* Real CNet Manager now owns the physical inbound observer bridge.
+         * Inject the delayed send terminal into the copied Manager
+         * attachment, not the retired raw adopt API. Keep the P2P caller's
+         * original send continuation for explicit delayed settlement. */
+        held_observer = copied.observer;
+        copied.observer.on_send = delayed_send;
     }
-    return __real_cnet_client_adopt_accepted(client, accepted, &events, output);
+    return __real_cnet_manager_reserve(manager, &copied, output);
 }
 int __wrap_cnet_send_buffer(cnet_client *client, cnet_connection connection, mem_buffer_t *buffer) {
     if (fail_send) { fail_send = 0; return SALTS_ENOBUFS; }
