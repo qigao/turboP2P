@@ -41,7 +41,7 @@ static void fill_config(
     mesh_mgmt_execution_node_config_v1_t *config,
     mesh_mgmt_execution_deployment_v1_t *deployment,
     const char *store_path) {
-remove local key  memset(config, 0, sizeof(*config));
+  memset(config, 0, sizeof(*config));
   memset(deployment, 0, sizeof(*deployment));
   memset(deployment->deployment_id, 0x21, sizeof(deployment->deployment_id));
   deployment->generation = 1u;
