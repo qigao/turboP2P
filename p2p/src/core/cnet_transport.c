@@ -1,4 +1,5 @@
 #include "cnet_transport.h"
+#include "cnet_sg_ace.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,10 @@ struct p2p_cnet_owner_s {
     p2p_cnet_config_t config;
     p2p_cnet_connection_t *connections;
     size_t connection_count;
+    /* The fixed Owner publishes live P2P connection pressure; another SG
+     * shard must not dereference its non-atomic linked list or size. This is
+     * advisory only, not a reserved CNet slot. */
+    atomic_uint_fast64_t published_connections;
     p2p_cnet_accept_fn accept;
     void *accept_context;
     int busy;
@@ -154,6 +159,9 @@ static int sweep(p2p_cnet_owner_t *owner) {
         if (connection->detached && (connection->terminal || owner->stopped)) {
             *link = connection->next;
             owner->connection_count--;
+            atomic_store_explicit(&owner->published_connections,
+                                  (uint64_t)owner->connection_count,
+                                  memory_order_release);
             free_connection(connection);
         } else {
             link = &connection->next;
@@ -357,6 +365,8 @@ static void publish_connection(p2p_cnet_owner_t *owner,
     connection->next = owner->connections;
     owner->connections = connection;
     owner->connection_count++;
+    atomic_store_explicit(&owner->published_connections,
+                          (uint64_t)owner->connection_count, memory_order_release);
 }
 
 static cnet_observer observer(p2p_cnet_connection_t *connection) {
@@ -392,6 +402,7 @@ static int create_owner_impl(const p2p_cnet_config_t *config,
     owner = calloc(1, sizeof(*owner));
     if (!owner) return P2P_ERR_NO_MEM;
     owner->config = *config;
+    atomic_init(&owner->published_connections, 0u);
     owner->external_backend = external_backend;
     owner->host_lease = host_lease;
     if (external_backend) {
@@ -572,20 +583,26 @@ static int sg_route_accepted(p2p_cnet_owner_t *owner,
         atomic_fetch_add_explicit(&sg->denied, 1u, memory_order_relaxed);
         return P2P_OK;
     }
-    for (size_t i = 0u; i < sg->owner_count; ++i) {
+    /* CNet EXPLICIT is O(1): a pinned admission must not take snapshots
+     * of unrelated Owner inboxes. RR and LOWEST_PRESSURE admit all bounded
+     * hint rows and still delegate the actual selection to upstream CNet. */
+    const size_t first = sg->placement == CNET_OWNER_PLACE_EXPLICIT
+        ? sg->explicit_owner : 0u;
+    const size_t end = sg->placement == CNET_OWNER_PLACE_EXPLICIT
+        ? first + 1u : sg->owner_count;
+    for (size_t i = first; i < end; ++i) {
         cnet_handoff_snapshot snap = {0};
-        if (cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK) {
+        p2p_sg_ace_capacity capacity = {
+            (uint64_t)sg->finals[i]->config.client.connection_capacity
+        };
+        p2p_sg_ace_hint strategy = p2p_sg_ace_capacity_strategy(&capacity);
+        if (cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK ||
+            !p2p_sg_ace_hint_valid(&strategy) ||
+            p2p_sg_ace_hint_evaluate(&strategy, &snap,
+                atomic_load_explicit(&sg->finals[i]->published_connections,
+                                     memory_order_acquire), &hints[i]) != SALTS_OK) {
             cnet_accepted_stream_close(accepted);
             return P2P_ERR_INVALID_STATE;
-        }
-        hints[i].pressure = (uint64_t)(snap.reserved + snap.queued + snap.taken);
-        hints[i].eligible = !snap.sealed &&
-            hints[i].pressure < snap.connection_capacity;
-        if (sg->finals[i] == owner) {
-            /* No cross-thread read of another Owner's connection_count. */
-            hints[i].pressure += (uint64_t)owner->connection_count;
-            hints[i].eligible = hints[i].eligible &&
-                owner->connection_count < owner->config.client.connection_capacity;
         }
     }
     if (sg->sequence == UINT64_MAX) {
