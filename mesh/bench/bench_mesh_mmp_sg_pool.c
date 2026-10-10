@@ -42,7 +42,16 @@
 #if BENCH_ASYNC_PROGRESS != 0 && BENCH_ASYNC_PROGRESS != 1
 #error BENCH_ASYNC_PROGRESS must be 0 or 1
 #endif
-#define BENCH_DRIVER_LABEL (BENCH_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
+#ifndef BENCH_APP_INDEPENDENT
+#define BENCH_APP_INDEPENDENT 0
+#endif
+#if BENCH_APP_INDEPENDENT != 0 && BENCH_APP_INDEPENDENT != 1
+#error BENCH_APP_INDEPENDENT must be 0 or 1
+#endif
+#define BENCH_DRIVER_LABEL (BENCH_APP_INDEPENDENT ? \
+    (BENCH_ASYNC_PROGRESS ? "owner-independent-app-independent" \
+                          : "global-barrier-app-independent") \
+    : (BENCH_ASYNC_PROGRESS ? "owner-independent" : "global-barrier"))
 enum {
   BENCH_SESSIONS = 4,
   BENCH_FINALS = BENCH_MMP_FINALS,
@@ -64,7 +73,7 @@ typedef struct {
   p2p_peer_t *peer;
   uint8_t private_key[32], public_key[32];
   uint8_t request[BENCH_BYTES_MAX];
-  size_t bytes, round, warmup, rounds;
+  size_t bytes, round, next_to_send, warmup, rounds;
   uint64_t sent_ns, *samples;
   size_t authenticated, received, invalid, unexpected_closes;
 } bench_client;
@@ -619,6 +628,49 @@ static void snapshot_all(benchmark_case *sc) {
 static void run_rounds(benchmark_case *sc) {
   const size_t total=sc->warmup+sc->rounds;
   uint64_t wall0=0,cpu0=0;
+#if BENCH_APP_INDEPENDENT
+  /* This workload removes the GLOBAL APPLICATION per-round barrier. Each
+   * of four signed clients maintains exactly ONE in-flight request at a
+   * time and independently queues its next payload after its own echo.
+   * Same per-session warmup + measured counts, immutable signed Pool
+   * connection quota and no replay. No new IO observer or thread. */
+  for (size_t phase=0u;phase<2u;++phase) {
+    const size_t target=phase?total:sc->warmup;
+    if (phase) {
+      BENCH_MEASURE_BOUNDARY(sc);
+      wall0=clock_ns(CLOCK_MONOTONIC);
+      cpu0=clock_ns(CLOCK_PROCESS_CPUTIME_ID);
+    }
+    const uint64_t deadline=cmeta_monotonic_ms()+BENCH_TIMEOUT_MS;
+    for (;;) {
+      int all_done=1;
+      for (size_t i=0u;i<BENCH_SESSIONS;++i) {
+        bench_client *c=&sc->clients[i];
+        check_equal((size_t)0u,c->invalid);
+        check_true(c->received<=c->next_to_send &&
+                   c->next_to_send<=target);
+        if (c->received==c->next_to_send && c->next_to_send<target) {
+          const size_t round=c->next_to_send;
+          c->round=round;
+          frame_for_client(c->request,sc->bytes,i,round);
+          c->sent_ns=clock_ns(CLOCK_MONOTONIC);
+          check_equal(P2P_OK,p2p_send_message(
+              c->runtime.node,c->peer,P2P_MSG_CUSTOM,c->request,sc->bytes));
+          c->next_to_send++;
+        }
+        if (c->received!=target) all_done=0;
+      }
+      if (all_done) break;
+      check_true(cmeta_monotonic_ms()<deadline);
+      BENCH_MEASURE_PUMP(sc);
+    }
+    for (size_t i=0u;i<BENCH_SESSIONS;++i) {
+      check_equal(target,sc->clients[i].received);
+      check_equal(target,sc->clients[i].next_to_send);
+      check_equal((size_t)0u,sc->clients[i].invalid);
+    }
+  }
+#else
   for (size_t round=0u;round<total;++round) {
     if (round==sc->warmup) {
       /* Equal measured work starts after the warmup worker tasks settle. */
@@ -647,6 +699,7 @@ static void run_rounds(benchmark_case *sc) {
       check_equal((size_t)0u,sc->clients[i].invalid);
     }
   }
+#endif
   BENCH_MEASURE_FINISH(sc);
   const uint64_t wall1=clock_ns(CLOCK_MONOTONIC);
   const uint64_t cpu1=clock_ns(CLOCK_PROCESS_CPUTIME_ID);
