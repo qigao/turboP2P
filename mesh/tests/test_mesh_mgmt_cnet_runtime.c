@@ -158,6 +158,87 @@ static void wait_record(endpoint_t *server, endpoint_t *client, const char *key,
   }
   check_equal(P2P_OK, result);
 }
+
+/* These READY facts originate from real signed MMP SESSION_ESTABLISHED,
+ * not raw CNet CONNECTED, a fabricated event or a guessed Pool key.
+ * Reconnect changes the canonical Router connection_id, so old proof
+ * generations cannot be promoted to ClientPool READY after a new session. */
+static void test_router_signed_pool_ready_capability(void) {
+  endpoint_t server = {0}, client = {0};
+  mesh_mgmt_agent_router_ready_v1_t proof = {0}, second = {0};
+  uint8_t first_connection_id[16] = {0};
+  uint8_t wrong_id[P2P_KEY_SIZE] = {0};
+  uint8_t wrong_node_id[32] = {0};
+
+  start_pair(&server, &client);
+  wait_established(&server, &client, 1u);
+  check_not_null(server.peer);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, server.peer,
+          client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          NULL, &proof));
+  check_equal(sizeof(proof), proof.size);
+  check_equal(MESH_MGMT_AGENT_ROUTER_READY_VERSION, proof.version);
+  check_equal(client.public_key, proof.remote_transport_peer_id, P2P_KEY_SIZE);
+  check_equal(client.identity.signer.hello.managed_node_id,
+              proof.remote_managed_node_id, 32u);
+  check_true(memcmp(proof.connection_id, first_connection_id, 16u) != 0);
+  check_equal((uint64_t)1u, proof.remote_incarnation);
+  memcpy(first_connection_id, proof.connection_id, sizeof(first_connection_id));
+
+  /* The right signed managed node but the wrong P2P transport key must
+   * fail with fully zeroed output; no stale or partial capability leaks. */
+  memcpy(wrong_id, client.public_key, P2P_KEY_SIZE);
+  wrong_id[0] ^= 1u;
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, server.peer, wrong_id,
+          client.identity.signer.hello.managed_node_id,
+          first_connection_id, &proof));
+  check_equal((size_t)0u, proof.size);
+  memcpy(wrong_node_id,
+         client.identity.signer.hello.managed_node_id, 32u);
+  wrong_node_id[0] ^= 1u;
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          wrong_node_id, first_connection_id, &proof));
+  check_equal((size_t)0u, proof.size);
+  /* A live session proves its *own* Router peer, not a different
+   * endpoint's peer pointer, even when the claimed identities match. */
+  check_equal(MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, client.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          NULL, &proof));
+  check_equal((size_t)0u, proof.size);
+
+  /* Close the real signed session and let the two MMP Routers negotiate
+   * a new one. The prior local connection_id is generation-stale. */
+  p2p_disconnect_peer(client.peer);
+  wait_established(&server, &client, 2u);
+  check_not_null(server.peer);
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          first_connection_id, &proof));
+  check_equal((size_t)0u, proof.size);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_ready_session_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          NULL, &second));
+  check_true(memcmp(first_connection_id, second.connection_id, 16u) != 0);
+  check_equal(MESH_MGMT_AGENT_ROUTER_READY_VERSION, second.version);
+  check_equal(client.public_key, second.remote_transport_peer_id, P2P_KEY_SIZE);
+
+  destroy(&client);
+  destroy(&server);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
@@ -505,6 +586,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("issues only live signed MMP READY proofs and rejects stale reconnect generations") {
+    test_router_signed_pool_ready_capability();
+  }
   it("uses configured CNet EXPLICIT Client strategy for real Noise and MMP admission") {
     test_explicit_client_strategy_real_noise_mmp();
   }

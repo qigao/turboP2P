@@ -93,6 +93,20 @@ typedef struct {
   mesh_mgmt_session_state_t session_state;
 } mesh_mgmt_agent_router_peer_snapshot_v1_t;
 
+/* Connection-generation-bound, signed MMP protocol READY facts copied
+ * only from a still-live Router session. This is not a Pool lease or a
+ * permission to attach an unrelated Manager-owned TCP connection. */
+#define MESH_MGMT_AGENT_ROUTER_READY_VERSION 1u
+typedef struct {
+  size_t size;
+  uint32_t version;
+  uint8_t remote_transport_peer_id[P2P_KEY_SIZE];
+  uint8_t remote_managed_node_id[32];
+  uint8_t connection_id[16]; /* unique local Router connection generation */
+  uint8_t remote_session_id[16];
+  uint64_t remote_incarnation;
+} mesh_mgmt_agent_router_ready_v1_t;
+
 typedef struct {
   uint8_t managed_node_id[32];
   uint8_t certificate[MESH_MGMT_CERTIFICATE_V1_SIZE];
@@ -180,6 +194,25 @@ mesh_mgmt_agent_router_peer_snapshot_v1(const mesh_mgmt_agent_router_v1_t *route
 mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_identity_snapshot_v1(
     const mesh_mgmt_agent_router_v1_t *router, const uint8_t managed_node_id[32],
     mesh_mgmt_agent_router_identity_snapshot_v1_t *out_snapshot);
+
+/* Check actual signed MMP SESSION_ESTABLISHED and the exact currently
+ * authenticated P2P peer, expected transport and managed-node identities,
+ * and (optionally) an expected local Router connection_id. A copied token is
+ * only a short-lived proof: revalidate it against the live Router immediately
+ * before any protocol READY transition, and require that the underlying
+ * CNet Manager physical connection is THE SAME P2P/MMP transport.
+ *
+ * CNet TCP CONNECTED, P2P Noise alone, arbitrary dispatch event objects and
+ * expired connection_ids cannot grant this proof. Duplicate live signed
+ * sessions for the same managed node are rejected rather than pooled.
+ * Output is fully zeroed on failure. Only the Router Owner thread may call. */
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_session_v1(
+    const mesh_mgmt_agent_router_v1_t *router,
+    const p2p_peer_t *peer,
+    const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],
+    const uint8_t expected_managed_node_id[32],
+    const uint8_t expected_connection_id[16], /* NULL for first proof */
+    mesh_mgmt_agent_router_ready_v1_t *out_ready);
 
 /**
  * Sends one canonical COMMAND_REQUEST through the unique established session
