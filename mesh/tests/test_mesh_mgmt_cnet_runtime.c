@@ -721,17 +721,44 @@ static void test_runtime_signed_pool_reconnect_preserves_old_lease(void) {
   check_equal((size_t)0u, pool.terminal_waiting_for_leases);
   check_equal((size_t)1u, pool.active_leases);
   check_equal((size_t)1u, pool.ready);
+
+  /* Now stop with the NEW generation still leased. The old lease has
+   * already drained, but the new Pool/Manager/Owner borrows must survive
+   * checked Stop and Destroy independently of the reused callback index. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_stop_v1(&server.runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPING, server.runtime.state);
+  check_not_null(server.runtime.node);
+  check_true(server.runtime.signed_pool.impl != NULL);
+  check_true(server.runtime.signed_pool_manager != NULL);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+      mesh_mgmt_agent_runtime_destroy_v2(&server.runtime));
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_true(pool.sealed);
+  check_equal((size_t)1u, pool.active_leases);
+  check_equal((size_t)0u, pool.ready);
+
+  /* The checked Release is still legal in STOPPING; only then may
+   * another Stop release the real upstream Pool before CNet Owner. */
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_release_v3(
+          &server.runtime, new_lease));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
       mesh_mgmt_agent_runtime_signed_pool_release_v3(
           &server.runtime, new_lease));
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
           &server.runtime, &pool));
   check_equal((size_t)0u, pool.active_leases);
-  check_equal((size_t)1u, pool.ready);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_stop_v1(&server.runtime));
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPED, server.runtime.state);
+  check_true(server.runtime.node == NULL);
 
-  destroy(&client);
   destroy(&server);
+  destroy(&client);
 }
 
 static void test_session_records_reconnect(void) {
