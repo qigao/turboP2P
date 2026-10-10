@@ -44,6 +44,14 @@ enum { NOISE_SESSIONS=4, NOISE_FINALS=NOISE_BENCH_FINALS,
 typedef struct noise_case noise_case;
 typedef struct noise_final noise_final;
 typedef struct noise_lane noise_lane;
+/* Kept for the full P2P Node lifetime, as the real Noise handshake
+ * synchronously invokes its borrowed identity provider callbacks. */
+typedef struct noise_test_identity {
+  uint8_t public_key[32];
+  uint8_t allowed[NOISE_SESSIONS][32];
+  size_t count;
+  p2p_authenticated_identity_v2_t principal;
+} noise_test_identity;
 
 typedef struct noise_client {
   noise_case *scenario;
@@ -51,6 +59,7 @@ typedef struct noise_client {
   p2p_node_cnet_t *owner;
   p2p_peer_t *peer;
   uint8_t private_key[32],public_key[32];
+  noise_test_identity identity;
   uint8_t request[NOISE_PAYLOAD_MAX];
   uint64_t *samples,sent_ns;
   size_t index,authenticated,received,invalid,closed;
@@ -62,6 +71,7 @@ struct noise_final {
   p2p_node_t *node;
   p2p_node_cnet_t *owner;
   uint8_t private_key[32],public_key[32];
+  noise_test_identity identity;
   p2p_peer_t *peers[NOISE_SESSIONS];
   uint8_t pending[NOISE_SESSIONS][NOISE_PAYLOAD_MAX];
   size_t pending_size[NOISE_SESSIONS];
@@ -166,13 +176,68 @@ static bool quiescent(void *arg) {
   const noise_lane *lane=(const noise_lane*)arg;
   return lane->released&&!lane->acceptor&&!lane->final_transport;
 }
-static void configure_identity(p2p_node_t *node,const uint8_t private_key[32],
+static int build_local_credential(void *ctx,const uint8_t local[32],
+                                  uint8_t *credential,size_t cap,size_t *size,
+                                  p2p_authenticated_identity_v2_t *identity) {
+  noise_test_identity *test=(noise_test_identity*)ctx;
+  if (!credential||!size||!identity||cap<32u||
+      memcmp(local,test->public_key,32u)!=0)
+    return P2P_ERR_INVALID_ARG;
+  memcpy(credential,local,32u);
+  *size=32u;
+  *identity=test->principal;
+  return P2P_OK;
+}
+static int verify_remote_credential(void *ctx,const uint8_t remote[32],
+                                    const uint8_t binding[32],
+                                    const uint8_t *credential,size_t length,
+                                    uint64_t now_ms,
+                                    p2p_authenticated_identity_v2_t *identity) {
+  noise_test_identity *test=(noise_test_identity*)ctx;
+  uint8_t zero[32]={0};
+  if (!test||!remote||!binding||!credential||!identity||
+      length!=32u||!now_ms||memcmp(binding,zero,32u)==0||
+      memcmp(credential,remote,32u)!=0) return P2P_ERR_UNTRUSTED_IDENTITY;
+  for(size_t i=0;i<test->count;++i) {
+    if (memcmp(test->allowed[i],remote,32u)!=0)continue;
+    *identity=test->principal;
+    return P2P_OK;
+  }
+  return P2P_ERR_UNTRUSTED_IDENTITY;
+}
+static void configure_identity(p2p_node_t *node,noise_test_identity *test,
+                               const uint8_t private_key[32],
                                const uint8_t *allowlist,size_t count) {
-  uint8_t network_id[32];
-  memset(network_id,9,sizeof(network_id));
+  p2p_security_config_v2_t security={0};
+  check_not_null(node);
+  check_true(count>0u&&count<=NOISE_SESSIONS);
   check_equal(P2P_OK,p2p_node_set_private_key(node,private_key));
-  check_equal(P2P_OK,p2p_node_configure_pinned_security_v2(
-      node,network_id,allowlist,count));
+  check_equal(P2P_OK,p2p_public_key_from_private_key(
+      private_key,test->public_key));
+  for(size_t i=0;i<count;++i)
+    memcpy(test->allowed[i],allowlist+32u*i,32u);
+  test->count=count;
+  memset(&test->principal,11,sizeof(test->principal));
+  security.struct_size=sizeof(security);
+  security.handshake_timeout_ms=5000u;
+  security.ready_timeout_ms=5000u;
+  security.send_hwm_bytes=128u*1024u;
+  security.node_send_budget_bytes=4u*128u*1024u;
+  /* Send HWM is NOT cumulative Noise session byte lifetime.
+   * Follow production v2 defaults for a real multi-round benchmark. */
+  security.session_max_age_ms=0u;
+  security.session_max_bytes_per_direction=0u;
+  security.identity_provider.build_local_credential=build_local_credential;
+  security.identity_provider.verify_remote_credential=verify_remote_credential;
+  security.identity_provider.context=test;
+  memset(security.network_id_hash,9u,32u);
+  security.cookie_gate_limit=16u;
+  security.cookie_lifetime_ms=5000u;
+  security.cookie_key_rotation_ms=10000u;
+  security.source_admission_burst=16u;
+  security.source_admission_refill_per_second=1u;
+  security.source_admission_bucket_limit=16u;
+  check_equal(P2P_OK,p2p_node_configure_security_v2(node,&security));
 }
 static void client_connected(p2p_peer_t *peer,void *arg) {
   noise_client *c=(noise_client*)arg;
@@ -272,7 +337,7 @@ static void init_owner(native_io_sharded_context *context,void *arg) {
   noise_final *f=&sc->finals[lane->shard-1u];
   f->node=p2p_node_state_create("127.0.0.1",0);
   if (!f->node) {lane_error(lane,P2P_ERR_NO_MEM,"server Node allocation");return;}
-  configure_identity(f->node,f->private_key,
+  configure_identity(f->node,&f->identity,f->private_key,
                      &sc->client_allowlist[0][0],NOISE_SESSIONS);
   p2p_set_peer_callbacks(f->node,server_connected,server_disconnected,f);
   p2p_set_message_handler(f->node,server_echo,f);
@@ -496,7 +561,8 @@ static void run_noise_baseline(void) {
     noise_client *c=&sc->clients[i];
     c->node=p2p_node_state_create("127.0.0.1",0);
     check_not_null(c->node);
-    configure_identity(c->node,c->private_key,sc->server_key,1u);
+    configure_identity(c->node,&c->identity,c->private_key,
+                       sc->server_key,1u);
     p2p_set_peer_callbacks(c->node,client_connected,client_disconnected,c);
     p2p_set_message_handler(c->node,client_echo,c);
     p2p_cnet_config_t transport=net_config(2u);
