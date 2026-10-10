@@ -139,3 +139,18 @@ runs:
         test -x "$VCPKG_ROOT/vcpkg"
         test -n "${RE2C_ROOT:-}"
         "$RE2C_ROOT/bin/re2c" --version
+
+    - name: Restore required GmSSL provider from canonical vcpkg cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        # SaltsUtils 4.3's latest floating SDK now exports a GmSSL
+        # find_dependency() contract. Resolve its REAL canonical vcpkg port,
+        # not a fake imported target, SDK copy, fallback or older RC pin.
+        test -f "$VCPKG_OVERLAY_PORTS/gmssl/vcpkg.json"
+        test -x "$VCPKG_ROOT/vcpkg"
+        "$VCPKG_ROOT/vcpkg" install gmssl:x64-linux \
+          --overlay-ports="$VCPKG_OVERLAY_PORTS" --no-downloads
+        config="$VCPKG_ROOT/installed/x64-linux/share/gmssl/GmSSLConfig.cmake"
+        test -f "$config"
+        echo "GmSSL provider: $config"
