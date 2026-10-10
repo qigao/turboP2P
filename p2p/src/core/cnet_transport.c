@@ -1,5 +1,6 @@
 #include "cnet_transport.h"
 #include "cnet_sg_ace.h"
+#include <salts/thread.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +39,7 @@ typedef struct p2p_cnet_connection_s {
 
 struct p2p_cnet_owner_s {
     cnet_client client;
+    const void *thread_owner; /* fixed Owner thread identity from creation */
     cnet_listener listener;
     p2p_cnet_config_t config;
     p2p_cnet_connection_t *connections;
@@ -429,6 +431,7 @@ static int create_owner_impl(const p2p_cnet_config_t *config,
     owner = calloc(1, sizeof(*owner));
     if (!owner) return P2P_ERR_NO_MEM;
     owner->config = *config;
+    owner->thread_owner = cmeta_thread_current_token();
     atomic_init(&owner->published_occupancy, 0u);
     atomic_init(&owner->published_host_load, 0u);
     owner->external_backend = external_backend;
@@ -811,6 +814,55 @@ int p2p_cnet_sg_seal_v1(p2p_cnet_sg_t *sg) {
         if (status != SALTS_OK) return p2p_error(status);
     }
     return P2P_OK;
+}
+
+
+/* Strict, opt-in connection credit for an independent CNet client cohosted
+ * with this SG final Owner. Reuses the SAME bounded upstream CNet Handoff
+ * credit ledger as inbound P2P streams: there is no second quota, queue or
+ * timing authority. The caller must reserve BEFORE cnet_connect_peer(),
+ * retain the RESERVED ticket through real CNet terminal/callback retirement,
+ * then release exactly once on the final Owner. A successful reservation
+ * transfers a ticket obligation, not a socket or shared CNet observer.
+ *
+ * This is strict for PARTICIPATING external clients and SG accepted streams.
+ * Non-participating/outgoing/local P2P paths still require independent host
+ * capacity policy; no global socket cap is fabricated by the SG selector. */
+int p2p_cnet_sg_cohost_credit_reserve_v1(
+    p2p_cnet_sg_t *sg, size_t final_owner_index,
+    cnet_handoff_ticket *out_credit) {
+    int status;
+    if (out_credit) *out_credit = (cnet_handoff_ticket){0};
+    if (!sg || !out_credit || final_owner_index >= sg->owner_count)
+        return P2P_ERR_INVALID_ARG;
+    p2p_cnet_owner_t *owner = sg->finals[final_owner_index];
+    if (!owner || owner->thread_owner != cmeta_thread_current_token() ||
+        owner->stopping || owner->stopped ||
+        atomic_load_explicit(&sg->sealed, memory_order_acquire))
+        return P2P_ERR_INVALID_STATE;
+    status = cnet_handoff_reserve(&sg->inboxes[final_owner_index], out_credit);
+    return p2p_error(status);
+}
+
+int p2p_cnet_sg_cohost_credit_release_v1(
+    p2p_cnet_sg_t *sg, size_t final_owner_index,
+    cnet_handoff_ticket credit) {
+    if (!sg || final_owner_index >= sg->owner_count ||
+        credit.slot == 0u || credit.incarnation == 0u ||
+        credit.generation == 0u)
+        return P2P_ERR_INVALID_ARG;
+    p2p_cnet_owner_t *owner = sg->finals[final_owner_index];
+    if (!owner || owner->thread_owner != cmeta_thread_current_token())
+        return P2P_ERR_INVALID_STATE;
+    /* Release remains valid after SG seal/Owner stop, but never after SG
+     * destroy. Reserved credits are returned only after the *real* extra
+     * CNet connection terminal, not merely when a close is requested.
+     * Stale/duplicate/foreign tickets fail closed without count mutation. */
+    const int status = cnet_handoff_release(
+        &sg->inboxes[final_owner_index], credit);
+    if (status == SALTS_ENOENT || status == SALTS_EALREADY ||
+        status == SALTS_EBUSY) return P2P_ERR_INVALID_STATE;
+    return p2p_error(status);
 }
 
 int p2p_cnet_sg_snapshot_v1(p2p_cnet_sg_t *sg, size_t index,
