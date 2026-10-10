@@ -74,6 +74,7 @@ struct sg_multi_case {
    * distribution recommendation. */
   uint8_t same_signed_identity;
   uint8_t exercise_command_terminal;
+  uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
   sg_multi_lane lanes[SG_MULTI_MAX_SHARDS];
@@ -308,13 +309,11 @@ static void host_install(native_io_sharded_context *ctx, void *arg) {
   const uint64_t pool_owner_id =
       lane->scenario->same_signed_identity ? UINT64_C(70)
                                             : (uint64_t)(70u + lane->shard);
-  /* Only in the failover fixture, keep a manual old-generation borrow and
-   * an independently admitted CNet MMP wire-terminal Lease concurrently. */
-  const size_t max_leases =
-      lane->scenario->same_signed_identity &&
-      lane->scenario->exercise_command_terminal ? 2u : 1u;
+  /* One physical connection has exactly ONE exclusive ClientPool Lease.
+   * The cross-Owner test retains the REAL wire-command Lease rather than
+   * forging simultaneous operations on one physical generation. */
   SG_CHECK(lane, mesh_mgmt_agent_runtime_enable_signed_pool_v3(
-      &f->server.runtime, pool_owner_id, 1u, max_leases));
+      &f->server.runtime, pool_owner_id, 1u, 1u));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_start_v1(&f->server.runtime));
   if (f->server.runtime.owns_node || !f->server.runtime.sg_final_mode ||
       f->server.runtime.signed_pool.impl != NULL ||
@@ -476,9 +475,6 @@ static void host_send_command(native_io_sharded_context *ctx, void *arg) {
   signed_final *f = lane_final(lane);
   signed_final *signed_client = lane->scenario->same_signed_identity
       ? &lane->scenario->finals_data[0] : f;
-  const size_t expected_active =
-      lane->scenario->same_signed_identity &&
-      lane->scenario->exercise_command_terminal ? 2u : 1u;
   uint64_t denied = 97u;
   cnet_pool_snapshot pool = {0};
   SG_CHECK(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
@@ -497,7 +493,7 @@ static void host_send_command(native_io_sharded_context *ctx, void *arg) {
       denied != 0u ||
       mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
           &f->server.runtime, &pool) != MESH_MGMT_AGENT_RUNTIME_OK ||
-      pool.ready != 1u || pool.active_leases != expected_active)
+      pool.ready != 1u || pool.active_leases != 1u)
     fail_lane(lane, P2P_ERR_INVALID_STATE, "SG MMP command credit/terminal admission");
 }
 
@@ -634,18 +630,29 @@ static void host_migration_retire_old(native_io_sharded_context *ctx, void *arg)
   cnet_pool_snapshot snapshot = {0};
   SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
       &old->server.runtime, &snapshot));
-  if (snapshot.terminal_waiting_for_leases != 1u ||
-      snapshot.ready != 0u || snapshot.active_leases != 1u) {
-    fail_lane(lane, SALTS_EBUSY, "old Final A not terminal with borrowed Lease");
-    return;
-  }
-  SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_release_v3(
-      &old->server.runtime, old->lease));
-  if (mesh_mgmt_agent_runtime_signed_pool_release_v3(
-          &old->server.runtime, old->lease) !=
-          MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
-    fail_lane(lane, SALTS_EPROTO, "duplicate old Final A Lease");
-    return;
+  if (lane->scenario->exercise_command_terminal) {
+    /* Real A CNet wire terminal has now released its sole application
+     * credit, but may not free the original SG P2P Owner prematurely. */
+    if (!old->command_terminals || old->server.runtime.command_terminal_inflight ||
+        snapshot.active_leases != 0u || snapshot.ready != 0u ||
+        snapshot.physical_in_use != 0u) {
+      fail_lane(lane, SALTS_EBUSY, "retired A command still borrowed");
+      return;
+    }
+  } else {
+    if (snapshot.terminal_waiting_for_leases != 1u ||
+        snapshot.ready != 0u || snapshot.active_leases != 1u) {
+      fail_lane(lane, SALTS_EBUSY, "old Final A not terminal with borrowed Lease");
+      return;
+    }
+    SG_CHECK(lane, mesh_mgmt_agent_runtime_signed_pool_release_v3(
+        &old->server.runtime, old->lease));
+    if (mesh_mgmt_agent_runtime_signed_pool_release_v3(
+            &old->server.runtime, old->lease) !=
+        MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
+      fail_lane(lane, SALTS_EPROTO, "duplicate old Final A Lease");
+      return;
+    }
   }
   SG_CHECK(lane, mesh_mgmt_agent_runtime_stop_v1(&old->server.runtime));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_destroy_v2(&old->server.runtime));
@@ -764,8 +771,14 @@ static void pump(sg_multi_case *sc) {
       check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
           mesh_mgmt_agent_runtime_poll_v1(&client->runtime));
   }
-  for (size_t i = 0u; i < sc->shards; ++i)
+  for (size_t i = 0u; i < sc->shards; ++i) {
+    /* Intentionally suspend ONLY the retiring final's actual SG observer
+     * while the one EndpointPool redials a new TCP/Noise/MMP session on B.
+     * A's admitted command Lease cannot terminal before the original
+     * worker resumes NativeIO progress. No second observer or replay. */
+    if (i == 1u && sc->hold_retiring_final_progress) continue;
     submit(sc, i, host_progress);
+  }
   barrier(sc);
   cmeta_sleep_ms(1u);
 }
@@ -1121,19 +1134,21 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   submit(sc, 1u, host_snapshot);
   barrier(sc);
   check_equal((size_t)1u, old->pool.ready);
-  submit(sc, 1u, host_acquire);
-  barrier(sc);
-  check_true(old->lease.slot != 0u);
   if (command_mode) {
-    /* Final A retains its manual application Lease while one real signed
-     * MMP wire write occupies the second Pool operation slot. */
+    /* One REAL command fills A's one-slot Pool; until original SG Host A
+     * resumes, no fake logical terminal or premature Lease reclaim. */
     submit(sc, 1u, host_send_command);
     barrier(sc);
     submit(sc, 1u, host_snapshot);
     barrier(sc);
-    check_equal((size_t)2u, old->pool.active_leases);
+    check_equal((size_t)1u, old->pool.active_leases);
     check_equal((size_t)1u, old->server.runtime.command_terminal_inflight);
     check_equal(0u, old->command_terminals);
+    sc->hold_retiring_final_progress = 1u;
+  } else {
+    submit(sc, 1u, host_acquire);
+    barrier(sc);
+    check_true(old->lease.slot != 0u);
   }
   p2p_cnet_sg_snapshot_v1_t handoff_a = {0};
   check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
@@ -1147,53 +1162,70 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   p2p_disconnect_peer(old->client.peer);
   const uint64_t reconnect_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
   while ((!next->server.established || old->client.established < 2u ||
-          !old->server.closed) &&
+          (!command_mode && !old->server.closed)) &&
          cmeta_monotonic_ms() < reconnect_deadline)
     pump(sc);
   check_equal(1u, old->server.established);
   check_equal(1u, next->server.established);
   check_equal(2u, old->client.established);
-  check_true(old->server.closed > 0u && old->client.closed > 0u);
+  check_true(old->client.closed > 0u);
+  if (!command_mode) check_true(old->server.closed > 0u);
   check_not_null(next->server.peer);
   submit(sc, 2u, host_snapshot);
   barrier(sc);
   check_equal((size_t)1u, next->pool.ready);
   check_true(next->manager != old->manager);
   check_equal(old->immutable_key.owner_id, next->immutable_key.owner_id);
-  submit(sc, 2u, host_acquire);
-  barrier(sc);
-  check_true(next->lease.slot != 0u);
   if (command_mode) {
-    /* Reauthenticated B owns a NEW signed MMP command/Lease on its own
-     * Manager, while the manual A retired-generation Lease remains held. */
+    /* B's new authenticated command completes FIRST while A's original
+     * CNet Owner is paused, so A retains its admitted send ticket/Lease. */
     submit(sc, 2u, host_send_command);
     barrier(sc);
-    submit(sc, 2u, host_snapshot);
-    barrier(sc);
-    check_equal((size_t)2u, next->pool.active_leases);
-    check_equal((size_t)1u, next->server.runtime.command_terminal_inflight);
-    const uint64_t terminal_deadline =
-        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
-    while ((!old->command_terminals || !next->command_terminals) &&
-           cmeta_monotonic_ms() < terminal_deadline)
-      pump(sc);
-    check_equal(1u, old->command_terminals);
-    check_equal(1u, next->command_terminals);
-    /* A may write completely before the physical close or fail during
-     * real CNet terminal. Either outcome must be reported exactly once. */
-    check_true(old->command_terminal_status == P2P_OK ||
-               old->command_terminal_status == P2P_ERR_NETWORK);
-    check_equal(P2P_OK, next->command_terminal_status);
-    check_equal((size_t)0u, old->server.runtime.command_terminal_inflight);
-    check_equal((size_t)0u, next->server.runtime.command_terminal_inflight);
     submit(sc, 1u, host_snapshot);
     submit(sc, 2u, host_snapshot);
     barrier(sc);
     check_equal((size_t)1u, old->pool.active_leases);
     check_equal((size_t)1u, next->pool.active_leases);
+    check_equal((size_t)1u, old->server.runtime.command_terminal_inflight);
+    check_equal(0u, old->command_terminals);
+    const uint64_t b_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while (!next->command_terminals && cmeta_monotonic_ms() < b_deadline)
+      pump(sc);
+    check_equal(1u, next->command_terminals);
+    check_equal(P2P_OK, next->command_terminal_status);
+    check_equal((size_t)0u, next->server.runtime.command_terminal_inflight);
+    check_equal(0u, old->command_terminals);
+    check_equal((size_t)1u, old->server.runtime.command_terminal_inflight);
+
+    /* Resume ONLY the native A Owner; its old physical close/write terminal
+     * must settle on A, without mutating B's separate signed Pool/generation. */
+    sc->hold_retiring_final_progress = 0u;
+    const uint64_t a_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((!old->command_terminals || !old->server.closed) &&
+           cmeta_monotonic_ms() < a_deadline)
+      pump(sc);
+    check_equal(1u, old->command_terminals);
+    check_true(old->server.closed > 0u);
+    check_true(old->command_terminal_status == P2P_OK ||
+               old->command_terminal_status == P2P_ERR_NETWORK);
+    check_equal((size_t)0u, old->server.runtime.command_terminal_inflight);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal((size_t)0u, next->pool.active_leases);
     for (unsigned turn = 0u; turn < 4u; ++turn) pump(sc);
     check_equal(1u, old->command_terminals);
     check_equal(1u, next->command_terminals);
+
+    /* Retain a legitimate B Lease during final retirement of A. */
+    submit(sc, 2u, host_acquire);
+    barrier(sc);
+    check_true(next->lease.slot != 0u);
+  } else {
+    submit(sc, 2u, host_acquire);
+    barrier(sc);
+    check_true(next->lease.slot != 0u);
   }
 
   /* Wait for authoritative Manager retirement of A, while B continues
@@ -1206,11 +1238,18 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     barrier(sc);
     check_equal((size_t)1u, next->pool.ready);
     check_equal((size_t)1u, next->pool.active_leases);
-    if (old->pool.terminal_waiting_for_leases == 1u ||
+    if ((command_mode
+             ? (old->pool.physical_in_use == 0u && old->pool.active_leases == 0u)
+             : (old->pool.terminal_waiting_for_leases == 1u)) ||
         cmeta_monotonic_ms() >= drain_deadline) break;
   }
-  check_equal((size_t)1u, old->pool.terminal_waiting_for_leases);
-  check_equal((size_t)1u, old->pool.active_leases);
+  if (command_mode) {
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal((size_t)0u, old->pool.physical_in_use);
+  } else {
+    check_equal((size_t)1u, old->pool.terminal_waiting_for_leases);
+    check_equal((size_t)1u, old->pool.active_leases);
+  }
   check_equal((size_t)0u, old->pool.ready);
   p2p_cnet_sg_snapshot_v1_t old_ticket = {0}, new_ticket = {0};
   check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
