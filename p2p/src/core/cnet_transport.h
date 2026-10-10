@@ -104,6 +104,19 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
  * Extra clients must reach real terminal/stop/destroy BEFORE SG lease release.
  * Do not call the standalone SG poll on any participant in the same batch. */
 #define P2P_CNET_SG_MAX_COHOST_CLIENTS 4u
+/* Real NativeIO SG Host publishes other CNet clients' *physical occupied
+ * slots* (CONNECTING through terminal), plus an explicit shared SG slot
+ * budget. Both fit uint32_t and are published atomically as one snapshot.
+ * Capacity is an advisory pressure gate; final CNet admission still owns
+ * all actual socket/resource credit. Call only on the original SG shard with
+ * its exact live host lease, from the host's bounded Owner callback.
+ * Co-hosted poll with extras fails fast until this has been initialized.
+ * Capacity=slots=0 unpublishes after other clients have fully drained.
+ * Invalid/foreign/stale publication has no side effect. */
+int p2p_cnet_owner_publish_sg_host_load(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    size_t other_client_slots, size_t shared_host_capacity);
 /* Side-effect-free admission check for the P2P Node wrapper. Always check
  * lease, shard and client aliases BEFORE P2P protocol maintenance. */
 int p2p_cnet_owner_preflight_sg_host(
