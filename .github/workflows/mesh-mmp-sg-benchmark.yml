@@ -1,0 +1,141 @@
+name: Signed MMP SG equal-load echo benchmark
+on:
+  push:
+    branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
+    paths:
+      - 'mesh/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/mesh-mmp-sg-benchmark.yml'
+  pull_request:
+    branches: [feature/mesh-signed-pool-sg-final-owner-23]
+    paths:
+      - 'mesh/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/mesh-mmp-sg-benchmark.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  signed-equal-load:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-mmp-sg-equal-load
+      - name: Build opt-in signed SG ClientPool echo benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/mmp-sg-benchmark -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DP2P_MMP_SG_BUILD_BENCHMARKS=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+          cmake --build build/mmp-sg-benchmark --parallel 2 --target \
+            bench_mesh_mmp_sg_1 bench_mesh_mmp_sg_2 bench_mesh_mmp_sg_4
+      - name: Validate four-session equal-load profiles
+        shell: bash
+        env:
+          P2P_MMP_BENCH_WARMUP: '8'
+          P2P_MMP_BENCH_ROUNDS: '32'
+        run: |
+          set -euo pipefail
+          echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-aggregate.csv
+          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-sessions.csv
+          {
+            uname -a
+            lscpu
+            cmake --version | head -1
+            git rev-parse HEAD
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+            echo "SALTS_ROOT=$SALTS_ROOT"
+            echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
+          } > mmp-sg-machine.txt
+          repeats=1
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            repeats=5
+            export P2P_MMP_BENCH_WARMUP=64 P2P_MMP_BENCH_ROUNDS=512
+          fi
+          for repeat in $(seq 1 "$repeats"); do
+            for bytes in 8 1024; do
+              for finals in 1 2 4; do
+                export P2P_MMP_BENCH_PAYLOAD="$bytes"
+                log="mmp-sg-finals-$finals-$bytes-B-repeat-$repeat.log"
+                "./build/mmp-sg-benchmark/bench_mesh_mmp_sg_$finals" | tee "$log"
+                grep '^P2P_MMP_SG_BENCH,' "$log" |
+                  sed 's/^P2P_MMP_SG_BENCH,//' >> mmp-sg-aggregate.csv
+                grep '^P2P_MMP_SG_SESSION,' "$log" |
+                  sed 's/^P2P_MMP_SG_SESSION,//' >> mmp-sg-sessions.csv
+              done
+            done
+          done
+          python3 - <<'PY'
+          import csv, math, os, statistics
+          from collections import defaultdict
+          with open("mmp-sg-aggregate.csv", newline="", encoding="utf-8") as stream:
+              aggregate = list(csv.DictReader(stream))
+          with open("mmp-sg-sessions.csv", newline="", encoding="utf-8") as stream:
+              sessions = list(csv.DictReader(stream))
+          repeats = 5 if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch" else 1
+          expected = {(n, b) for n in (1, 2, 4) for b in (8, 1024)}
+          actual = defaultdict(list)
+          metrics = ("wall_ms", "process_cpu_ms", "process_cpu_pct",
+                     "app_msgs_per_s", "payload_mib_per_s",
+                     "rtt_p50_us", "rtt_p95_us", "rtt_p99_us")
+          for row in aggregate:
+              n, size = int(row["final_owners"]), int(row["payload_bytes"])
+              if (int(row["total_shards"]) != n + 1 or
+                  int(row["sessions"]) != 4 or
+                  row["protocol"] != "sg-signed-ready-data-echo" or
+                  row["driver"] != "global-barrier" or
+                  int(row["rounds"]) != int(os.environ["P2P_MMP_BENCH_ROUNDS"]) or
+                  int(row["warmup"]) != int(os.environ["P2P_MMP_BENCH_WARMUP"])):
+                  raise SystemExit(f"Unequal-load profile: {row}")
+              if not all(math.isfinite(float(row[k])) and float(row[k]) >= 0
+                         for k in metrics):
+                  raise SystemExit(f"Invalid metrics: {row}")
+              actual[(n, size)].append(row)
+          if set(actual) != expected or any(len(v) != repeats for v in actual.values()):
+              raise SystemExit(f"Missing/duplicate equal-load profile: {actual}")
+          grouped = defaultdict(list)
+          for row in sessions:
+              n, size = int(row["final_owners"]), int(row["payload_bytes"])
+              client = int(row["session_id"])
+              if ((n, size) not in expected or client not in (1, 2, 3, 4)
+                  or int(row["total_shards"]) != n+1):
+                  raise SystemExit(f"Invalid per-session RTT: {row}")
+              grouped[(n,size,client)].append(row)
+          if len(grouped) != 24 or any(len(g)!=repeats for g in grouped.values()):
+              raise SystemExit("Incomplete four-client per-session RTT profiles")
+          with open("mmp-sg-summary.csv", "w", newline="", encoding="utf-8") as stream:
+              out=csv.writer(stream)
+              out.writerow(["protocol","driver","final_owners","total_shards","sessions",
+                            "payload_bytes","repeats","rounds",
+                            *["median_"+k for k in metrics]])
+              for (n,size), rows in sorted(actual.items()):
+                  out.writerow(["sg-signed-ready-data-echo","global-barrier",
+                                n,n+1,4,size,len(rows),int(rows[0]["rounds"]),
+                                *[round(statistics.median(float(r[k]) for r in rows),4)
+                                  for k in metrics]])
+          PY
+          cat mmp-sg-summary.csv
+          echo 'Signed MMP READY gates P2P custom echo; Lease covers enqueue only. NOT raw CNet or management RPC measurements.'
+      - name: Upload raw metrics and machine metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-mmp-sg-equal-load
+          path: |
+            mmp-sg-aggregate.csv
+            mmp-sg-sessions.csv
+            mmp-sg-summary.csv
+            mmp-sg-machine.txt
+            mmp-sg-finals-*.log
+          if-no-files-found: error
+      - name: Report ccache
+        if: always()
+        shell: bash
+        run: ccache --show-stats
