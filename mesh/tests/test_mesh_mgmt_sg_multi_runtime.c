@@ -706,11 +706,25 @@ static void host_register_rpc(native_io_sharded_context *ctx, void *arg) {
   memcpy(binding->target_node_id,
          f->client.identity.signer.hello.managed_node_id,
          sizeof(binding->target_node_id));
+  memcpy(binding->result_signer_public_key, f->result_signer_public,
+         sizeof(binding->result_signer_public_key));
   binding->deadline_ms = TEST_NOW_MS + 2000u;
   SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_init_v1(
       &f->rpc_registry, 2u, 1000u));
   SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_register_v1(
       &f->rpc_registry, binding, TEST_NOW_MS));
+  /* An attacker cannot replace the signer key on an already registered
+   * request even if every command/correlation/session field is identical. */
+  {
+    mesh_mgmt_execution_rpc_binding_v1_t forged = *binding;
+    forged.result_signer_public_key[0] ^= 1u;
+    if (mesh_mgmt_execution_rpc_registry_register_v1(
+            &f->rpc_registry, &forged, TEST_NOW_MS) !=
+        MESH_MGMT_EXECUTION_RPC_REGISTRY_CONFLICT) {
+      fail_lane(lane, SALTS_EPROTO, "cross-Final signer rebound");
+      return;
+    }
+  }
   if (mesh_mgmt_execution_rpc_registry_release_v1(
           &f->rpc_registry, binding->correlation_id) !=
           MESH_MGMT_EXECUTION_RPC_REGISTRY_NOT_READY) {
@@ -1140,7 +1154,10 @@ static void test_multi_final(size_t final_count, int command_mode) {
       f->server.rpc_final = f;
       f->client.rpc_final = f;
       prepare_typed_request(f);
-      if (sc->exercise_signed_result) {
+      /* Bind the declared target to its trusted execution signer even
+       * when this test only returns a negative STATUS; RESULT admission
+       * later MUST match this immutable per-target authority. */
+      {
         uint8_t signer_private[32] = {0};
         memset(signer_private, (int)(0x81u + i), sizeof(signer_private));
         check_equal(MESH_MGMT_CRYPTO_OK,
