@@ -30,7 +30,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
             -DVCPKG_MANIFEST_MODE=OFF
           cmake --build build/mmp-sg-benchmark --parallel 2 --target \
-            bench_mesh_mmp_sg_1 bench_mesh_mmp_sg_2 bench_mesh_mmp_sg_4
+            bench_mesh_mmp_sg_1 bench_mesh_mmp_sg_2 bench_mesh_mmp_sg_4 \
+            bench_mesh_mmp_sg_1_async bench_mesh_mmp_sg_2_async bench_mesh_mmp_sg_4_async
       - name: Validate four-session equal-load profiles
         shell: bash
         env:
@@ -40,7 +41,7 @@ jobs:
           set -euo pipefail
           echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-aggregate.csv
           echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > mmp-sg-sessions.csv
-          echo 'repeat,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > mmp-sg-rtt.csv
+          echo 'repeat,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > mmp-sg-rtt.csv
           {
             uname -a
             lscpu
@@ -59,14 +60,18 @@ jobs:
             for bytes in 8 1024; do
               for finals in 1 2 4; do
                 export P2P_MMP_BENCH_PAYLOAD="$bytes"
-                log="mmp-sg-finals-$finals-$bytes-B-repeat-$repeat.log"
-                "./build/mmp-sg-benchmark/bench_mesh_mmp_sg_$finals" | tee "$log"
-                grep '^P2P_MMP_SG_BENCH,' "$log" |
-                  sed 's/^P2P_MMP_SG_BENCH,//' >> mmp-sg-aggregate.csv
-                grep '^P2P_MMP_SG_SESSION,' "$log" |
-                  sed 's/^P2P_MMP_SG_SESSION,//' >> mmp-sg-sessions.csv
-                grep '^P2P_MMP_SG_RTT,' "$log" |
-                  sed "s/^P2P_MMP_SG_RTT,/$repeat,/" >> mmp-sg-rtt.csv
+                for mode in barrier async; do
+                  exe="bench_mesh_mmp_sg_$finals"
+                  if [ "$mode" = async ]; then exe="${exe}_async"; fi
+                  log="mmp-sg-finals-$finals-$bytes-B-$mode-repeat-$repeat.log"
+                  "./build/mmp-sg-benchmark/$exe" | tee "$log"
+                  grep '^P2P_MMP_SG_BENCH,' "$log" |
+                    sed 's/^P2P_MMP_SG_BENCH,//' >> mmp-sg-aggregate.csv
+                  grep '^P2P_MMP_SG_SESSION,' "$log" |
+                    sed 's/^P2P_MMP_SG_SESSION,//' >> mmp-sg-sessions.csv
+                  grep '^P2P_MMP_SG_RTT,' "$log" |
+                    sed "s/^P2P_MMP_SG_RTT,/$repeat,/" >> mmp-sg-rtt.csv
+                done
               done
             done
           done
@@ -80,47 +85,51 @@ jobs:
           with open("mmp-sg-rtt.csv", newline="", encoding="utf-8") as stream:
               raw_rtt = list(csv.DictReader(stream))
           repeats = 5
-          expected = {(n, b) for n in (1, 2, 4) for b in (8, 1024)}
+          expected = {(mode, n, b)
+                      for mode in ("global-barrier", "owner-independent")
+                      for n in (1, 2, 4) for b in (8, 1024)}
           actual = defaultdict(list)
           metrics = ("wall_ms", "process_cpu_ms", "process_cpu_pct",
                      "app_msgs_per_s", "payload_mib_per_s",
                      "rtt_p50_us", "rtt_p95_us", "rtt_p99_us")
           for row in aggregate:
+              mode = row["driver"]
               n, size = int(row["final_owners"]), int(row["payload_bytes"])
-              if (int(row["total_shards"]) != n + 1 or
+              if ((mode,n,size) not in expected or
+                  int(row["total_shards"]) != n + 1 or
                   int(row["sessions"]) != 4 or
                   row["protocol"] != "sg-signed-ready-data-echo" or
-                  row["driver"] != "global-barrier" or
                   int(row["rounds"]) != int(os.environ["P2P_MMP_BENCH_ROUNDS"]) or
                   int(row["warmup"]) != int(os.environ["P2P_MMP_BENCH_WARMUP"])):
                   raise SystemExit(f"Unequal-load profile: {row}")
               if not all(math.isfinite(float(row[k])) and float(row[k]) >= 0
                          for k in metrics):
                   raise SystemExit(f"Invalid metrics: {row}")
-              actual[(n, size)].append(row)
+              actual[(mode, n, size)].append(row)
           if set(actual) != expected or any(len(v) != repeats for v in actual.values()):
               raise SystemExit(f"Missing/duplicate equal-load profile: {actual}")
           grouped = defaultdict(list)
           for row in sessions:
+              mode = row["driver"]
               n, size = int(row["final_owners"]), int(row["payload_bytes"])
               client = int(row["session_id"])
-              if ((n, size) not in expected or client not in (1, 2, 3, 4)
+              if ((mode, n, size) not in expected or client not in (1, 2, 3, 4)
                   or int(row["total_shards"]) != n+1):
                   raise SystemExit(f"Invalid per-session RTT: {row}")
-              grouped[(n,size,client)].append(row)
-          if len(grouped) != 24 or any(len(g)!=repeats for g in grouped.values()):
+              grouped[(mode,n,size,client)].append(row)
+          if len(grouped) != 48 or any(len(g)!=repeats for g in grouped.values()):
               raise SystemExit("Incomplete four-client per-session RTT profiles")
           counts = defaultdict(set)
           rounds = int(os.environ["P2P_MMP_BENCH_ROUNDS"])
-          expected_raw = {(repeat,n,size,client)
+          expected_raw = {(repeat,mode,n,size,client)
                           for repeat in range(1,repeats+1)
-                          for n,size in expected for client in (1,2,3,4)}
+                          for mode,n,size in expected for client in (1,2,3,4)}
           for row in raw_rtt:
-              key = (int(row["repeat"]),int(row["final_owners"]),
+              key = (int(row["repeat"]),row["driver"],int(row["final_owners"]),
                      int(row["payload_bytes"]),int(row["session_id"]))
               round_no = int(row["round"])
               if (key not in expected_raw or
-                  int(row["total_shards"]) != key[1]+1 or
+                  int(row["total_shards"]) != key[2]+1 or
                   round_no<1 or round_no>rounds or
                   not math.isfinite(float(row["rtt_us"])) or
                   float(row["rtt_us"])<=0 or round_no in counts[key]):
@@ -135,8 +144,8 @@ jobs:
                             *["median_"+k for k in metrics],
                             "app_msgs_per_s_min","app_msgs_per_s_max",
                             "process_cpu_pct_min","process_cpu_pct_max"])
-              for (n,size), rows in sorted(actual.items()):
-                  out.writerow(["sg-signed-ready-data-echo","global-barrier",
+              for (mode,n,size), rows in sorted(actual.items()):
+                  out.writerow(["sg-signed-ready-data-echo",mode,
                                 n,n+1,4,size,len(rows),int(rows[0]["rounds"]),
                                 *[round(statistics.median(float(r[k]) for r in rows),4)
                                   for k in metrics],
@@ -146,7 +155,7 @@ jobs:
                                 round(max(float(r["process_cpu_pct"]) for r in rows),4)])
           PY
           cat mmp-sg-summary.csv
-          echo 'Signed MMP READY gates P2P custom echo; Lease covers enqueue only. NOT raw CNet or management RPC measurements.'
+          echo 'Signed MMP READY gates P2P custom echo; Lease covers enqueue only. Two drivers use matched 4-session work. NOT raw CNet or management RPC measurements.'
       - name: Upload raw metrics and machine metadata
         uses: actions/upload-artifact@v4
         with:

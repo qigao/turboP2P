@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 #ifndef BENCH_MMP_FINALS
 #error BENCH_MMP_FINALS must be 1, 2 or 4
@@ -35,6 +36,13 @@
 #if BENCH_MMP_FINALS != 1 && BENCH_MMP_FINALS != 2 && BENCH_MMP_FINALS != 4
 #error Unsupported BENCH_MMP_FINALS
 #endif
+#ifndef BENCH_ASYNC_PROGRESS
+#define BENCH_ASYNC_PROGRESS 0
+#endif
+#if BENCH_ASYNC_PROGRESS != 0 && BENCH_ASYNC_PROGRESS != 1
+#error BENCH_ASYNC_PROGRESS must be 0 or 1
+#endif
+#define BENCH_DRIVER_LABEL (BENCH_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
 enum {
   BENCH_SESSIONS = 4,
   BENCH_FINALS = BENCH_MMP_FINALS,
@@ -72,6 +80,13 @@ typedef struct {
   size_t turns, stop_retries;
   int stopped, released, error;
   const char *where;
+#if BENCH_ASYNC_PROGRESS
+  /* Exactly one SG Host observe/progress per worker at any instant.
+   * The finalize callback returns the scheduling token on completion. */
+  atomic_bool progress_ready;
+  atomic_int cancel_status;
+  atomic_int owner_failed;
+#endif
 } bench_lane;
 
 struct bench_final {
@@ -118,6 +133,9 @@ static uint64_t clock_ns(clockid_t clock_kind) {
 }
 static void bench_error(bench_lane *lane,int code,const char *where) {
   if (!lane->error) {lane->error=code;lane->where=where;}
+#if BENCH_ASYNC_PROGRESS
+  atomic_store_explicit(&lane->owner_failed,code,memory_order_release);
+#endif
 }
 #define BC(lane, expr) do { \
   int status_=(expr); \
@@ -540,6 +558,60 @@ static void pump(benchmark_case *sc) {
   for (size_t j=0;j<BENCH_SHARDS;++j) submit(sc,j,progress);
   barrier(sc);
 }
+#if BENCH_ASYNC_PROGRESS
+/* The coordinator never invokes a NativeIO observe or waits across SG
+ * shards in a measured round. Bounded per-lane tasks become eligible for
+ * resubmission only AFTER their original worker finalize callback. */
+static void progress_cancel(void *ctx,int status) {
+  bench_lane *lane=(bench_lane*)ctx;
+  atomic_store_explicit(&lane->cancel_status,status,memory_order_relaxed);
+}
+static void progress_finalize(void *ctx) {
+  bench_lane *lane=(bench_lane*)ctx;
+  atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+}
+static void pump_independent(benchmark_case *sc) {
+  for (size_t i=0u;i<BENCH_SESSIONS;++i)
+    if (sc->clients[i].runtime.state==MESH_MGMT_AGENT_RUNTIME_RUNNING)
+      check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+                  mesh_mgmt_agent_runtime_poll_v1(&sc->clients[i].runtime));
+  for (size_t shard=0u;shard<BENCH_SHARDS;++shard) {
+    bench_lane *lane=&sc->lanes[shard];
+    check_equal(0,atomic_load_explicit(&lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(&lane->cancel_status,memory_order_relaxed));
+    if (!atomic_exchange_explicit(&lane->progress_ready,false,memory_order_acq_rel))
+      continue;
+    native_io_sharded_task task={
+      progress,progress_cancel,progress_finalize,lane
+    };
+    const int status=native_io_sharded_try_submit_to(sc->host,shard,&task);
+    if (status!=SALTS_OK) {
+      /* A rejected bounded task owns neither NativeIO completion nor lease.
+       * Return the token, but never fallback to independent event polling. */
+      atomic_store_explicit(&lane->progress_ready,true,memory_order_release);
+      if (status!=SALTS_ENOBUFS) check_equal(SALTS_OK,status);
+    }
+  }
+}
+static void finish_independent(benchmark_case *sc) {
+  /* Setup and teardown use barriers; the measured hot path has no global
+   * NativeIO wait until the final completed application echo batch. */
+  barrier(sc);
+  for (size_t shard=0u;shard<BENCH_SHARDS;++shard) {
+    bench_lane *lane=&sc->lanes[shard];
+    check_true(atomic_load_explicit(&lane->progress_ready,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(&lane->owner_failed,memory_order_acquire));
+    check_equal(0,atomic_load_explicit(&lane->cancel_status,memory_order_relaxed));
+  }
+}
+#define BENCH_MEASURE_PUMP(s) pump_independent(s)
+#define BENCH_MEASURE_FINISH(s) finish_independent(s)
+#define BENCH_MEASURE_BOUNDARY(s) finish_independent(s)
+#else
+#define BENCH_MEASURE_PUMP(s) pump(s)
+#define BENCH_MEASURE_FINISH(s) ((void)0)
+#define BENCH_MEASURE_BOUNDARY(s) ((void)0)
+#endif
 static void snapshot_all(benchmark_case *sc) {
   for (size_t j=1u;j<BENCH_SHARDS;++j) submit(sc,j,snapshot);
   barrier(sc);
@@ -549,6 +621,8 @@ static void run_rounds(benchmark_case *sc) {
   uint64_t wall0=0,cpu0=0;
   for (size_t round=0u;round<total;++round) {
     if (round==sc->warmup) {
+      /* Equal measured work starts after the warmup worker tasks settle. */
+      BENCH_MEASURE_BOUNDARY(sc);
       wall0=clock_ns(CLOCK_MONOTONIC);
       cpu0=clock_ns(CLOCK_PROCESS_CPUTIME_ID);
     }
@@ -566,13 +640,14 @@ static void run_rounds(benchmark_case *sc) {
       for (size_t i=0;i<BENCH_SESSIONS;++i)
         if (sc->clients[i].received<=round) all_done=0;
       if (all_done||cmeta_monotonic_ms()>=deadline) break;
-      pump(sc);
+      BENCH_MEASURE_PUMP(sc);
     }
     for (size_t i=0;i<BENCH_SESSIONS;++i) {
       check_equal(round+1u,sc->clients[i].received);
       check_equal((size_t)0u,sc->clients[i].invalid);
     }
   }
+  BENCH_MEASURE_FINISH(sc);
   const uint64_t wall1=clock_ns(CLOCK_MONOTONIC);
   const uint64_t cpu1=clock_ns(CLOCK_PROCESS_CPUTIME_ID);
   const double wall=(double)(wall1-wall0)/1e9;
@@ -588,14 +663,14 @@ static void run_rounds(benchmark_case *sc) {
     /* Preserve chronological raw roundtrips BEFORE percentile sort.
      * Emitted after the measured wall/CPU boundary: no printf in hot path. */
     for (size_t round=0u;round<sc->rounds;++round)
-      printf("P2P_MMP_SG_RTT,%u,%u,%u,%zu,%zu,%.3f\n",
-          (unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
+      printf("P2P_MMP_SG_RTT,%s,%u,%u,%u,%zu,%zu,%.3f\n",
+          BENCH_DRIVER_LABEL,(unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
           (unsigned)(i+1u),sc->bytes,round+1u,
           (double)c->samples[round]/1000.0);
     qsort(c->samples,sc->rounds,sizeof(uint64_t),cmp_u64);
-    printf("P2P_MMP_SG_SESSION,sg-signed-ready-data-echo,global-barrier,"
+    printf("P2P_MMP_SG_SESSION,sg-signed-ready-data-echo,%s,"
            "%u,%u,%u,%zu,%zu,%.3f,%.3f,%.3f\n",
-           (unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
+           BENCH_DRIVER_LABEL,(unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
            (unsigned)(i+1u),sc->bytes,sc->rounds,
            (double)pct(c->samples,sc->rounds,50u)/1000.0,
            (double)pct(c->samples,sc->rounds,95u)/1000.0,
@@ -603,10 +678,10 @@ static void run_rounds(benchmark_case *sc) {
   }
   qsort(combined,nsamples,sizeof(uint64_t),cmp_u64);
   check_true(wall>0.0 && cpu>=0.0);
-  printf("P2P_MMP_SG_BENCH,sg-signed-ready-data-echo,global-barrier,"
+  printf("P2P_MMP_SG_BENCH,sg-signed-ready-data-echo,%s,"
          "%u,%u,%u,%zu,%zu,%zu,%.3f,%.3f,%.3f,%.3f,%.6f,"
          "%.3f,%.3f,%.3f\n",
-         (unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
+         BENCH_DRIVER_LABEL,(unsigned)BENCH_FINALS,(unsigned)BENCH_SHARDS,
          (unsigned)BENCH_SESSIONS,sc->bytes,sc->rounds,sc->warmup,
          wall*1000.0,cpu*1000.0,cpu*100.0/wall,
          messages/wall,messages*(double)sc->bytes/(1048576.0*wall),
@@ -660,6 +735,11 @@ static void run_benchmark(void) {
   for (size_t i=0;i<BENCH_SHARDS;++i) {
     sc->lanes[i].scenario=sc;
     sc->lanes[i].shard=i;
+#if BENCH_ASYNC_PROGRESS
+    atomic_init(&sc->lanes[i].progress_ready,true);
+    atomic_init(&sc->lanes[i].cancel_status,0);
+    atomic_init(&sc->lanes[i].owner_failed,0);
+#endif
     submit(sc,i,init_worker);
   }
   barrier(sc);

@@ -321,6 +321,19 @@ if(P2P_MMP_SG_BUILD_BENCHMARKS)
     target_link_libraries(bench_mesh_mmp_sg_${finals} PRIVATE
       mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
   endforeach()
+  # Paired independent SG progress against the EXACT same signed identity
+  # fixture, payloads, warmup, message counts, and original CNet credit policy.
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_mesh_mmp_sg_${finals}_async
+      "${mesh_tests}/../bench/bench_mesh_mmp_sg_pool.c")
+    set_property(TARGET bench_mesh_mmp_sg_${finals}_async PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_mesh_mmp_sg_${finals}_async
+      PRIVATE BENCH_MMP_FINALS=${finals} BENCH_ASYNC_PROGRESS=1)
+    target_include_directories(bench_mesh_mmp_sg_${finals}_async PRIVATE
+      "${mesh_tests}")
+    target_link_libraries(bench_mesh_mmp_sg_${finals}_async PRIVATE
+      mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
 endif()
 
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
