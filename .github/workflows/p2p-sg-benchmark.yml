@@ -2,7 +2,7 @@ name: P2P SG Host performance profiles
 on:
   workflow_dispatch:
   push:
-    branches: [feature/p2p-sg-benchmark-23]
+    branches: [feature/p2p-sg-benchmark-23, feature/p2p-sg-independent-progress-23]
     paths:
       - 'p2p/bench/**'
       - 'tests/salts_foundation/CMakeLists.txt'
