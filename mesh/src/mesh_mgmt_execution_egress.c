@@ -31,7 +31,7 @@ mesh_mgmt_execution_egress_result_t mesh_mgmt_execution_egress_init_v1(
   if (egress->storage == NULL) {
     return MESH_MGMT_EXECUTION_EGRESS_RESOURCE_EXHAUSTED;
   }
-  if (!ring_spsc_init(&egress->ring, egress->storage, storage_size)) {
+  if (!cmeta_spsc_ring_init(&egress->ring, egress->storage, storage_size)) {
     free(egress->storage);
     memset(egress, 0, sizeof(*egress));
     return MESH_MGMT_EXECUTION_EGRESS_INVALID_ARG;
@@ -77,7 +77,7 @@ mesh_mgmt_execution_egress_result_t mesh_mgmt_execution_egress_try_push_v1(
     return MESH_MGMT_EXECUTION_EGRESS_FULL;
   }
 
-  slot = ring_spsc_write_acquire(
+  slot = cmeta_spsc_ring_write_acquire(
       &egress->ring, MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE);
   if (slot == NULL) {
     atomic_fetch_add_explicit(&egress->rejected_full, 1u,
@@ -105,7 +105,7 @@ mesh_mgmt_execution_egress_result_t mesh_mgmt_execution_egress_try_push_v1(
   memset(slot, 0, MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE);
   memcpy(slot, &item, sizeof(item));
   atomic_fetch_add_explicit(&egress->pending, 1u, memory_order_release);
-  ring_spsc_write_release(&egress->ring,
+  cmeta_spsc_ring_write_release(&egress->ring,
                           MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE);
   atomic_fetch_add_explicit(&egress->published, 1u, memory_order_relaxed);
   return MESH_MGMT_EXECUTION_EGRESS_OK;
@@ -144,7 +144,7 @@ mesh_mgmt_execution_egress_result_t mesh_mgmt_execution_egress_peek_v1(
       egress->storage == NULL) {
     return MESH_MGMT_EXECUTION_EGRESS_INVALID_ARG;
   }
-  slot = ring_spsc_read_acquire(&egress->ring, &available);
+  slot = cmeta_spsc_ring_read_acquire(&egress->ring, &available);
   if (slot == NULL || available < MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE) {
     return MESH_MGMT_EXECUTION_EGRESS_EMPTY;
   }
@@ -161,11 +161,11 @@ mesh_mgmt_execution_egress_result_t mesh_mgmt_execution_egress_consume_v1(
       egress->storage == NULL) {
     return MESH_MGMT_EXECUTION_EGRESS_INVALID_ARG;
   }
-  slot = ring_spsc_read_acquire(&egress->ring, &available);
+  slot = cmeta_spsc_ring_read_acquire(&egress->ring, &available);
   if (slot == NULL || available < MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE) {
     return MESH_MGMT_EXECUTION_EGRESS_EMPTY;
   }
-  ring_spsc_read_release(&egress->ring,
+  cmeta_spsc_ring_read_release(&egress->ring,
                          MESH_MGMT_EXECUTION_EGRESS_SLOT_SIZE);
   atomic_fetch_sub_explicit(&egress->pending, 1u, memory_order_release);
   atomic_fetch_add_explicit(&egress->consumed, 1u, memory_order_relaxed);

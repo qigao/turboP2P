@@ -2,7 +2,7 @@
 #define MESH_MGMT_EXECUTION_WORKER_H
 
 #include "mesh_mgmt_execution_service.h"
-#include "turbo_thread.h"
+#include <salts/thread_pool.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -65,7 +65,7 @@ typedef struct mesh_mgmt_execution_worker_stats_v1 {
 } mesh_mgmt_execution_worker_stats_v1_t;
 
 typedef struct mesh_mgmt_execution_worker_v1 {
-  turbo_threadpool_t *pool;
+  cmeta_threadpool_t *pool;
   mesh_mgmt_execution_service_v1_t *service;
   mesh_mgmt_execution_runner_io_v1_t runner_io;
   mesh_mgmt_execution_worker_completion_v1_fn completion;

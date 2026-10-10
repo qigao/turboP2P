@@ -2,7 +2,7 @@
 #define MESH_MGMT_EXECUTION_EGRESS_H
 
 #include "mesh_mgmt_execution_worker.h"
-#include "ring_buffer_spsc.h"
+#include <salts/spsc_ring.h>
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -48,7 +48,7 @@ typedef struct mesh_mgmt_execution_egress_stats_v1 {
 } mesh_mgmt_execution_egress_stats_v1_t;
 
 typedef struct mesh_mgmt_execution_egress_v1 {
-  ring_spsc_t ring;
+  cmeta_spsc_ring ring;
   uint8_t *storage;
   size_t capacity;
   atomic_bool accepting;

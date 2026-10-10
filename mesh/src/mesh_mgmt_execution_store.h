@@ -3,7 +3,7 @@
 
 #include "mesh_mgmt_execution.h"
 #include "mesh_mgmt_execution_result.h"
-#include "turbo_fs.h"
+#include <cmeta_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -13,6 +13,7 @@ extern "C" {
 #endif
 
 #define MESH_MGMT_EXECUTION_STORE_VERSION 2u
+#define MESH_MGMT_EXECUTION_STORE_PATH_MAX 4096u
 
 typedef enum {
   MESH_MGMT_EXECUTION_STORE_OK = 0,
@@ -40,10 +41,10 @@ typedef struct {
   mesh_mgmt_execution_journal_entry_v1_t *rollback_entries;
   mesh_mgmt_execution_stored_result_v1_t *results;
   mesh_mgmt_execution_stored_result_v1_t *rollback_results;
-  char path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH + 5u];
-  char lock_path[TURBO_FS_MAX_PATH + 6u];
-  turbo_file_t lock_file;
+  char path[MESH_MGMT_EXECUTION_STORE_PATH_MAX];
+  char temp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
+  char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
+  cmeta_file_t lock_file;
   uint8_t open;
 } mesh_mgmt_execution_store_v1_t;
 
