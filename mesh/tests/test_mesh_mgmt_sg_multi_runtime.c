@@ -3,6 +3,10 @@
 #include "mesh_mgmt_test_identity.h"
 #include "mesh_mgmt_execution_wire.h"
 #include "mesh_mgmt_execution_rpc_registry.h"
+#ifdef MESH_SG_REAL_EXECUTION
+#include "mesh_mgmt_execution_node.h"
+#include <stdlib.h>
+#endif
 #include "core/node_cnet.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
@@ -66,6 +70,11 @@ struct signed_final {
   mesh_mgmt_execution_rpc_binding_v1_t rpc_binding;
   mesh_mgmt_execution_rpc_completion_v1_t rpc_completion;
   uint8_t result_signer_public[32];
+#ifdef MESH_SG_REAL_EXECUTION
+  mesh_mgmt_execution_node_v1_t execution_node;
+  mesh_mgmt_execution_deployment_v1_t execution_deployment;
+  char *execution_store_path;
+#endif
   unsigned rpc_request_events, rpc_status_events, rpc_result_events;
   unsigned rpc_reply_sent, rpc_errors;
 };
@@ -92,6 +101,7 @@ struct sg_multi_case {
   uint8_t exercise_command_terminal;
   uint8_t exercise_typed_rpc;
   uint8_t exercise_signed_result;
+  uint8_t exercise_real_execution;
   uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
@@ -146,6 +156,17 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
       ++f->rpc_errors;
       return -1;
     }
+#ifdef MESH_SG_REAL_EXECUTION
+    if (f->scenario->exercise_real_execution) {
+      /* Only nonblocking copied work admission is done from the signed MMP
+       * callback. Durable Store and guest CPU work stay on the CMeta Worker. */
+      if (mesh_mgmt_execution_node_try_submit_v1(
+              &f->execution_node, &command) != MESH_MGMT_EXECUTION_NODE_OK) {
+        ++f->rpc_errors;
+        return -1;
+      }
+    } else
+#endif
     if (f->scenario->exercise_signed_result) {
       /* Owned typed command survives the borrowed dispatcher callback.
        * A separate client-runtime turn below emits the signed RESULT. */
@@ -306,6 +327,71 @@ static const uint8_t SG_RPC_ISSUER_PRIVATE[32] = {
     0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69,
     0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
 };
+
+#ifdef MESH_SG_REAL_EXECUTION
+static uint64_t sg_execution_clock(void *context) {
+  (void)context;
+  return TEST_NOW_MS;
+}
+static void sg_execution_limits(mesh_mgmt_execution_limits_v1_t *limits) {
+  memset(limits, 0, sizeof(*limits));
+  limits->module_bytes = 1024u * 1024u;
+  limits->stack_bytes = 64u * 1024u;
+  limits->linear_memory_bytes = 256u * 1024u;
+  limits->timeout_ms = 1000u;
+  limits->control_flow_steps = 1000000u;
+  limits->host_calls = 64u;
+  limits->copied_guest_bytes = 64u * 1024u;
+  limits->input_bytes = 64u * 1024u;
+  limits->stdout_bytes = 64u * 1024u;
+  limits->stderr_bytes = 64u * 1024u;
+}
+static void init_real_execution_node(signed_final *f) {
+  mesh_mgmt_execution_node_config_v1_t config = {0};
+  uint8_t signer_private[32] = {0};
+  mesh_mgmt_execution_deployment_v1_t *deployment =
+      &f->execution_deployment;
+
+  check_true(f->scenario->exercise_real_execution);
+  f->execution_store_path = tt_make_temp_file("sg-worker-wasm", ".journal");
+  check_not_null(f->execution_store_path);
+  if (!f->execution_store_path) return;
+  (void)remove(f->execution_store_path);
+  memset(deployment->deployment_id, 0x21, sizeof(deployment->deployment_id));
+  deployment->generation = 1u;
+  deployment->runtime = MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1;
+  deployment->module_path = MESH_TEST_EXECUTION_SUCCESS_WASM;
+  check_equal(MESH_MGMT_EXECUTION_RUNNER_OK,
+      mesh_mgmt_execution_runner_module_digest_v1(
+          deployment->module_path, 1024u * 1024u,
+          deployment->module_digest, NULL));
+  config.store_path = f->execution_store_path;
+  config.store_capacity = 8u;
+  config.deployment_capacity = 1u;
+  config.worker_queue_capacity = 4u;
+  config.egress_capacity = 4u;
+  config.deployments = deployment;
+  config.deployment_count = 1u;
+  memcpy(config.local_node_id,
+         f->client.identity.signer.hello.managed_node_id, 32u);
+  memset(signer_private, (int)(0x81u + f->final_index), 32u);
+  memcpy(config.result_private_key, signer_private, 32u);
+  check_equal(MESH_MGMT_CRYPTO_OK,
+      mesh_mgmt_ed25519_public_from_private(
+          SG_RPC_ISSUER_PRIVATE, config.grant_issuer_key));
+  config.host_capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+  config.hard_capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+  sg_execution_limits(&config.host_limits);
+  config.hard_limits = config.host_limits;
+  config.worker_generation = (uint64_t)(f->final_index + 1u);
+  config.clock_now_ms = sg_execution_clock;
+  /* Import-free, NO test runner: actual TurboWasm is called by Worker. */
+  check_true(config.execute_runner == NULL);
+  check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+      mesh_mgmt_execution_node_init_v1(&f->execution_node, &config));
+}
+#endif
+
 static void prepare_typed_request(signed_final *f) {
   mesh_mgmt_execution_grant_v1_t grant = {0};
   mesh_mgmt_execution_request_v1_t request = {0};
@@ -330,19 +416,30 @@ static void prepare_typed_request(signed_final *f) {
          sizeof(grant.target_node_id));
   memset(grant.deployment_id, 0x21, sizeof(grant.deployment_id));
   grant.deployment_generation = 1u;
-  memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
   grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
-  grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
-  grant.max_limits.module_bytes = 1024u;
-  grant.max_limits.stack_bytes = 1024u;
-  grant.max_limits.linear_memory_bytes = 4096u;
-  grant.max_limits.timeout_ms = 100u;
-  grant.max_limits.control_flow_steps = 1000u;
-  grant.max_limits.host_calls = 4u;
-  grant.max_limits.copied_guest_bytes = 1024u;
-  grant.max_limits.input_bytes = 64u;
-  grant.max_limits.stdout_bytes = 64u;
-  grant.max_limits.stderr_bytes = 64u;
+#ifdef MESH_SG_REAL_EXECUTION
+  if (f->scenario->exercise_real_execution) {
+    /* Signed command binds the ACTUAL prestaged guest's SHA-256. */
+    memcpy(grant.package_digest, f->execution_deployment.module_digest,
+           sizeof(grant.package_digest));
+    grant.capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+    sg_execution_limits(&grant.max_limits);
+  } else
+#endif
+  {
+    memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
+    grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+    grant.max_limits.module_bytes = 1024u;
+    grant.max_limits.stack_bytes = 1024u;
+    grant.max_limits.linear_memory_bytes = 4096u;
+    grant.max_limits.timeout_ms = 100u;
+    grant.max_limits.control_flow_steps = 1000u;
+    grant.max_limits.host_calls = 4u;
+    grant.max_limits.copied_guest_bytes = 1024u;
+    grant.max_limits.input_bytes = 64u;
+    grant.max_limits.stdout_bytes = 64u;
+    grant.max_limits.stderr_bytes = 64u;
+  }
   grant.not_before_ms = TEST_NOW_MS - 1000u;
   grant.expires_at_ms = TEST_NOW_MS + 10000u;
   check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
@@ -354,11 +451,19 @@ static void prepare_typed_request(signed_final *f) {
   memcpy(request.deployment_id, grant.deployment_id, sizeof(request.deployment_id));
   request.deployment_generation = grant.deployment_generation;
   memcpy(request.package_digest, grant.package_digest, sizeof(request.package_digest));
-  request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
-  memset(request.input_digest, 0x51, sizeof(request.input_digest));
-  memcpy(request.inline_input, "input", 5u);
-  request.inline_input_size = 5u;
-  request.input_length = 5u;
+#ifdef MESH_SG_REAL_EXECUTION
+  if (f->scenario->exercise_real_execution) {
+    /* The explicit no-import guest ABI does not accept INLINE payloads. */
+    request.input_kind = MESH_MGMT_EXECUTION_INPUT_NONE;
+  } else
+#endif
+  {
+    request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
+    memset(request.input_digest, 0x51, sizeof(request.input_digest));
+    memcpy(request.inline_input, "input", 5u);
+    request.inline_input_size = 5u;
+    request.input_length = 5u;
+  }
   request.output_mode = MESH_MGMT_EXECUTION_OUTPUT_DIGEST;
   request.deadline_ms = TEST_NOW_MS + 2000u;
   memset(request.request_nonce, 0x61 + ordinal, sizeof(request.request_nonce));
@@ -1085,6 +1190,20 @@ static void pump(sg_multi_case *sc) {
     signed_final *f = &sc->finals_data[i];
     signed_endpoint *client = &f->client;
     if (client->runtime.state == MESH_MGMT_AGENT_RUNTIME_RUNNING) {
+#ifdef MESH_SG_REAL_EXECUTION
+      if (sc->exercise_real_execution) {
+        if (f->rpc_request_events == 1u && !f->rpc_reply_sent &&
+            !f->rpc_errors) {
+          const mesh_mgmt_execution_node_result_t sent =
+              mesh_mgmt_execution_node_send_next_v1(
+                  &f->execution_node, &client->runtime);
+          if (sent == MESH_MGMT_EXECUTION_NODE_OK)
+            ++f->rpc_reply_sent; /* local admission, NOT wire terminal/ACK */
+          else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
+            ++f->rpc_errors;
+        }
+      } else
+#endif
       if (sc->exercise_signed_result)
         send_fixture_signed_result(f); /* outside any MMP callback */
       check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
@@ -1136,7 +1255,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
   sc->shards = final_count + 1u;
   sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
   sc->exercise_typed_rpc = (uint8_t)(command_mode >= 2);
-  sc->exercise_signed_result = (uint8_t)(command_mode == 3);
+  sc->exercise_signed_result = (uint8_t)(command_mode >= 3);
+  sc->exercise_real_execution = (uint8_t)(command_mode == 4);
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -1153,6 +1273,9 @@ static void test_multi_final(size_t final_count, int command_mode) {
     if (sc->exercise_typed_rpc) {
       f->server.rpc_final = f;
       f->client.rpc_final = f;
+#ifdef MESH_SG_REAL_EXECUTION
+      if (sc->exercise_real_execution) init_real_execution_node(f);
+#endif
       prepare_typed_request(f);
       /* Bind the declared target to its trusted execution signer even
        * when this test only returns a negative STATUS; RESULT admission
@@ -1357,8 +1480,18 @@ static void test_multi_final(size_t final_count, int command_mode) {
           check_equal(0u, f->rpc_status_events);
           check_equal(1u, f->rpc_result_events);
           check_equal(MESH_MGMT_KIND_COMMAND_RESULT, reply->kind);
-          check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
-          check_equal(7, result->guest_exit_code);
+          /* The existing RESULT test explicitly signs an invented FAILED
+           * fixture; the execution-enabled test MUST report the actual
+           * TurboWasm guest's durable SUCCEEDED result. Never conflate. */
+          if (sc->exercise_real_execution) {
+            check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, result->state);
+            check_equal(0, result->guest_exit_code);
+            check_equal((uint64_t)(f->final_index + 1u),
+                        result->worker_generation);
+          } else {
+            check_equal(MESH_MGMT_EXECUTION_STATE_FAILED, result->state);
+            check_equal(7, result->guest_exit_code);
+          }
           check_equal((uint64_t)1u, result->usage.invocations);
           check_equal(f->expected_command_id, result->command_id,
                       sizeof(f->expected_command_id));
@@ -1509,6 +1642,45 @@ static void test_multi_final(size_t final_count, int command_mode) {
   for (size_t i = 0u; i < sc->finals; ++i)
     check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
         mesh_mgmt_agent_runtime_destroy_v2(&sc->finals_data[i].client.runtime));
+
+#ifdef MESH_SG_REAL_EXECUTION
+  if (sc->exercise_real_execution) {
+    for (size_t i = 0u; i < sc->finals; ++i) {
+      signed_final *f = &sc->finals_data[i];
+      mesh_mgmt_execution_result_v1_t durable = {0};
+      mesh_mgmt_execution_worker_stats_v1_t stats = {0};
+      char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
+      char tmp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
+
+      check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+          mesh_mgmt_execution_node_shutdown_v1(&f->execution_node));
+      check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
+          mesh_mgmt_execution_worker_get_stats_v1(
+              &f->execution_node.worker, &stats));
+      check_equal((uint64_t)1u, stats.submitted);
+      check_equal((uint64_t)1u, stats.completed);
+      check_equal(MESH_MGMT_EXECUTION_STORE_OK,
+          mesh_mgmt_execution_store_get_result_v1(
+              &f->execution_node.store, f->expected_command_id, &durable));
+      check_equal(f->rpc_response.result.signature, durable.signature,
+                  sizeof(durable.signature));
+      check_equal(f->result_signer_public, durable.signer_public_key, 32u);
+      check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, durable.state);
+      check_equal((uint64_t)1u, durable.usage.invocations);
+      mesh_mgmt_execution_node_destroy_v1(&f->execution_node);
+      check_true(f->execution_store_path != NULL);
+      (void)snprintf(lock_path, sizeof(lock_path), "%s.lock",
+                     f->execution_store_path);
+      (void)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+                     f->execution_store_path);
+      (void)remove(f->execution_store_path);
+      (void)remove(lock_path);
+      (void)remove(tmp_path);
+      free(f->execution_store_path);
+      f->execution_store_path = NULL;
+    }
+  }
+#endif
 
   check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sc->handoff));
   for (size_t i = 0u; i < sc->shards; ++i)
@@ -1811,6 +1983,14 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 }
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
+#ifdef MESH_SG_REAL_EXECUTION
+  it("executes genuine signed remote Wasm on 2 SG Final Worker Owners") {
+    test_multi_final(2u, 4);
+  }
+  it("executes genuine signed remote Wasm on 4 SG Final Worker Owners") {
+    test_multi_final(4u, 4);
+  }
+#endif
   it("verifies authenticated signed COMMAND_RESULT across 2 SG Final Owners") {
     test_multi_final(2u, 3);
   }
