@@ -1,0 +1,117 @@
+name: TurboWasm execution native SDK
+
+on:
+  pull_request:
+    branches:
+      - test/mesh-prestaged-wasm-worker-result-gate
+      - feature/mesh-execution-turbowasm-native-sdk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: turbowasm-execution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actual-guest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - name: Restore latest published TurboWasm.Native
+        shell: bash
+        run: |
+          set -euo pipefail
+          project="$RUNNER_TEMP/qigao-turbowasm-execution.csproj"
+          packages="$RUNNER_TEMP/qigao-turbowasm-execution-packages"
+          config="$RUNNER_TEMP/NuGet.Config"
+          test -f "$config"
+          cat > "$project" <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net8.0</TargetFramework>
+              <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="TurboWasm.Native" Version="*" />
+            </ItemGroup>
+          </Project>
+          EOF
+          dotnet restore "$project" --packages "$packages" \
+            --configfile "$config" --no-cache --force-evaluate
+          python3 - "$RUNNER_TEMP/obj/project.assets.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], encoding="utf-8") as source:
+              libraries = json.load(source)["libraries"]
+          versions = [name.split("/", 1)[1] for name in libraries
+                      if name.lower().startswith("turbowasm.native/")]
+          if len(versions) != 1 or "-" in versions[0]:
+              raise SystemExit(f"Expected one latest stable TurboWasm.Native release, got {versions}")
+          print(f"Selected released TurboWasm.Native {versions[0]}")
+          PY
+          mapfile -t roots < <(find "$packages/turbowasm.native" \
+            -mindepth 3 -maxdepth 3 -type d -path "*/sdk/linux-x64")
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "Expected precisely one restored TurboWasm.Native linux-x64 SDK" >&2
+            exit 1
+          fi
+          root="${roots[0]}"
+          test -f "$root/lib/cmake/TurboWasm/TurboWasmConfig.cmake"
+          test -f "$root/include/turbowasm/instance.h"
+          echo "TURBOWASM_ROOT=$root" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$root/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+      - name: Install deterministic wasm32 guest compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y clang lld
+          clang --version
+          wasm-ld --version
+      - name: Restore native compiler cache
+        uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-foundation-release-sanitize
+      - name: Build real guest against installed native SDKs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/wasm-sdk -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            -DP2P_TURBOWASM_SDK_GATE=ON
+          cmake --build build/wasm-sdk --parallel 2 \
+            --target test_mesh_mgmt_execution_runner_sdk
+          ctest --test-dir build/wasm-sdk --output-on-failure \
+            -R '^test_mesh_mgmt_execution_runner_sdk$'
+          ctest --test-dir build/wasm-sdk --output-on-failure \
+            -R '^test_mesh_mgmt_execution_runner_sdk$' --repeat until-fail:10
+      - name: Real guest local ASan/UBSan qualification
+        shell: bash
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/wasm-sdk-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF \
+            -DP2P_TURBOWASM_SDK_GATE=ON \
+            '-DCMAKE_C_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
+            '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
+          cmake --build build/wasm-sdk-sanitize --parallel 2 \
+            --target test_mesh_mgmt_execution_runner_sdk
+          ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
+            -R '^test_mesh_mgmt_execution_runner_sdk$'
+          ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
+            -R '^test_mesh_mgmt_execution_runner_sdk$' --repeat until-fail:5
+      - name: Compiler cache statistics
+        if: always()
+        shell: bash
+        run: ccache --show-stats
