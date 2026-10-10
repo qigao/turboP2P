@@ -314,6 +314,153 @@ static void test_router_signed_pool_ready_capability(void) {
   destroy(&server);
 }
 
+
+/* Real inbound P2P CNet Manager physical stream + real signed MMP session.
+ * Only after those two proofs are simultaneously valid does upstream CNet
+ * ClientPool receive one post-auth READY record and a one-slot lease.
+ * No provisional/guessable pre-Noise authority or separate TCP echo is
+ * allowed to authorize an MMP protocol reuse lease. */
+static void test_signed_same_physical_cnet_pool_lease(void) {
+  endpoint_t server = {0}, client = {0};
+  p2p_cnet_managed_binding_v1_t transport = {0};
+  mesh_mgmt_agent_router_physical_ready_v1_t authenticated = {0};
+  cnet_client_pool pool = {0};
+  cnet_pool_connection physical = {0}, extra_physical = {0};
+  cnet_pool_lease lease = {0}, retry_lease = {0};
+  cnet_pool_key key = {0}, mismatch = {0};
+  cnet_pool_snapshot status = {0};
+  uint8_t initial_router_id[16] = {0};
+
+  start_pair(&server, &client);
+  wait_established(&server, &client, 1u);
+  check_equal(P2P_OK,
+      p2p_peer_cnet_managed_binding_v1(server.peer, &transport));
+  check_not_null(transport.manager);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_physical_ready_v1(
+          &server.runtime.router, server.peer,
+          client.public_key, client.identity.signer.hello.managed_node_id,
+          NULL, transport.manager, &authenticated));
+  memcpy(initial_router_id, authenticated.signed_session.connection_id,
+         sizeof(initial_router_id));
+
+  const cnet_pool_config cfg = {
+      sizeof(cnet_pool_config), CNET_CLIENT_POOL_VERSION, transport.manager,
+      7u, 1u, 1u, 1u
+  };
+  check_equal(SALTS_OK, cnet_pool_init(&pool, &cfg));
+  check_equal(SALTS_OK, cnet_pool_get_snapshot(&pool, &status));
+  check_equal((size_t)0u, status.connecting);
+  check_equal((size_t)0u, status.ready);
+
+  /* Wrong Manager cannot borrow signed Router READY even while owning a
+   * different CNet Client on the same machine. No Pool record is created. */
+  cnet_manager unrelated = {0};
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_pool_bind_ready_v1(
+          &server.runtime.router, server.peer,
+          client.public_key, client.identity.signer.hello.managed_node_id,
+          initial_router_id, &unrelated, &pool, 7u, &physical, &key));
+  check_equal((size_t)0u, physical.slot);
+  check_equal((size_t)0u, key.size);
+
+  /* Owner ID is an explicit Host control and must exactly match Pool
+   * configuration; the other compatibility fields come from signed facts. */
+  check_equal(MESH_MGMT_AGENT_ROUTER_CONFIG_INVALID,
+      mesh_mgmt_agent_router_pool_bind_ready_v1(
+          &server.runtime.router, server.peer,
+          client.public_key, client.identity.signer.hello.managed_node_id,
+          initial_router_id, transport.manager, &pool, 99u, &physical, &key));
+  check_equal((size_t)0u, physical.slot);
+  check_equal((size_t)0u, key.size);
+
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_pool_bind_ready_v1(
+          &server.runtime.router, server.peer,
+          client.public_key, client.identity.signer.hello.managed_node_id,
+          initial_router_id, transport.manager, &pool, 7u, &physical, &key));
+  check_true(physical.slot != 0u && physical.generation != 0u);
+  check_equal(sizeof(key), key.size);
+  check_equal(CNET_CLIENT_POOL_VERSION, key.version);
+  check_equal((uint64_t)7u, key.owner_id);
+  check_true(key.runtime_id != 0u && key.endpoint_id != 0u &&
+             key.authority_id != 0u && key.transport_id != 0u &&
+             key.peer_generation != 0u && key.session_id != 0u &&
+             key.protocol_id != 0u && key.client_identity_id != 0u);
+  check_equal((uint64_t)0u, key.tls_trust_id);
+  check_equal((uint64_t)0u, key.tls_sni_id);
+  check_equal((uint64_t)0u, key.alpn_id);
+
+  check_equal(SALTS_OK, cnet_pool_get_snapshot(&pool, &status));
+  check_equal((size_t)1u, status.ready);
+  check_equal((size_t)0u, status.connecting);
+  check_equal((size_t)0u, status.active_leases);
+  check_equal(SALTS_ENOBUFS,
+      cnet_pool_reserve_connecting(&pool, &key, &extra_physical));
+  check_equal((size_t)0u, extra_physical.slot);
+  mismatch = key;
+  mismatch.authority_id ^= UINT64_C(1);
+  cnet_managed_connection out_managed = {0};
+  check_equal(SALTS_ENOBUFS,
+      cnet_pool_try_acquire(&pool, &mismatch, NULL, &retry_lease,
+                            &out_managed));
+  check_equal((size_t)0u, retry_lease.slot);
+  mismatch = key;
+  mismatch.session_id ^= UINT64_C(1);
+  check_equal(SALTS_ENOBUFS,
+      cnet_pool_try_acquire(&pool, &mismatch, NULL, &retry_lease,
+                            &out_managed));
+  check_equal((size_t)0u, retry_lease.slot);
+
+  /* Lease admission itself rechecks signed Router proof and the exact
+   * original physical Manager generation, not just Pool's READY flag. */
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_pool_acquire_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          initial_router_id, &unrelated, &pool, 7u, &retry_lease));
+  check_equal((size_t)0u, retry_lease.slot);
+  check_equal(MESH_MGMT_AGENT_ROUTER_OK,
+      mesh_mgmt_agent_router_pool_acquire_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          initial_router_id, transport.manager, &pool, 7u, &lease));
+  check_true(lease.slot != 0u);
+  check_equal(MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED,
+      mesh_mgmt_agent_router_pool_acquire_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          initial_router_id, transport.manager, &pool, 7u, &retry_lease));
+  check_equal((size_t)0u, retry_lease.slot);
+  check_equal(SALTS_EBUSY, cnet_pool_terminal(&pool, physical));
+
+  /* The old signed session dies. Real per-peer endpoint reconnect policy
+   * restores a new signed Router generation and new Manager physical
+   * attachment; the old READY proof cannot issue a new lease. */
+  p2p_disconnect_peer(client.peer);
+  wait_established(&server, &client, 2u);
+  check_equal(MESH_MGMT_AGENT_ROUTER_IDENTITY_MISMATCH,
+      mesh_mgmt_agent_router_pool_acquire_v1(
+          &server.runtime.router, server.peer, client.public_key,
+          client.identity.signer.hello.managed_node_id,
+          initial_router_id, transport.manager, &pool, 7u, &retry_lease));
+  check_equal((size_t)0u, retry_lease.slot);
+  check_equal(SALTS_OK, cnet_pool_terminal(&pool, physical));
+  check_equal(SALTS_OK, cnet_pool_get_snapshot(&pool, &status));
+  check_equal((size_t)1u, status.terminal_waiting_for_leases);
+  check_equal((size_t)1u, status.active_leases);
+  check_equal(SALTS_EBUSY, cnet_pool_destroy(&pool));
+  check_equal(SALTS_OK, cnet_pool_release(&pool, lease));
+  check_equal(SALTS_ENOENT, cnet_pool_release(&pool, lease));
+  check_equal(SALTS_OK, cnet_pool_get_snapshot(&pool, &status));
+  check_true(status.drained);
+  check_equal(SALTS_OK, cnet_pool_destroy(&pool));
+
+  /* Never destroy borrowed Manager or P2P Owner while any Pool lease exists. */
+  destroy(&client);
+  destroy(&server);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
@@ -661,6 +808,9 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  it("binds real signed MMP READY to the same CNet Manager physical Pool lease") {
+    test_signed_same_physical_cnet_pool_lease();
+  }
   it("issues only live signed MMP READY proofs and rejects stale reconnect generations") {
     test_router_signed_pool_ready_capability();
   }
