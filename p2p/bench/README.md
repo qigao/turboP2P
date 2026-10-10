@@ -50,3 +50,25 @@ P2P_SG_BENCH_WARMUP=16 P2P_SG_BENCH_ROUNDS=128 \
 
 Source and CI output must remain attached to the same commit SHA. No fixed RC
 dependency pin, synthetic socket/Noise bypass, Actor scheduler or extra observer.
+
+## Owner-independent SG progress versus global barrier
+
+`bench_p2p_sg_{1,2,4_1,4}_async` uses the exact same installed SDK and
+P2P cookie/Noise/transport sources as the original `global-barrier`
+profiles. Only the measured progress driver differs. An external coordinator
+uses nonblocking `native_io_sharded_try_submit_to` to enqueue at most **one
+finite pending task per SG Owner**. A task's finalize callback releases its
+atomic readiness token; SG callbacks publish received-message count with
+release/acquire atomics, avoiding unsynchronized reads of peer/node fields.
+
+No `native_io_sharded_wait` is invoked during a measured async round. One
+final drain before teardown verifies each outstanding task and its callback
+storage has quiesced; setup and teardown remain synchronized. No second SG
+observer, permanent executor task, Actor or additional backend is installed.
+
+The workload still coordinates **one synchronous request/reply echo batch**
+per round, including all standalone-client progression in process CPU; it is
+not an open-loop saturated data-plane test. The CSV distinguishes
+`owner-independent` from `global-barrier`, with 5 separately initialized
+process runs per mode/topology and the same active-session matrix (1/1/1/3).
+Raw CNet/equal-concurrency multiple-peer and payload-size sweeps remain open.

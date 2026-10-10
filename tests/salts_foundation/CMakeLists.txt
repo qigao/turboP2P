@@ -313,6 +313,24 @@ if(P2P_SG_BUILD_BENCHMARKS)
     "${TURBOP2P_SOURCE_DIR}/p2p/tests")
   target_link_libraries(bench_p2p_sg_4_1
     PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  # Paired hot-path comparison: independent bounded SG tasks, no global wait
+  # during measured rounds. The setup/teardown retains safe drain barriers.
+  foreach(_profile IN ITEMS 1 2 4 4_1)
+    add_executable(bench_p2p_sg_${_profile}_async
+      "${TURBOP2P_SOURCE_DIR}/p2p/bench/bench_p2p_sg_owner.c")
+    set_property(TARGET bench_p2p_sg_${_profile}_async PROPERTY LINKER_LANGUAGE CXX)
+    if(_profile STREQUAL "4_1")
+      target_compile_definitions(bench_p2p_sg_${_profile}_async PRIVATE
+        BENCH_SG_SHARDS=4 BENCH_ACTIVE_SESSIONS=1 BENCH_ASYNC_PROGRESS=1)
+    else()
+      target_compile_definitions(bench_p2p_sg_${_profile}_async PRIVATE
+        BENCH_SG_SHARDS=${_profile} BENCH_ASYNC_PROGRESS=1)
+    endif()
+    target_include_directories(bench_p2p_sg_${_profile}_async PRIVATE
+      "${TURBOP2P_SOURCE_DIR}/p2p/tests")
+    target_link_libraries(bench_p2p_sg_${_profile}_async
+      PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
 endif()
 
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")

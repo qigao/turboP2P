@@ -19,6 +19,13 @@
     (BENCH_SG_SHARDS != 1 && BENCH_SG_SHARDS != 2 && BENCH_SG_SHARDS != 4)
 #error "BENCH_SG_SHARDS must be 1, 2 or 4"
 #endif
+#ifndef BENCH_ASYNC_PROGRESS
+#define BENCH_ASYNC_PROGRESS 0
+#endif
+#if BENCH_ASYNC_PROGRESS != 0 && BENCH_ASYNC_PROGRESS != 1
+#error "BENCH_ASYNC_PROGRESS must be 0 or 1"
+#endif
+#define BENCH_PROGRESS_LABEL (BENCH_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
 #ifndef BENCH_ACTIVE_SESSIONS
 #define BENCH_ACTIVE_SESSIONS (BENCH_SG_SHARDS - (BENCH_SG_SHARDS != 1))
 #endif
@@ -60,12 +67,19 @@ typedef struct sg4_lane {
     int released;
     int error;
     const char *failed_at;
+#if BENCH_ASYNC_PROGRESS
+    atomic_bool progress_ready; /* finalize acknowledges one short Owner task */
+    atomic_int cancel_status;  /* no silent cancellation */
+#endif
 } sg4_lane;
 
 typedef struct sg4_server {
     endpoint_t endpoint; /* Fixture identity and callback context, first. */
     sg4_lane *lane;
     unsigned owner_connected, owner_messages, owner_disconnected;
+#if BENCH_ASYNC_PROGRESS
+    atomic_int published_messages; /* release/acquire Owner → coordinator */
+#endif
 } sg4_server;
 
 struct sg4_case {
@@ -125,6 +139,10 @@ static void sg4_message(p2p_node_t *node, p2p_peer_t *peer,
     check_true(sg4_affinity(server));
     ++server->owner_messages;
     on_message(node, peer, data, length, &server->endpoint);
+#if BENCH_ASYNC_PROGRESS
+    atomic_store_explicit(&server->published_messages,
+                          server->endpoint.messages, memory_order_release);
+#endif
 }
 
 static bool sg4_quiescent(void *context) {
@@ -165,6 +183,9 @@ static void sg4_init(native_io_sharded_context *context, void *arg) {
     } else {
         sg4_server *server = &scenario->servers[sg4_server_index(lane->shard)];
         server->lane = lane;
+#if BENCH_ASYNC_PROGRESS
+        atomic_init(&server->published_messages, 0);
+#endif
         init_node(&server->endpoint, 41 + (int)lane->shard * 2, 0);
         p2p_set_peer_callbacks(server->endpoint.node,
                                sg4_connected, sg4_disconnected, server);
@@ -318,6 +339,64 @@ static void sg4_pump(sg4_case *scenario) {
     /* Saturated bounded SG turns: no fixed artificial 1ms sleep. */
 }
 
+
+#if BENCH_ASYNC_PROGRESS
+/* Coordinator drives each shard with at most one outstanding finite task.
+ * The SG Owner alone observes the backend. The task finalize, not the main
+ * thread, grants permission to enqueue the next turn. */
+static void sg4_progress_cancel(void *arg, int status) {
+    sg4_lane *lane = (sg4_lane *)arg;
+    atomic_store_explicit(&lane->cancel_status, status, memory_order_relaxed);
+}
+static void sg4_progress_finalize(void *arg) {
+    sg4_lane *lane = (sg4_lane *)arg;
+    atomic_store_explicit(&lane->progress_ready, true, memory_order_release);
+}
+static void sg4_pump_independent(sg4_case *scenario) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
+        check_equal(P2P_OK, p2p_poll(scenario->clients[i].node));
+    for (size_t shard = 0u; shard < SG4_SHARDS; ++shard) {
+        sg4_lane *lane = &scenario->lanes[shard];
+        if (!atomic_exchange_explicit(&lane->progress_ready, false,
+                                      memory_order_acq_rel))
+            continue;
+        native_io_sharded_task task = {
+            sg4_progress, sg4_progress_cancel, sg4_progress_finalize, lane
+        };
+        int status = native_io_sharded_try_submit_to(
+            scenario->runtime, shard, &task);
+        if (status != SALTS_OK) {
+            /* A rejected route borrows nothing: release the token and retry
+             * later. A full bounded queue must never trigger fallback I/O. */
+            atomic_store_explicit(&lane->progress_ready, true,
+                                  memory_order_release);
+            if (status != SALTS_ENOBUFS) check_equal(SALTS_OK, status);
+        }
+    }
+}
+static void sg4_independent_drain(sg4_case *scenario) {
+    /* The only runtime-wide synchronization boundary after measured rounds. */
+    sg4_barrier(scenario);
+    for (size_t shard = 0u; shard < SG4_SHARDS; ++shard) {
+        sg4_lane *lane = &scenario->lanes[shard];
+        check_true(atomic_load_explicit(&lane->progress_ready,
+                                        memory_order_acquire));
+        check_equal(0, atomic_load_explicit(&lane->cancel_status,
+                                            memory_order_relaxed));
+    }
+}
+#define SG4_WORKER_MESSAGES(s, i) \
+    atomic_load_explicit(&(s)->servers[(i)].published_messages, memory_order_acquire)
+#define SG4_BENCH_PUMP(s) sg4_pump_independent(s)
+#define SG4_BENCH_REPLY_BARRIER(s) ((void)0)
+#define SG4_BENCH_FINISH(s) sg4_independent_drain(s)
+#else
+#define SG4_WORKER_MESSAGES(s, i) ((s)->servers[(i)].endpoint.messages)
+#define SG4_BENCH_PUMP(s) sg4_pump(s)
+#define SG4_BENCH_REPLY_BARRIER(s) sg4_barrier(s)
+#define SG4_BENCH_FINISH(s) ((void)0)
+#endif
+
 static p2p_cnet_sg_snapshot_v1_t sg4_snapshot(sg4_case *scenario, size_t i) {
     p2p_cnet_sg_snapshot_v1_t snap = {0};
     check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
@@ -385,23 +464,23 @@ static void sg4_run_benchmark(sg4_case *scenario) {
         for (;;) {
             bool done = true;
             for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
-                if (scenario->servers[i].endpoint.messages < expected)
+                if (SG4_WORKER_MESSAGES(scenario, i) < expected)
                     done = false;
             if (done || cmeta_monotonic_ms() >= deadline) break;
-            sg4_pump(scenario);
+            SG4_BENCH_PUMP(scenario);
         }
         for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
-            check_equal(expected, scenario->servers[i].endpoint.messages);
+            check_equal(expected, SG4_WORKER_MESSAGES(scenario, i));
         for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             sg4_submit(scenario, sg4_final_shard(i), sg4_send);
-        sg4_barrier(scenario);
+        SG4_BENCH_REPLY_BARRIER(scenario);
         deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
         for (;;) {
             bool done = true;
             for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
                 if (scenario->clients[i].messages < expected) done = false;
             if (done || cmeta_monotonic_ms() >= deadline) break;
-            sg4_pump(scenario);
+            SG4_BENCH_PUMP(scenario);
         }
         for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             check_equal(expected, scenario->clients[i].messages);
@@ -411,12 +490,14 @@ static void sg4_run_benchmark(sg4_case *scenario) {
     }
     uint64_t wall1 = sg4_clock_ns(CLOCK_MONOTONIC);
     uint64_t cpu1 = sg4_clock_ns(CLOCK_PROCESS_CPUTIME_ID);
+    SG4_BENCH_FINISH(scenario);
     qsort(samples, count, sizeof(*samples), sg4_sort_u64);
     double wall_s = (double)(wall1 - wall0) / 1e9;
     double cpu_s = (double)(cpu1 - cpu0) / 1e9;
     double messages = (double)count * (double)SG4_ACTIVE_SESSIONS * 2.0;
     check_true(wall_s > 0.0);
-    printf("P2P_SG_BENCH,%u,%u,%zu,%zu,8,%.3f,%.3f,%.2f,%.2f,%.4f,%.3f,%.3f,%.3f\n",
+    printf("P2P_SG_BENCH,%s,%u,%u,%zu,%zu,8,%.3f,%.3f,%.2f,%.2f,%.4f,%.3f,%.3f,%.3f\n",
+           BENCH_PROGRESS_LABEL,
            (unsigned)SG4_SHARDS, (unsigned)SG4_ACTIVE_SESSIONS, count, warmup,
            wall_s * 1e3, cpu_s * 1e3, cpu_s * 100.0 / wall_s,
            messages / wall_s, messages * 8.0 / (1048576.0 * wall_s),
@@ -440,6 +521,10 @@ static void test_four_sg_native_p2p_owners(void) {
     for (size_t i = 0u; i < SG4_SHARDS; ++i) {
         scenario->lanes[i].scenario = scenario;
         scenario->lanes[i].shard = i;
+#if BENCH_ASYNC_PROGRESS
+        atomic_init(&scenario->lanes[i].progress_ready, true);
+        atomic_init(&scenario->lanes[i].cancel_status, 0);
+#endif
         sg4_submit(scenario, i, sg4_init);
     }
     sg4_barrier(scenario);
