@@ -15,6 +15,8 @@ typedef struct sg_lane {
     p2p_cnet_owner_t *transport;
     cnet_client extra_client;
     cnet_connection extra_connection;
+    cnet_handoff_ticket extra_credit; /* shared SG Handoff RESERVED token */
+    bool extra_credit_held;
     unsigned extra_connected, extra_received, extra_sent, extra_terminal;
     size_t extra_received_bytes;
     cnet_stream_peer listener;
@@ -68,7 +70,8 @@ static void mark_failed(sg_lane *lane, int rc) {
 static bool worker_quiescent(void *arg) {
     sg_lane *lane = (sg_lane *)arg;
     return lane->released && lane->acceptor == NULL &&
-           lane->transport == NULL && lane->extra_client.impl == NULL;
+           lane->transport == NULL && lane->extra_client.impl == NULL &&
+           !lane->extra_credit_held;
 }
 
 static int accept_must_handoff(p2p_cnet_owner_t *owner,
@@ -262,13 +265,9 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
         }
         SG_GO(lane, cnet_client_init_external(
             &lane->extra_client, &cfg.client, lane->backend));
-        cnet_observer telemetry = extra_observer(lane);
-        SG_GO(lane, cnet_connect_peer(
-            &lane->extra_client, &test->echo_address, NULL,
-            &telemetry, &lane->extra_connection));
-        /* Real extra CNet client has acquired a physical CONNECTING slot.
-         * Without an explicit shared-Host publication, a cohosted P2P poll
-         * must fail before admission, key-worker or observe progression. */
+        /* The extra client is initialized, but no external physical
+         * connection can be admitted before it obtains a shared CNet
+         * Handoff credit. The SG topology is assembled after this task. */
         cnet_client *extras[1] = {&lane->extra_client};
         if (p2p_cnet_owner_preflight_sg_host(
                 lane->transport, extras, 1u, context, lane->lease)
@@ -279,8 +278,55 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
             mark_failed(lane, P2P_ERR_INVALID_STATE);
             return;
         }
+        /* Co-host clients using CNet Handoff RESERVED credits are already
+         * reflected in its snapshot; publish only UNRESERVED extra slots
+         * so the CMeta ACE hint cannot double-count the same socket. */
         SG_GO(lane, p2p_cnet_owner_publish_sg_host_load(
-            lane->transport, context, lane->lease, 1u, 4u));
+            lane->transport, context, lane->lease, 0u, 2u));
+    }
+}
+
+
+/* This is a real external CNet connector on SG shard 1, not a mocked
+ * connection. Take the SAME bounded handoff slot as incoming P2P streams
+ * BEFORE physical cnet_connect_peer admission. A synchronous failure returns
+ * its RESERVED token immediately; an asynchronous terminal returns it only
+ * after the CNet callback has unwound. */
+static void host_connect_extra(native_io_sharded_context *context, void *arg) {
+    sg_lane *lane = (sg_lane *)arg;
+    sg_case *test = lane->test;
+    if (lane->shard != 1u ||
+        native_io_sharded_context_shard(context) != lane->shard ||
+        cmeta_thread_current_token() != lane->worker_token ||
+        lane->extra_credit_held || !test->handoff) {
+        mark_failed(lane, SALTS_EPERM);
+        return;
+    }
+    SG_GO(lane, p2p_cnet_sg_cohost_credit_reserve_v1(
+        test->handoff, 0u, &lane->extra_credit));
+    lane->extra_credit_held = true;
+
+    /* Wrong/stale generation must never return a live credit. */
+    cnet_handoff_ticket forged = lane->extra_credit;
+    ++forged.generation;
+    if (p2p_cnet_sg_cohost_credit_release_v1(
+            test->handoff, 0u, forged) != P2P_ERR_INVALID_STATE) {
+        mark_failed(lane, P2P_ERR_INVALID_STATE);
+        return;
+    }
+
+    cnet_observer telemetry = extra_observer(lane);
+    int status = cnet_connect_peer(&lane->extra_client, &test->echo_address,
+                                   NULL, &telemetry, &lane->extra_connection);
+    if (status != SALTS_OK) {
+        int release = p2p_cnet_sg_cohost_credit_release_v1(
+            test->handoff, 0u, lane->extra_credit);
+        if (release == P2P_OK) {
+            lane->extra_credit = (cnet_handoff_ticket){0};
+            lane->extra_credit_held = false;
+        }
+        mark_failed(lane, release == P2P_OK ? status : release);
+        return;
     }
 }
 
@@ -377,11 +423,19 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
         SG_GO(lane, p2p_node_cnet_poll_sg_host_cohosted(
             test->server.owner, extras, 1u,
             context, lane->lease, &observed, &settled));
-        /* The extra client's real terminal frees its physical shared-Host
-         * slot; no polling cnet_client.impl from another shard is needed. */
+        /* CNet's terminal callback has returned and no active request still
+         * borrows the physical connection. Return its RESERVED credit once,
+         * on the exact final Owner, never on close request or CNet CONNECTED. */
+        if (lane->extra_terminal && lane->extra_credit_held) {
+            SG_GO(lane, p2p_cnet_sg_cohost_credit_release_v1(
+                test->handoff, 0u, lane->extra_credit));
+            lane->extra_credit = (cnet_handoff_ticket){0};
+            lane->extra_credit_held = false;
+        }
+        /* All participating extra sockets are already in CNet Handoff's
+         * RESERVED count, so Host unreserved occupancy remains zero. */
         SG_GO(lane, p2p_cnet_owner_publish_sg_host_load(
-            lane->transport, context, lane->lease,
-            lane->extra_terminal ? 0u : 1u, 4u));
+            lane->transport, context, lane->lease, 0u, 2u));
     }
     ++lane->observe_calls;
     lane->observed += observed;
@@ -514,9 +568,24 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     topology.final_owner_count = 1u;
     topology.placement = CNET_OWNER_PLACE_EXPLICIT;
     topology.queue_capacity = 2u;
-    topology.connection_capacity = 4u;
+    topology.connection_capacity = 2u; /* one extra plus one Noise P2P */
     check_equal(P2P_OK, p2p_cnet_sg_create_v1(&topology, &test->handoff));
     check_not_null(test->handoff);
+    /* Host credit operations from the orchestration thread are rejected:
+     * the token belongs exclusively to the selected SG final Owner. */
+    cnet_handoff_ticket invalid_credit = {0};
+    check_equal(P2P_ERR_INVALID_STATE, p2p_cnet_sg_cohost_credit_reserve_v1(
+        test->handoff, 0u, &invalid_credit));
+    check_equal((size_t)0u, invalid_credit.slot);
+    submit_lane(test, 1u, host_connect_extra);
+    barrier(test);
+    check_true(test->lanes[1].extra_credit_held);
+    check_equal(P2P_ERR_INVALID_STATE, p2p_cnet_sg_cohost_credit_release_v1(
+        test->handoff, 0u, test->lanes[1].extra_credit));
+    check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
+        test->handoff, 0u, &before));
+    check_equal((size_t)1u, before.handoff.reserved);
+    check_equal((size_t)0u, before.handoff.taken);
     check_equal(P2P_OK, p2p_connect(
         test->client.node, "127.0.0.1", test->lanes[0].listener.port));
 
@@ -550,6 +619,7 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((uint64_t)1u, before.routed);
     check_equal((uint64_t)0u, before.denied);
     check_equal((size_t)1u, before.handoff.taken);
+    check_equal((size_t)1u, before.handoff.reserved);
     check_equal((size_t)0u, before.handoff.queued);
 
     check_equal(P2P_OK, p2p_send_message(test->client.node,
@@ -575,6 +645,11 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
         progress_once(test);
     check_equal((unsigned)1u, test->echo_terminal);
     check_equal((unsigned)1u, test->lanes[1].extra_terminal);
+    check_false(test->lanes[1].extra_credit_held);
+    check_equal(P2P_OK, p2p_cnet_sg_snapshot_v1(
+        test->handoff, 0u, &after));
+    check_equal((size_t)0u, after.handoff.reserved);
+    check_equal((size_t)1u, after.handoff.taken);
 
     p2p_peer_disconnect(test->client.peer);
     const uint64_t drain_deadline = cmeta_monotonic_ms() + HOST_TIMEOUT;
