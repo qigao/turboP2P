@@ -100,3 +100,41 @@ cannot inherit the already-authenticated P2P neighbor's READY capability.
 No hidden reconnect, MMP command replay or CNet ManagedDial state is added.
 That signed protocol boundary and a single authoritative retry timeline
 remain the subsequent phase of issue #38.
+
+
+## Signed MMP Router READY proof (not a generic CONNECTED callback)
+
+The dedicated production Mesh CNet/MMP Router now offers
+`mesh_mgmt_agent_router_ready_session_v1()` to copy a **bounded,
+generation-bound, verified** MMP readiness snapshot from its *actual live*
+signed session, using the existing certificate and Router session state.
+The caller must present the expected 32-byte P2P transport identity and
+expected signed 32-byte managed-node identity. The Router verifies:
+- its own active P2P peer slot is still READY, not disconnecting, failed
+  or pending close;
+- signed MMP session state is ESTABLISHED and remote HELLO verified;
+- the signed remote certificate's transport/managed-node IDs match the
+  locally verified P2P slot and the requested identity;
+- there is no second simultaneously qualified signed session for that
+  managed node;
+- if supplied, the previous/current exact 16-byte Router
+  `connection_id` equals the still-live generation (preventing the
+  previous session from being silently reused after reconnect).
+
+On success the result copies the signed identity, current connection ID,
+remote session ID and signed remote incarnation; **on every failure it
+zeros the output**. There is no packet-path reflection walk, Manager
+reservation, new network worker, DHT access or automatic retry. The real
+dedicated CNet management runtime test covers two signed P2P+MMP peers,
+wrong transport identity, wrong managed-node identity, foreign peer and
+the stale old `connection_id` after an actual reconnect. The fresh
+generation can be attested again.
+
+**This proof is not itself a CNet Manager binding or a Pool lease.**
+A future production adapter must additionally prove that the *same*
+physical Manager connection carries this authenticated P2P/MMP session,
+recheck the token against the Router immediately before a
+`cnet_pool_bind_ready` operation, and use a correctly projected complete
+Pool security key. An unrelated plaintext SG Cohost Manager cannot borrow
+this READY proof by having the same Owner or Host. There is no
+`cnet_pool_bind_ready` call in the plaintext echo fixture.
