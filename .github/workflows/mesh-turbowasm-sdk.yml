@@ -6,6 +6,7 @@ on:
       - test/mesh-prestaged-wasm-worker-result-gate
       - feature/mesh-execution-turbowasm-native-sdk
       - feature/mesh-execution-salts-worker-store-sdk
+      - test/mesh-sg-real-worker-signed-result-e2e
   workflow_dispatch:
 
 permissions:
