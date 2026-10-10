@@ -68,7 +68,8 @@ static void pump_four(endpoint_t *a, endpoint_t *b, endpoint_t *c, endpoint_t *d
     cmeta_sleep_ms(1u);
 }
 
-static void test_two_final_owners_real_cookie_noise_and_data(void) {
+static void test_two_final_owners_real_cookie_noise_and_data(
+    cnet_owner_placement_kind kind) {
     endpoint_t client_a = {0}, client_b = {0}, server_a = {0}, server_b = {0};
     cnet_stream_peer addr = {0};
     p2p_cnet_sg_t *sg = NULL;
@@ -85,7 +86,7 @@ static void test_two_final_owners_real_cookie_noise_and_data(void) {
     p2p_cnet_sg_config_v1_t cfg = policy(
         acceptor, p2p_node_cnet_transport_owner(server_a.owner),
         p2p_node_cnet_transport_owner(server_b.owner),
-        CNET_OWNER_PLACE_ROUND_ROBIN);
+        kind);
 
     check_equal(P2P_OK, p2p_cnet_sg_create_v1(&cfg, &sg));
     check_not_null(sg);
@@ -335,8 +336,14 @@ static void test_four_distinct_final_owners_cookie_noise_and_data(void) {
 }
 
 spec("P2P real SG cross-Owner credited accepted-stream handoff") {
-    it("runs real cookie, Noise, identity and data on two final P2P Owners") {
-        test_two_final_owners_real_cookie_noise_and_data();
+    it("runs real cookie, Noise, identity and data with ROUND_ROBIN") {
+        test_two_final_owners_real_cookie_noise_and_data(CNET_OWNER_PLACE_ROUND_ROBIN);
+    }
+    it("chooses the lower-pressure final Owner with real Noise handoff") {
+        /* First admission uses the empty Owner 0. Its TAKEN credit and
+         * published live connection then shift LOWEST_PRESSURE to Owner 1.
+         * Both still require authenticated cookie/Noise and real TCP DATA. */
+        test_two_final_owners_real_cookie_noise_and_data(CNET_OWNER_PLACE_LOWEST_PRESSURE);
     }
     it("runs four distinct final CNet Owners with authenticated FIFO data") {
         test_four_distinct_final_owners_cookie_noise_and_data();
