@@ -566,4 +566,24 @@ if(P2P_TURBOWASM_SDK_GATE)
   add_test(NAME test_mesh_mgmt_execution_node_sdk
     COMMAND test_mesh_mgmt_execution_node_sdk)
   set_tests_properties(test_mesh_mgmt_execution_node_sdk PROPERTIES TIMEOUT 45)
+
+  # Genuine 3/5 NativeIO SG worker Host with 2/4 independent Final Owner
+  # MMP signed ClientPools plus remote Production Execution Node/Worker,
+  # prestaged TurboWasm guest and durable Store (NOT a forged RESULT).
+  add_executable(test_mesh_mgmt_sg_multi_execution_runtime_sdk
+    "${mesh_tests}/test_mesh_mgmt_sg_multi_runtime.c")
+  set_property(TARGET test_mesh_mgmt_sg_multi_execution_runtime_sdk
+    PROPERTY LINKER_LANGUAGE CXX)
+  add_dependencies(test_mesh_mgmt_sg_multi_execution_runtime_sdk
+    mesh_wasm_success_guest)
+  target_compile_definitions(test_mesh_mgmt_sg_multi_execution_runtime_sdk PRIVATE
+    MESH_SG_REAL_EXECUTION=1
+    MESH_TEST_EXECUTION_SUCCESS_WASM="${_guest_success}")
+  target_link_libraries(test_mesh_mgmt_sg_multi_execution_runtime_sdk PRIVATE
+    mesh_execution_node_sdk mgmt_agent_runtime p2p_node_core
+    Salts::CNet Salts::TinyTest)
+  add_test(NAME test_mesh_mgmt_sg_multi_execution_runtime_sdk
+    COMMAND test_mesh_mgmt_sg_multi_execution_runtime_sdk)
+  set_tests_properties(test_mesh_mgmt_sg_multi_execution_runtime_sdk
+    PROPERTIES TIMEOUT 180)
 endif()
