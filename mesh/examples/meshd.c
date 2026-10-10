@@ -730,6 +730,34 @@ static uint64_t meshd_execution_clock_now_ms(void *context) {
     return turbo_realtime_ms();
 }
 
+/* The meshd execution profile signs RESULTS with the management node's
+ * configured private key (see meshd_execution_config_build_node). Resolve
+ * its counterpart from the LIVE issuer-verified target certificate, not
+ * from COMMAND_RESULT or a stale cached session after SG reconnect. */
+static int meshd_execution_resolve_result_signer(
+    void *context, const uint8_t target_node_id[32],
+    uint8_t out_signer_public_key[32]) {
+    mesh_mgmt_agent_router_identity_snapshot_v1_t snapshot = {0};
+    mesh_mgmt_certificate_v1_t certificate = {0};
+
+    (void)context;
+    if (!target_node_id || !out_signer_public_key) return -1;
+    memset(out_signer_public_key, 0, 32u);
+    if (mesh_mgmt_agent_router_identity_snapshot_v1(
+            &g_management_runtime.router, target_node_id, &snapshot) !=
+            MESH_MGMT_AGENT_ROUTER_OK ||
+        mesh_mgmt_certificate_verify_v1(
+            snapshot.certificate, snapshot.certificate_len,
+            g_management_dispatch.session.trusted_issuer_key,
+            g_management_signer.expected_mesh_id_hash,
+            turbo_realtime_ms(), &certificate) != MESH_MGMT_IDENTITY_OK ||
+        !mesh_mgmt_crypto_equal_32(certificate.managed_node_id,
+                                    target_node_id))
+        return -1;
+    memcpy(out_signer_public_key, certificate.management_key, 32u);
+    return 0;
+}
+
 static mesh_mgmt_execution_rpc_transport_result_t
 meshd_execution_send(void *context,
                      const uint8_t target_node_id[32],
@@ -1070,6 +1098,8 @@ static int meshd_management_start(mesh_network_t *mesh,
         memcpy(execution_config.expected_grant_issuer_key,
                execution_grant_issuer_key,
                sizeof(execution_config.expected_grant_issuer_key));
+        execution_config.resolve_result_signer =
+            meshd_execution_resolve_result_signer;
         execution_config.clock_now_ms = meshd_execution_clock_now_ms;
         execution_config.send = meshd_execution_send;
         if (mesh_mgmt_execution_rpc_control_init_v1(

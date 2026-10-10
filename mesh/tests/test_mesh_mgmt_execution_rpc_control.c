@@ -16,7 +16,11 @@ typedef struct {
   mesh_mgmt_execution_rpc_transport_result_t send_result;
   size_t send_count;
   uint8_t last_target[MESH_MGMT_EXECUTION_DIGEST_SIZE];
+  uint8_t trusted_target[MESH_MGMT_EXECUTION_DIGEST_SIZE];
+  uint8_t trusted_result_signer[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   size_t last_payload_size;
+  size_t signer_lookups;
+  int reject_result_signer;
 } control_fixture_t;
 
 static uint64_t fixture_clock(void *context) {
@@ -34,6 +38,19 @@ fixture_send(void *context,
   fixture->last_payload_size = payload_size;
   check_not_null(payload);
   return fixture->send_result;
+}
+
+/* The trust authority comes from a target-scoped local policy, NEVER
+ * from the result's self-declared public key. */
+static int fixture_result_signer(void *context, const uint8_t target[32],
+                                 uint8_t out_public[32]) {
+  control_fixture_t *fixture = context;
+  ++fixture->signer_lookups;
+  if (fixture->reject_result_signer ||
+      memcmp(fixture->trusted_target, target, 32u) != 0)
+    return -1;
+  memcpy(out_public, fixture->trusted_result_signer, 32u);
+  return 0;
 }
 
 static void fill_bytes(uint8_t *bytes, size_t size, uint8_t value) {
@@ -77,7 +94,7 @@ static size_t make_request(
   grant.max_limits.stderr_bytes = 64u;
   grant.not_before_ms = TEST_NOW_MS - 1u;
   grant.expires_at_ms = TEST_DEADLINE_MS + 100u;
-  check_int_eq(mesh_mgmt_execution_grant_sign_v1(
+  check_equal(mesh_mgmt_execution_grant_sign_v1(
                    &grant, issuer_private_key),
                MESH_MGMT_EXECUTION_WIRE_OK);
 
@@ -100,7 +117,7 @@ static size_t make_request(
   request.deadline_ms = TEST_DEADLINE_MS;
   fill_bytes(request.request_nonce, sizeof(request.request_nonce), 0x61u);
   fill_bytes(request.correlation_id, sizeof(request.correlation_id), 0x71u);
-  check_int_eq(mesh_mgmt_execution_command_request_encode_v1(
+  check_equal(mesh_mgmt_execution_command_request_encode_v1(
                    &grant, &request, output,
                    MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1,
                    &output_size),
@@ -112,13 +129,21 @@ static void init_fixture(
     control_fixture_t *fixture,
     const uint8_t expected_mesh_id[MESH_MGMT_EXECUTION_DIGEST_SIZE],
     const uint8_t local_principal[MESH_MGMT_EXECUTION_DIGEST_SIZE],
-    const uint8_t issuer_public_key[MESH_MGMT_EXECUTION_DIGEST_SIZE]) {
+    const uint8_t issuer_public_key[MESH_MGMT_EXECUTION_DIGEST_SIZE],
+    const uint8_t trusted_target[MESH_MGMT_EXECUTION_DIGEST_SIZE]) {
   mesh_mgmt_execution_rpc_control_config_v1_t config;
+  uint8_t result_private[32];
 
   memset(fixture, 0, sizeof(*fixture));
   fixture->now_ms = TEST_NOW_MS;
   fixture->send_result = MESH_MGMT_EXECUTION_RPC_TRANSPORT_SENT;
-  check_int_eq(mesh_mgmt_execution_rpc_registry_init_v1(
+  memcpy(fixture->trusted_target, trusted_target,
+         sizeof(fixture->trusted_target));
+  memset(result_private, 0xA7, sizeof(result_private));
+  check_equal(mesh_mgmt_ed25519_public_from_private(
+      result_private, fixture->trusted_result_signer),
+      MESH_MGMT_CRYPTO_OK);
+  check_equal(mesh_mgmt_execution_rpc_registry_init_v1(
                    &fixture->registry, 1u, TEST_RETENTION_MS),
                MESH_MGMT_EXECUTION_RPC_REGISTRY_OK);
   memset(&config, 0, sizeof(config));
@@ -129,11 +154,13 @@ static void init_fixture(
          sizeof(config.local_principal_key));
   memcpy(config.expected_grant_issuer_key, issuer_public_key,
          sizeof(config.expected_grant_issuer_key));
+  config.resolve_result_signer = fixture_result_signer;
+  config.result_signer_context = fixture;
   config.clock_now_ms = fixture_clock;
   config.clock_context = fixture;
   config.send = fixture_send;
   config.send_context = fixture;
-  check_int_eq(mesh_mgmt_execution_rpc_control_init_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_init_v1(
                    &fixture->control, &config),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
 }
@@ -145,10 +172,10 @@ static void make_keys(uint8_t issuer_private_key[32],
 
   fill_bytes(issuer_private_key, 32u, 0x81u);
   fill_bytes(subject_private_key, 32u, 0x91u);
-  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+  check_equal(mesh_mgmt_ed25519_public_from_private(
                    issuer_private_key, issuer_public_key),
                MESH_MGMT_CRYPTO_OK);
-  check_int_eq(mesh_mgmt_ed25519_public_from_private(
+  check_equal(mesh_mgmt_ed25519_public_from_private(
                    subject_private_key, subject_public_key),
                MESH_MGMT_CRYPTO_OK);
 }
@@ -172,25 +199,28 @@ static void test_submit_is_bound_and_idempotent(void) {
   fill_bytes(target_node_id, sizeof(target_node_id), 0x52u);
   payload_size = make_request(issuer_private, mesh_id, subject_public,
                               target_node_id, payload);
-  init_fixture(&fixture, mesh_id, subject_public, issuer_public);
+  init_fixture(&fixture, mesh_id, subject_public, issuer_public, target_node_id);
 
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size, &binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
-  check_int_eq(fixture.send_count, 1u);
-  check_int_eq(fixture.last_payload_size, payload_size);
-  check_int_eq(memcmp(fixture.last_target, target_node_id,
+  check_equal(fixture.send_count, 1u);
+  check_equal(fixture.last_payload_size, payload_size);
+  check_equal(fixture.signer_lookups, 1u);
+  check_equal(memcmp(binding.result_signer_public_key,
+                      fixture.trusted_result_signer, 32u), 0);
+  check_equal(memcmp(fixture.last_target, target_node_id,
                       sizeof(target_node_id)),
                0);
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size,
                    &duplicate_binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_ALREADY_EXISTS);
-  check_int_eq(fixture.send_count, 1u);
-  check_int_eq(mesh_mgmt_execution_rpc_control_get_v1(
+  check_equal(fixture.send_count, 1u);
+  check_equal(mesh_mgmt_execution_rpc_control_get_v1(
                    &fixture.control, binding.correlation_id, &completion),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
-  check_int_eq(completion.state, MESH_MGMT_EXECUTION_RPC_PENDING);
+  check_equal(completion.state, MESH_MGMT_EXECUTION_RPC_PENDING);
 
   memset(&response, 0, sizeof(response));
   response.kind = MESH_MGMT_KIND_COMMAND_STATUS;
@@ -204,13 +234,13 @@ static void test_submit_is_bound_and_idempotent(void) {
          sizeof(response.status.request_digest));
   memcpy(response.status.responder_node_id, binding.target_node_id,
          sizeof(response.status.responder_node_id));
-  check_int_eq(mesh_mgmt_execution_rpc_control_complete_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_complete_v1(
                    &fixture.control, &response),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
-  check_int_eq(mesh_mgmt_execution_rpc_control_get_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_get_v1(
                    &fixture.control, binding.correlation_id, &completion),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
-  check_int_eq(completion.state, MESH_MGMT_EXECUTION_RPC_STATUS);
+  check_equal(completion.state, MESH_MGMT_EXECUTION_RPC_STATUS);
   mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
 }
 
@@ -235,18 +265,49 @@ static void test_authority_and_scope_fail_before_send(void) {
   payload_size = make_request(issuer_private, mesh_id, subject_public,
                               target_node_id, payload);
 
-  init_fixture(&fixture, wrong_mesh_id, subject_public, issuer_public);
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  init_fixture(&fixture, wrong_mesh_id, subject_public, issuer_public, target_node_id);
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size, &binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_SCOPE_MISMATCH);
-  check_int_eq(fixture.send_count, 0u);
+  check_equal(fixture.send_count, 0u);
   mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
 
-  init_fixture(&fixture, mesh_id, subject_public, wrong_issuer_public);
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  init_fixture(&fixture, mesh_id, subject_public, wrong_issuer_public, target_node_id);
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size, &binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_AUTH_FAILED);
-  check_int_eq(fixture.send_count, 0u);
+  check_equal(fixture.send_count, 0u);
+  mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
+}
+
+static void test_signer_resolution_rejects_before_any_send(void) {
+  control_fixture_t fixture;
+  mesh_mgmt_execution_rpc_binding_v1_t binding;
+  uint8_t issuer_private[32], issuer_public[32], subject_public[32];
+  uint8_t mesh_id[32], target_node_id[32];
+  uint8_t payload[MESH_MGMT_EXECUTION_COMMAND_REQUEST_MAX_SIZE_V1];
+  size_t payload_size;
+  make_keys(issuer_private, issuer_public, subject_public);
+  fill_bytes(mesh_id, sizeof(mesh_id), 0x42u);
+  fill_bytes(target_node_id, sizeof(target_node_id), 0x52u);
+  payload_size = make_request(issuer_private, mesh_id, subject_public,
+                              target_node_id, payload);
+
+  init_fixture(&fixture, mesh_id, subject_public, issuer_public, target_node_id);
+  fixture.reject_result_signer = 1;
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
+      &fixture.control, payload, payload_size, &binding),
+      MESH_MGMT_EXECUTION_RPC_CONTROL_AUTH_FAILED);
+  check_equal(fixture.signer_lookups, 1u);
+  check_equal(fixture.send_count, 0u);
+  mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
+
+  init_fixture(&fixture, mesh_id, subject_public, issuer_public, target_node_id);
+  fixture.trusted_target[0] ^= 1u; /* same mesh, WRONG target */
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
+      &fixture.control, payload, payload_size, &binding),
+      MESH_MGMT_EXECUTION_RPC_CONTROL_AUTH_FAILED);
+  check_equal(fixture.send_count, 0u);
   mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
 }
 
@@ -267,25 +328,25 @@ static void test_send_failure_preserves_only_ambiguous_work(void) {
   fill_bytes(target_node_id, sizeof(target_node_id), 0x52u);
   payload_size = make_request(issuer_private, mesh_id, subject_public,
                               target_node_id, payload);
-  init_fixture(&fixture, mesh_id, subject_public, issuer_public);
+  init_fixture(&fixture, mesh_id, subject_public, issuer_public, target_node_id);
 
   fixture.send_result = MESH_MGMT_EXECUTION_RPC_TRANSPORT_UNAVAILABLE;
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size, &binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_SEND_UNAVAILABLE);
-  check_int_eq(mesh_mgmt_execution_rpc_control_get_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_get_v1(
                    &fixture.control, binding.correlation_id, &completion),
                MESH_MGMT_EXECUTION_RPC_CONTROL_NOT_FOUND);
 
   fixture.send_result = MESH_MGMT_EXECUTION_RPC_TRANSPORT_AMBIGUOUS;
-  check_int_eq(mesh_mgmt_execution_rpc_control_submit_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_submit_v1(
                    &fixture.control, payload, payload_size, &binding),
                MESH_MGMT_EXECUTION_RPC_CONTROL_SEND_AMBIGUOUS);
-  check_int_eq(mesh_mgmt_execution_rpc_control_get_v1(
+  check_equal(mesh_mgmt_execution_rpc_control_get_v1(
                    &fixture.control, binding.correlation_id, &completion),
                MESH_MGMT_EXECUTION_RPC_CONTROL_OK);
-  check_int_eq(completion.state, MESH_MGMT_EXECUTION_RPC_PENDING);
-  check_int_eq(fixture.send_count, 2u);
+  check_equal(completion.state, MESH_MGMT_EXECUTION_RPC_PENDING);
+  check_equal(fixture.send_count, 2u);
   mesh_mgmt_execution_rpc_registry_destroy_v1(&fixture.registry);
 }
 
@@ -296,6 +357,9 @@ spec("mesh management execution RPC control E10b") {
     }
     it("rejects untrusted authority and cross-mesh scope") {
       test_authority_and_scope_fail_before_send();
+    }
+    it("refuses requests without an authorized per-target result signer") {
+      test_signer_resolution_rejects_before_any_send();
     }
     it("abandons definitive failures but retains ambiguous sends") {
       test_send_failure_preserves_only_ambiguous_work();

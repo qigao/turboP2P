@@ -37,6 +37,9 @@ typedef struct {
   uint8_t correlation_id[MESH_MGMT_EXECUTION_ID_SIZE];
   uint8_t request_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t target_node_id[MESH_MGMT_EXECUTION_DIGEST_SIZE];
+  /* Immutable per-target authorized execution signer, resolved BEFORE the
+   * request is sent. A valid self-declared RESULT signature is insufficient. */
+  uint8_t result_signer_public_key[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint64_t deadline_ms;
 } mesh_mgmt_execution_rpc_binding_v1_t;
 
@@ -87,8 +90,9 @@ mesh_mgmt_execution_rpc_registry_abandon_v1(
 /**
  * Completes a pending binding from an owned response produced by
  * mesh_mgmt_execution_response_from_event_v1(). Identity, digest, command,
- * and correlation bindings are checked again before committing the terminal
- * state.
+ * correlation and authorized result signer bindings are checked again
+ * before committing the terminal state. A RESULT's signature is verified
+ * against the registered trusted key; no on-wire signer self-assertion.
  */
 mesh_mgmt_execution_rpc_registry_result_t
 mesh_mgmt_execution_rpc_registry_complete_v1(

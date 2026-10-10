@@ -37,6 +37,14 @@ typedef enum {
 
 typedef uint64_t (*mesh_mgmt_execution_rpc_clock_v1_fn)(void *context);
 
+/* A trusted per-target resolver, NOT a key read from COMMAND_RESULT.
+ * Return 0 only for an authorized nonzero execution-result public key.
+ * Called synchronously before the command enters the send path. */
+typedef int (*mesh_mgmt_execution_rpc_result_signer_v1_fn)(
+    void *context,
+    const uint8_t target_node_id[MESH_MGMT_EXECUTION_DIGEST_SIZE],
+    uint8_t out_signer_public_key[MESH_MGMT_EXECUTION_DIGEST_SIZE]);
+
 /**
  * The payload and target are borrowed for the duration of the call.
  * UNAVAILABLE may be returned only when the callback can prove that no
@@ -53,6 +61,8 @@ typedef struct {
   uint8_t expected_mesh_id[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t local_principal_key[MESH_MGMT_EXECUTION_DIGEST_SIZE];
   uint8_t expected_grant_issuer_key[MESH_MGMT_EXECUTION_DIGEST_SIZE];
+  mesh_mgmt_execution_rpc_result_signer_v1_fn resolve_result_signer;
+  void *result_signer_context;
   mesh_mgmt_execution_rpc_clock_v1_fn clock_now_ms;
   void *clock_context;
   mesh_mgmt_execution_rpc_send_v1_fn send;
