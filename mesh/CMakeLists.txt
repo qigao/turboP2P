@@ -849,7 +849,13 @@ set_property(TARGET mesh_mgmt_execution_wire PROPERTY FOLDER "mesh/internal")
 option(TURBO_P2P_ENABLE_NODE_EXECUTION
   "Build the local prestaged TurboRuntime node-execution runner" OFF)
 if(TURBO_P2P_ENABLE_NODE_EXECUTION)
-  find_package(TurboRuntime CONFIG REQUIRED)
+  # The old TurboRuntime::Core ABI is retired. A released native TurboWasm SDK
+  # is mandatory when node execution is requested: no compatibility shim,
+  # fallback interpreter, or silent disabling of this execution boundary.
+  find_package(TurboWasm CONFIG REQUIRED)
+  if(NOT TARGET TurboWasm::Runtime)
+    message(FATAL_ERROR "Node execution requires the installed TurboWasm::Runtime SDK")
+  endif()
   add_library(mesh_mgmt_execution_runner STATIC
     src/mesh_mgmt_execution_runner.c
     src/mesh_mgmt_execution_runner.h)
@@ -857,7 +863,7 @@ if(TURBO_P2P_ENABLE_NODE_EXECUTION)
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
   target_link_libraries(mesh_mgmt_execution_runner
     PUBLIC mesh_mgmt_execution
-    PRIVATE OpenSSL::Crypto TurboRuntime::Core TurboUtils::Core)
+    PRIVATE OpenSSL::Crypto TurboWasm::Runtime Salts::Platform)
   set_property(TARGET mesh_mgmt_execution_runner PROPERTY FOLDER "mesh/internal")
 
   add_library(mesh_mgmt_execution_orchestrator STATIC
