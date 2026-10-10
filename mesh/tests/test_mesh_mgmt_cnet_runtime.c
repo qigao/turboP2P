@@ -1100,6 +1100,51 @@ static void test_signed_execution_command_wire_terminal_v4(void) {
     check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
         mesh_mgmt_agent_runtime_poll_v1(&server.runtime));
   check_equal((unsigned)1u, probe.terminals); /* one callback per ticket */
+
+  /* Stop with an ADMITTED but NOT YET COMPLETED signed command. Whether
+   * the original CNet write wins or peer close fails it, only the upstream
+   * callback may return the Lease; logical Router detach MUST NOT erase the
+   * callback ticket. Checked Stop either settles it during native progress
+   * or remains STOPPING with the original Manager and Pool intact. */
+  uint64_t stop_ticket = 0u;
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_send_execution_leased_v4(
+          &server.runtime, MESH_MGMT_KIND_COMMAND_STATUS,
+          client.identity.signer.hello.managed_node_id,
+          payload, payload_len,
+          on_command_wire_terminal, &probe, &stop_ticket));
+  check_true(stop_ticket > ticket);
+  check_equal((unsigned)1u, probe.terminals);
+  check_equal((size_t)1u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+      mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+          &server.runtime, &pool));
+  check_equal((size_t)1u, pool.active_leases);
+  mesh_mgmt_agent_runtime_result_t stop_result =
+      mesh_mgmt_agent_runtime_stop_v1(&server.runtime);
+  if (stop_result == MESH_MGMT_AGENT_RUNTIME_INVALID_STATE) {
+    check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPING, server.runtime.state);
+    check_not_null(server.runtime.node);
+    check_not_null(server.runtime.signed_pool_manager);
+    check_true(server.runtime.signed_pool.impl != NULL);
+  }
+  deadline = cmeta_monotonic_ms() + WAIT_MS;
+  while (stop_result == MESH_MGMT_AGENT_RUNTIME_INVALID_STATE &&
+         cmeta_monotonic_ms() < deadline) {
+    /* The dedicated composition advances exactly its original CNet Owner
+     * while the borrow remains pinned. This is shutdown progress only, not
+     * a new retry source or replay of the encrypted command. */
+    stop_result = mesh_mgmt_agent_runtime_stop_v1(&server.runtime);
+    cmeta_sleep_ms(1u);
+  }
+  check_equal(MESH_MGMT_AGENT_RUNTIME_OK, stop_result);
+  check_equal((unsigned)2u, probe.terminals);
+  check_equal(stop_ticket, probe.ticket);
+  check_equal((size_t)0u, server.runtime.command_terminal_inflight);
+  check_equal(MESH_MGMT_AGENT_RUNTIME_STOPPED, server.runtime.state);
+  /* Exactly one of the terminal outcomes is legitimate, depending on
+   * whether the real TCP write or the real TCP close settled first. */
+  check_true(probe.status == P2P_OK || probe.status == P2P_ERR_NETWORK);
   destroy(&server);
   destroy(&client);
 }
