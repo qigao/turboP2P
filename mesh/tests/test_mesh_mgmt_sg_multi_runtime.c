@@ -3,6 +3,10 @@
 #include "mesh_mgmt_test_identity.h"
 #include "mesh_mgmt_execution_wire.h"
 #include "mesh_mgmt_execution_rpc_registry.h"
+#ifdef MESH_SG_REAL_EXECUTION
+#include "mesh_mgmt_execution_node.h"
+#include <stdlib.h>
+#endif
 #include "core/node_cnet.h"
 #include "core/node_state.h"
 #include "core/peer_cnet.h"
@@ -66,6 +70,11 @@ struct signed_final {
   mesh_mgmt_execution_rpc_binding_v1_t rpc_binding;
   mesh_mgmt_execution_rpc_completion_v1_t rpc_completion;
   uint8_t result_signer_public[32];
+#ifdef MESH_SG_REAL_EXECUTION
+  mesh_mgmt_execution_node_v1_t execution_node;
+  mesh_mgmt_execution_deployment_v1_t execution_deployment;
+  char *execution_store_path;
+#endif
   unsigned rpc_request_events, rpc_status_events, rpc_result_events;
   unsigned rpc_reply_sent, rpc_errors;
 };
@@ -92,6 +101,7 @@ struct sg_multi_case {
   uint8_t exercise_command_terminal;
   uint8_t exercise_typed_rpc;
   uint8_t exercise_signed_result;
+  uint8_t exercise_real_execution;
   uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
@@ -306,6 +316,71 @@ static const uint8_t SG_RPC_ISSUER_PRIVATE[32] = {
     0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69,
     0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
 };
+
+#ifdef MESH_SG_REAL_EXECUTION
+static uint64_t sg_execution_clock(void *context) {
+  (void)context;
+  return TEST_NOW_MS;
+}
+static void sg_execution_limits(mesh_mgmt_execution_limits_v1_t *limits) {
+  memset(limits, 0, sizeof(*limits));
+  limits->module_bytes = 1024u * 1024u;
+  limits->stack_bytes = 64u * 1024u;
+  limits->linear_memory_bytes = 256u * 1024u;
+  limits->timeout_ms = 1000u;
+  limits->control_flow_steps = 1000000u;
+  limits->host_calls = 64u;
+  limits->copied_guest_bytes = 64u * 1024u;
+  limits->input_bytes = 64u * 1024u;
+  limits->stdout_bytes = 64u * 1024u;
+  limits->stderr_bytes = 64u * 1024u;
+}
+static void init_real_execution_node(signed_final *f) {
+  mesh_mgmt_execution_node_config_v1_t config = {0};
+  uint8_t signer_private[32] = {0};
+  mesh_mgmt_execution_deployment_v1_t *deployment =
+      &f->execution_deployment;
+
+  check_true(f->scenario->exercise_real_execution);
+  f->execution_store_path = tt_make_temp_file("sg-worker-wasm", ".journal");
+  check_not_null(f->execution_store_path);
+  if (!f->execution_store_path) return;
+  (void)remove(f->execution_store_path);
+  memset(deployment->deployment_id, 0x21, sizeof(deployment->deployment_id));
+  deployment->generation = 1u;
+  deployment->runtime = MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1;
+  deployment->module_path = MESH_TEST_EXECUTION_SUCCESS_WASM;
+  check_equal(MESH_MGMT_EXECUTION_RUNNER_OK,
+      mesh_mgmt_execution_runner_module_digest_v1(
+          deployment->module_path, 1024u * 1024u,
+          deployment->module_digest, NULL));
+  config.store_path = f->execution_store_path;
+  config.store_capacity = 8u;
+  config.deployment_capacity = 1u;
+  config.worker_queue_capacity = 4u;
+  config.egress_capacity = 4u;
+  config.deployments = deployment;
+  config.deployment_count = 1u;
+  memcpy(config.local_node_id,
+         f->client.identity.signer.hello.managed_node_id, 32u);
+  memset(signer_private, (int)(0x81u + f->final_index), 32u);
+  memcpy(config.result_private_key, signer_private, 32u);
+  check_equal(MESH_MGMT_CRYPTO_OK,
+      mesh_mgmt_ed25519_public_from_private(
+          SG_RPC_ISSUER_PRIVATE, config.grant_issuer_key));
+  config.host_capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+  config.hard_capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+  sg_execution_limits(&config.host_limits);
+  config.hard_limits = config.host_limits;
+  config.worker_generation = (uint64_t)(f->final_index + 1u);
+  config.clock_now_ms = sg_execution_clock;
+  /* Import-free, NO test runner: actual TurboWasm is called by Worker. */
+  check_true(config.execute_runner == NULL);
+  check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+      mesh_mgmt_execution_node_init_v1(&f->execution_node, &config));
+}
+#endif
+
 static void prepare_typed_request(signed_final *f) {
   mesh_mgmt_execution_grant_v1_t grant = {0};
   mesh_mgmt_execution_request_v1_t request = {0};
