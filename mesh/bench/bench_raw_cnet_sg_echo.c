@@ -59,7 +59,7 @@ typedef struct {
   size_t recv_used;
   uint8_t pending[RAW_BYTES_MAX];
   size_t pending_size,replies,received,bytes_sent;
-  int connected,terminal;
+  int connected,terminal,receive_armed;
 } raw_server_peer;
 
 struct raw_lane {
@@ -186,8 +186,7 @@ static void client_recv(void *arg,cnet_connection handle,
   memcpy(c->received_frame+c->received_used,view->data,view->size);
   c->received_used+=view->size;
   if (c->received_used==c->scenario->bytes) {
-    if (c->received!=c->scenario->clients[c->index].received /* equals own state */ ||
-        memcmp(c->request,c->received_frame,c->scenario->bytes)!=0 ||
+    if (memcmp(c->request,c->received_frame,c->scenario->bytes)!=0 ||
         c->sent_ns==0u) {
       c->invalid++;return;
     }
@@ -350,7 +349,6 @@ static void publish_accepted(raw_lane *lane) {
 static void flush_pending(raw_lane *lane) {
   for (size_t slot=0u;slot<lane->accepted;++slot) {
     raw_server_peer *p=&lane->peers[slot];
-    if (p->connected&&!p->received /* no bytes */) continue;
     if (!p->pending_size) continue;
     int status=send_copy(&lane->client,p->connection,p->pending,p->pending_size);
     if (status!=SALTS_OK) {
@@ -394,11 +392,11 @@ static void progress(native_io_sharded_context *ctx,void *arg) {
   if (lane->shard) {
     for (size_t i=0u;i<lane->accepted;++i) {
       raw_server_peer *p=&lane->peers[i];
-      if (p->connected && !p->received && !p->replies) {
-        /* Read demand is armed after exact incoming CNet ownership. */
+      if (p->connected && !p->receive_armed) {
+        /* Arm the FIRST receive exactly once; callback reparms later reads.
+         * Repeated demand without this flag silently changes CNet work. */
         RAW_CHECK(lane,cnet_receive(&lane->client,p->connection,1u));
-        p->received=0u;
-        p->replies=0u;
+        p->receive_armed=1;
       }
     }
     flush_pending(lane);
