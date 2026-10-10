@@ -173,6 +173,9 @@ static void echo_on_receive(void *context, cnet_connection handle,
     }
     ++test->echo_received;
     check_equal(SALTS_OK, probe_send(&test->echo_client, handle, "reply", 5u));
+    /* Keep an explicit read posted to observe the remote FIN after reply.
+     * A completed one-shot receive does not arm closure detection again. */
+    check_equal(SALTS_OK, cnet_receive(&test->echo_client, handle, 1u));
 }
 static void echo_on_send(void *context, cnet_connection handle, size_t length) {
     sg_case *test = (sg_case *)context;
@@ -304,6 +307,17 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
             cnet_client *dupes[2] = {extras[0], extras[0]};
             status = p2p_node_cnet_poll_sg_host_cohosted(
                 test->server.owner, dupes, 2u,
+                context, lane->lease, &observed, &settled);
+            if (status != P2P_ERR_INVALID_ARG || observed != 0u ||
+                settled != 0u) {
+                mark_failed(lane, P2P_ERR_INVALID_STATE);
+                return;
+            }
+            /* No uninitialized external cohost may advance P2P state. */
+            cnet_client empty_client = {0};
+            cnet_client *empty[1] = {&empty_client};
+            status = p2p_node_cnet_poll_sg_host_cohosted(
+                test->server.owner, empty, 1u,
                 context, lane->lease, &observed, &settled);
             if (status != P2P_ERR_INVALID_ARG || observed != 0u ||
                 settled != 0u) {

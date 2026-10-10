@@ -883,7 +883,7 @@ int p2p_cnet_owner_preflight_sg_host(
         native_io_sharded_context_shard(context) != (size_t)lease.owner_shard)
         return P2P_ERR_INVALID_STATE;
     for (size_t i = 0u; i < extra_count; ++i) {
-        if (!extras[i] || extras[i] == &owner->client)
+        if (!extras[i] || !extras[i]->impl || extras[i] == &owner->client)
             return P2P_ERR_INVALID_ARG;
         for (size_t j = 0u; j < i; ++j)
             if (extras[i] == extras[j])
