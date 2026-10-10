@@ -105,6 +105,10 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_init_v1(
 
   if (!node || !config)
     return MESH_MGMT_EXECUTION_NODE_INVALID_ARG;
+  /* Reinit must not wipe a live callback's address-stable continuation. */
+  if (node->initialized ||
+      node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE)
+    return MESH_MGMT_EXECUTION_NODE_INVALID_ARG;
   memset(node, 0, sizeof(*node));
   if (!config_is_valid(config))
     return MESH_MGMT_EXECUTION_NODE_INVALID_CONFIG;
@@ -246,7 +250,9 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_shutdown_v1(
     return MESH_MGMT_EXECUTION_NODE_WORKER_FAILED;
   /* A confirmed native write must first be committed on the sender owner
    * turn. A failure is indeterminate and cannot be silently discarded. */
-  if (node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE)
+  if (node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE ||
+      (node->egress.initialized &&
+       atomic_load_explicit(&node->egress.pending, memory_order_acquire) != 0u))
     return MESH_MGMT_EXECUTION_NODE_BUSY;
   return MESH_MGMT_EXECUTION_NODE_OK;
 }
@@ -264,6 +270,11 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_destroy_v2(
       mesh_mgmt_execution_worker_shutdown_v1(&node->worker) !=
           MESH_MGMT_EXECUTION_WORKER_OK)
     return MESH_MGMT_EXECUTION_NODE_WORKER_FAILED;
+  /* Stop drained all accepted Work. Never silently erase an unsent or
+   * indeterminate durable Worker result from the still-owned Egress. */
+  if (node->egress.initialized &&
+      atomic_load_explicit(&node->egress.pending, memory_order_acquire) != 0u)
+    return MESH_MGMT_EXECUTION_NODE_BUSY;
   mesh_mgmt_execution_worker_destroy_v1(&node->worker);
   if (node->egress.initialized)
     (void)mesh_mgmt_execution_egress_close_v1(&node->egress);
