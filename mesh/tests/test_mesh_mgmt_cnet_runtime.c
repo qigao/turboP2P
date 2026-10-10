@@ -553,11 +553,23 @@ static void test_runtime_signed_pool_callback_stop_and_lease(void) {
       mesh_mgmt_agent_runtime_destroy_v2(&server.runtime));
   check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
       mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
-          &server.runtime, server.peer, &extra));
+          &server.runtime, client.peer, &extra));
   check_equal((size_t)0u, extra.slot);
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
           &server.runtime, &pool));
+  /* A real TCP terminal may complete in a later bounded Owner pass.
+   * Each Stop retry uses the same retained Manager/Pool objects rather
+   * than discarding outstanding callbacks or a borrowed lease. */
+  for (unsigned pass = 0u;
+       pass < 32u && pool.terminal_waiting_for_leases == 0u; ++pass) {
+    cmeta_sleep_ms(1u);
+    check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+        mesh_mgmt_agent_runtime_stop_v1(&server.runtime));
+    check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
+        mesh_mgmt_agent_runtime_signed_pool_snapshot_v3(
+            &server.runtime, &pool));
+  }
   check_true(pool.sealed);
   check_equal((size_t)0u, pool.ready);
   check_equal((size_t)1u, pool.active_leases);
