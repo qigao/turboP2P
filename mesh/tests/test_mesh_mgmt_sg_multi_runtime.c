@@ -33,6 +33,8 @@ typedef struct {
 } signed_endpoint;
 
 typedef struct {
+  sg_multi_case *scenario;
+  size_t final_index;
   signed_endpoint server, client;
   mesh_mgmt_p2p_security_provider_v2_t security;
   p2p_node_t *node;
@@ -430,7 +432,7 @@ static void host_foreign(native_io_sharded_context *ctx, void *arg) {
 /* Only the ORIGINAL signed SG Final worker owns the callback and Pool. */
 static void multi_command_terminal(void *context, uint64_t ticket, int status) {
   signed_final *f = context;
-  sg_multi_lane *lane = f->lane;
+  sg_multi_lane *lane = &f->scenario->lanes[f->final_index + 1u];
   if (cmeta_thread_current_token() != lane->worker_token ||
       !f->command_ticket || ticket != f->command_ticket ||
       f->command_terminals != 0u) {
@@ -800,7 +802,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
     signed_final *f = &sc->finals_data[i];
     prepare(&f->server, (uint8_t)(17u + 2u*i));
     prepare(&f->client, (uint8_t)(33u + 2u*i));
-    f->lane = &sc->lanes[i+1u];
+    f->scenario = sc;
+    f->final_index = i;
     if (command_mode) enable_command_status(f);
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
