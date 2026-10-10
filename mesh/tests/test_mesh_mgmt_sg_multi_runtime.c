@@ -1494,7 +1494,11 @@ static void test_multi_final(size_t final_count, int command_mode) {
           if ((sc->exercise_signed_result
                    ? sc->finals_data[i].rpc_result_events
                    : sc->finals_data[i].rpc_status_events) != 1u ||
-              sc->finals_data[i].rpc_errors)
+              sc->finals_data[i].rpc_errors ||
+              /* Remote RESULT delivery is not the same event as the local
+               * native write terminal or Egress head commit. */
+              (sc->exercise_real_execution &&
+               sc->finals_data[i].rpc_reply_sent != 1u))
             replied = false;
         if (replied || cmeta_monotonic_ms() >= remote_deadline) break;
         pump(sc);
