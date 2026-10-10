@@ -49,6 +49,8 @@ static int binding_is_valid(
                          sizeof(binding->request_digest)) &&
          !bytes_are_zero(binding->target_node_id,
                          sizeof(binding->target_node_id)) &&
+         !bytes_are_zero(binding->result_signer_public_key,
+                         sizeof(binding->result_signer_public_key)) &&
          binding->deadline_ms > now_ms;
 }
 
@@ -63,6 +65,9 @@ static int binding_equal(
                      sizeof(left->request_digest)) &&
          bytes_equal(left->target_node_id, right->target_node_id,
                      sizeof(left->target_node_id)) &&
+         bytes_equal(left->result_signer_public_key,
+                     right->result_signer_public_key,
+                     sizeof(left->result_signer_public_key)) &&
          left->deadline_ms == right->deadline_ms;
 }
 
@@ -277,6 +282,13 @@ mesh_mgmt_execution_rpc_registry_complete_v1(
                    sizeof(slot->binding.request_digest)) ||
       !bytes_equal(slot->binding.target_node_id, responder_node_id,
                    sizeof(slot->binding.target_node_id)))
+    return MESH_MGMT_EXECUTION_RPC_REGISTRY_AUTH_FAILED;
+  /* The Noise/MMP peer identity and the execution-result signer are
+   * separate authorities. Never trust a self-declared result public key. */
+  if (terminal_state == MESH_MGMT_EXECUTION_RPC_RESULT &&
+      mesh_mgmt_execution_result_verify_v1(
+          &response->result, slot->binding.result_signer_public_key) !=
+          MESH_MGMT_EXECUTION_RESULT_OK)
     return MESH_MGMT_EXECUTION_RPC_REGISTRY_AUTH_FAILED;
 
   slot->state = terminal_state;
