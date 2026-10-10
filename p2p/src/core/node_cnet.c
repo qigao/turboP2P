@@ -304,6 +304,7 @@ static void reap_disconnected(p2p_node_t *node) {
 static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
                                native_io_sharded_context *context,
                                const native_io_sharded_host_lease *lease,
+                               cnet_client *const *cohosts, size_t cohost_count,
                                size_t *out_observed, size_t *out_sg_settled) {
     uint64_t now;
     int result;
@@ -321,8 +322,9 @@ static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
         p2p_private_key_executor_pump(owner->node);
         if (!owner->stopping)
             result = context
-                ? p2p_cnet_owner_poll_sg_host(owner->transport, context,
-                    *lease, out_observed, out_sg_settled)
+                ? p2p_cnet_owner_poll_sg_host_cohosts(owner->transport,
+                    context, *lease, cohosts, cohost_count,
+                    out_observed, out_sg_settled)
                 : p2p_cnet_owner_poll(owner->transport);
     }
     reap_disconnected(owner->node);
@@ -340,7 +342,7 @@ static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
 }
 
 int p2p_node_cnet_poll(p2p_node_cnet_t *owner) {
-    return node_cnet_poll_impl(owner, NULL, NULL, NULL, NULL);
+    return node_cnet_poll_impl(owner, NULL, NULL, NULL, 0u, NULL, NULL);
 }
 
 int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
@@ -349,7 +351,21 @@ int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
                                size_t *out_observed, size_t *out_sg_settled) {
     if (!context || !out_observed || !out_sg_settled)
         return P2P_ERR_INVALID_ARG;
-    return node_cnet_poll_impl(owner, context, &lease,
+    return node_cnet_poll_impl(owner, context, &lease, NULL, 0u,
+                               out_observed, out_sg_settled);
+}
+
+int p2p_node_cnet_poll_sg_host_cohosts(
+    p2p_node_cnet_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    cnet_client *const *cohosts, size_t cohost_count,
+    size_t *out_observed, size_t *out_sg_settled) {
+    if (!context || !out_observed || !out_sg_settled)
+        return P2P_ERR_INVALID_ARG;
+    if (cohost_count > P2P_CNET_SG_MAX_COHOSTS ||
+        (cohost_count != 0u && !cohosts))
+        return P2P_ERR_INVALID_ARG;
+    return node_cnet_poll_impl(owner, context, &lease, cohosts, cohost_count,
                                out_observed, out_sg_settled);
 }
 

@@ -863,15 +863,15 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
  * The API is intentionally one-transport-per-shard. When multiple CNet
  * consumers share a shard the host must advance/route them in ONE combined
  * cnet_sg_host_routes, not invoke this helper once for each consumer. */
-int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
-                                native_io_sharded_context *context,
-                                native_io_sharded_host_lease lease,
-                                size_t *out_observed,
-                                size_t *out_sg_settled) {
+int p2p_cnet_owner_poll_sg_host_cohosts(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    cnet_client *const *cohosts, size_t cohost_count,
+    size_t *out_observed, size_t *out_sg_settled) {
     size_t count = 0u, routed_events = 0u;
     size_t accepts = 0u, sharded = 0u;
     cnet_sg_host_routes routes = {0};
-    cnet_client *clients[1];
+    cnet_client *clients[1u + P2P_CNET_SG_MAX_COHOSTS] = {0};
     int result = P2P_OK, status;
     if (out_observed) *out_observed = 0u;
     if (out_sg_settled) *out_sg_settled = 0u;
@@ -884,6 +884,19 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
         owner->host_lease.generation != lease.generation ||
         native_io_sharded_context_shard(context) != (size_t)lease.owner_shard)
         return P2P_ERR_INVALID_STATE;
+    /* Refuse invalid multi-consumer graphs before any P2P/NativeIO work. */
+    if (cohost_count > P2P_CNET_SG_MAX_COHOSTS ||
+        (cohost_count && !cohosts))
+        return P2P_ERR_INVALID_ARG;
+    for (size_t i = 0u; i < cohost_count; ++i) {
+        if (!cohosts[i] || cohosts[i] == &owner->client)
+            return P2P_ERR_INVALID_ARG;
+        for (size_t j = 0u; j < i; ++j)
+            if (cohosts[i] == cohosts[j]) return P2P_ERR_INVALID_ARG;
+    }
+    clients[0] = &owner->client;
+    for (size_t i = 0u; i < cohost_count; ++i)
+        clients[i + 1u] = cohosts[i];
     owner->busy = 1;
 
     if (owner->sg_final) {
@@ -891,8 +904,10 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
         if (result != P2P_OK) goto done;
     }
     resume_connections(owner);
-    status = cnet_client_advance_external(&owner->client, &routed_events);
-    if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+    for (size_t i = 0u; i <= cohost_count; ++i) {
+        status = cnet_client_advance_external(clients[i], &routed_events);
+        if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+    }
 
     status = native_io_sharded_context_observe_host(
         context, lease, owner->host_batch,
@@ -902,12 +917,11 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
         goto done;
     }
     *out_observed = count;
-    clients[0] = &owner->client;
     routes.size = sizeof(routes);
     routes.version = CNET_SG_HOST_ROUTING_VERSION;
     routes.listener = owner->listener.impl ? &owner->listener : NULL;
     routes.clients = clients;
-    routes.client_count = 1u;
+    routes.client_count = 1u + cohost_count;
     status = cnet_sg_host_route_batch(owner->host_batch, count, &routes,
                                        &accepts, &sharded);
     *out_sg_settled = sharded;
@@ -926,8 +940,10 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
             }
         }
     }
-    status = cnet_client_advance_external(&owner->client, &routed_events);
-    if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+    for (size_t i = 0u; i <= cohost_count; ++i) {
+        status = cnet_client_advance_external(clients[i], &routed_events);
+        if (status != SALTS_OK) { result = p2p_error(status); goto done; }
+    }
     resume_connections(owner);
     for (p2p_cnet_connection_t *connection = owner->connections;
          connection; connection = connection->next)
@@ -939,6 +955,15 @@ done:
         if (result == P2P_OK) result = retire;
     }
     return result;
+}
+
+int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
+                                native_io_sharded_context *context,
+                                native_io_sharded_host_lease lease,
+                                size_t *out_observed,
+                                size_t *out_sg_settled) {
+    return p2p_cnet_owner_poll_sg_host_cohosts(
+        owner, context, lease, NULL, 0u, out_observed, out_sg_settled);
 }
 
 int p2p_cnet_owner_stop(p2p_cnet_owner_t *owner) {

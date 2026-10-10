@@ -245,3 +245,35 @@ a stricter gate than merely checking strategy IDs or a mocked completion
 batch, but it is **not** mixed-protocol cohosting nor a 1/2/4-core performance
 qualification. Complete #37 only after SG-host multi-consumer, 4-shard
 workloads, real multicore benchmark and cross-platform installed SDK gates.
+
+
+## Phase S3 — combined SG Host CNet Client cohosting (#37)
+
+The explicit `p2p_cnet_owner_poll_sg_host_cohosts` and the P2P Node
+counterpart support up to three additional borrowed CNet clients, each
+initialized with `cnet_client_init_external` on the SAME NativeIO SG
+Owner/backend. Duplicate/self client references, excessive count and
+missing arrays fail before backend progression. The old one-client
+`poll_sg_host` is simply the zero-cohost case.
+
+One short SG Owner task advances each client, performs EXACTLY ONE
+`native_io_sharded_context_observe_host`, and calls exactly one
+`cnet_sg_host_route_batch` using the existing P2P listener plus every
+independent CNet client. It then advances every client again. No callback
+escapes its owner, second observe is installed, or application data is
+replayed. Cofinal clients and callback storage remain caller-owned until
+their real terminal and host-lease release.
+
+The real installed-SDK acceptance has two SG worker shards, an
+authenticated credited cross-shard P2P Noise session, and a second CNet
+client on the acceptor shard that connects to the standalone P2P listener
+and exchanges a valid secure preface and genuine cookie challenge. The
+independent cohost reaches a real CNet terminal while the authenticated
+Noise/P2P path continues carrying bidirectional application payloads.
+The test also retains a zero-cohost baseline.
+
+Only the original P2P listener is included in this helper. Multiple
+unrelated external listeners on the same shard require a separate
+application-level routes composition and are not implicitly supported.
+Native 4-shard hosted P2P workload, cross-platform consumer gates and
+1/2/4-core P95/P99 throughput/CPU comparisons remain open in #37.

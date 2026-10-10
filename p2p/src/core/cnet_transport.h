@@ -86,6 +86,21 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
                                 size_t *out_observed,
                                 size_t *out_sg_settled);
 
+/* One P2P transport plus up to three explicit additional CNet external clients
+ * on the SAME leased NativeIO shard/backend. Clients must stay borrowed and
+ * owner-affine through their terminal callbacks and Host lease release.
+ * One authoritative SG observe and one whole-batch combined routes[] cover
+ * ALL clients, without separate polling tasks, duplicate completion dispatch,
+ * Actor or fallback. No other cohost may install its own listener here; use
+ * an application-composed host for multi-listener topologies. Duplicate or
+ * P2P-owned client references and oversized arrays fail before progress. */
+#define P2P_CNET_SG_MAX_COHOSTS 3u
+int p2p_cnet_owner_poll_sg_host_cohosts(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    cnet_client *const *cohosts, size_t cohost_count,
+    size_t *out_observed, size_t *out_sg_settled);
+
 /* Stop inside a callback is deferred to poll return. Destruction inside any
  * callback is rejected. Retry stop/destroy after a drain timeout; retain owner
  * and callback contexts until destroy succeeds. Stopped owners cannot restart. */

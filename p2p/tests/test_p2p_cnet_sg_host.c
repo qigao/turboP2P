@@ -1,5 +1,6 @@
 #include "p2p_cnet_node_fixture.h"
 #include <cnet/sg_host.h>
+#include "security/p2p_cookie.h"
 #include <salts/native_io_sharded.h>
 #include <stdio.h>
 
@@ -20,6 +21,12 @@ typedef struct sg_lane {
     bool released;
     bool stopped;
     size_t stop_retries;
+    cnet_client cohost_client;
+    cnet_connection cohost_connection;
+    size_t cohost_connected, cohost_sent, cohost_cookies, cohost_terminal;
+    size_t cohost_cookie_bytes;
+    uint8_t cohost_cookie[P2P_COOKIE_PACKET_SIZE];
+    bool cohost_destroyed;
     int error;
     const char *error_site;
 } sg_lane;
@@ -29,6 +36,7 @@ struct sg_case {
     p2p_cnet_sg_t *handoff;
     sg_lane lanes[HOST_SHARDS];
     endpoint_t client, server;
+    bool with_cohost;
 };
 
 static native_io_backend_kind sg_backend(void) {
@@ -56,7 +64,7 @@ static void mark_failed(sg_lane *lane, int rc) {
 static bool worker_quiescent(void *arg) {
     sg_lane *lane = (sg_lane *)arg;
     return lane->released && lane->acceptor == NULL &&
-           lane->transport == NULL;
+           lane->transport == NULL && !lane->cohost_client.impl;
 }
 
 static int accept_must_handoff(p2p_cnet_owner_t *owner,
@@ -67,6 +75,84 @@ static int accept_must_handoff(p2p_cnet_owner_t *owner,
     (void)owner; (void)connection; (void)source;
     ++lane->cancelled;
     return P2P_ERR_INVALID_STATE; /* This should never be selected. */
+}
+
+/* Distinct CNet consumer on the acceptor's SAME NativeIO SG shard.
+ * Its own connection speaks only the real P2P cookie prefix to the separate
+ * standalone P2P listener. Noise is deliberately not promoted; the main
+ * cross-shard P2P session still authenticates independently. */
+static void cohost_on_state(void *arg, cnet_connection handle,
+                             cnet_connection_state state, const cnet_error *error) {
+    sg_lane *lane = (sg_lane *)arg;
+    (void)error;
+    if (cmeta_thread_current_token() != lane->worker_token ||
+        handle.slot != lane->cohost_connection.slot ||
+        handle.generation != lane->cohost_connection.generation) {
+        mark_failed(lane, SALTS_EPERM); return;
+    }
+    if (state == CNET_CONNECTION_CONNECTED) {
+        uint8_t network[32];
+        uint8_t preface[P2P_SECURE_PREFACE_SIZE];
+        mem_buffer_t *buffer;
+        memset(network, 9, sizeof(network));
+        p2p_secure_preface_build(network, preface);
+        buffer = mem_get_buffer(mem_global(), sizeof(preface));
+        if (!buffer) { mark_failed(lane, SALTS_ENOMEM); return; }
+        memcpy(mem_buffer_data(buffer), preface, sizeof(preface));
+        mem_set_used(buffer, sizeof(preface));
+        int rc = cnet_send_buffer(&lane->cohost_client, handle, buffer);
+        mem_buffer_release(buffer);
+        if (rc == SALTS_OK) rc = cnet_receive(&lane->cohost_client, handle, 1u);
+        if (rc != SALTS_OK) mark_failed(lane, rc);
+        ++lane->cohost_connected;
+    } else if (state == CNET_CONNECTION_CLOSED ||
+               state == CNET_CONNECTION_FAILED) {
+        if (state == CNET_CONNECTION_FAILED) mark_failed(lane, SALTS_ECONNRESET);
+        ++lane->cohost_terminal;
+    }
+}
+static void cohost_on_receive(void *arg, cnet_connection handle,
+                               const cnet_receive_view *view) {
+    sg_lane *lane = (sg_lane *)arg;
+    if (cmeta_thread_current_token() != lane->worker_token ||
+        view == NULL || view->kind != CNET_MESSAGE_BYTES ||
+        !view->data || !view->size ||
+        view->size > sizeof(lane->cohost_cookie) - lane->cohost_cookie_bytes) {
+        mark_failed(lane, SALTS_EPROTO); return;
+    }
+    memcpy(lane->cohost_cookie + lane->cohost_cookie_bytes,
+           view->data, view->size);
+    lane->cohost_cookie_bytes += view->size;
+    if (lane->cohost_cookie_bytes == P2P_COOKIE_PACKET_SIZE) {
+        uint8_t response[P2P_COOKIE_PACKET_SIZE];
+        uint8_t binding[P2P_COOKIE_BINDING_SIZE];
+        if (p2p_cookie_build_response(lane->cohost_cookie, response, binding) != P2P_OK) {
+            mark_failed(lane, SALTS_EPROTO); return;
+        }
+        ++lane->cohost_cookies;
+        int rc = cnet_close(&lane->cohost_client, handle);
+        if (rc != SALTS_OK) mark_failed(lane, rc);
+    } else {
+        int rc = cnet_receive(&lane->cohost_client, handle, 1u);
+        if (rc != SALTS_OK) mark_failed(lane, rc);
+    }
+}
+static void cohost_on_send(void *arg, cnet_connection handle, size_t bytes) {
+    sg_lane *lane = (sg_lane *)arg;
+    if (cmeta_thread_current_token() != lane->worker_token ||
+        handle.slot != lane->cohost_connection.slot ||
+        bytes != P2P_SECURE_PREFACE_SIZE) {
+        mark_failed(lane, SALTS_EPROTO); return;
+    }
+    lane->cohost_sent += bytes;
+}
+static cnet_observer cohost_observer(sg_lane *lane) {
+    cnet_observer cb = {0};
+    cb.on_state = cohost_on_state;
+    cb.on_receive = cohost_on_receive;
+    cb.on_send = cohost_on_send;
+    cb.user = lane;
+    return cb;
 }
 
 static void host_initialize(native_io_sharded_context *context, void *arg) {
@@ -88,6 +174,18 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
         }
         SG_GO(lane, p2p_cnet_owner_listen(lane->acceptor, "127.0.0.1",
             0u, 8u, accept_must_handoff, lane, &lane->listener));
+        if (test->with_cohost) {
+            cnet_stream_peer remote = {0};
+            cnet_observer cb = cohost_observer(lane);
+            remote.family = CNET_DATAGRAM_ADDRESS_IPV4;
+            remote.address[0] = 127u;
+            remote.address[3] = 1u;
+            remote.port = (uint16_t)test->client.node->port;
+            SG_GO(lane, cnet_client_init_external(&lane->cohost_client,
+                                                  &cfg.client, lane->backend));
+            SG_GO(lane, cnet_connect_peer(&lane->cohost_client, &remote,
+                                          NULL, &cb, &lane->cohost_connection));
+        }
     } else {
         endpoint_t *server = &test->server;
         init_node(server, 33, 0);
@@ -130,8 +228,15 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
         ++lane->accepted;
     }
     if (lane->shard == 0u) {
-        SG_GO(lane, p2p_cnet_owner_poll_sg_host(
-            lane->acceptor, context, lane->lease, &observed, &settled));
+        if (test->with_cohost && !lane->cohost_destroyed) {
+            cnet_client *other[1] = {&lane->cohost_client};
+            SG_GO(lane, p2p_cnet_owner_poll_sg_host_cohosts(
+                lane->acceptor, context, lane->lease,
+                other, 1u, &observed, &settled));
+        } else {
+            SG_GO(lane, p2p_cnet_owner_poll_sg_host(
+                lane->acceptor, context, lane->lease, &observed, &settled));
+        }
     } else if (lane->stop_retries) {
         /* P2P node stop has detached application callbacks. SG Host must
          * still drive the borrowed CNet terminal before destroy/retry. */
@@ -153,6 +258,16 @@ static void host_stop(native_io_sharded_context *context, void *arg) {
         mark_failed(lane, SALTS_EPERM); return;
     }
     if (lane->stopped) return;
+    if (lane->shard == 0u && lane->test->with_cohost &&
+        !lane->cohost_destroyed) {
+        if (lane->cohost_terminal == 0u) {
+            ++lane->stop_retries;
+            return; /* Other client still owns CNet callbacks. */
+        }
+        SG_GO(lane, cnet_client_stop_external(&lane->cohost_client));
+        SG_GO(lane, cnet_client_destroy(&lane->cohost_client));
+        lane->cohost_destroyed = true;
+    }
     result = lane->shard == 0u
         ? p2p_cnet_owner_stop(lane->acceptor)
         : p2p_node_cnet_stop(lane->test->server.owner);
@@ -220,7 +335,7 @@ static void progress_once(sg_case *test) {
 
 static void host_send(native_io_sharded_context *context, void *arg);
 
-static void test_real_sg_host_handoff_authenticated_p2p(void) {
+static void test_real_sg_host_handoff_authenticated_p2p(bool with_cohost) {
     sg_case fixture = {0};
     sg_case *test = &fixture;
     native_io_sharded_config cfg = {HOST_SHARDS, 8u,
@@ -231,6 +346,10 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
 
     test->client.remote = &test->server;
     test->server.remote = &test->client;
+    test->with_cohost = with_cohost;
+    /* The extra CNet cohost connects to the already-live standalone P2P
+     * listener; no second backend is created on the SG acceptor shard. */
+    init_endpoint(&test->client, 17, 7u, 0);
     check_equal(SALTS_OK, native_io_sharded_create(&cfg, &test->runtime));
     check_not_null(test->runtime);
     for (size_t i = 0u; i < HOST_SHARDS; ++i) {
@@ -249,7 +368,6 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((uint32_t)1u, test->lanes[1].lease.owner_shard);
     check_true(test->lanes[0].listener.port != 0u);
 
-    init_endpoint(&test->client, 17, 7u, 0);
     topology.size = sizeof(topology);
     topology.version = P2P_CNET_SG_VERSION;
     topology.acceptor = test->lanes[0].acceptor;
@@ -282,6 +400,23 @@ static void test_real_sg_host_handoff_authenticated_p2p(void) {
     check_equal((uint64_t)0u, before.denied);
     check_equal((size_t)1u, before.handoff.taken);
     check_equal((size_t)0u, before.handoff.queued);
+
+    if (with_cohost) {
+        const uint64_t cohost_deadline = cmeta_monotonic_ms() + HOST_TIMEOUT;
+        while ((test->lanes[0].cohost_cookies == 0u ||
+                test->lanes[0].cohost_terminal == 0u) &&
+               cmeta_monotonic_ms() < cohost_deadline)
+            progress_once(test);
+        check_equal((size_t)1u, test->lanes[0].cohost_connected);
+        check_equal((size_t)P2P_SECURE_PREFACE_SIZE,
+                    test->lanes[0].cohost_sent);
+        check_equal((size_t)P2P_COOKIE_PACKET_SIZE,
+                    test->lanes[0].cohost_cookie_bytes);
+        check_equal((size_t)1u, test->lanes[0].cohost_cookies);
+        check_equal((size_t)1u, test->lanes[0].cohost_terminal);
+        check_true(test->lanes[0].observed > 0u);
+        check_equal((unsigned)0u, test->lanes[0].cancelled);
+    }
 
     check_equal(P2P_OK, p2p_send_message(test->client.node,
         test->client.peer, P2P_MSG_CUSTOM, "client", 7u));
@@ -366,6 +501,9 @@ static void host_send(native_io_sharded_context *context, void *arg) {
 
 spec("P2P SG NativeIO hosted Owner with real credited P2P authentication") {
     it("routes one SG-observed batch per shard and exchanges authenticated data after credit handoff") {
-        test_real_sg_host_handoff_authenticated_p2p();
+        test_real_sg_host_handoff_authenticated_p2p(false);
+    }
+    it("cohosts an independent CNet Client on the acceptor shard without stealing P2P completions") {
+        test_real_sg_host_handoff_authenticated_p2p(true);
     }
 }

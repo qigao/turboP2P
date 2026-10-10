@@ -48,6 +48,15 @@ int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
                                size_t *out_observed,
                                size_t *out_sg_settled);
 
+/* P2P Owner maintenance + one SG-native Host batch shared with explicitly
+ * borrowed, external CNet cohost clients on the same shard. The caller is
+ * responsible for cohost lifespan, callbacks and terminal retirement. */
+int p2p_node_cnet_poll_sg_host_cohosts(
+    p2p_node_cnet_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    cnet_client *const *cohosts, size_t cohost_count,
+    size_t *out_observed, size_t *out_sg_settled);
+
 /* Borrow the exact CNet transport Owner for an explicit host-side SG
  * placement topology. The returned pointer must outlive the SG inbox and
  * every accepted peer; stop nodes, then destroy SG, then destroy nodes.
