@@ -27,6 +27,7 @@ add_library(foundation STATIC
   "${mesh_src}/mesh_mgmt_execution_consumer.c"
   "${mesh_src}/mesh_mgmt_execution_response_consumer.c"
   "${mesh_src}/mesh_mgmt_execution_rpc_registry.c"
+  "${mesh_src}/mesh_mgmt_execution_rpc_control.c"
   "${mesh_src}/mesh_mgmt_transport.c"
   "${mesh_src}/mesh_mgmt_connection.c"
   "${mesh_src}/mesh_mgmt_peer.c"
@@ -57,6 +58,8 @@ target_link_libraries(foundation PUBLIC
 
 foreach(test_name IN ITEMS
   test_mesh_mgmt_session
+  test_mesh_mgmt_execution_rpc_registry
+  test_mesh_mgmt_execution_rpc_control
   test_mesh_mgmt_transport
   test_mesh_mgmt_peer_signer
   test_mesh_mgmt_crypto
