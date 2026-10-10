@@ -182,6 +182,18 @@ typedef struct {
   uint64_t next_command_ticket;
   uint64_t last_command_ticket;
   int last_command_terminal_status;
+  /* Ordinary authenticated, NON-POOL response sender: exactly one retained
+   * CNet/Noise wire-terminal continuation per runtime. It does not create a
+   * ClientPool, claim a Lease or introduce a second connection clock.
+   * Stop/Destroy reject while active; the original P2P owner must progress
+   * the already-admitted native write to its single terminal callback. */
+  mesh_mgmt_agent_command_terminal_fn_v4 response_terminal_complete;
+  void *response_terminal_context;
+  uint64_t response_terminal_ticket;
+  uint64_t next_response_terminal_ticket;
+  uint64_t last_response_terminal_ticket;
+  int last_response_terminal_status;
+  uint8_t response_terminal_active;
   /* Borrowed real SG final Node. The SG Host, not Runtime, owns its backend,
    * connection progress and shutdown; lifecycle methods run ONLY on the
    * original shard worker under a live Host lease. */
@@ -402,6 +414,22 @@ mesh_mgmt_agent_runtime_send_execution_response_v1(
     const uint8_t target_node_id[32],
     const uint8_t *payload,
     size_t payload_len);
+
+/* Response send requiring the EXACT original CNet/Noise full-wire terminal.
+ * For signed-Pool runtimes uses the already qualified leased v4 send. For
+ * ordinary authenticated outbound MMP clients uses ONE retained response
+ * ticket without a fake Pool or Lease. A successful return means admission
+ * only; complete(context,ticket,status) is called exactly once later by the
+ * native P2P terminal callback. No callback on rejected admission.
+ * Stop/Destroy keep Runtime, Router, P2P node and callback context alive
+ * while the ticket is outstanding. No replays or remote business ACK. */
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_response_terminal_v5(
+    mesh_mgmt_agent_runtime_v1_t *runtime,
+    uint8_t kind, const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    mesh_mgmt_agent_command_terminal_fn_v4 complete,
+    void *context, uint64_t *out_ticket);
 
 /**
  * Revalidates and copies a request supplied to the configured runtime event
