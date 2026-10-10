@@ -437,6 +437,18 @@ target_link_libraries(test_mesh_mgmt_sg_runtime PRIVATE
 add_test(NAME test_mesh_mgmt_sg_runtime COMMAND test_mesh_mgmt_sg_runtime)
 set_tests_properties(test_mesh_mgmt_sg_runtime PROPERTIES TIMEOUT 90)
 
+# 2 and 4 independent SG final signed MMP ClientPools on 3/5 native
+# workers (including one acceptor): exact physical Manager, per-final
+# exclusive Lease, wrong-owner denial and checked Stop/Destroy.
+add_executable(test_mesh_mgmt_sg_multi_runtime
+  "${mesh_tests}/test_mesh_mgmt_sg_multi_runtime.c")
+set_property(TARGET test_mesh_mgmt_sg_multi_runtime PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_sg_multi_runtime PRIVATE
+  mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+add_test(NAME test_mesh_mgmt_sg_multi_runtime
+  COMMAND test_mesh_mgmt_sg_multi_runtime)
+set_tests_properties(test_mesh_mgmt_sg_multi_runtime PROPERTIES TIMEOUT 120)
+
 # The compatibility entry point must compile too; linking/running shared mesh
 # still requires the complete root build.
 add_library(mgmt_mesh_bridge_compile OBJECT "${mesh_src}/mesh_mgmt_agent_runtime_mesh.c")
