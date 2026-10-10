@@ -285,6 +285,13 @@ static void runtime_release_initialized(mesh_mgmt_agent_runtime_v1_t *runtime) {
 
 static mesh_mgmt_agent_runtime_result_t runtime_stop_initialized(
     mesh_mgmt_agent_runtime_v1_t *runtime) {
+  /* An unmanaged ordinary outbound RESULT send owns a borrowed callback
+   * context on the native P2P connection. Checked Stop MUST NOT detach the
+   * Router or destroy the connection while that callback is outstanding.
+   * Leave RUNNING so the SAME original owner can continue its normal poll;
+   * after the native terminal the caller can retry Stop/Destroy. */
+  if (runtime->response_terminal_active)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
   runtime->state = MESH_MGMT_AGENT_RUNTIME_STOPPING;
   mesh_mgmt_endpoint_pool_stop_v1(&runtime->endpoint_pool);
   if (runtime->signed_pool.impl) {
@@ -428,7 +435,7 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_init_bound(
       runtime->state != MESH_MGMT_AGENT_RUNTIME_UNINITIALIZED || runtime->node ||
       runtime->router.slots.data || runtime->endpoint_pool.entries.data ||
       runtime->signed_pool.impl || runtime->signed_pool_records ||
-      runtime->command_terminal_slots ||
+      runtime->command_terminal_slots || runtime->response_terminal_active ||
       runtime->endpoint_publisher.state != MESH_MGMT_ENDPOINT_PUBLISHER_UNINITIALIZED ||
       runtime->service_publisher.state != MESH_MGMT_SERVICE_PUBLISHER_UNINITIALIZED)
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
@@ -1321,4 +1328,97 @@ mesh_mgmt_agent_runtime_send_execution_response_v1(
   }
   runtime->last_error = MESH_MGMT_AGENT_RUNTIME_OK;
   return MESH_MGMT_AGENT_RUNTIME_OK;
+}
+
+/* Runs only from the owning P2P/CNet native terminal, including after a
+ * logical peer detach. Ordinary outbound clients have no inbound signed
+ * ClientPool to borrow: one retained ticket is enough to guard this Runtime.
+ * This is only a LOCAL encrypted write terminal, not an application ACK. */
+static void runtime_unmanaged_response_terminal(void *context,
+                                                int p2p_status) {
+  mesh_mgmt_agent_runtime_v1_t *runtime = context;
+  mesh_mgmt_agent_command_terminal_fn_v4 complete;
+  void *user_context;
+  uint64_t ticket;
+  uint8_t was_busy;
+
+  if (!runtime || !runtime->response_terminal_active)
+    return;
+  complete = runtime->response_terminal_complete;
+  user_context = runtime->response_terminal_context;
+  ticket = runtime->response_terminal_ticket;
+  runtime->response_terminal_active = 0u;
+  runtime->response_terminal_complete = NULL;
+  runtime->response_terminal_context = NULL;
+  runtime->response_terminal_ticket = 0u;
+  runtime->last_response_terminal_ticket = ticket;
+  runtime->last_response_terminal_status = p2p_status;
+  was_busy = runtime->in_api;
+  runtime->in_api = 1u; /* Stop/reentrant response send always fail. */
+  if (complete)
+    complete(user_context, ticket, p2p_status);
+  runtime->in_api = was_busy;
+}
+
+mesh_mgmt_agent_runtime_result_t
+mesh_mgmt_agent_runtime_send_execution_response_terminal_v5(
+    mesh_mgmt_agent_runtime_v1_t *runtime, uint8_t kind,
+    const uint8_t target_node_id[32],
+    const uint8_t *payload, size_t payload_len,
+    mesh_mgmt_agent_command_terminal_fn_v4 complete,
+    void *context, uint64_t *out_ticket) {
+  mesh_mgmt_agent_router_result_t router_result;
+  uint64_t ticket;
+
+  if (out_ticket) *out_ticket = 0u;
+  if (!runtime || !target_node_id || !payload || !payload_len ||
+      !complete || !out_ticket ||
+      (kind != MESH_MGMT_KIND_COMMAND_RESULT &&
+       kind != MESH_MGMT_KIND_COMMAND_STATUS))
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_ARG;
+  if (runtime->state != MESH_MGMT_AGENT_RUNTIME_RUNNING ||
+      runtime_is_busy(runtime) || !runtime->node)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
+  if (runtime->signed_pool_enabled)
+    return mesh_mgmt_agent_runtime_send_execution_leased_v4(
+        runtime, kind, target_node_id, payload, payload_len,
+        complete, context, out_ticket);
+
+  if (runtime->response_terminal_active)
+    return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+  /* The callback association is bounded at exactly one slot, and never
+   * selects an alternate connection, generates redials or retries the frame.
+   * The Router resolves only the unique, currently authenticated session. */
+  if (runtime->next_response_terminal_ticket == 0u)
+    runtime->next_response_terminal_ticket = 1u;
+  if (runtime->next_response_terminal_ticket == UINT64_MAX)
+    return MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED;
+
+  ticket = runtime->next_response_terminal_ticket++;
+  runtime->response_terminal_ticket = ticket;
+  runtime->response_terminal_complete = complete;
+  runtime->response_terminal_context = context;
+  runtime->response_terminal_active = 1u;
+  runtime->in_api = 1u;
+  router_result = mesh_mgmt_agent_router_send_execution_terminal_v4(
+      &runtime->router, kind, target_node_id, payload, payload_len,
+      runtime_unmanaged_response_terminal, runtime);
+  runtime->in_api = 0u;
+  runtime->last_router_result = router_result;
+  if (router_result == MESH_MGMT_AGENT_ROUTER_OK) {
+    *out_ticket = ticket; /* admission only, not full wire completion */
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_OK);
+  }
+  /* Rejected P2P admission has no callback. If Noise's nonce advanced before
+   * the actual CNet admission failure, the peer is already disconnected by
+   * P2P. Never attempt another send for this request here. */
+  runtime->response_terminal_active = 0u;
+  runtime->response_terminal_complete = NULL;
+  runtime->response_terminal_context = NULL;
+  runtime->response_terminal_ticket = 0u;
+  if (router_result == MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND)
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED);
+  if (router_result == MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED)
+    return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_RESOURCE_EXHAUSTED);
+  return runtime_fail(runtime, MESH_MGMT_AGENT_RUNTIME_SEND_FAILED);
 }
