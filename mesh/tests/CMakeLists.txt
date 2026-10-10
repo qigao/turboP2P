@@ -109,20 +109,17 @@ if(TURBOP2P_ENABLE_FLOWMQ_IPC)
 endif()
 
 if(TURBO_P2P_ENABLE_NODE_EXECUTION)
+    include(MeshPrestagedWasmGuest)
     set(MESH_MGMT_EXECUTION_TEST_WASM
         "${CMAKE_CURRENT_BINARY_DIR}/mesh_mgmt_execution_test_guest.wasm")
-    turbo_add_wasm_application(mesh_mgmt_execution_test_guest
-        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/data/execution_guest.c
-        MAX_MEMORY 262144
-        OUTPUT ${MESH_MGMT_EXECUTION_TEST_WASM}
-        NO_CHECK)
+    turbop2p_add_raw_wasm_guest(mesh_mgmt_execution_test_guest
+        SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/execution_guest.c"
+        OUTPUT "${MESH_MGMT_EXECUTION_TEST_WASM}")
     set(MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM
         "${CMAKE_CURRENT_BINARY_DIR}/mesh_mgmt_execution_test_success_guest.wasm")
-    turbo_add_wasm_application(mesh_mgmt_execution_test_success_guest
-        SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/data/execution_success_guest.c
-        MAX_MEMORY 262144
-        OUTPUT ${MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM}
-        NO_CHECK)
+    turbop2p_add_raw_wasm_guest(mesh_mgmt_execution_test_success_guest
+        SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/data/execution_success_guest.c"
+        OUTPUT "${MESH_MGMT_EXECUTION_TEST_SUCCESS_WASM}")
     add_executable(mesh_native_test_worker
         mesh_native_test_worker_main.c)
     set_target_properties(mesh_native_test_worker PROPERTIES
@@ -553,9 +550,7 @@ foreach(test_source ${MESH_TEST_SOURCES})
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${_turbo_p2p_runtime_dlls} $<TARGET_FILE_DIR:${test_name}>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:TurboRuntime::Core> $<TARGET_FILE_DIR:${test_name}>
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:TurboWasm::Runtime> $<TARGET_FILE_DIR:${test_name}>)
+                ${_turbo_p2p_runtime_dlls} $<TARGET_FILE_DIR:${test_name}>)
     endif()
 
     add_test(NAME ${test_name} COMMAND ${test_name})
