@@ -266,6 +266,21 @@ static void host_initialize(native_io_sharded_context *context, void *arg) {
         SG_GO(lane, cnet_connect_peer(
             &lane->extra_client, &test->echo_address, NULL,
             &telemetry, &lane->extra_connection));
+        /* Real extra CNet client has acquired a physical CONNECTING slot.
+         * Without an explicit shared-Host publication, a cohosted P2P poll
+         * must fail before admission, key-worker or observe progression. */
+        cnet_client *extras[1] = {&lane->extra_client};
+        if (p2p_cnet_owner_preflight_sg_host(
+                lane->transport, extras, 1u, context, lane->lease)
+                != P2P_ERR_INVALID_STATE ||
+            p2p_cnet_owner_publish_sg_host_load(
+                lane->transport, context, lane->lease, 2u, 1u)
+                != P2P_ERR_INVALID_ARG) {
+            mark_failed(lane, P2P_ERR_INVALID_STATE);
+            return;
+        }
+        SG_GO(lane, p2p_cnet_owner_publish_sg_host_load(
+            lane->transport, context, lane->lease, 1u, 4u));
     }
 }
 
@@ -324,9 +339,15 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
                 mark_failed(lane, P2P_ERR_INVALID_STATE);
                 return;
             }
-            /* The NODE wrapper must reject the foreign owner lease and
-             * a stale generation before any P2P maintenance or observation. */
+            /* The NODE wrapper and Host capacity publisher both reject a
+             * foreign Owner lease before any P2P or CNet progression. */
             native_io_sharded_host_lease bad_lease = test->lanes[0].lease;
+            if (p2p_cnet_owner_publish_sg_host_load(
+                    lane->transport, context, bad_lease, 0u, 4u)
+                    != P2P_ERR_INVALID_STATE) {
+                mark_failed(lane, P2P_ERR_INVALID_STATE);
+                return;
+            }
             status = p2p_node_cnet_poll_sg_host_cohosted(
                 test->server.owner, extras, 1u,
                 context, bad_lease, &observed, &settled);
@@ -337,6 +358,12 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
             }
             bad_lease = lane->lease;
             ++bad_lease.generation;
+            if (p2p_cnet_owner_publish_sg_host_load(
+                    lane->transport, context, bad_lease, 0u, 4u)
+                    != P2P_ERR_INVALID_STATE) {
+                mark_failed(lane, P2P_ERR_INVALID_STATE);
+                return;
+            }
             status = p2p_node_cnet_poll_sg_host_cohosted(
                 test->server.owner, extras, 1u,
                 context, bad_lease, &observed, &settled);
@@ -350,6 +377,11 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
         SG_GO(lane, p2p_node_cnet_poll_sg_host_cohosted(
             test->server.owner, extras, 1u,
             context, lane->lease, &observed, &settled));
+        /* The extra client's real terminal frees its physical shared-Host
+         * slot; no polling cnet_client.impl from another shard is needed. */
+        SG_GO(lane, p2p_cnet_owner_publish_sg_host_load(
+            lane->transport, context, lane->lease,
+            lane->extra_terminal ? 0u : 1u, 4u));
     }
     ++lane->observe_calls;
     lane->observed += observed;
