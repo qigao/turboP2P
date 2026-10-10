@@ -40,7 +40,16 @@
 #if BENCH_RAW_ASYNC_PROGRESS != 0 && BENCH_RAW_ASYNC_PROGRESS != 1
 #error Invalid BENCH_RAW_ASYNC_PROGRESS
 #endif
-#define RAW_DRIVER_LABEL (BENCH_RAW_ASYNC_PROGRESS ? "owner-independent" : "global-barrier")
+#ifndef BENCH_APP_INDEPENDENT
+#define BENCH_APP_INDEPENDENT 0
+#endif
+#if BENCH_APP_INDEPENDENT != 0 && BENCH_APP_INDEPENDENT != 1
+#error BENCH_APP_INDEPENDENT must be 0 or 1
+#endif
+#define RAW_DRIVER_LABEL (BENCH_APP_INDEPENDENT ? \
+    (BENCH_RAW_ASYNC_PROGRESS ? "owner-independent-app-independent" \
+                              : "global-barrier-app-independent") \
+    : (BENCH_RAW_ASYNC_PROGRESS ? "owner-independent" : "global-barrier"))
 enum { RAW_SESSIONS=4, RAW_FINALS=BENCH_RAW_FINALS,
        RAW_SHARDS=RAW_FINALS+1, RAW_PER_FINAL=RAW_SESSIONS/RAW_FINALS,
        RAW_BATCH=16, RAW_BYTES_MAX=1024, RAW_TIMEOUT_MS=15000 };
@@ -53,7 +62,7 @@ typedef struct {
   cnet_client client;
   cnet_connection connection;
   uint8_t request[RAW_BYTES_MAX],received_frame[RAW_BYTES_MAX];
-  size_t received_used, received, rounds, warmup;
+  size_t received_used, received, next_to_send, rounds, warmup;
   size_t connected,terminal,invalid;
   uint64_t sent_ns,*samples;
 } raw_client;
@@ -508,6 +517,47 @@ static void finish_independent(raw_case *sc) {
 static void run_rounds(raw_case *sc) {
   const size_t total=sc->warmup+sc->rounds;
   uint64_t wall0=0u,cpu0=0u;
+#if BENCH_APP_INDEPENDENT
+  /* Identical four independent per-session one-inflight request streams
+   * to the signed MMP fixture; no global app round barrier and no
+   * duplicate receive demand. The native CNet SG Host remains sole
+   * external observer, whichever Owner scheduler was selected. */
+  for (size_t phase=0u;phase<2u;++phase) {
+    const size_t target=phase?total:sc->warmup;
+    if (phase) {
+      RAW_MEASURE_BOUNDARY(sc);
+      wall0=mono_ns(CLOCK_MONOTONIC);
+      cpu0=mono_ns(CLOCK_PROCESS_CPUTIME_ID);
+    }
+    const uint64_t deadline=cmeta_monotonic_ms()+RAW_TIMEOUT_MS;
+    for (;;) {
+      bool all_done=true;
+      for (size_t i=0u;i<RAW_SESSIONS;++i) {
+        raw_client *c=&sc->clients[i];
+        check_equal((size_t)0u,c->invalid);
+        check_true(c->received<=c->next_to_send &&
+                   c->next_to_send<=target);
+        if (c->received==c->next_to_send && c->next_to_send<target) {
+          const size_t round=c->next_to_send;
+          frame(c->request,sc->bytes,i,round);
+          c->sent_ns=mono_ns(CLOCK_MONOTONIC);
+          check_equal(SALTS_OK,send_copy(
+              &c->client,c->connection,c->request,sc->bytes));
+          c->next_to_send++;
+        }
+        if (c->received!=target) all_done=false;
+      }
+      if (all_done) break;
+      check_true(cmeta_monotonic_ms()<deadline);
+      RAW_MEASURE_PUMP(sc);
+    }
+    for (size_t i=0u;i<RAW_SESSIONS;++i) {
+      check_equal(target,sc->clients[i].received);
+      check_equal(target,sc->clients[i].next_to_send);
+      check_equal((size_t)0u,sc->clients[i].invalid);
+    }
+  }
+#else
   for (size_t round=0u;round<total;++round) {
     if (round==sc->warmup) {
       RAW_MEASURE_BOUNDARY(sc);
@@ -534,6 +584,7 @@ static void run_rounds(raw_case *sc) {
       check_equal((size_t)0u,sc->clients[i].invalid);
     }
   }
+#endif
   RAW_MEASURE_FINISH(sc);
   uint64_t wall1=mono_ns(CLOCK_MONOTONIC),cpu1=mono_ns(CLOCK_PROCESS_CPUTIME_ID);
   const double elapsed=(double)(wall1-wall0)/1e9;

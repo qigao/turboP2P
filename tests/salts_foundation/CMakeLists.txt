@@ -362,6 +362,43 @@ if(P2P_RAW_CNET_SG_BUILD_BENCHMARKS)
     target_link_libraries(bench_raw_cnet_sg_${finals}_async PRIVATE
       Salts::CNet Salts::TinyTest)
   endforeach()
+  # True application session-independent workload, still exactly 4 sessions.
+  # Run separately from the batch-barrier fixture; do not conflate the two
+  # different offered-load models when claiming SG multicore scaling.
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_raw_cnet_sg_${finals}_sessions
+      "${mesh_tests}/../bench/bench_raw_cnet_sg_echo.c")
+    set_property(TARGET bench_raw_cnet_sg_${finals}_sessions PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_raw_cnet_sg_${finals}_sessions
+      PRIVATE BENCH_RAW_FINALS=${finals} BENCH_APP_INDEPENDENT=1)
+    target_link_libraries(bench_raw_cnet_sg_${finals}_sessions PRIVATE
+      Salts::CNet Salts::TinyTest)
+    add_executable(bench_raw_cnet_sg_${finals}_async_sessions
+      "${mesh_tests}/../bench/bench_raw_cnet_sg_echo.c")
+    set_property(TARGET bench_raw_cnet_sg_${finals}_async_sessions PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_raw_cnet_sg_${finals}_async_sessions
+      PRIVATE BENCH_RAW_FINALS=${finals} BENCH_RAW_ASYNC_PROGRESS=1 BENCH_APP_INDEPENDENT=1)
+    target_link_libraries(bench_raw_cnet_sg_${finals}_async_sessions PRIVATE
+      Salts::CNet Salts::TinyTest)
+  endforeach()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_mesh_mmp_sg_${finals}_sessions
+      "${mesh_tests}/../bench/bench_mesh_mmp_sg_pool.c")
+    set_property(TARGET bench_mesh_mmp_sg_${finals}_sessions PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_mesh_mmp_sg_${finals}_sessions PRIVATE
+      BENCH_MMP_FINALS=${finals} BENCH_APP_INDEPENDENT=1)
+    target_include_directories(bench_mesh_mmp_sg_${finals}_sessions PRIVATE "${mesh_tests}")
+    target_link_libraries(bench_mesh_mmp_sg_${finals}_sessions PRIVATE
+      mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+    add_executable(bench_mesh_mmp_sg_${finals}_async_sessions
+      "${mesh_tests}/../bench/bench_mesh_mmp_sg_pool.c")
+    set_property(TARGET bench_mesh_mmp_sg_${finals}_async_sessions PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_mesh_mmp_sg_${finals}_async_sessions PRIVATE
+      BENCH_MMP_FINALS=${finals} BENCH_ASYNC_PROGRESS=1 BENCH_APP_INDEPENDENT=1)
+    target_include_directories(bench_mesh_mmp_sg_${finals}_async_sessions PRIVATE "${mesh_tests}")
+    target_link_libraries(bench_mesh_mmp_sg_${finals}_async_sessions PRIVATE
+      mgmt_agent_runtime p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
 endif()
 
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
