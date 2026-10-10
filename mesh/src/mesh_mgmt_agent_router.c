@@ -660,6 +660,31 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_session_v1(
   return MESH_MGMT_AGENT_ROUTER_OK;
 }
 
+
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_peer_v1(
+    const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
+    mesh_mgmt_agent_router_ready_v1_t *out_ready) {
+  if (out_ready) memset(out_ready, 0, sizeof(*out_ready));
+  if (!router || !peer || !out_ready)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
+  if (router->state != MESH_MGMT_AGENT_ROUTER_INSTALLED)
+    return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+  for (size_t i = 0u; i < router->max_peers; ++i) {
+    const mesh_mgmt_agent_router_slot_v1_t *slot = slot_at_const(router, i);
+    if (!slot || !slot->active || slot->peer != peer) continue;
+    const mesh_mgmt_session_v1_t *session =
+        &slot->runtime.protocol_peer.connection.dispatcher.session;
+    if (session->state != MESH_MGMT_SESSION_ESTABLISHED ||
+        !session->remote_hello_verified)
+      return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
+    return mesh_mgmt_agent_router_ready_session_v1(
+        router, peer, slot->remote_transport_peer_id,
+        session->remote_certificate.managed_node_id,
+        slot->connection_id, out_ready);
+  }
+  return MESH_MGMT_AGENT_ROUTER_PEER_NOT_FOUND;
+}
+
 mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_physical_ready_v1(
     const mesh_mgmt_agent_router_v1_t *router, const p2p_peer_t *peer,
     const uint8_t expected_transport_peer_id[P2P_KEY_SIZE],

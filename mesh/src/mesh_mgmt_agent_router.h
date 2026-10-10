@@ -232,6 +232,19 @@ mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_session_v1(
     const uint8_t expected_connection_id[16], /* NULL for first proof */
     mesh_mgmt_agent_router_ready_v1_t *out_ready);
 
+/* Returns a copied signed MMP READY snapshot for the EXACT active Router
+ * peer, deriving transport/managed-node identities only from the already
+ * verified Router slot and its signed remote certificate. This avoids
+ * introducing a caller-supplied "authenticated" flag during callbacks.
+ * This is not a physical Manager or Pool lease; always use the same-peer
+ * physical proof when granting ClientPool READY. Zeroes output on error. */
+mesh_mgmt_agent_router_result_t mesh_mgmt_agent_router_ready_peer_v1(
+    const mesh_mgmt_agent_router_v1_t *router,
+    const p2p_peer_t *peer,
+    mesh_mgmt_agent_router_ready_v1_t *out_ready);
+
+
+
 /**
  * Sends one canonical COMMAND_REQUEST through the unique established session
  * authenticated for target_node_id. Physical peer addresses never cross this
