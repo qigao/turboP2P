@@ -104,6 +104,11 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
  * Extra clients must reach real terminal/stop/destroy BEFORE SG lease release.
  * Do not call the standalone SG poll on any participant in the same batch. */
 #define P2P_CNET_SG_MAX_COHOST_CLIENTS 4u
+/* Side-effect-free admission check for the P2P Node wrapper. Always check
+ * lease, shard and client aliases BEFORE P2P protocol maintenance. */
+int p2p_cnet_owner_preflight_sg_host(
+    p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
+    native_io_sharded_context *context, native_io_sharded_host_lease lease);
 int p2p_cnet_owner_poll_sg_host_cohosted(
     p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
     native_io_sharded_context *context,

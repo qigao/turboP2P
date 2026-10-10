@@ -863,20 +863,15 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
  * The API is intentionally one-transport-per-shard. When multiple CNet
  * consumers share a shard the host must advance/route them in ONE combined
  * cnet_sg_host_routes, not invoke this helper once for each consumer. */
-int p2p_cnet_owner_poll_sg_host_cohosted(
+/* Shared zero-side-effect preflight. A P2P Node must call this BEFORE
+ * expiring admissions, pumping private-key work or advancing CNet on a
+ * possibly foreign/stale SG lease. The transport repeats it at its boundary
+ * so direct callers cannot bypass the ownership contract. */
+int p2p_cnet_owner_preflight_sg_host(
     p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
-    native_io_sharded_context *context,
-    native_io_sharded_host_lease lease,
-    size_t *out_observed, size_t *out_sg_settled) {
-    size_t count = 0u, routed_events = 0u;
-    size_t accepts = 0u, sharded = 0u;
-    cnet_sg_host_routes routes = {0};
-    cnet_client *clients[P2P_CNET_SG_MAX_COHOST_CLIENTS + 1u] = {0};
-    int result = P2P_OK, status;
-    if (out_observed) *out_observed = 0u;
-    if (out_sg_settled) *out_sg_settled = 0u;
+    native_io_sharded_context *context, native_io_sharded_host_lease lease) {
     if (extra_count > P2P_CNET_SG_MAX_COHOST_CLIENTS ||
-        (extra_count != 0u && !extras) || !out_observed || !out_sg_settled)
+        (extra_count != 0u && !extras))
         return P2P_ERR_INVALID_ARG;
     if (!owner || !context ||
         !owner->external_backend || !owner->host_batch ||
@@ -894,6 +889,26 @@ int p2p_cnet_owner_poll_sg_host_cohosted(
             if (extras[i] == extras[j])
                 return P2P_ERR_INVALID_ARG;
     }
+    return P2P_OK;
+}
+
+int p2p_cnet_owner_poll_sg_host_cohosted(
+    p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    size_t *out_observed, size_t *out_sg_settled) {
+    size_t count = 0u, routed_events = 0u;
+    size_t accepts = 0u, sharded = 0u;
+    cnet_sg_host_routes routes = {0};
+    cnet_client *clients[P2P_CNET_SG_MAX_COHOST_CLIENTS + 1u] = {0};
+    int result = P2P_OK, status;
+    if (out_observed) *out_observed = 0u;
+    if (out_sg_settled) *out_sg_settled = 0u;
+    if (!out_observed || !out_sg_settled)
+        return P2P_ERR_INVALID_ARG;
+    result = p2p_cnet_owner_preflight_sg_host(
+        owner, extras, extra_count, context, lease);
+    if (result != P2P_OK) return result;
     owner->busy = 1;
 
     if (owner->sg_final) {

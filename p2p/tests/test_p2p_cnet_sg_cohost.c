@@ -310,6 +310,27 @@ static void host_progress(native_io_sharded_context *context, void *arg) {
                 mark_failed(lane, P2P_ERR_INVALID_STATE);
                 return;
             }
+            /* The NODE wrapper must reject the foreign owner lease and
+             * a stale generation before any P2P maintenance or observation. */
+            native_io_sharded_host_lease bad_lease = test->lanes[0].lease;
+            status = p2p_node_cnet_poll_sg_host_cohosted(
+                test->server.owner, extras, 1u,
+                context, bad_lease, &observed, &settled);
+            if (status != P2P_ERR_INVALID_STATE || observed != 0u ||
+                settled != 0u) {
+                mark_failed(lane, P2P_ERR_INVALID_STATE);
+                return;
+            }
+            bad_lease = lane->lease;
+            ++bad_lease.generation;
+            status = p2p_node_cnet_poll_sg_host_cohosted(
+                test->server.owner, extras, 1u,
+                context, bad_lease, &observed, &settled);
+            if (status != P2P_ERR_INVALID_STATE || observed != 0u ||
+                settled != 0u) {
+                mark_failed(lane, P2P_ERR_INVALID_STATE);
+                return;
+            }
             ++lane->wrong_owner_rejections;
         }
         SG_GO(lane, p2p_node_cnet_poll_sg_host_cohosted(

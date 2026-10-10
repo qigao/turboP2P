@@ -325,6 +325,15 @@ static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
         for (size_t j = 0u; j < i; ++j)
             if (extras[i] == extras[j]) return P2P_ERR_INVALID_ARG;
     }
+    if (context) {
+        if (!lease || !out_observed || !out_sg_settled)
+            return P2P_ERR_INVALID_ARG;
+        /* Reject foreign/stale lease and self-aliased cohosts BEFORE touching
+         * admission expiry, peer tables or key-worker completion state. */
+        result = p2p_cnet_owner_preflight_sg_host(
+            owner->transport, extras, extra_count, context, *lease);
+        if (result != P2P_OK) return result;
+    }
     owner->busy = 1;
     now = cmeta_monotonic_ms();
     result = p2p_cnet_admission_expire(owner->admission, now);
