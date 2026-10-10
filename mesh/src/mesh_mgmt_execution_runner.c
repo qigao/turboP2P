@@ -333,6 +333,9 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_resolve_v1(
   return MESH_MGMT_EXECUTION_RUNNER_OK;
 }
 
+/* Runs exactly one prestaged import-free Wasm function with no implicit
+ * host capabilities or network retry. The execution Worker owns this call;
+ * a CNet/NativeIO SG owner must NEVER run the guest inline. */
 mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_run_v1(
     const mesh_mgmt_execution_runner_v1_t *runner,
     const mesh_mgmt_execution_request_v1_t *request,
@@ -340,16 +343,24 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_run_v1(
     uint64_t now_ms, const mesh_mgmt_execution_runner_io_v1_t *io,
     mesh_mgmt_execution_runner_output_v1_t *out) {
   const mesh_mgmt_execution_deployment_entry_v1_t *deployment;
-  turbo_runtime_config_t config;
-  turbo_runtime_run_request_t runtime_request;
-  turbo_runtime_run_result_t runtime_result;
-  turbo_runtime_t *runtime = NULL;
-  turbo_runtime_app_t *app = NULL;
-  runner_io_context_t io_context;
-  uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  int runtime_code;
+  turbowasm_runtime_config config = {0};
+  turbowasm_module module = {0};
+  turbowasm_instance instance = {0};
+  turbowasm_module_summary summary = {0};
+  turbowasm_function_signature signature = {0};
+  turbowasm_execution_options options = {0};
+  turbowasm_value guest_result = {0};
+  turbowasm_trap trap = TURBOWASM_TRAP_NONE;
+  turbowasm_status status = TURBOWASM_INVALID_ARGUMENT;
+  runner_deadline_v1_t deadline = {0};
+  uint8_t *borrowed_bytes = NULL;
+  size_t borrowed_size = 0u, allocation_budget = 0u, result_count = 0u;
+  uint32_t entry_function = 0u;
+  unsigned int hash_len = 0u;
+  int found_entry = 0;
   mesh_mgmt_execution_runner_result_t result =
       MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
+  static const uint8_t empty_output[] = {0};
 
   if (!runner || !runner->entries || !request || !effective_policy || !out)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
@@ -357,132 +368,137 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_run_v1(
   if (mesh_mgmt_execution_request_validate_v1(request, now_ms) !=
       MESH_MGMT_EXECUTION_OK)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
-  if ((request->input_kind != MESH_MGMT_EXECUTION_INPUT_NONE &&
-       request->input_kind != MESH_MGMT_EXECUTION_INPUT_INLINE) ||
+  /* No WASI, filesystem, networking, stdout or input-import capability is
+   * accidentally granted. The V1 raw guest accepts no inline input; reject
+   * such requests instead of silently discarding their application payload. */
+  if (request->input_kind != MESH_MGMT_EXECUTION_INPUT_NONE ||
       (request->output_mode != MESH_MGMT_EXECUTION_OUTPUT_NONE &&
-       request->output_mode != MESH_MGMT_EXECUTION_OUTPUT_DIGEST))
+       request->output_mode != MESH_MGMT_EXECUTION_OUTPUT_DIGEST) ||
+      effective_policy->capabilities !=
+          MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1)
     return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
-  if (effective_policy->capabilities !=
-      MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1)
-    return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
-  if (request->inline_input_size > effective_policy->limits.input_bytes)
+  (void)io; /* Import-free raw ABI cannot emit stdout/stderr events. */
+  if (!safe_allocation_budget(&effective_policy->limits,
+                              &allocation_budget))
     return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
 
-  deployment =
-      find_deployment(runner, request->deployment_id,
-                      request->deployment_generation);
+  deployment = find_deployment(
+      runner, request->deployment_id, request->deployment_generation);
   if (!deployment)
     return MESH_MGMT_EXECUTION_RUNNER_NOT_FOUND;
   if (deployment->runtime != MESH_MGMT_EXECUTION_DEPLOYMENT_WASM_V1)
     return MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
-  if (memcmp(deployment->module_digest, request->package_digest,
-             MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0)
+  if (CRYPTO_memcmp(deployment->module_digest, request->package_digest,
+                    MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0)
     return MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;
-  result = mesh_mgmt_execution_runner_module_digest_v1(
-      deployment->module_path, effective_policy->limits.module_bytes, digest,
-      NULL);
+  result = read_verified_module(
+      deployment->module_path, deployment->module_digest,
+      effective_policy->limits.module_bytes,
+      &borrowed_bytes, &borrowed_size);
   if (result != MESH_MGMT_EXECUTION_RUNNER_OK)
     return result;
-  if (memcmp(digest, deployment->module_digest,
-             MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0)
-    return MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;
+  result = MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
 
-  turbo_runtime_config_init(&config);
-  config.allowed_capabilities = TURBO_WASM_CAP_CORE | TURBO_WASM_CAP_UTILS |
-                                TURBO_WASM_CAP_APP;
-  config.limits.execution.stack_bytes =
-      effective_policy->limits.stack_bytes;
-  config.limits.execution.linear_memory_bytes =
+  turbowasm_runtime_config_init(&config);
+  config.limits.max_module_bytes = effective_policy->limits.module_bytes;
+  config.limits.max_linear_memory_bytes =
       effective_policy->limits.linear_memory_bytes;
-  config.limits.execution.module_bytes =
-      effective_policy->limits.module_bytes;
-  config.limits.execution.call_timeout_ms =
-      effective_policy->limits.timeout_ms;
-  config.limits.execution.control_flow_steps =
-      effective_policy->limits.control_flow_steps;
-  config.limits.execution.host_calls_per_invocation =
-      effective_policy->limits.host_calls;
-  config.limits.execution.copied_guest_bytes_per_invocation =
-      effective_policy->limits.copied_guest_bytes;
-  config.limits.input_bytes = effective_policy->limits.input_bytes;
-  config.limits.stdout_bytes = effective_policy->limits.stdout_bytes;
-  config.limits.stderr_bytes = effective_policy->limits.stderr_bytes;
+  config.limits.max_allocation_bytes = allocation_budget;
+  config.limits.max_table_elements = 64u;
+  status = turbowasm_module_load_borrowed_with_config(
+      &module, borrowed_bytes, borrowed_size, &config);
+  if (status != TURBOWASM_OK) goto cleanup;
+  out->modules_loaded = 1u;
 
-  runtime_code = turbo_runtime_create(&config, &runtime);
-  if (runtime_code != TURBO_RUNTIME_OK) {
-    out->runtime_code = runtime_code;
-    return MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
-  }
-  runtime_code =
-      turbo_runtime_load_wasm(runtime, deployment->module_path, &app);
-  if (runtime_code != TURBO_RUNTIME_OK) {
-    out->runtime_code = runtime_code;
-    copy_runtime_error(runtime, out);
+  if (!turbowasm_module_summary_get(&module, &summary)) {
+    status = TURBOWASM_MALFORMED_MODULE;
     goto cleanup;
   }
-
-  result = mesh_mgmt_execution_runner_module_digest_v1(
-      deployment->module_path, effective_policy->limits.module_bytes, digest,
-      NULL);
-  if (result != MESH_MGMT_EXECUTION_RUNNER_OK)
-    goto cleanup;
-  if (memcmp(digest, deployment->module_digest,
-             MESH_MGMT_EXECUTION_DIGEST_SIZE) != 0) {
-    result = MESH_MGMT_EXECUTION_RUNNER_DIGEST_MISMATCH;
+  /* Explicitly deny start-section execution and imports. Instance creation
+   * can therefore never execute unbudgeted start code or hidden host effects. */
+  if (summary.has_start || turbowasm_module_import_count(&module) != 0u ||
+      turbowasm_module_memory_count(&module) > 1u) {
+    result = MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
     goto cleanup;
   }
-
-  memset(&io_context, 0, sizeof(io_context));
-  io_context.io = io;
-  io_context.stdout_hash = EVP_MD_CTX_new();
-  io_context.stderr_hash = EVP_MD_CTX_new();
-  if (!io_context.stdout_hash || !io_context.stderr_hash ||
-      EVP_DigestInit_ex(io_context.stdout_hash, EVP_sha256(), NULL) != 1 ||
-      EVP_DigestInit_ex(io_context.stderr_hash, EVP_sha256(), NULL) != 1) {
-    EVP_MD_CTX_free(io_context.stdout_hash);
-    EVP_MD_CTX_free(io_context.stderr_hash);
-    result = MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
+  for (size_t i = 0u; i < turbowasm_module_memory_count(&module); ++i) {
+    turbowasm_memory_desc memory = {0};
+    if (!turbowasm_module_memory_at(&module, i, &memory) ||
+        memory.imported || memory.shared || memory.memory64 ||
+        memory.page_size == 0u ||
+        memory.minimum64 >
+            effective_policy->limits.linear_memory_bytes / memory.page_size) {
+      result = MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
+      goto cleanup;
+    }
+  }
+  for (size_t i = 0u; i < turbowasm_module_export_count(&module); ++i) {
+    const turbowasm_export_desc *entry =
+        turbowasm_module_export_at(&module, i);
+    if (!is_turbo_main(entry)) continue;
+    if (found_entry) {
+      result = MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
+      goto cleanup;
+    }
+    entry_function = entry->item_index;
+    found_entry = 1;
+  }
+  if (!found_entry ||
+      !turbowasm_module_function_signature_get(
+          &module, entry_function, &signature) ||
+      signature.param_count != 0u || signature.result_count != 1u ||
+      turbowasm_module_function_result_type(
+          &module, entry_function, 0u) !=
+          turbowasm_value_type_descriptor(TURBOWASM_VALUE_I32)) {
+    result = MESH_MGMT_EXECUTION_RUNNER_POLICY_DENIED;
     goto cleanup;
   }
+  status = turbowasm_instance_create(&instance, &module);
+  if (status != TURBOWASM_OK) goto cleanup;
 
-  memset(&runtime_request, 0, sizeof(runtime_request));
-  runtime_request.struct_size = sizeof(runtime_request);
-  runtime_request.input = request->input_kind == MESH_MGMT_EXECUTION_INPUT_INLINE
-                              ? request->inline_input
-                              : NULL;
-  runtime_request.input_size = request->inline_input_size;
-  runtime_request.write_stdout = write_stdout;
-  runtime_request.write_stderr = write_stderr;
-  runtime_request.io_user_data = &io_context;
-  memset(&runtime_result, 0, sizeof(runtime_result));
-  runtime_result.struct_size = sizeof(runtime_result);
-
-  runtime_code =
-      turbo_runtime_app_run(app, &runtime_request, &runtime_result);
-  out->runtime_code = runtime_result.runtime_code;
-  out->runtime_stage = (int)runtime_result.stage;
-  out->guest_exit_code = runtime_result.guest_exit_code;
-  out->invocations = runtime_result.wasm_usage.invocations;
-  out->host_calls = runtime_result.wasm_usage.host_calls;
-  out->copied_guest_bytes = runtime_result.wasm_usage.copied_guest_bytes;
-  out->modules_loaded = runtime_result.wasm_usage.modules_loaded;
-  out->modules_rejected = runtime_result.wasm_usage.modules_rejected;
-  out->open_handles = runtime_result.wasm_usage.open_handles;
-  result = finish_output_hashes(&io_context, out);
-  EVP_MD_CTX_free(io_context.stdout_hash);
-  EVP_MD_CTX_free(io_context.stderr_hash);
-  if (result != MESH_MGMT_EXECUTION_RUNNER_OK)
+  deadline.deadline_ms = cmeta_monotonic_ms();
+  if (UINT64_MAX - deadline.deadline_ms <
+      effective_policy->limits.timeout_ms)
+    deadline.deadline_ms = UINT64_MAX;
+  else
+    deadline.deadline_ms += effective_policy->limits.timeout_ms;
+  options.has_fuel_limit = true;
+  options.fuel = effective_policy->limits.control_flow_steps;
+  options.should_interrupt = runtime_interrupted;
+  options.interrupt_context = &deadline;
+  status = turbowasm_instance_invoke_with_options(
+      &instance, entry_function, NULL, 0u, &guest_result, 1u,
+      &result_count, &trap, &options);
+  out->runtime_stage = 7; /* actual guest invocation */
+  if (status != TURBOWASM_OK || trap != TURBOWASM_TRAP_NONE)
     goto cleanup;
-  if (runtime_code != TURBO_RUNTIME_OK) {
-    copy_runtime_error(runtime, out);
-    result = MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
+  if (result_count != 1u || guest_result.kind != TURBOWASM_VALUE_I32) {
+    status = TURBOWASM_TYPE_MISMATCH;
+    goto cleanup;
+  }
+  out->runtime_code = (int)TURBOWASM_OK;
+  out->guest_exit_code = guest_result.as.i32;
+  out->invocations = 1u;
+  /* An import-free guest has no stdout/stderr or host effects. Record
+   * canonical SHA-256 of empty output; no synthetic host usage is reported. */
+  if (EVP_Digest(empty_output, 0u, out->stdout_digest, &hash_len,
+                 EVP_sha256(), NULL) != 1 ||
+      hash_len != MESH_MGMT_EXECUTION_DIGEST_SIZE ||
+      EVP_Digest(empty_output, 0u, out->stderr_digest, &hash_len,
+                 EVP_sha256(), NULL) != 1 ||
+      hash_len != MESH_MGMT_EXECUTION_DIGEST_SIZE) {
+    status = TURBOWASM_INVALID_ARGUMENT;
     goto cleanup;
   }
   result = MESH_MGMT_EXECUTION_RUNNER_OK;
 
 cleanup:
-  if (app)
-    turbo_runtime_app_destroy(app);
-  turbo_runtime_destroy(runtime);
+  if (result == MESH_MGMT_EXECUTION_RUNNER_RUNTIME)
+    describe_runtime_status(out, status);
+  /* This order is mandatory: instance → validated module → borrowed bytes.
+   * No instance, module or pooled NativeIO object may escape this Worker. */
+  turbowasm_instance_destroy(&instance);
+  turbowasm_module_destroy(&module);
+  free(borrowed_bytes);
   return result;
 }
