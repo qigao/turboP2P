@@ -45,7 +45,7 @@ static void mesh_mgmt_execution_worker_run_job(void *argument) {
 mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_init_v1(
     mesh_mgmt_execution_worker_v1_t *worker,
     const mesh_mgmt_execution_worker_config_v1_t *config) {
-  turbo_threadpool_config_t pool_config;
+  cmeta_threadpool_config_t pool_config;
 
   if (worker == NULL || config == NULL || config->service == NULL ||
       config->completion == NULL || config->queue_capacity == 0u ||
@@ -64,7 +64,7 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_init_v1(
   memset(&pool_config, 0, sizeof(pool_config));
   pool_config.num_threads = 1;
   pool_config.queue_capacity = config->queue_capacity;
-  worker->pool = turbo_threadpool_create_with_config(&pool_config);
+  worker->pool = cmeta_threadpool_create_with_config(&pool_config);
   if (worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_RESOURCE_EXHAUSTED;
   }
@@ -86,13 +86,13 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_try_submit_v1(
     const mesh_mgmt_execution_shadow_command_v1_t *command,
     const mesh_mgmt_execution_authorization_input_v1_t *authorization) {
   mesh_mgmt_execution_worker_job_v1_t *job;
-  int accepting;
+
 
   if (worker == NULL || command == NULL || authorization == NULL ||
       worker->initialized == 0u || worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_INVALID_ARG;
   }
-  if (turbo_threadpool_is_accepting(worker->pool) == 0) {
+  if (cmeta_threadpool_is_accepting(worker->pool) == 0) {
     return MESH_MGMT_EXECUTION_WORKER_CLOSED;
   }
 
@@ -103,15 +103,21 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_try_submit_v1(
   job->worker = worker;
   job->command = *command;
   job->authorization = *authorization;
-  if (turbo_threadpool_try_submit(
-          worker->pool, mesh_mgmt_execution_worker_run_job, job) == 0) {
-    return MESH_MGMT_EXECUTION_WORKER_OK;
+  {
+    const int status = cmeta_threadpool_try_submit(
+        worker->pool, mesh_mgmt_execution_worker_run_job, job);
+    if (status == SALTS_OK)
+      return MESH_MGMT_EXECUTION_WORKER_OK;
+    /* A rejected nonblocking admission invokes no callback and transfers
+     * no ownership. Only ENOBUFS means queue pressure; all other statuses
+     * fail fast rather than pretending a retryable full queue. */
+    free(job);
+    if (status == SALTS_ENOBUFS)
+      return MESH_MGMT_EXECUTION_WORKER_FULL;
+    if (status == SALTS_ESHUTDOWN)
+      return MESH_MGMT_EXECUTION_WORKER_CLOSED;
+    return MESH_MGMT_EXECUTION_WORKER_INVALID_ARG;
   }
-
-  accepting = turbo_threadpool_is_accepting(worker->pool);
-  free(job);
-  return accepting != 0 ? MESH_MGMT_EXECUTION_WORKER_FULL
-                        : MESH_MGMT_EXECUTION_WORKER_CLOSED;
 }
 
 mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_shutdown_v1(
@@ -119,15 +125,17 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_shutdown_v1(
   if (worker == NULL || worker->initialized == 0u || worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_INVALID_ARG;
   }
-  turbo_threadpool_shutdown(worker->pool);
-  turbo_threadpool_wait(worker->pool);
+  if (cmeta_threadpool_shutdown_with_policy(
+          worker->pool, SALTS_THREADPOOL_SHUTDOWN_DRAIN) != SALTS_OK ||
+      cmeta_threadpool_wait_status(worker->pool) != SALTS_OK)
+    return MESH_MGMT_EXECUTION_WORKER_CLOSED;
   return MESH_MGMT_EXECUTION_WORKER_OK;
 }
 
 mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_get_stats_v1(
     mesh_mgmt_execution_worker_v1_t *worker,
     mesh_mgmt_execution_worker_stats_v1_t *out_stats) {
-  turbo_threadpool_stats_t pool_stats;
+  cmeta_threadpool_stats_t pool_stats;
 
   if (worker == NULL || out_stats == NULL || worker->initialized == 0u ||
       worker->pool == NULL) {
@@ -135,7 +143,7 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_get_stats_v1(
   }
   memset(&pool_stats, 0, sizeof(pool_stats));
   memset(out_stats, 0, sizeof(*out_stats));
-  turbo_threadpool_get_stats(worker->pool, &pool_stats);
+  cmeta_threadpool_get_stats(worker->pool, &pool_stats);
   out_stats->queue_capacity = pool_stats.queue_capacity;
   out_stats->accepting = pool_stats.accepting != 0;
   out_stats->submitted = (uint64_t)pool_stats.submitted_tasks;
@@ -151,9 +159,10 @@ void mesh_mgmt_execution_worker_destroy_v1(
   if (worker == NULL)
     return;
   if (worker->pool != NULL) {
-    turbo_threadpool_shutdown(worker->pool);
-    turbo_threadpool_wait(worker->pool);
-    turbo_threadpool_destroy(worker->pool);
+    (void)cmeta_threadpool_shutdown_with_policy(
+        worker->pool, SALTS_THREADPOOL_SHUTDOWN_DRAIN);
+    (void)cmeta_threadpool_wait_status(worker->pool);
+    cmeta_threadpool_destroy(worker->pool);
   }
   memset(worker, 0, sizeof(*worker));
 }
