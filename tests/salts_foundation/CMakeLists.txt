@@ -297,6 +297,8 @@ if(P2P_SG_BUILD_BENCHMARKS)
       "${TURBOP2P_SOURCE_DIR}/p2p/bench/bench_p2p_sg_owner.c")
     set_property(TARGET bench_p2p_sg_${_shards} PROPERTY LINKER_LANGUAGE CXX)
     target_compile_definitions(bench_p2p_sg_${_shards} PRIVATE BENCH_SG_SHARDS=${_shards})
+    target_include_directories(bench_p2p_sg_${_shards} PRIVATE
+      "${TURBOP2P_SOURCE_DIR}/p2p/tests")
     target_link_libraries(bench_p2p_sg_${_shards}
       PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
   endforeach()
