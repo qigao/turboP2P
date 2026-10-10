@@ -26,16 +26,16 @@ static int p2p_sg_ace_capacity_evaluate(
         taken > (uint64_t)credits->connection_capacity - reserved - queued ||
         published_credited_connections > published_live_connections)
         return SALTS_EINVAL;
-    /* The CNet Handoff snapshot and the P2P Owner's single atomic pair
-     * originate from different shards; they are not jointly linearizable.
-     * A release/adopt racing these two reads can briefly show credited >
-     * TAKEN. Do NOT abort the entire listener for normal concurrent
-     * retirement: decline only this candidate. The output stays cleared,
-     * and upstream Owner Placement will decide among still-eligible targets.
-     * Permanently malformed credit snapshots still fail fast above. */
-    if (published_credited_connections > taken)
-        return SALTS_ENOBUFS;
+    /* Published P2P credit may be RESERVED for direct same-Owner adoption
+     * or TAKEN for completed cross-Owner handoff. Neither is a new ledger:
+     * both are upstream CNet Handoff tokens. The Handoff credit snapshot
+     * and Owner's atomic live/credited pair are independent authorities;
+     * a concurrent release may briefly show credited > outstanding.
+     * Temporarily deny ONLY this candidate; a corrupt local (credited >
+     * live) pair still fails fast above. */
     credit_total = reserved + queued + taken;
+    if (published_credited_connections > credit_total)
+        return SALTS_ENOBUFS;
     /* Credited/adopted streams are present in BOTH the CNet physical list
      * and Handoff's TAKEN tickets; remove only that proven intersection.
      * Unadopted TAKEN is still counted. Cross-shard stale/coherency mismatch

@@ -81,6 +81,25 @@ spec("CMeta ACE admission policy composes actual CNet SG pressure") {
         check_equal(SALTS_OK, p2p_sg_ace_hint_evaluate(&strategy, &s, 0u, 0u, &hint));
         check_false(hint.eligible);
     }
+
+    it("deduplicates directly adopted RESERVED credit on the same CNet Owner") {
+        p2p_sg_ace_capacity cap = {2};
+        p2p_sg_ace_hint policy = p2p_sg_ace_capacity_strategy(&cap);
+        cnet_handoff_snapshot credits = snapshot(2, 1u, 0u, 0u);
+        cnet_owner_placement_hint hint = {0};
+        /* The live P2P connection retains the *same RESERVED* credit used
+         * for direct local admission; count one physical stream, not two. */
+        check_equal(SALTS_OK,
+            p2p_sg_ace_hint_evaluate(&policy, &credits, 1u, 1u, &hint));
+        check_equal((uint64_t)1u, hint.pressure);
+        check_true(hint.eligible);
+        /* The independent cohost has the remaining RESERVED credit. */
+        credits.reserved = 2u;
+        check_equal(SALTS_OK,
+            p2p_sg_ace_hint_evaluate(&policy, &credits, 1u, 1u, &hint));
+        check_equal((uint64_t)2u, hint.pressure);
+        check_false(hint.eligible);
+    }
     it("counts unadopted TAKEN alongside other live P2P connections") {
         p2p_sg_ace_capacity cap = {6};
         p2p_sg_ace_hint strategy = p2p_sg_ace_capacity_strategy(&cap);

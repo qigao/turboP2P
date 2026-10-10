@@ -204,9 +204,10 @@ int p2p_cnet_sg_seal_v1(p2p_cnet_sg_t *sg);
  * If CNet connect fails synchronously, release immediately; after async
  * connection terminal, release after callback return on the Owner.
  *
- * Strict capacity applies only to SG accepted inbound streams and external
- * CNet clients that explicitly use these credits, not arbitrary outbound
- * P2P paths, unregistered cohost consumers or raw OS socket capacity. Host
+ * Strict capacity applies to SG accepted inbound streams (whether
+ * cross-Owner or local same-Owner direct admission) and external CNet clients
+ * that explicitly use these credits, not arbitrary outbound P2P paths,
+ * unregistered cohost consumers or raw OS socket capacity. Host
  * must still publish any UNRESERVED cohost clients' occupied physical slots
  * via p2p_cnet_owner_publish_sg_host_load; count a reserved cohost in one
  * credit ledger only, never twice in the ACE pressure hint. */
