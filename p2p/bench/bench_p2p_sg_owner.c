@@ -355,17 +355,20 @@ static void test_four_sg_native_p2p_owners(void) {
         init_endpoint(client, 17 + (int)i * 2, 7u, 0);
     }
 
-    policy.size = sizeof(policy);
-    policy.version = P2P_CNET_SG_VERSION;
-    policy.acceptor = scenario->lanes[0].acceptor;
-    for (size_t i = 0u; i < SG4_FINALS; ++i)
-        policy.final_owners[i] = scenario->lanes[i+1u].final_transport;
-    policy.final_owner_count = SG4_FINALS;
-    policy.placement = CNET_OWNER_PLACE_ROUND_ROBIN;
-    policy.queue_capacity = 2u;
-    policy.connection_capacity = 4u;
-    check_equal(P2P_OK,
-        p2p_cnet_sg_create_v1(&policy, &scenario->handoff));
+    if (SG4_SHARDS > 1) {
+        policy.size = sizeof(policy);
+        policy.version = P2P_CNET_SG_VERSION;
+        policy.acceptor = scenario->lanes[0].acceptor;
+        for (size_t i = 0u; i < SG4_FINALS; ++i)
+            policy.final_owners[i] =
+                scenario->lanes[sg4_final_shard(i)].final_transport;
+        policy.final_owner_count = SG4_FINALS;
+        policy.placement = CNET_OWNER_PLACE_ROUND_ROBIN;
+        policy.queue_capacity = 2u;
+        policy.connection_capacity = 4u;
+        check_equal(P2P_OK,
+            p2p_cnet_sg_create_v1(&policy, &scenario->handoff));
+    }
 
     /* Sequential accept admission ensures stable, signed identity/owner
      * correspondence. Once established, all sessions advance concurrently. */
@@ -381,11 +384,13 @@ static void test_four_sg_native_p2p_owners(void) {
         check_equal(1, client->authenticated);
         check_equal(1, server->endpoint.authenticated);
         check_equal(1u, server->owner_connected);
-        p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
-        check_equal((uint64_t)(i + 1u), snap.routed);
-        check_equal((uint64_t)0u, snap.denied);
-        check_equal((size_t)1u, snap.handoff.taken);
-        check_equal((size_t)0u, snap.handoff.queued);
+        if (scenario->handoff) {
+            p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
+            check_equal((uint64_t)(i + 1u), snap.routed);
+            check_equal((uint64_t)0u, snap.denied);
+            check_equal((size_t)1u, snap.handoff.taken);
+            check_equal((size_t)0u, snap.handoff.queued);
+        }
     }
 
     for (size_t i = 0u; i < SG4_FINALS; ++i) {
@@ -393,7 +398,7 @@ static void test_four_sg_native_p2p_owners(void) {
         check_equal(P2P_OK, p2p_send_message(
             scenario->clients[i].node, scenario->clients[i].peer,
             P2P_MSG_CUSTOM, request, sizeof(request)));
-        sg4_submit(scenario, i+1u, sg4_send);
+        sg4_submit(scenario, sg4_final_shard(i), sg4_send);
     }
     sg4_barrier(scenario);
     const uint64_t exchange_deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
@@ -418,6 +423,8 @@ static void test_four_sg_native_p2p_owners(void) {
         check_equal((size_t)8u, scenario->clients[i].received_len);
     }
 
+    sg4_run_benchmark(scenario);
+
     for (size_t i = 0u; i < SG4_FINALS; ++i)
         p2p_peer_disconnect(scenario->clients[i].peer);
     const uint64_t drain_deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
@@ -425,20 +432,24 @@ static void test_four_sg_native_p2p_owners(void) {
         bool drained = true;
         sg4_pump(scenario);
         for (size_t i = 0u; i < SG4_FINALS; ++i) {
-            p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
-            if (snap.handoff.taken != 0u ||
-                !scenario->servers[i].endpoint.disconnected)
+            if (scenario->handoff) {
+                p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
+                if (snap.handoff.taken != 0u) drained = false;
+            }
+            if (!scenario->servers[i].endpoint.disconnected)
                 drained = false;
         }
         if (drained || cmeta_monotonic_ms() >= drain_deadline) break;
     }
     for (size_t i = 0u; i < SG4_FINALS; ++i) {
-        p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
-        check_equal((size_t)0u, snap.handoff.taken);
-        check_equal((size_t)0u, snap.handoff.queued);
+        if (scenario->handoff) {
+            p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
+            check_equal((size_t)0u, snap.handoff.taken);
+            check_equal((size_t)0u, snap.handoff.queued);
+        }
         check_equal(1u, scenario->servers[i].owner_disconnected);
         check_equal((size_t)0u, p2p_cnet_owner_connection_count(
-            scenario->lanes[i+1u].final_transport));
+            scenario->lanes[sg4_final_shard(i)].final_transport));
     }
     check_equal((unsigned)0u,
                 scenario->lanes[0].unwanted_local_accepts);
@@ -448,7 +459,8 @@ static void test_four_sg_native_p2p_owners(void) {
         check_equal(1u, scenario->lanes[i].wrong_owner_rejections);
     }
 
-    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(scenario->handoff));
+    if (scenario->handoff)
+        check_equal(P2P_OK, p2p_cnet_sg_seal_v1(scenario->handoff));
     for (size_t i = 0u; i < SG4_SHARDS; ++i)
         sg4_submit(scenario, i, sg4_stop);
     sg4_barrier(scenario);
@@ -471,8 +483,10 @@ static void test_four_sg_native_p2p_owners(void) {
     for (size_t i = 0u; i < SG4_SHARDS; ++i)
         check_true(scenario->lanes[i].stopped);
 
-    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(scenario->handoff));
-    scenario->handoff = NULL;
+    if (scenario->handoff) {
+        check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(scenario->handoff));
+        scenario->handoff = NULL;
+    }
     for (size_t i = 0u; i < SG4_SHARDS; ++i)
         sg4_submit(scenario, i, sg4_destroy);
     sg4_barrier(scenario);
@@ -491,8 +505,8 @@ static void test_four_sg_native_p2p_owners(void) {
     }
 }
 
-spec("P2P 4-shard NativeIO SG Host, credited P2P final Owner identities") {
-    it("hosts three distinct authenticated final P2P Owners on four actual SG shards") {
+spec("P2P SG Host real Noise benchmark: 1/2/4 SG worker topology") {
+    it("runs authenticated echo batches and safely retires SG hosts") {
         test_four_sg_native_p2p_owners();
     }
 }
