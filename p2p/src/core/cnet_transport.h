@@ -184,6 +184,39 @@ typedef struct {
 int p2p_cnet_sg_create_v1(const p2p_cnet_sg_config_v1_t *config,
                            p2p_cnet_sg_t **output);
 int p2p_cnet_sg_seal_v1(p2p_cnet_sg_t *sg);
+
+/* Strict participating SG Host credit contract, not just a placement hint.
+ * This reuses the SAME CNet Handoff capacity ledger as P2P accepted-stream
+ * handoff for the chosen final Owner; the host does not allocate another
+ * queue, Actor or credit registry. The independent CNet client MUST reserve
+ * on that Owner BEFORE cnet_connect_peer/adopt, carry the returned opaque
+ * CNet ticket across the connection's entire physical + callback lifetime,
+ * and release exactly once AFTER real CNet terminal or completed stop.
+ *
+ * A successful reserve holds a CNet Handoff RESERVED credit (never publishes
+ * a detached stream), so Handoff snapshot/reserve and P2P SG selection see
+ * the same authoritative connection_capacity. SG seal prevents new reserves,
+ * but existing credits must still be released. An outstanding credit prevents
+ * p2p_cnet_sg_destroy_v1 even if the producer and final Owner are stopped.
+ *
+ * Only that final P2P Owner's original thread may reserve/release. Invalid
+ * indices, foreign/duplicate/stale tickets and wrong thread fail closed.
+ * If CNet connect fails synchronously, release immediately; after async
+ * connection terminal, release after callback return on the Owner.
+ *
+ * Strict capacity applies only to SG accepted inbound streams and external
+ * CNet clients that explicitly use these credits, not arbitrary outbound
+ * P2P paths, unregistered cohost consumers or raw OS socket capacity. Host
+ * must still publish any UNRESERVED cohost clients' occupied physical slots
+ * via p2p_cnet_owner_publish_sg_host_load; count a reserved cohost in one
+ * credit ledger only, never twice in the ACE pressure hint. */
+int p2p_cnet_sg_cohost_credit_reserve_v1(
+    p2p_cnet_sg_t *sg, size_t final_owner_index,
+    cnet_handoff_ticket *out_credit);
+int p2p_cnet_sg_cohost_credit_release_v1(
+    p2p_cnet_sg_t *sg, size_t final_owner_index,
+    cnet_handoff_ticket credit);
+
 int p2p_cnet_sg_snapshot_v1(p2p_cnet_sg_t *sg, size_t final_owner_index,
                              p2p_cnet_sg_snapshot_v1_t *output);
 int p2p_cnet_sg_destroy_v1(p2p_cnet_sg_t *sg);

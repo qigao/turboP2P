@@ -247,6 +247,137 @@ static void test_credited_queue_full_does_not_reroute_pinned_owner(void) {
 }
 
 
+
+/* Same upstream CNet Handoff credits are reserved for a second
+ * independently managed Cohost CNet client and for real detached TCP
+ * streams. FULL at one physical quota refuses P2P admission without
+ * migrating/pinning another Owner or bypassing Noise. */
+static void test_cohost_credit_strictly_blocks_real_p2p_admission(void) {
+    endpoint_t server = {0}, rejected_client = {0}, admitted_client = {0};
+    server.remote = &admitted_client;
+    rejected_client.remote = &server;
+    admitted_client.remote = &server;
+    init_endpoint(&rejected_client, 17, 7u, 0);
+    init_endpoint(&admitted_client, 19, 7u, 0);
+    init_endpoint(&server, 33, 7u, 0);
+    cnet_stream_peer listener = {0};
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_t *sg = NULL;
+    p2p_cnet_sg_config_v1_t config = {0};
+    config.size = sizeof(config);
+    config.version = P2P_CNET_SG_VERSION;
+    config.acceptor = acceptor;
+    config.final_owners[0] = p2p_node_cnet_transport_owner(server.owner);
+    config.final_owner_count = 1u;
+    config.placement = CNET_OWNER_PLACE_EXPLICIT;
+    config.queue_capacity = 1u;
+    config.connection_capacity = 1u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&config, &sg));
+
+    cnet_handoff_ticket extra = {0}, another = {0};
+    check_equal(P2P_OK, p2p_cnet_sg_cohost_credit_reserve_v1(
+        sg, 0u, &extra));
+    check_true(extra.slot != 0u && extra.generation != 0u);
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED,
+                p2p_cnet_sg_cohost_credit_reserve_v1(sg, 0u, &another));
+    check_equal((size_t)0u, another.slot);
+    p2p_cnet_sg_snapshot_v1_t state = snapshot(sg, 0u);
+    check_equal((size_t)1u, state.handoff.reserved);
+    check_equal((size_t)0u, state.handoff.queued);
+
+    check_equal(P2P_OK, p2p_connect(rejected_client.node,
+        "127.0.0.1", (int)listener.port));
+    uint64_t deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (snapshot(sg, 0u).denied == 0u &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(rejected_client.node));
+        check_equal(P2P_OK, p2p_cnet_owner_poll(acceptor));
+        cmeta_sleep_ms(1u);
+    }
+    state = snapshot(sg, 0u);
+    check_equal((uint64_t)1u, state.denied);
+    check_equal((uint64_t)0u, state.routed);
+    check_equal((size_t)1u, state.handoff.reserved);
+
+    /* Stale generation and duplicate settlement cannot return a live slot. */
+    cnet_handoff_ticket stale = extra;
+    ++stale.generation;
+    check_equal(P2P_ERR_INVALID_STATE,
+                p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, stale));
+    check_equal(P2P_OK,
+                p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, extra));
+    check_equal(P2P_ERR_INVALID_STATE,
+                p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, extra));
+    check_equal((size_t)0u, snapshot(sg, 0u).handoff.reserved);
+
+    /* Once the independent client has returned its physical credit, the
+     * next real P2P TCP stream can be handed to its original final Owner
+     * and authenticated through cookie/Noise exactly as before. */
+    check_equal(P2P_OK, p2p_connect(admitted_client.node,
+        "127.0.0.1", (int)listener.port));
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while ((!admitted_client.authenticated || !server.authenticated) &&
+           cmeta_monotonic_ms() < deadline) {
+        check_equal(P2P_OK, p2p_poll(admitted_client.node));
+        check_equal(P2P_OK, p2p_poll(server.node));
+        check_equal(P2P_OK, p2p_cnet_owner_poll(acceptor));
+        cmeta_sleep_ms(1u);
+    }
+    check_equal(1, admitted_client.authenticated);
+    check_equal(1, server.authenticated);
+    state = snapshot(sg, 0u);
+    check_equal((uint64_t)1u, state.routed);
+    check_equal((size_t)1u, state.handoff.taken);
+    check_equal((size_t)0u, state.handoff.reserved);
+
+    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    check_equal(P2P_OK, p2p_node_cnet_stop(server.owner));
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    finish_node(&rejected_client);
+    finish_node(&admitted_client);
+    finish_node(&server);
+}
+
+static void test_cohost_credit_must_drain_before_sg_destroy(void) {
+    endpoint_t server = {0};
+    init_endpoint(&server, 33, 7u, 0);
+    cnet_stream_peer listener = {0};
+    p2p_cnet_owner_t *acceptor = open_acceptor(&listener);
+    p2p_cnet_sg_t *sg = NULL;
+    p2p_cnet_sg_config_v1_t config = {0};
+    config.size = sizeof(config);
+    config.version = P2P_CNET_SG_VERSION;
+    config.acceptor = acceptor;
+    config.final_owners[0] = p2p_node_cnet_transport_owner(server.owner);
+    config.final_owner_count = 1u;
+    config.placement = CNET_OWNER_PLACE_EXPLICIT;
+    config.queue_capacity = 1u;
+    config.connection_capacity = 1u;
+    check_equal(P2P_OK, p2p_cnet_sg_create_v1(&config, &sg));
+
+    cnet_handoff_ticket extra = {0}, declined = {0};
+    check_equal(P2P_OK, p2p_cnet_sg_cohost_credit_reserve_v1(
+        sg, 0u, &extra));
+    check_equal(P2P_OK, p2p_cnet_sg_seal_v1(sg));
+    check_equal(P2P_ERR_INVALID_STATE,
+                p2p_cnet_sg_cohost_credit_reserve_v1(sg, 0u, &declined));
+    check_equal(P2P_OK, p2p_cnet_owner_stop(acceptor));
+    check_equal(P2P_OK, p2p_node_cnet_stop(server.owner));
+    /* Both owners are stopped, but the host must not free the CNet Handoff
+     * while the independent cohost's reserved credit is still borrowed. */
+    check_equal(P2P_ERR_INVALID_STATE, p2p_cnet_sg_destroy_v1(sg));
+    check_equal((size_t)1u, snapshot(sg, 0u).handoff.reserved);
+    check_equal(P2P_OK,
+                p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, extra));
+    check_equal(P2P_ERR_INVALID_STATE,
+                p2p_cnet_sg_cohost_credit_release_v1(sg, 0u, extra));
+    check_equal(P2P_OK, p2p_cnet_sg_destroy_v1(sg));
+    check_equal(P2P_OK, p2p_cnet_owner_destroy(acceptor));
+    finish_node(&server);
+}
+
 static void pump_four_final_owners(
     endpoint_t clients[4], endpoint_t servers[4],
     p2p_cnet_owner_t *acceptor) {
@@ -353,5 +484,11 @@ spec("P2P real SG cross-Owner credited accepted-stream handoff") {
     }
     it("denies a full pinned handoff inbox and drains queued TCP on stop") {
         test_credited_queue_full_does_not_reroute_pinned_owner();
+    }
+    it("shares exact CNet Handoff capacity with a cohosted connector") {
+        test_cohost_credit_strictly_blocks_real_p2p_admission();
+    }
+    it("retains the borrowed SG Handoff until all cohost credits return") {
+        test_cohost_credit_must_drain_before_sg_destroy();
     }
 }
