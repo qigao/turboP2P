@@ -273,6 +273,16 @@ target_link_libraries(test_p2p_cnet_sg_host_four PRIVATE
 add_test(NAME test_p2p_cnet_sg_host_four COMMAND test_p2p_cnet_sg_host_four)
 set_tests_properties(test_p2p_cnet_sg_host_four PROPERTIES TIMEOUT 90)
 
+# One native SG Host observes/composes a P2P CNet client + a SECOND real
+# independently configured external CNet client on the SAME shard backend.
+add_executable(test_p2p_cnet_sg_cohost
+  "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_sg_cohost.c")
+set_property(TARGET test_p2p_cnet_sg_cohost PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_p2p_cnet_sg_cohost PRIVATE
+  p2p_node_core Salts::CNet Salts::TinyTest)
+add_test(NAME test_p2p_cnet_sg_cohost COMMAND test_p2p_cnet_sg_cohost)
+set_tests_properties(test_p2p_cnet_sg_cohost PROPERTIES TIMEOUT 90)
+
 add_executable(test_p2p_cnet_lifecycle "${TURBOP2P_SOURCE_DIR}/p2p/tests/test_p2p_cnet_lifecycle.c")
 set_property(TARGET test_p2p_cnet_lifecycle PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_p2p_cnet_lifecycle PRIVATE p2p_node_core Salts::TinyTest)

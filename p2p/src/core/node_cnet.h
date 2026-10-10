@@ -48,6 +48,17 @@ int p2p_node_cnet_poll_sg_host(p2p_node_cnet_t *owner,
                                size_t *out_observed,
                                size_t *out_sg_settled);
 
+/* Same final P2P Owner-domain maintenance and P2P Noise callbacks as above,
+ * but shares ONE SG observed batch with independent external CNet consumers.
+ * Extra consumers must be created/bound/stopped on the same SG worker and
+ * destroyed before the Host lease. There is NO per-consumer second observe. */
+int p2p_node_cnet_poll_sg_host_cohosted(
+    p2p_node_cnet_t *owner, cnet_client *const *extras, size_t extra_count,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    size_t *out_observed, size_t *out_sg_settled);
+
+
 /* Borrow the exact CNet transport Owner for an explicit host-side SG
  * placement topology. The returned pointer must outlive the SG inbox and
  * every accepted peer; stop nodes, then destroy SG, then destroy nodes.

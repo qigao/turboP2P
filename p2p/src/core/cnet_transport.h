@@ -86,6 +86,36 @@ int p2p_cnet_owner_poll_sg_host(p2p_cnet_owner_t *owner,
                                 size_t *out_observed,
                                 size_t *out_sg_settled);
 
+/* Host-composed, owner-local SG routing for 1 P2P CNet transport plus at most
+ * four other independent CNet clients borrowing THE SAME SG Host backend.
+ *
+ * These extra clients must already have been initialized with
+ * cnet_client_init_external() using the exact borrowed_backend passed to this
+ * transport, and their lifecycle/owner affine callbacks remain caller-owned.
+ * At most one external listener belongs to this route group (the P2P one).
+ *
+ * Each call performs ONE native_io_sharded_context_observe_host(), then ONE
+ * combined cnet_sg_host_route_batch() with every client. All SG-owned
+ * completions remain SG-settled, not re-submitted to any consumer. This API
+ * does not install secondary observe loops or create an Actor/backend.
+ *
+ * No duplicate/NULL CNet clients or P2P client's own internal handle are
+ * permitted in extras; wrong lease/shard and invalid configuration fail fast.
+ * Extra clients must reach real terminal/stop/destroy BEFORE SG lease release.
+ * Do not call the standalone SG poll on any participant in the same batch. */
+#define P2P_CNET_SG_MAX_COHOST_CLIENTS 4u
+/* Side-effect-free admission check for the P2P Node wrapper. Always check
+ * lease, shard and client aliases BEFORE P2P protocol maintenance. */
+int p2p_cnet_owner_preflight_sg_host(
+    p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
+    native_io_sharded_context *context, native_io_sharded_host_lease lease);
+int p2p_cnet_owner_poll_sg_host_cohosted(
+    p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
+    native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    size_t *out_observed, size_t *out_sg_settled);
+
+
 /* Stop inside a callback is deferred to poll return. Destruction inside any
  * callback is rejected. Retry stop/destroy after a drain timeout; retain owner
  * and callback contexts until destroy succeeds. Stopped owners cannot restart. */

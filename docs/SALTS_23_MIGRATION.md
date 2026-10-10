@@ -271,3 +271,40 @@ metrics by itself. The CNet cohosting contract for two+ external clients
 on one shard and repeatable 1/2/4-core latency/throughput/CPU measurements
 remain independently open. Release and focused ASan/UBSan are mandatory,
 and prebuilt SDK binaries remain outside instrumentation.
+
+
+### Phase S4 — multiple CNet consumers on ONE SG Owner (#37)
+
+A host can explicitly bind a P2P CNet Owner **plus up to four independent
+`cnet_client_init_external` consumers** to the same shard/backend using
+`p2p_cnet_owner_poll_sg_host_cohosted` (or the corresponding Node-level
+domain-maintenance entry point). This is an application-composed CNet Host,
+not a parser, strategy registry or second CNet polling runtime.
+
+All clients belong to the one native SG Owner worker and borrow the **same**
+registered host lease/backend. One bounded task advances every external
+client, performs **exactly one**
+`native_io_sharded_context_observe_host`, sends the *whole* completion batch
+through **one** `cnet_sg_host_route_batch` with all clients, and advances
+all consumer command/callback state once more. The host routes its optional
+single listener before client completions. There is no attempt to observe or
+route already-SG-owned terminals again. Duplicate/NULL client references,
+excess consumers, wrong shard or stale lease reject without fallback.
+
+Each extra CNet consumer still owns its own connection callbacks and
+protocol logic; P2P cookie/Noise and signed MMP session READY cannot be
+inferred from an unrelated CNet client's CONNECTED callback. All extra
+consumers must reach real terminal and be stopped/destroyed on their Owner
+**before** `native_io_sharded_context_release_host` succeeds. The standalone
+one-consumer SG API delegates to the same shared implementation.
+
+An installed SDK regression runs a two-shard NativeIO SG topology with a real
+P2P cross-Owner handoff + Noise-authenticated bidirectional data **while**
+a second, independent external CNet client on the P2P Owner's same backend
+connects to a separate remote listener and exchanges real TCP request/reply
+bytes. The two CNet observer lifecycles are verified on the same SG worker,
+including duplicate-client refusal and terminal/resource quiescence.
+
+This proves cohosting correctness, **not** transparent multiplexing of two
+listeners on one routes[] or comparable throughput/latency measurements.
+A general multi-listener group would need its own explicit admission topology.
