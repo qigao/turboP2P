@@ -252,12 +252,16 @@ static int random_bytes(void *ctx,uint8_t *out,size_t length) {
   return runtime_random_bytes(r,out,length);
 }
 static void init_final(bench_final *f,size_t index) {
-  bench_client base={0};
-  init_identity(&base,17u); /* SAME synthetic test server identity all Finals */
-  memcpy(f->private_key,base.private_key,32u);
-  memcpy(f->public_key,base.public_key,32u);
-  f->identity=base.identity;
+  uint8_t management_key[32]={0};
+  f->private_key[0]=17u; /* SAME synthetic test server identity all Finals */
+  management_key[0]=18u;
   f->random.next_message_byte=(uint8_t)(17u+index*31u);
+  check_equal(P2P_OK,p2p_public_key_from_private_key(
+      f->private_key,f->public_key));
+  /* Template random/callback context MUST reference persistent final Owner
+   * storage, never a temporary fixture copied from the stack. */
+  check_equal(0,prepare_runtime_config(&f->identity,NULL,NULL,
+      f->public_key,management_key,17u,17u,17u,17u,&f->random));
   f->cfg.max_peers=BENCH_PER_FINAL;
   f->cfg.endpoint_capacity=BENCH_PER_FINAL;
   f->cfg.signer_template=&f->identity.signer;
