@@ -1,4 +1,4 @@
-name: Raw CNet SG four-session TCP baseline
+name: Paired raw CNet and signed MMP SG equal-load benchmarks
 on:
   pull_request:
     branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
@@ -11,7 +11,7 @@ permissions:
   contents: read
   packages: read
 jobs:
-  raw-cnet-sg:
+  paired-transport:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -19,52 +19,67 @@ jobs:
       - uses: ./.github/actions/setup-salts-sdk
       - uses: ./.github/actions/setup-compiler-cache
         with:
-          profile: linux-cnet-sg-raw-equal-load
-      - name: Build pure CNet NativeIO SG four-session echo
+          profile: linux-raw-signed-sg-paired
+      - name: Build raw CNet and signed MMP SG profiles
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S tests/salts_foundation -B build/raw-cnet-sg-bench -G Ninja \
+          cmake -S tests/salts_foundation -B build/sg-paired -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DP2P_RAW_CNET_SG_BUILD_BENCHMARKS=ON \
+            -DP2P_MMP_SG_BUILD_BENCHMARKS=ON \
             -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
             -DVCPKG_MANIFEST_MODE=OFF
-          cmake --build build/raw-cnet-sg-bench --parallel 2 --target \
+          cmake --build build/sg-paired --parallel 2 --target \
             bench_raw_cnet_sg_1 bench_raw_cnet_sg_2 bench_raw_cnet_sg_4 \
-            bench_raw_cnet_sg_1_async bench_raw_cnet_sg_2_async bench_raw_cnet_sg_4_async
-      - name: Verify raw TCP 1/2/4 Final Owner same-work gate
+            bench_raw_cnet_sg_1_async bench_raw_cnet_sg_2_async bench_raw_cnet_sg_4_async \
+            bench_mesh_mmp_sg_1 bench_mesh_mmp_sg_2 bench_mesh_mmp_sg_4 \
+            bench_mesh_mmp_sg_1_async bench_mesh_mmp_sg_2_async bench_mesh_mmp_sg_4_async
+      - name: Interleave raw and signed four-session samples
         shell: bash
         env:
           P2P_MMP_BENCH_WARMUP: '32'
           P2P_MMP_BENCH_ROUNDS: '256'
         run: |
           set -euo pipefail
-          echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-aggregate.csv
-          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-sessions.csv
-          echo 'repeat,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > raw-sg-rtt.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > paired-sg-aggregate.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > paired-sg-sessions.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > paired-sg-rtt.csv
           {
             uname -a
             lscpu
+            cmake --version | head -1
             git rev-parse HEAD
             date -u +'%Y-%m-%dT%H:%M:%SZ'
             echo "SALTS_ROOT=$SALTS_ROOT"
             echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
-          } > raw-sg-machine.txt
+          } > paired-sg-machine.txt
           for repeat in 1 2 3 4 5; do
             for bytes in 8 1024; do
               for finals in 1 2 4; do
                 export P2P_MMP_BENCH_PAYLOAD="$bytes"
                 for mode in barrier async; do
-                  exe="bench_raw_cnet_sg_$finals"
-                  if [ "$mode" = async ]; then exe="${exe}_async"; fi
-                  log="raw-cnet-sg-$finals-final-$bytes-B-$mode-repeat-$repeat.log"
-                  "./build/raw-cnet-sg-bench/$exe" | tee "$log"
-                  grep '^RAW_CNET_SG_BENCH,' "$log" |
-                    sed 's/^RAW_CNET_SG_BENCH,//' >> raw-sg-aggregate.csv
-                  grep '^RAW_CNET_SG_SESSION,' "$log" |
-                    sed 's/^RAW_CNET_SG_SESSION,//' >> raw-sg-sessions.csv
-                  grep '^RAW_CNET_SG_RTT,' "$log" |
-                    sed "s/^RAW_CNET_SG_RTT,/$repeat,/" >> raw-sg-rtt.csv
+                  if [ $((repeat % 2)) -eq 0 ]; then order='signed raw'; else order='raw signed'; fi
+                  for stack in $order; do
+                    if [ "$stack" = raw ]; then
+                      exe="bench_raw_cnet_sg_$finals"
+                      prefix='RAW_CNET_SG'
+                      label='raw-cnet-tcp-echo'
+                    else
+                      exe="bench_mesh_mmp_sg_$finals"
+                      prefix='P2P_MMP_SG'
+                      label='sg-signed-ready-data-echo'
+                    fi
+                    if [ "$mode" = async ]; then exe="$exe"_async; fi
+                    log="paired-sg-$stack-$mode-$finals-$bytes-repeat-$repeat.log"
+                    "./build/sg-paired/$exe" | tee "$log"
+                    grep "^$prefix"_BENCH, "$log" |
+                      sed "s/^$prefix\_BENCH,/$repeat,/" >> paired-sg-aggregate.csv
+                    grep "^$prefix"_SESSION, "$log" |
+                      sed "s/^$prefix\_SESSION,/$repeat,/" >> paired-sg-sessions.csv
+                    grep "^$prefix"_RTT, "$log" |
+                      sed "s/^$prefix\_RTT,/$repeat,$label,/" >> paired-sg-rtt.csv
+                  done
                 done
               done
             done
@@ -72,78 +87,114 @@ jobs:
           python3 - <<'PY'
           import csv, math, statistics
           from collections import defaultdict
-          rows=list(csv.DictReader(open('raw-sg-aggregate.csv',encoding='utf8')))
-          clients=list(csv.DictReader(open('raw-sg-sessions.csv',encoding='utf8')))
-          raw=list(csv.DictReader(open('raw-sg-rtt.csv',encoding='utf8')))
-          expected={(mode,n,b)
-                    for mode in ('global-barrier','owner-independent')
-                    for n in (1,2,4) for b in (8,1024)}
-          got=defaultdict(list)
-          for row in rows:
-              mode=row['driver']
-              n,b=int(row['final_owners']),int(row['payload_bytes'])
-              if ((mode,n,b) not in expected or
-                  int(row['total_shards']) != n+1 or int(row['sessions']) != 4 or
-                  int(row['rounds']) != 256 or int(row['warmup']) != 32 or
-                  row['protocol']!='raw-cnet-tcp-echo'
+          def load(path):
+              with open(path, newline="", encoding="utf8") as f:
+                  return list(csv.DictReader(f))
+          aggregate=load("paired-sg-aggregate.csv")
+          sessions=load("paired-sg-sessions.csv")
+          rtts=load("paired-sg-rtt.csv")
+          protocols=("raw-cnet-tcp-echo","sg-signed-ready-data-echo")
+          modes=("global-barrier","owner-independent")
+          cases={(p,m,n,b,r) for p in protocols for m in modes for n in (1,2,4)
+                 for b in (8,1024) for r in range(1,6)}
+          lookup={}
+          for row in aggregate:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]))
+              metrics=("app_msgs_per_s","wall_ms","process_cpu_ms",
+                       "process_cpu_pct","rtt_p95_us")
+              if (key not in cases or key in lookup
+                  or int(row["total_shards"])!=key[2]+1
+                  or int(row["sessions"])!=4 or int(row["rounds"])!=256
+                  or int(row["warmup"])!=32
                   or any(not math.isfinite(float(row[k])) or float(row[k])<=0
-                         for k in ('app_msgs_per_s','wall_ms','rtt_p95_us'))):
-                  raise SystemExit(f'Invalid raw CNet profile: {row}')
-              got[(mode,n,b)].append(row)
-          if set(got)!=expected or any(len(v)!=5 for v in got.values()):
-              raise SystemExit(f'Incomplete raw SG aggregate: {dict((k,len(v)) for k,v in got.items())}')
+                         for k in metrics)):
+                  raise SystemExit(f"Invalid paired aggregate: {row}")
+              lookup[key]=row
+          if set(lookup)!=cases:
+              raise SystemExit(f"Missing paired profiles: {cases-set(lookup)}")
+          expected_sessions={(p,m,n,b,r,c) for (p,m,n,b,r) in cases
+                             for c in (1,2,3,4)}
+          seen=set()
+          for row in sessions:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]),
+                   int(row["session_id"]))
+              if (key not in expected_sessions or key in seen
+                  or int(row["total_shards"])!=key[2]+1):
+                  raise SystemExit(f"Invalid paired session: {row}")
+              seen.add(key)
+          if seen!=expected_sessions:
+              raise SystemExit("Missing per-client paired percentile")
+          rtt_seen=set()
+          for row in rtts:
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]),
+                   int(row["session_id"]),int(row["round"]))
+              if (key[:6] not in expected_sessions or key[6] not in range(1,257)
+                  or int(row["total_shards"])!=key[2]+1 or key in rtt_seen
+                  or not math.isfinite(float(row["rtt_us"]))
+                  or float(row["rtt_us"])<=0):
+                  raise SystemExit(f"Invalid paired RTT: {row}")
+              rtt_seen.add(key)
+          if len(rtt_seen)!=len(expected_sessions)*256:
+              raise SystemExit("Incomplete paired raw chronological RTT")
           groups=defaultdict(list)
-          for row in clients:
-              key=(row['driver'],int(row['final_owners']),
-                   int(row['payload_bytes']),int(row['session_id']))
-              if (key[:3] not in expected or key[3] not in (1,2,3,4)
-                  or int(row['total_shards'])!=key[1]+1):
-                  raise SystemExit(f'Invalid per-session raw RTT: {row}')
-              groups[key].append(row)
-          if len(groups)!=48 or any(len(v)!=5 for v in groups.values()):
-              raise SystemExit('Incomplete raw 4-session percentile evidence')
-          samples=defaultdict(set)
-          for row in raw:
-              key=(int(row['repeat']),row['driver'],int(row['final_owners']),
-                   int(row['payload_bytes']),int(row['session_id']))
-              rd=int(row['round'])
-              if (key[0] not in range(1,6) or key[1:4] not in expected
-                  or key[4] not in (1,2,3,4) or
-                  int(row['total_shards'])!=key[2]+1 or
-                  rd not in range(1,257) or rd in samples[key] or
-                  not math.isfinite(float(row['rtt_us'])) or float(row['rtt_us'])<=0):
-                  raise SystemExit(f'Invalid/duplicate raw CNet RTT: {row}')
-              samples[key].add(rd)
-          if len(samples)!=5*2*3*2*4 or any(len(x)!=256 for x in samples.values()):
-              raise SystemExit('Missing raw CNet per-round RTT evidence')
-          with open('raw-sg-summary.csv','w',newline='',encoding='utf8') as out:
+          for key,row in lookup.items():
+              groups[key[:4]].append(row)
+          with open("paired-sg-summary.csv","w",newline="",encoding="utf8") as out:
               writer=csv.writer(out)
-              writer.writerow(['protocol','driver','final_owners','total_shards',
-                  'sessions','payload_bytes','repeats','rounds','median_app_msgs_per_s',
-                  'median_process_cpu_pct','median_rtt_p95_us',
-                  'min_app_msgs_per_s','max_app_msgs_per_s'])
-              for (mode,n,b),records in sorted(got.items()):
-                  writer.writerow(['raw-cnet-tcp-echo',mode,n,n+1,4,b,5,256,
-                      round(statistics.median(float(x['app_msgs_per_s']) for x in records),3),
-                      round(statistics.median(float(x['process_cpu_pct']) for x in records),3),
-                      round(statistics.median(float(x['rtt_p95_us']) for x in records),3),
-                      round(min(float(x['app_msgs_per_s']) for x in records),3),
-                      round(max(float(x['app_msgs_per_s']) for x in records),3)])
-          print('Raw SG four-session paired profiles PASS:',sorted(got))
-          print(open('raw-sg-summary.csv',encoding='utf8').read())
+              writer.writerow(["protocol","driver","final_owners","total_shards",
+                               "sessions","payload_bytes","repeats","rounds",
+                               "median_msgs_per_s","median_process_cpu_pct",
+                               "median_rtt_p95_us","min_msgs_per_s","max_msgs_per_s",
+                               "median_cpu_us_per_app_msg"])
+              for (protocol,mode,n,b),rows in sorted(groups.items()):
+                  med=lambda field: statistics.median(float(r[field]) for r in rows)
+                  writer.writerow([protocol,mode,n,n+1,4,b,5,256,
+                      round(med("app_msgs_per_s"),3),
+                      round(med("process_cpu_pct"),3),
+                      round(med("rtt_p95_us"),3),
+                      round(min(float(r["app_msgs_per_s"]) for r in rows),3),
+                      round(max(float(r["app_msgs_per_s"]) for r in rows),3),
+                      round(statistics.median(float(r["process_cpu_ms"])*1000/(256*4*2)
+                            for r in rows),3)])
+          with open("paired-sg-comparison.csv","w",newline="",encoding="utf8") as out:
+              writer=csv.writer(out)
+              writer.writerow(["driver","final_owners","payload_bytes","repeats",
+                               "median_signed_over_raw_msgs_per_s_ratio",
+                               "median_signed_over_raw_cpu_pct_ratio",
+                               "median_signed_over_raw_p95_rtt_ratio"])
+              for mode in modes:
+                  for n in (1,2,4):
+                      for b in (8,1024):
+                          paired=[]
+                          for repeat in range(1,6):
+                              raw=lookup[("raw-cnet-tcp-echo",mode,n,b,repeat)]
+                              signed=lookup[("sg-signed-ready-data-echo",mode,n,b,repeat)]
+                              paired.append((
+                                  float(signed["app_msgs_per_s"])/float(raw["app_msgs_per_s"]),
+                                  float(signed["process_cpu_pct"])/float(raw["process_cpu_pct"]),
+                                  float(signed["rtt_p95_us"])/float(raw["rtt_p95_us"])))
+                          writer.writerow([mode,n,b,5,
+                              *[round(statistics.median(item[i] for item in paired),4)
+                                for i in range(3)]])
           PY
-          echo 'Raw TCP/CNet echo is NOT Noise, MMP, Pool, or encrypted RPC. Matched session/SG/Handoff work only.'
-      - name: Upload raw CNet baseline evidence
+          cat paired-sg-summary.csv
+          cat paired-sg-comparison.csv
+          echo 'Signed ratio includes Noise, MMP READY, P2P framing and Pool Lease enqueue. It is NOT isolated crypto or management RPC overhead.'
+      - name: Upload paired raw CNet and signed MMP evidence
         uses: actions/upload-artifact@v4
         with:
-          name: raw-cnet-sg-equal-load
+          name: paired-raw-cnet-signed-mmp-sg
           path: |
-            raw-sg-aggregate.csv
-            raw-sg-sessions.csv
-            raw-sg-rtt.csv
-            raw-sg-summary.csv
-            raw-sg-machine.txt
-            raw-cnet-sg-*.log
+            paired-sg-aggregate.csv
+            paired-sg-sessions.csv
+            paired-sg-rtt.csv
+            paired-sg-summary.csv
+            paired-sg-comparison.csv
+            paired-sg-machine.txt
+            paired-sg-*.log
           if-no-files-found: error
       - name: Report ccache
         if: always()
