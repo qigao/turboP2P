@@ -77,6 +77,9 @@ struct signed_final {
 #endif
   unsigned rpc_request_events, rpc_status_events, rpc_result_events;
   unsigned rpc_reply_sent, rpc_errors;
+#ifdef MESH_SG_REAL_EXECUTION
+  unsigned rpc_result_admissions, rpc_result_native_terminals;
+#endif
 };
 
 typedef struct {
@@ -1197,9 +1200,37 @@ static void pump(sg_multi_case *sc) {
           const mesh_mgmt_execution_node_result_t sent =
               mesh_mgmt_execution_node_send_next_v1(
                   &f->execution_node, &client->runtime);
-          if (sent == MESH_MGMT_EXECUTION_NODE_OK)
-            ++f->rpc_reply_sent; /* local admission, NOT wire terminal/ACK */
-          else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
+          if (sent == MESH_MGMT_EXECUTION_NODE_OK) {
+            /* This is now full native CNet/Noise write completion, NOT
+             * transport admission or remote execution/business ACK. */
+            ++f->rpc_reply_sent;
+            ++f->rpc_result_native_terminals;
+            check_equal(MESH_MGMT_EXECUTION_SEND_IDLE,
+                        f->execution_node.response_sender.state);
+            check_equal((size_t)0u,
+                        atomic_load(&f->execution_node.egress.pending));
+            check_true(client->runtime.last_response_terminal_ticket > 0u);
+            check_equal(P2P_OK,
+                        client->runtime.last_response_terminal_status);
+          } else if (sent == MESH_MGMT_EXECUTION_NODE_BUSY) {
+            if (f->execution_node.response_sender.state ==
+                    MESH_MGMT_EXECUTION_SEND_IN_FLIGHT &&
+                f->rpc_result_admissions == 0u) {
+              ++f->rpc_result_admissions;
+              /* The real native write ticket exists, but its callback has
+               * NOT run and the Egress head is still retained. A checked
+               * Stop/Destroy cannot steal Runtime/Store/Worker ownership. */
+              check_true(client->runtime.response_terminal_active);
+              check_equal((size_t)1u,
+                          atomic_load(&f->execution_node.egress.pending));
+              check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
+                  mesh_mgmt_agent_runtime_stop_v1(&client->runtime));
+              check_equal(MESH_MGMT_AGENT_RUNTIME_RUNNING,
+                          client->runtime.state);
+              check_equal(MESH_MGMT_EXECUTION_NODE_BUSY,
+                  mesh_mgmt_execution_node_destroy_v2(&f->execution_node));
+            }
+          } else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
             ++f->rpc_errors;
         }
       } else
@@ -1652,6 +1683,12 @@ static void test_multi_final(size_t final_count, int command_mode) {
       char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
       char tmp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
 
+      check_equal(1u, f->rpc_result_admissions);
+      check_equal(1u, f->rpc_result_native_terminals);
+      check_equal(1u, f->rpc_reply_sent);
+      check_equal((uint64_t)1u, f->execution_node.response_sender.last_terminal_ticket);
+      check_equal(P2P_OK, f->execution_node.response_sender.terminal_status);
+      check_equal((size_t)0u, atomic_load(&f->execution_node.egress.pending));
       check_equal(MESH_MGMT_EXECUTION_NODE_OK,
           mesh_mgmt_execution_node_shutdown_v1(&f->execution_node));
       check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
@@ -1667,7 +1704,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
       check_equal(f->result_signer_public, durable.signer_public_key, 32u);
       check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, durable.state);
       check_equal((uint64_t)1u, durable.usage.invocations);
-      mesh_mgmt_execution_node_destroy_v1(&f->execution_node);
+      check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+          mesh_mgmt_execution_node_destroy_v2(&f->execution_node));
       check_true(f->execution_store_path != NULL);
       (void)snprintf(lock_path, sizeof(lock_path), "%s.lock",
                      f->execution_store_path);
