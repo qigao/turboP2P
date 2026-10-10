@@ -401,6 +401,33 @@ if(P2P_RAW_CNET_SG_BUILD_BENCHMARKS)
   endforeach()
 endif()
 
+# Optional pure Noise/P2P echo stage between raw CNet and signed MMP
+# (four authenticated transport connections; 1/2/4 SG Final workers).
+option(P2P_NOISE_SG_BUILD_BENCHMARKS "Build four-session Noise-only SG echo" OFF)
+if(P2P_NOISE_SG_BUILD_BENCHMARKS)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "Noise-only SG benchmark requires Linux CPU clock")
+  endif()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_noise_sg_${finals}
+      "${mesh_tests}/../bench/bench_noise_sg_echo.c")
+    set_property(TARGET bench_noise_sg_${finals} PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_noise_sg_${finals}
+      PRIVATE NOISE_BENCH_FINALS=${finals})
+    target_link_libraries(bench_noise_sg_${finals}
+      PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
+  foreach(finals IN ITEMS 1 2 4)
+    add_executable(bench_noise_sg_${finals}_async
+      "${mesh_tests}/../bench/bench_noise_sg_echo.c")
+    set_property(TARGET bench_noise_sg_${finals}_async PROPERTY LINKER_LANGUAGE CXX)
+    target_compile_definitions(bench_noise_sg_${finals}_async PRIVATE
+      NOISE_BENCH_FINALS=${finals} NOISE_ASYNC_PROGRESS=1)
+    target_link_libraries(bench_noise_sg_${finals}_async
+      PRIVATE p2p_node_core Salts::CNet Salts::TinyTest)
+  endforeach()
+endif()
+
 # Benchmark-only installed SDK profile, isolated from Release and ASan CTest.
 # Topologies 1/2/4 have respectively 1/1/3 authenticated connections; use
 # the session column rather than claiming equal-load CPU scaling.

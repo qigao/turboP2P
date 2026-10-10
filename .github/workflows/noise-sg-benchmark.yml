@@ -1,0 +1,165 @@
+name: Noise-only P2P SG four-session transport baseline
+on:
+  pull_request:
+    branches: [feature/raw-cnet-sg-equal-load-23]
+    paths:
+      - 'mesh/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/noise-sg-benchmark.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  noise-sg:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-noise-only-sg-equal-load
+      - name: Build genuine Noise-only P2P NativeIO SG profiles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/noise-sg-bench -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DP2P_NOISE_SG_BUILD_BENCHMARKS=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+          cmake --build build/noise-sg-bench --parallel 2 --target \
+            bench_noise_sg_1 bench_noise_sg_2 bench_noise_sg_4 \
+            bench_noise_sg_1_async bench_noise_sg_2_async bench_noise_sg_4_async
+      - name: Verify four distinct Noise identities and exact SG echo work
+        shell: bash
+        env:
+          P2P_MMP_BENCH_WARMUP: '32'
+          P2P_MMP_BENCH_ROUNDS: '256'
+        run: |
+          set -euo pipefail
+          echo 'repeat,protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > noise-sg-aggregate.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > noise-sg-sessions.csv
+          echo 'repeat,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > noise-sg-rtt.csv
+          {
+            uname -a
+            lscpu
+            git rev-parse HEAD
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+            echo "SALTS_ROOT=$SALTS_ROOT"
+            echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
+          } > noise-sg-machine.txt
+          for repeat in 1 2 3 4 5; do
+            for bytes in 8 1024; do
+              for finals in 1 2 4; do
+                export P2P_MMP_BENCH_PAYLOAD="$bytes"
+                for mode in barrier async; do
+                  exe="bench_noise_sg_$finals"
+                  if [ "$mode" = async ]; then exe="$exe"_async; fi
+                  log="noise-sg-$finals-final-$bytes-B-$mode-repeat-$repeat.log"
+                  "./build/noise-sg-bench/$exe" | tee "$log"
+                  grep '^NOISE_SG_BENCH,' "$log" |
+                    sed "s/^NOISE_SG_BENCH,/$repeat,/" >> noise-sg-aggregate.csv
+                  grep '^NOISE_SG_SESSION,' "$log" |
+                    sed "s/^NOISE_SG_SESSION,/$repeat,/" >> noise-sg-sessions.csv
+                  grep '^NOISE_SG_RTT,' "$log" |
+                    sed "s/^NOISE_SG_RTT,/$repeat,/" >> noise-sg-rtt.csv
+                done
+              done
+            done
+          done
+          python3 - <<'PY'
+          import csv, math, statistics
+          from collections import defaultdict
+          def load(path):
+              with open(path, newline="", encoding="utf8") as stream:
+                  return list(csv.DictReader(stream))
+          profiles=load("noise-sg-aggregate.csv")
+          sessions=load("noise-sg-sessions.csv")
+          rtts=load("noise-sg-rtt.csv")
+          modes=("global-barrier","owner-independent")
+          cases={(m,n,b,r) for m in modes for n in (1,2,4)
+                 for b in (8,1024) for r in range(1,6)}
+          lookup={}
+          for row in profiles:
+              key=(row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]))
+              fields=("wall_ms","process_cpu_ms","process_cpu_pct",
+                      "app_msgs_per_s","rtt_p50_us","rtt_p95_us","rtt_p99_us")
+              if (key not in cases or key in lookup
+                  or row["protocol"]!="noise-only-p2p-echo"
+                  or int(row["total_shards"])!=key[1]+1 or int(row["sessions"])!=4
+                  or int(row["warmup"])!=32 or int(row["rounds"])!=256
+                  or any(not math.isfinite(float(row[k])) or float(row[k])<=0
+                         for k in fields)):
+                  raise SystemExit(f"Invalid/duplicate Noise equal-work run: {row}")
+              lookup[key]=row
+          if set(lookup)!=cases:
+              raise SystemExit(f"Missing Noise profiles: {cases-set(lookup)}")
+          expected_session={(m,n,b,r,i) for m,n,b,r in cases for i in (1,2,3,4)}
+          actual_sessions=set()
+          for row in sessions:
+              key=(row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]),
+                   int(row["session_id"]))
+              if (key not in expected_session or key in actual_sessions
+                  or row["protocol"]!="noise-only-p2p-echo"
+                  or int(row["total_shards"])!=key[1]+1):
+                  raise SystemExit(f"Invalid/duplicate Noise session: {row}")
+              actual_sessions.add(key)
+          if actual_sessions!=expected_session:
+              raise SystemExit("Incomplete Noise per-session percentiles")
+          raw_seen=set()
+          for row in rtts:
+              key=(row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]),
+                   int(row["session_id"]),int(row["round"]))
+              if (key[:5] not in expected_session or key[5] not in range(1,257)
+                  or key in raw_seen or int(row["total_shards"])!=key[1]+1
+                  or not math.isfinite(float(row["rtt_us"]))
+                  or float(row["rtt_us"])<=0):
+                  raise SystemExit(f"Invalid chronological Noise RTT: {row}")
+              raw_seen.add(key)
+          if len(raw_seen)!=len(expected_session)*256:
+              raise SystemExit("Incomplete per-round Noise RTT data")
+          groups=defaultdict(list)
+          for (mode,n,b,r),row in lookup.items():
+              groups[(mode,n,b)].append(row)
+          with open("noise-sg-summary.csv","w",newline="",encoding="utf8") as stream:
+              out=csv.writer(stream)
+              out.writerow(["protocol","driver","final_owners","total_shards",
+                            "sessions","payload_bytes","repeats","rounds",
+                            "median_msgs_per_s","median_cpu_pct","median_rtt_p95_us",
+                            "min_msgs_per_s","max_msgs_per_s",
+                            "median_cpu_us_per_app_message"])
+              for (mode,n,b),rows in sorted(groups.items()):
+                  med=lambda field: statistics.median(float(row[field]) for row in rows)
+                  out.writerow(["noise-only-p2p-echo",mode,n,n+1,4,b,5,256,
+                      round(med("app_msgs_per_s"),3),
+                      round(med("process_cpu_pct"),3),
+                      round(med("rtt_p95_us"),3),
+                      round(min(float(row["app_msgs_per_s"]) for row in rows),3),
+                      round(max(float(row["app_msgs_per_s"]) for row in rows),3),
+                      round(statistics.median(
+                          float(row["process_cpu_ms"])*1000/(256*4*2)
+                          for row in rows),3)])
+          PY
+          cat noise-sg-summary.csv
+          echo 'Noise-only is real P2P Cookie/Noise. NOT MMP or Pool and not isolated crypto overhead.'
+      - name: Archive standalone Noise-only evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: noise-only-p2p-sg-equal-load
+          path: |
+            noise-sg-aggregate.csv
+            noise-sg-sessions.csv
+            noise-sg-rtt.csv
+            noise-sg-summary.csv
+            noise-sg-machine.txt
+            noise-sg-*.log
+          if-no-files-found: error
+      - name: Report ccache
+        if: always()
+        shell: bash
+        run: ccache --show-stats
