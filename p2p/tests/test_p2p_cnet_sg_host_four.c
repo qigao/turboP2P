@@ -1,6 +1,7 @@
 #include "p2p_cnet_node_fixture.h"
 
 #include <cnet/sg_host.h>
+#include <cnet/client_pool.h>
 #include <salts/native_io_sharded.h>
 
 #include <stdio.h>
@@ -41,6 +42,10 @@ typedef struct sg4_lane {
 typedef struct sg4_server {
     endpoint_t endpoint; /* Fixture identity and callback context, first. */
     sg4_lane *lane;
+    /* Test-only pre-MMP Pool: borrowed from the EXACT final SG Manager.
+     * Noise identity alone MUST NOT promote a connection to Pool READY. */
+    cnet_client_pool pre_mmp_pool;
+    p2p_cnet_managed_binding_v1_t physical;
     unsigned owner_connected, owner_messages, owner_disconnected;
 } sg4_server;
 
@@ -84,6 +89,32 @@ static int sg4_affinity(sg4_server *server) {
 static void sg4_connected(p2p_peer_t *peer, void *context) {
     sg4_server *server = (sg4_server *)context;
     check_true(sg4_affinity(server));
+    /* This callback runs on the actual FINAL SG worker after Noise.
+     * A signed MMP HELLO has NOT happened: inspect the original inbound
+     * Manager, but do not fabricate or publish a ClientPool READY. */
+    p2p_cnet_managed_binding_v1_t exact = {0};
+    cnet_manager_entry managed = {0};
+    cnet_pool_snapshot unpromoted = {0};
+    check_equal(P2P_OK, p2p_peer_cnet_managed_binding_v1(peer, &exact));
+    check_not_null(exact.manager);
+    check_true(exact.managed.slot != 0u && exact.physical.slot != 0u);
+    check_equal(SALTS_OK,
+        cnet_manager_lookup(exact.manager, exact.managed, &managed));
+    check_equal(CNET_MANAGER_BOUND, managed.state);
+    check_equal(exact.physical.slot, managed.connection.slot);
+    check_equal(exact.physical.generation, managed.connection.generation);
+    check_true(server->pre_mmp_pool.impl == NULL);
+    const cnet_pool_config cfg = {
+        sizeof(cfg), CNET_CLIENT_POOL_VERSION, exact.manager,
+        (uint64_t)server->lane->shard, 1u, 1u, 1u
+    };
+    check_equal(SALTS_OK, cnet_pool_init(&server->pre_mmp_pool, &cfg));
+    check_equal(SALTS_OK,
+        cnet_pool_get_snapshot(&server->pre_mmp_pool, &unpromoted));
+    check_equal((size_t)0u, unpromoted.ready);
+    check_equal((size_t)0u, unpromoted.physical_in_use);
+    check_equal((size_t)0u, unpromoted.active_leases);
+    server->physical = exact;
     ++server->owner_connected;
     on_connected(peer, &server->endpoint);
 }
@@ -198,6 +229,44 @@ static void sg4_progress(native_io_sharded_context *context, void *arg) {
     lane->settled += settled;
 }
 
+/* Each Final Owner's actual CNet Manager and Pool must reject even the
+ * neighboring SG worker. Wrong-owner mutation cannot seal or steal READY
+ * from any future authenticated MMP session. The pre-MMP test Pools remain
+ * deliberately EMPTY; Router signed HELLO is not part of this fixture. */
+static void sg4_cross_owner_pool_contract(native_io_sharded_context *context,
+                                           void *arg) {
+    sg4_lane *lane = (sg4_lane *)arg;
+    sg4_case *scenario = lane->scenario;
+    if (lane->shard == 0u || lane->error) return;
+    sg4_server *local = &scenario->servers[lane->shard - 1u];
+    const size_t other_shard = (lane->shard % SG4_FINALS) + 1u;
+    sg4_server *other = &scenario->servers[other_shard - 1u];
+    cnet_manager_entry wrong = {0}, local_entry = {0};
+    cnet_pool_snapshot wrong_pool = {0}, local_pool = {0};
+    if (native_io_sharded_context_shard(context) != lane->shard ||
+        cmeta_thread_current_token() != lane->worker_token ||
+        !local->physical.manager || !other->physical.manager ||
+        local->physical.manager == other->physical.manager) {
+        sg4_error(lane, SALTS_EPERM, "SG final Pool worker/Manager identity");
+        return;
+    }
+    if (cnet_manager_lookup(other->physical.manager,
+                             other->physical.managed, &wrong) != SALTS_EPERM ||
+        wrong.state != 0 ||
+        cnet_pool_seal(&other->pre_mmp_pool) != SALTS_EPERM ||
+        cnet_pool_get_snapshot(&other->pre_mmp_pool, &wrong_pool) != SALTS_EPERM ||
+        wrong_pool.ready != 0u || wrong_pool.physical_in_use != 0u ||
+        cnet_manager_lookup(local->physical.manager,
+                            local->physical.managed, &local_entry) != SALTS_OK ||
+        local_entry.state != CNET_MANAGER_BOUND ||
+        cnet_pool_get_snapshot(&local->pre_mmp_pool, &local_pool) != SALTS_OK ||
+        local_pool.sealed || local_pool.ready != 0u ||
+        local_pool.physical_in_use != 0u || local_pool.active_leases != 0u) {
+        sg4_error(lane, SALTS_EPERM, "wrong SG Final Owner Manager/Pool isolation");
+        return;
+    }
+}
+
 static void sg4_send(native_io_sharded_context *context, void *arg) {
     sg4_lane *lane = (sg4_lane *)arg;
     sg4_server *server = &lane->scenario->servers[lane->shard - 1u];
@@ -250,6 +319,9 @@ static void sg4_destroy(native_io_sharded_context *context, void *arg) {
         lane->acceptor = NULL;
     } else {
         sg4_server *server = &lane->scenario->servers[lane->shard - 1u];
+        /* A test-only Pool borrows this exact final Manager and must retire
+         * on the SAME SG worker before the native P2P Owner disappears. */
+        SG4_CALL(lane, cnet_pool_destroy(&server->pre_mmp_pool));
         SG4_CALL(lane, p2p_node_cnet_destroy(server->endpoint.owner));
         server->endpoint.owner = NULL;
         lane->final_transport = NULL;
@@ -367,6 +439,26 @@ static void test_four_sg_native_p2p_owners(void) {
         check_equal((size_t)1u, snap.handoff.taken);
         check_equal((size_t)0u, snap.handoff.queued);
     }
+
+    /* This barrier publishes all per-worker live Manager/Pool snapshots.
+     * Real 4-shard Final Owners, not independent single-Owner instances. */
+    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+        const sg4_server *server = &scenario->servers[i];
+        check_not_null(server->physical.manager);
+        check_true(server->pre_mmp_pool.impl != NULL);
+        cnet_manager_entry foreign_entry = {0};
+        cnet_pool_snapshot foreign_pool = {0};
+        check_equal(SALTS_EPERM,
+            cnet_manager_lookup(server->physical.manager,
+                                server->physical.managed, &foreign_entry));
+        check_equal((int)0, (int)foreign_entry.state);
+        check_equal(SALTS_EPERM,
+            cnet_pool_get_snapshot((cnet_client_pool *)&server->pre_mmp_pool,
+                                   &foreign_pool));
+        check_equal((size_t)0u, foreign_pool.ready);
+        sg4_submit(scenario, i+1u, sg4_cross_owner_pool_contract);
+    }
+    sg4_barrier(scenario);
 
     for (size_t i = 0u; i < SG4_FINALS; ++i) {
         char request[8] = {'h','e','l','l','o','-',(char)('1' + i),'\0'};
