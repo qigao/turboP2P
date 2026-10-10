@@ -149,15 +149,16 @@ runs:
         # not a fake imported target, SDK copy, fallback or older RC pin.
         test -f "$VCPKG_OVERLAY_PORTS/gmssl/vcpkg.json"
         test -x "$VCPKG_ROOT/vcpkg"
-        # The shared vcpkg-cache warms gmssl with its canonical manifest
-        # baseline. Classic mode selects a DIFFERENT vcpkg-cmake ABI, misses
-        # the published gmssl binary, and must not compile in a consumer.
-        # Use the SAME canonical baseline without installing the whole warm
-        # cache dependency graph or pinning an SDK/NuGet release.
-        test -f "$VCPKG_CACHE_REPOSITORY_ROOT/vcpkg.json"
+        # vcpkg-cache's public action intentionally materializes ONLY ABI-
+        # relevant ports/triplets/cmake, not its root vcpkg.json. TurboP2P's
+        # checked-in root manifest uses the SAME published registry baseline
+        # as vcpkg-cache's Linux GmSSL warm-cache job. Use that manifest's
+        # baseline to reproduce the cached gmssl/vcpkg-cmake ABI, without
+        # installing the unrelated product manifest dependencies.
+        test -f "$GITHUB_WORKSPACE/vcpkg.json"
         manifest="$RUNNER_TEMP/qigao-gmssl-sdk-closure"
         mkdir -p "$manifest"
-        python3 - "$VCPKG_CACHE_REPOSITORY_ROOT/vcpkg.json" \
+        python3 - "$GITHUB_WORKSPACE/vcpkg.json" \
                     "$manifest/vcpkg.json" <<'PY'
         import json
         import sys
