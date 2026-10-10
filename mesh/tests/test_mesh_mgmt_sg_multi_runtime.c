@@ -1230,6 +1230,12 @@ static void test_multi_final(size_t final_count, int command_mode) {
     }
   }
 
+  if (sc->exercise_typed_rpc) {
+    for (size_t i = 1u; i < sc->shards; ++i)
+      submit(sc, i, host_register_rpc);
+    barrier(sc);
+  }
+
   if (command_mode) {
     /* Multiple real authenticated Final owners each hold an independent
      * command Lease until their OWN NativeIO/CNet completion, with no inline
@@ -1270,6 +1276,22 @@ static void test_multi_final(size_t final_count, int command_mode) {
         check_equal(0u, f->rpc_status_events);
         check_equal(0u, f->rpc_result_events);
         check_equal(0u, f->rpc_reply_sent);
+      }
+      /* Even after the actual encrypted full-write send terminal and return
+       * of the original single-slot CNet Lease, the RPC registry MUST still
+       * say PENDING. Only a validated remote response can complete it. */
+      for (size_t i = 1u; i < sc->shards; ++i)
+        submit(sc, i, host_snapshot_rpc);
+      barrier(sc);
+      for (size_t i = 0u; i < sc->finals; ++i) {
+        const signed_final *f = &sc->finals_data[i];
+        check_equal(MESH_MGMT_EXECUTION_RPC_PENDING, f->rpc_completion.state);
+        check_equal(f->expected_command_id,
+                    f->rpc_completion.binding.command_id,
+                    sizeof(f->expected_command_id));
+        check_equal(f->expected_correlation_id,
+                    f->rpc_completion.binding.correlation_id,
+                    sizeof(f->expected_correlation_id));
       }
     }
     const uint64_t wire_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
@@ -1360,6 +1382,30 @@ static void test_multi_final(size_t final_count, int command_mode) {
         check_equal(f->server.identity.signer.hello.managed_node_id,
                     reply->target_node_id, 32u);
       }
+    }
+    if (sc->exercise_typed_rpc) {
+      for (size_t i = 1u; i < sc->shards; ++i)
+        submit(sc, i, host_snapshot_rpc);
+      barrier(sc);
+      for (size_t i = 0u; i < sc->finals; ++i) {
+        const signed_final *f = &sc->finals_data[i];
+        check_equal(sc->exercise_signed_result
+                        ? MESH_MGMT_EXECUTION_RPC_RESULT
+                        : MESH_MGMT_EXECUTION_RPC_STATUS,
+                    f->rpc_completion.state);
+        check_equal(f->expected_request_digest,
+                    f->rpc_completion.binding.request_digest,
+                    sizeof(f->expected_request_digest));
+        check_equal(f->rpc_response.kind, f->rpc_completion.response.kind);
+        check_equal((size_t)0u, f->pool.active_leases);
+        check_equal((size_t)0u, f->server.runtime.command_terminal_inflight);
+      }
+      /* Release the RPC completion only after the application has
+       * explicitly consumed its result. This is independent of the
+       * original native CNet send ticket and Pool's already-returned Lease. */
+      for (size_t i = 1u; i < sc->shards; ++i)
+        submit(sc, i, host_release_rpc);
+      barrier(sc);
     }
     for (unsigned turn = 0u; turn < 4u; ++turn) pump(sc);
     for (size_t i = 0u; i < sc->finals; ++i) {
