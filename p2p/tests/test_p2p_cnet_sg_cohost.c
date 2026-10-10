@@ -546,6 +546,14 @@ static void host_destroy(native_io_sharded_context *context, void *arg) {
             mark_failed(lane, SALTS_EBUSY);
             return;
         }
+        /* Original managed attachment is stale after on_recycle; it must
+         * not alias a new connection generation. */
+        cnet_manager_entry stale = {0};
+        if (cnet_manager_lookup(&lane->extra_manager,
+                lane->extra_managed, &stale) != SALTS_ENOENT) {
+            mark_failed(lane, SALTS_EPROTO);
+            return;
+        }
         SG_GO(lane, cnet_manager_destroy(&lane->extra_manager));
         SG_GO(lane, cnet_client_stop_external(&lane->extra_client));
         SG_GO(lane, cnet_client_destroy(&lane->extra_client));
