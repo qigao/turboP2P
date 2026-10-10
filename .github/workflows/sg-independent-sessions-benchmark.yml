@@ -1,4 +1,4 @@
-name: Raw CNet vs signed SG independent-session smoke
+name: Raw CNet vs signed SG independently paced equal-load
 on:
   pull_request:
     branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
@@ -36,16 +36,16 @@ jobs:
             bench_raw_cnet_sg_1_async_sessions bench_raw_cnet_sg_2_async_sessions bench_raw_cnet_sg_4_async_sessions \
             bench_mesh_mmp_sg_1_sessions bench_mesh_mmp_sg_2_sessions bench_mesh_mmp_sg_4_sessions \
             bench_mesh_mmp_sg_1_async_sessions bench_mesh_mmp_sg_2_async_sessions bench_mesh_mmp_sg_4_async_sessions
-      - name: Validate each client independently progresses equal workload
+      - name: Five fresh equal-work repeats with independently paced clients
         shell: bash
         env:
-          P2P_MMP_BENCH_WARMUP: '8'
-          P2P_MMP_BENCH_ROUNDS: '32'
+          P2P_MMP_BENCH_WARMUP: '32'
+          P2P_MMP_BENCH_ROUNDS: '256'
         run: |
           set -euo pipefail
-          echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-aggregate.csv
-          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-sessions.csv
-          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > session-independent-rtt.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-aggregate.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > session-independent-sessions.csv
+          echo 'repeat,protocol,driver,final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > session-independent-rtt.csv
           {
             uname -a
             lscpu
@@ -54,88 +54,140 @@ jobs:
             echo "SALTS_ROOT=$SALTS_ROOT"
             echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
           } > session-independent-machine.txt
-          for payload in 8 1024; do
-            for finals in 1 2 4; do
-              export P2P_MMP_BENCH_PAYLOAD="$payload"
-              for mode in barrier async; do
-                for protocol in raw signed; do
-                  if [ "$protocol" = raw ]; then
-                    exe="bench_raw_cnet_sg_$finals"
-                    prefix='RAW_CNET_SG'
-                  else
-                    exe="bench_mesh_mmp_sg_$finals"
-                    prefix='P2P_MMP_SG'
-                  fi
-                  if [ "$mode" = async ]; then exe="$exe"_async; fi
-                  exe="$exe"_sessions
-                  log="session-independent-$protocol-$mode-$finals-$payload.log"
-                  "./build/sg-sessions/$exe" | tee "$log"
-                  grep "^$prefix"_BENCH, "$log" |
-                    sed "s/^$prefix\_BENCH,//" >> session-independent-aggregate.csv
-                  grep "^$prefix"_SESSION, "$log" |
-                    sed "s/^$prefix\_SESSION,//" >> session-independent-sessions.csv
-                  if [ "$protocol" = raw ]; then label='raw-cnet-tcp-echo'; else label='sg-signed-ready-data-echo'; fi
-                  grep "^$prefix"_RTT, "$log" |
-                    sed "s/^$prefix\_RTT,/$label,/" >> session-independent-rtt.csv
+          for repeat in 1 2 3 4 5; do
+            for payload in 8 1024; do
+              for finals in 1 2 4; do
+                export P2P_MMP_BENCH_PAYLOAD="$payload"
+                for mode in barrier async; do
+                  for protocol in raw signed; do
+                    if [ "$protocol" = raw ]; then
+                      exe="bench_raw_cnet_sg_$finals"
+                      prefix='RAW_CNET_SG'
+                    else
+                      exe="bench_mesh_mmp_sg_$finals"
+                      prefix='P2P_MMP_SG'
+                    fi
+                    if [ "$mode" = async ]; then exe="$exe"_async; fi
+                    exe="$exe"_sessions
+                    log="session-independent-$protocol-$mode-$finals-$payload-repeat-$repeat.log"
+                    "./build/sg-sessions/$exe" | tee "$log"
+                    grep "^$prefix"_BENCH, "$log" |
+                      sed "s/^$prefix\_BENCH,/$repeat,/" >> session-independent-aggregate.csv
+                    grep "^$prefix"_SESSION, "$log" |
+                      sed "s/^$prefix\_SESSION,/$repeat,/" >> session-independent-sessions.csv
+                    if [ "$protocol" = raw ]; then label='raw-cnet-tcp-echo'; else label='sg-signed-ready-data-echo'; fi
+                    grep "^$prefix"_RTT, "$log" |
+                      sed "s/^$prefix\_RTT,/$repeat,$label,/" >> session-independent-rtt.csv
+                  done
                 done
               done
             done
           done
           python3 - <<'PY'
-          import csv, math
+          import csv, math, statistics
+          from collections import defaultdict
           def load(path):
-              with open(path, newline="",encoding="utf-8") as f:
-                  return list(csv.DictReader(f))
+              with open(path, newline="", encoding="utf8") as stream:
+                  return list(csv.DictReader(stream))
           aggregate=load("session-independent-aggregate.csv")
           sessions=load("session-independent-sessions.csv")
           rtts=load("session-independent-rtt.csv")
-          cases={(protocol,mode,finals,payload)
-                 for protocol in ("raw-cnet-tcp-echo","sg-signed-ready-data-echo")
-                 for mode in ("global-barrier-app-independent","owner-independent-app-independent")
-                 for finals in (1,2,4) for payload in (8,1024)}
-          seen={}
+          protocols=("raw-cnet-tcp-echo","sg-signed-ready-data-echo")
+          drivers=("global-barrier-app-independent","owner-independent-app-independent")
+          cases={(p,m,n,b,r) for p in protocols for m in drivers
+                 for n in (1,2,4) for b in (8,1024) for r in range(1,6)}
+          lookup={}
           for row in aggregate:
-              key=(row["protocol"],row["driver"],int(row["final_owners"]),int(row["payload_bytes"]))
-              if (key not in cases or key in seen
+              key=(row["protocol"],row["driver"],int(row["final_owners"]),
+                   int(row["payload_bytes"]),int(row["repeat"]))
+              fields=("wall_ms","process_cpu_ms","process_cpu_pct",
+                      "app_msgs_per_s","rtt_p50_us","rtt_p95_us","rtt_p99_us")
+              if (key not in cases or key in lookup
                   or int(row["total_shards"])!=key[2]+1
-                  or int(row["sessions"])!=4 or int(row["rounds"])!=32
-                  or int(row["warmup"])!=8
+                  or int(row["sessions"])!=4 or int(row["rounds"])!=256
+                  or int(row["warmup"])!=32
                   or any(not math.isfinite(float(row[k])) or float(row[k])<=0
-                         for k in ("app_msgs_per_s","wall_ms","process_cpu_ms","rtt_p95_us"))):
-                  raise SystemExit(f"Invalid app-independent sample: {row}")
-              seen[key]=row
-          if set(seen)!=cases:
-              raise SystemExit(f"Missing app-independent profiles: {cases-set(seen)}")
-          per_client=set()
+                         for k in fields)):
+                  raise SystemExit(f"Invalid per-client workload sample: {row}")
+              lookup[key]=row
+          if set(lookup)!=cases:
+              raise SystemExit(f"Missing paired 5-repeat app-independent profiles: {cases-set(lookup)}")
+          expected_sessions={(p,m,n,b,r,client) for p,m,n,b,r in cases
+                             for client in (1,2,3,4)}
+          session_seen=set()
           for row in sessions:
               key=(row["protocol"],row["driver"],int(row["final_owners"]),
-                   int(row["payload_bytes"]),int(row["session_id"]))
-              if (key[:4] not in cases or key[4] not in (1,2,3,4) or key in per_client):
-                  raise SystemExit(f"Bad session percentile: {row}")
-              per_client.add(key)
-          if len(per_client)!=24*4:
-              raise SystemExit("Incomplete independent client percentiles")
+                   int(row["payload_bytes"]),int(row["repeat"]),int(row["session_id"]))
+              if key not in expected_sessions or key in session_seen:
+                  raise SystemExit(f"Invalid session RTT percentiles: {row}")
+              session_seen.add(key)
+          if session_seen!=expected_sessions:
+              raise SystemExit("Missing distinct per-session percentiles")
           samples=set()
           for row in rtts:
               key=(row["protocol"],row["driver"],int(row["final_owners"]),
-                   int(row["payload_bytes"]),int(row["session_id"]),int(row["round"]))
-              if (key[:5] not in per_client or key[5] not in range(1,33)
-                  or key in samples or not math.isfinite(float(row["rtt_us"]))
+                   int(row["payload_bytes"]),int(row["repeat"]),
+                   int(row["session_id"]),int(row["round"]))
+              if (key[:6] not in expected_sessions or key[6] not in range(1,257)
+                  or key in samples or int(row["total_shards"])!=key[2]+1
+                  or not math.isfinite(float(row["rtt_us"]))
                   or float(row["rtt_us"])<=0):
-                  raise SystemExit(f"Bad chronological RTT: {row}")
+                  raise SystemExit(f"Invalid chronological session RTT: {row}")
               samples.add(key)
-          if len(samples)!=24*4*32:
-              raise SystemExit(f"Missing per-client RTTs: {len(samples)}")
-          print("Independent per-client workloads: 24/24 complete; 3072 RTTs present")
+          if len(samples)!=len(expected_sessions)*256:
+              raise SystemExit(f"Missing chronological RTT data: {len(samples)}")
+          groups=defaultdict(list)
+          for key,row in lookup.items():
+              groups[key[:4]].append(row)
+          with open("session-independent-summary.csv","w",newline="",encoding="utf8") as stream:
+              writer=csv.writer(stream)
+              writer.writerow(["protocol","driver","final_owners","total_shards",
+                               "sessions","payload_bytes","repeats","rounds",
+                               "median_app_msgs_per_s","median_process_cpu_pct",
+                               "median_p95_rtt_us","min_app_msgs_per_s","max_app_msgs_per_s",
+                               "median_cpu_us_per_app_message"])
+              for (protocol,driver,n,b),rows in sorted(groups.items()):
+                  med=lambda col: statistics.median(float(r[col]) for r in rows)
+                  writer.writerow([protocol,driver,n,n+1,4,b,5,256,
+                      round(med("app_msgs_per_s"),3),
+                      round(med("process_cpu_pct"),3),
+                      round(med("rtt_p95_us"),3),
+                      round(min(float(r["app_msgs_per_s"]) for r in rows),3),
+                      round(max(float(r["app_msgs_per_s"]) for r in rows),3),
+                      round(statistics.median(float(r["process_cpu_ms"])*1000/(256*4*2)
+                            for r in rows),3)])
+          with open("session-independent-comparison.csv","w",newline="",encoding="utf8") as stream:
+              writer=csv.writer(stream)
+              writer.writerow(["driver","final_owners","payload_bytes","repeats",
+                               "median_signed_over_raw_throughput_ratio",
+                               "median_signed_over_raw_cpu_pct_ratio",
+                               "median_signed_over_raw_p95_rtt_ratio"])
+              for driver in drivers:
+                  for n in (1,2,4):
+                      for b in (8,1024):
+                          paired=[]
+                          for rep in range(1,6):
+                              raw=lookup[("raw-cnet-tcp-echo",driver,n,b,rep)]
+                              signed=lookup[("sg-signed-ready-data-echo",driver,n,b,rep)]
+                              paired.append((
+                                  float(signed["app_msgs_per_s"])/float(raw["app_msgs_per_s"]),
+                                  float(signed["process_cpu_pct"])/float(raw["process_cpu_pct"]),
+                                  float(signed["rtt_p95_us"])/float(raw["rtt_p95_us"])))
+                          writer.writerow([driver,n,b,5,
+                              *[round(statistics.median(pair[i] for pair in paired),4)
+                                for i in range(3)]])
+          print(f"PASS: {len(lookup)}/120 complete; {len(samples)}/122880 RTTs")
           PY
-      - name: Upload session-independent smoke data
+      - name: Upload five-repeat session-independent raw and paired results
         uses: actions/upload-artifact@v4
         with:
-          name: sg-independent-sessions-smoke
+          name: sg-independent-sessions-equal-load
           path: |
             session-independent-aggregate.csv
             session-independent-sessions.csv
             session-independent-rtt.csv
+            session-independent-summary.csv
+            session-independent-comparison.csv
             session-independent-machine.txt
             session-independent-*.log
           if-no-files-found: error
