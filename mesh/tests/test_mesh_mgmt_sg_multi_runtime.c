@@ -405,19 +405,30 @@ static void prepare_typed_request(signed_final *f) {
          sizeof(grant.target_node_id));
   memset(grant.deployment_id, 0x21, sizeof(grant.deployment_id));
   grant.deployment_generation = 1u;
-  memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
   grant.operation = MESH_MGMT_EXECUTION_OPERATION_RUN_PRESTAGED_WASM;
-  grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
-  grant.max_limits.module_bytes = 1024u;
-  grant.max_limits.stack_bytes = 1024u;
-  grant.max_limits.linear_memory_bytes = 4096u;
-  grant.max_limits.timeout_ms = 100u;
-  grant.max_limits.control_flow_steps = 1000u;
-  grant.max_limits.host_calls = 4u;
-  grant.max_limits.copied_guest_bytes = 1024u;
-  grant.max_limits.input_bytes = 64u;
-  grant.max_limits.stdout_bytes = 64u;
-  grant.max_limits.stderr_bytes = 64u;
+#ifdef MESH_SG_REAL_EXECUTION
+  if (f->scenario->exercise_real_execution) {
+    /* Signed command binds the ACTUAL prestaged guest's SHA-256. */
+    memcpy(grant.package_digest, f->execution_deployment.module_digest,
+           sizeof(grant.package_digest));
+    grant.capabilities = MESH_MGMT_EXECUTION_RAW_WASM_CAPABILITIES_V1;
+    sg_execution_limits(&grant.max_limits);
+  } else
+#endif
+  {
+    memset(grant.package_digest, 0x31, sizeof(grant.package_digest));
+    grant.capabilities = MESH_MGMT_EXECUTION_CAP_CORE;
+    grant.max_limits.module_bytes = 1024u;
+    grant.max_limits.stack_bytes = 1024u;
+    grant.max_limits.linear_memory_bytes = 4096u;
+    grant.max_limits.timeout_ms = 100u;
+    grant.max_limits.control_flow_steps = 1000u;
+    grant.max_limits.host_calls = 4u;
+    grant.max_limits.copied_guest_bytes = 1024u;
+    grant.max_limits.input_bytes = 64u;
+    grant.max_limits.stdout_bytes = 64u;
+    grant.max_limits.stderr_bytes = 64u;
+  }
   grant.not_before_ms = TEST_NOW_MS - 1000u;
   grant.expires_at_ms = TEST_NOW_MS + 10000u;
   check_equal(MESH_MGMT_EXECUTION_WIRE_OK,
@@ -429,11 +440,19 @@ static void prepare_typed_request(signed_final *f) {
   memcpy(request.deployment_id, grant.deployment_id, sizeof(request.deployment_id));
   request.deployment_generation = grant.deployment_generation;
   memcpy(request.package_digest, grant.package_digest, sizeof(request.package_digest));
-  request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
-  memset(request.input_digest, 0x51, sizeof(request.input_digest));
-  memcpy(request.inline_input, "input", 5u);
-  request.inline_input_size = 5u;
-  request.input_length = 5u;
+#ifdef MESH_SG_REAL_EXECUTION
+  if (f->scenario->exercise_real_execution) {
+    /* The explicit no-import guest ABI does not accept INLINE payloads. */
+    request.input_kind = MESH_MGMT_EXECUTION_INPUT_NONE;
+  } else
+#endif
+  {
+    request.input_kind = MESH_MGMT_EXECUTION_INPUT_INLINE;
+    memset(request.input_digest, 0x51, sizeof(request.input_digest));
+    memcpy(request.inline_input, "input", 5u);
+    request.inline_input_size = 5u;
+    request.input_length = 5u;
+  }
   request.output_mode = MESH_MGMT_EXECUTION_OUTPUT_DIGEST;
   request.deadline_ms = TEST_NOW_MS + 2000u;
   memset(request.request_nonce, 0x61 + ordinal, sizeof(request.request_nonce));
@@ -1211,7 +1230,8 @@ static void test_multi_final(size_t final_count, int command_mode) {
   sc->shards = final_count + 1u;
   sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
   sc->exercise_typed_rpc = (uint8_t)(command_mode >= 2);
-  sc->exercise_signed_result = (uint8_t)(command_mode == 3);
+  sc->exercise_signed_result = (uint8_t)(command_mode >= 3);
+  sc->exercise_real_execution = (uint8_t)(command_mode == 4);
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -1228,6 +1248,9 @@ static void test_multi_final(size_t final_count, int command_mode) {
     if (sc->exercise_typed_rpc) {
       f->server.rpc_final = f;
       f->client.rpc_final = f;
+#ifdef MESH_SG_REAL_EXECUTION
+      if (sc->exercise_real_execution) init_real_execution_node(f);
+#endif
       prepare_typed_request(f);
       /* Bind the declared target to its trusted execution signer even
        * when this test only returns a negative STATUS; RESULT admission
