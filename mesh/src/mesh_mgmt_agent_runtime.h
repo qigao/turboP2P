@@ -113,6 +113,7 @@ typedef struct {
   cnet_pool_connection physical;
   cnet_managed_connection managed;
   cnet_pool_key key;
+  uint8_t connection_id[16]; /* original signed Router generation */
   uint8_t active;
   uint8_t draining;
 } mesh_mgmt_runtime_pool_record_v3_t;

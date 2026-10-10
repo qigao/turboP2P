@@ -114,6 +114,8 @@ static int runtime_pool_authenticated(
   record->physical = physical;
   record->managed = exact.managed;
   record->key = key;
+  memcpy(record->connection_id, signed_ready.connection_id,
+         sizeof(record->connection_id));
   record->active = 1u;
   return SALTS_OK;
 }
@@ -609,7 +611,8 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_acquire_v3(
   if (!record) return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
   auth = mesh_mgmt_agent_router_ready_peer_v1(&runtime->router, peer, &signed_ready);
   if (auth != MESH_MGMT_AGENT_ROUTER_OK ||
-      memcmp(signed_ready.connection_id, record->key.session_id ? signed_ready.connection_id : signed_ready.connection_id, sizeof(signed_ready.connection_id)) != 0)
+      memcmp(signed_ready.connection_id, record->connection_id,
+             sizeof(record->connection_id)) != 0)
     return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
   auth = mesh_mgmt_agent_router_pool_acquire_v1(
       &runtime->router, peer, signed_ready.remote_transport_peer_id,
@@ -631,11 +634,13 @@ mesh_mgmt_agent_runtime_result_t mesh_mgmt_agent_runtime_signed_pool_release_v3(
        runtime->state != MESH_MGMT_AGENT_RUNTIME_STOPPING) ||
       runtime_is_busy(runtime))
     return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
-  runtime->signed_pool_status = cnet_pool_release(&runtime->signed_pool, lease);
-  if (runtime->signed_pool_status == SALTS_ENOENT)
-    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE;
-  if (runtime->signed_pool_status != SALTS_OK)
+  const int status = cnet_pool_release(&runtime->signed_pool, lease);
+  if (status == SALTS_ENOENT)
+    return MESH_MGMT_AGENT_RUNTIME_INVALID_STATE; /* duplicate/foreign lease */
+  if (status != SALTS_OK) {
+    runtime->signed_pool_status = status;
     return MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
+  }
   runtime->signed_pool_status = runtime_pool_advance(runtime);
   return runtime->signed_pool_status == SALTS_OK
     ? MESH_MGMT_AGENT_RUNTIME_OK : MESH_MGMT_AGENT_RUNTIME_POOL_FAILED;
