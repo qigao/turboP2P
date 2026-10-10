@@ -5,7 +5,7 @@
 
 static_assert(std::is_same<decltype(&p2p_sg_ace_hint_evaluate),
   int (*)(p2p_sg_ace_hint *, const cnet_handoff_snapshot *,
-          uint64_t, cnet_owner_placement_hint *)>::value,
+          uint64_t, uint64_t, cnet_owner_placement_hint *)>::value,
   "CMeta ACE Interface requires exact native C++17 dispatch");
 
 int main() {
@@ -17,7 +17,7 @@ int main() {
     cnet_owner_placement_hint hint = {};
     if (!p2p_sg_ace_hint_valid(&policy)) return 1;
     if (!cmeta_interface_desc_valid(p2p_sg_ace_hint_interface())) return 2;
-    if (p2p_sg_ace_hint_evaluate(&policy, &s, 1u, &hint) != SALTS_OK) return 3;
+    if (p2p_sg_ace_hint_evaluate(&policy, &s, 1u, 0u, &hint) != SALTS_OK) return 3;
     if (!hint.eligible || hint.pressure != 1u) return 4;
     return 0;
 }
