@@ -317,6 +317,14 @@ static int node_cnet_poll_impl(p2p_node_cnet_t *owner,
     if (extra_count > P2P_CNET_SG_MAX_COHOST_CLIENTS ||
         (extra_count != 0u && (!extras || context == NULL)))
         return P2P_ERR_INVALID_ARG;
+    /* Node-level failfast too: malformed external consumer lists must be
+     * rejected before any P2P expiry, key-executor pump or Owner progress.
+     * Transport's own check additionally rejects aliasing its private client. */
+    for (size_t i = 0u; i < extra_count; ++i) {
+        if (!extras[i]) return P2P_ERR_INVALID_ARG;
+        for (size_t j = 0u; j < i; ++j)
+            if (extras[i] == extras[j]) return P2P_ERR_INVALID_ARG;
+    }
     owner->busy = 1;
     now = cmeta_monotonic_ms();
     result = p2p_cnet_admission_expire(owner->admission, now);
