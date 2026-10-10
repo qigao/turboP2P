@@ -542,7 +542,7 @@ static void destroy_raw_worker(native_io_sharded_context *ctx,void *arg) {
   RAW_CHECK(lane,native_io_sharded_context_release_host(ctx,lane->lease));
   lane->backend=NULL;
 }
-static void benchmark(void) {
+static void run_raw_cnet_benchmark(void) {
   raw_case scenario={0},*sc=&scenario;
   const native_io_sharded_config sg_cfg={
     RAW_SHARDS,8u,{backend_kind(),64u,128u,RAW_BATCH}};
@@ -653,6 +653,6 @@ static void benchmark(void) {
 }
 spec("Raw CNet four-connection equal-work NativeIO SG Handoff") {
   it("echoes 8B/1024B on 1/2/4 final workers without Noise or MMP") {
-    benchmark();
+    run_raw_cnet_benchmark();
   }
 }
