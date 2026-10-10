@@ -708,7 +708,11 @@ static int meshd_management_epoch_allocate(void *context,
 static void meshd_management_reset(void) {
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
     if (g_execution_node_configured || g_execution_node.initialized) {
-        mesh_mgmt_execution_node_destroy_v1(&g_execution_node);
+        if (mesh_mgmt_execution_node_destroy_v2(&g_execution_node) !=
+            MESH_MGMT_EXECUTION_NODE_OK) {
+            fprintf(stderr, "Execution Node still owns a native RESULT terminal; retaining context\n");
+            return;
+        }
     }
     memset(&g_execution_node, 0, sizeof(g_execution_node));
     mesh_mgmt_execution_process_destroy_v1(&g_execution_process);
@@ -874,6 +878,12 @@ static int meshd_execution_drain(void) {
         if (result == MESH_MGMT_EXECUTION_NODE_EMPTY) {
             return 0;
         }
+        if (result == MESH_MGMT_EXECUTION_NODE_BUSY) {
+            /* Native encrypted RESULT admission is not a write terminal.
+             * P2P continues progressing on the authoritative event loop;
+             * revisit Egress only on its next ordinary owner turn. */
+            return 0;
+        }
         if (result != MESH_MGMT_EXECUTION_NODE_OK) {
             return -1;
         }
@@ -888,18 +898,33 @@ static void meshd_management_stop(void) {
     if (g_execution_node_configured) {
         mesh_mgmt_execution_node_result_t send_result;
 
-        (void)mesh_mgmt_execution_node_shutdown_v1(&g_execution_node);
+        send_result = mesh_mgmt_execution_node_shutdown_v1(&g_execution_node);
+        if (send_result != MESH_MGMT_EXECUTION_NODE_OK &&
+            send_result != MESH_MGMT_EXECUTION_NODE_BUSY) {
+            fprintf(stderr, "Execution Worker shutdown failed; retaining context\n");
+            return;
+        }
         for (;;) {
             send_result = mesh_mgmt_execution_node_send_next_v1(
                 &g_execution_node, &g_management_runtime);
-            if (send_result == MESH_MGMT_EXECUTION_NODE_EMPTY) {
+            if (send_result == MESH_MGMT_EXECUTION_NODE_EMPTY)
                 break;
+            if (send_result == MESH_MGMT_EXECUTION_NODE_BUSY) {
+                /* Do not advance a second NativeIO observer or free callback
+                 * memory. Checked Stop can be retried after normal P2P poll. */
+                fprintf(stderr, "Execution RESULT pending native terminal; retaining context\n");
+                return;
             }
             if (send_result != MESH_MGMT_EXECUTION_NODE_OK) {
-                break;
+                fprintf(stderr, "Execution RESULT unresolved; retaining Egress and Store\n");
+                return;
             }
         }
-        mesh_mgmt_execution_node_destroy_v1(&g_execution_node);
+        if (mesh_mgmt_execution_node_destroy_v2(&g_execution_node) !=
+                MESH_MGMT_EXECUTION_NODE_OK) {
+            fprintf(stderr, "Execution RESULT callback still active; retaining context\n");
+            return;
+        }
         memset(&g_execution_node, 0, sizeof(g_execution_node));
         g_execution_node_configured = 0;
     }
