@@ -1,0 +1,102 @@
+name: Raw CNet SG four-session TCP baseline
+on:
+  pull_request:
+    branches: [feature/mesh-mmp-sg-equal-load-benchmark-23]
+    paths:
+      - 'mesh/bench/**'
+      - 'tests/salts_foundation/CMakeLists.txt'
+      - '.github/workflows/raw-cnet-sg-benchmark.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  raw-cnet-sg:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-salts-sdk
+      - uses: ./.github/actions/setup-compiler-cache
+        with:
+          profile: linux-cnet-sg-raw-equal-load
+      - name: Build pure CNet NativeIO SG four-session echo
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S tests/salts_foundation -B build/raw-cnet-sg-bench -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DP2P_RAW_CNET_SG_BUILD_BENCHMARKS=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$QIGAO_VCPKG_TOOLCHAIN_FILE" \
+            -DVCPKG_MANIFEST_MODE=OFF
+          cmake --build build/raw-cnet-sg-bench --parallel 2 --target \
+            bench_raw_cnet_sg_1 bench_raw_cnet_sg_2 bench_raw_cnet_sg_4
+      - name: Verify raw TCP 1/2/4 Final Owner same-work gate
+        shell: bash
+        env:
+          P2P_MMP_BENCH_WARMUP: '8'
+          P2P_MMP_BENCH_ROUNDS: '32'
+        run: |
+          set -euo pipefail
+          echo 'protocol,driver,final_owners,total_shards,sessions,payload_bytes,rounds,warmup,wall_ms,process_cpu_ms,process_cpu_pct,app_msgs_per_s,payload_mib_per_s,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-aggregate.csv
+          echo 'protocol,driver,final_owners,total_shards,session_id,payload_bytes,rounds,rtt_p50_us,rtt_p95_us,rtt_p99_us' > raw-sg-sessions.csv
+          echo 'final_owners,total_shards,session_id,payload_bytes,round,rtt_us' > raw-sg-rtt.csv
+          {
+            uname -a
+            lscpu
+            git rev-parse HEAD
+            date -u +'%Y-%m-%dT%H:%M:%SZ'
+            echo "SALTS_ROOT=$SALTS_ROOT"
+            echo "SALTS_UTILS_ROOT=$SALTS_UTILS_ROOT"
+          } > raw-sg-machine.txt
+          for bytes in 8 1024; do
+            for finals in 1 2 4; do
+              export P2P_MMP_BENCH_PAYLOAD="$bytes"
+              log="raw-cnet-sg-$finals-final-$bytes-B.log"
+              "./build/raw-cnet-sg-bench/bench_raw_cnet_sg_$finals" | tee "$log"
+              grep '^RAW_CNET_SG_BENCH,' "$log" |
+                sed 's/^RAW_CNET_SG_BENCH,//' >> raw-sg-aggregate.csv
+              grep '^RAW_CNET_SG_SESSION,' "$log" |
+                sed 's/^RAW_CNET_SG_SESSION,//' >> raw-sg-sessions.csv
+              grep '^RAW_CNET_SG_RTT,' "$log" |
+                sed 's/^RAW_CNET_SG_RTT,global-barrier,//' >> raw-sg-rtt.csv
+            done
+          done
+          python3 - <<'PY'
+          import csv, math
+          from collections import defaultdict
+          rows=list(csv.DictReader(open('raw-sg-aggregate.csv',encoding='utf8')))
+          clients=list(csv.DictReader(open('raw-sg-sessions.csv',encoding='utf8')))
+          raw=list(csv.DictReader(open('raw-sg-rtt.csv',encoding='utf8')))
+          expected={(n,b) for n in (1,2,4) for b in (8,1024)}
+          got=set()
+          for row in rows:
+              n,b=int(row['final_owners']),int(row['payload_bytes'])
+              if ((n,b) not in expected or (n,b) in got or
+                  int(row['total_shards']) != n+1 or int(row['sessions']) != 4 or
+                  int(row['rounds']) != 32 or int(row['warmup']) != 8 or
+                  row['protocol']!='raw-cnet-tcp-echo' or row['driver']!='global-barrier'
+                  or any(not math.isfinite(float(row[k])) or float(row[k])<=0
+                         for k in ('app_msgs_per_s','wall_ms','rtt_p95_us'))):
+                  raise SystemExit(f'Invalid or duplicate raw CNet profile: {row}')
+              got.add((n,b))
+          if got!=expected or len(clients)!=24 or len(raw)!=6*4*32:
+              raise SystemExit(f'Incomplete raw SG work: profiles {got} sessions {len(clients)} RTT {len(raw)}')
+          print('Raw SG four-session smoke profiles PASS:',sorted(got))
+          PY
+          echo 'Raw TCP/CNet echo is NOT Noise, MMP, Pool, or encrypted RPC. Matched session/SG/Handoff work only.'
+      - name: Upload raw CNet baseline evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-cnet-sg-equal-load
+          path: |
+            raw-sg-aggregate.csv
+            raw-sg-sessions.csv
+            raw-sg-rtt.csv
+            raw-sg-machine.txt
+            raw-cnet-sg-*.log
+          if-no-files-found: error
+      - name: Report ccache
+        if: always()
+        shell: bash
+        run: ccache --show-stats
