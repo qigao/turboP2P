@@ -138,8 +138,14 @@ spec("CMeta ACE admission policy composes actual CNet SG pressure") {
             p2p_sg_ace_hint_evaluate(&policy, &s, 1u, 2u, &hint));
         check_false(hint.eligible);
         check_equal((uint64_t)0u, hint.pressure);
-        check_equal(SALTS_EINVAL,
+        /* Cross-owner TAKEN and published-Owner counts can race during
+         * release. Treat that one candidate as unavailable, not a fatal
+         * listener failure or inaccurate zero-pressure admission. */
+        hint = (cnet_owner_placement_hint){true, 88u};
+        check_equal(SALTS_ENOBUFS,
             p2p_sg_ace_hint_evaluate(&policy, &s, 2u, 2u, &hint));
+        check_false(hint.eligible);
+        check_equal((uint64_t)0u, hint.pressure);
     }
     it("fails fast on impossible credits, missing state or output") {
         p2p_sg_ace_capacity cap = {4};

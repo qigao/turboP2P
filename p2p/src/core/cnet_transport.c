@@ -166,15 +166,23 @@ static int sweep(p2p_cnet_owner_t *owner) {
         p2p_cnet_connection_t *connection = *link;
         if (connection->inbound_credit != NULL &&
             ((connection->detached && connection->terminal) || owner->stopped)) {
-            int status = cnet_handoff_release(connection->inbound_credit,
-                                              connection->inbound_ticket);
-            if (status != SALTS_OK) return p2p_error(status);
-            connection->inbound_credit = NULL;
+            /* A release reduces CNet TAKEN before the acceptor's next
+             * placement snapshot. Decrement our published adopted subset
+             * FIRST: the brief conservative overcount is safe; the reverse
+             * order could create a false credited > TAKEN mismatch. */
             if (!owner->handed_off_connections)
                 return P2P_ERR_INVALID_STATE;
             --owner->handed_off_connections;
-            /* Publish even if the connection remains attached after stop. */
             publish_owner_occupancy(owner);
+            int status = cnet_handoff_release(connection->inbound_credit,
+                                              connection->inbound_ticket);
+            if (status != SALTS_OK) {
+                /* Failed CNet release did not consume this TAKEN credit. */
+                ++owner->handed_off_connections;
+                publish_owner_occupancy(owner);
+                return p2p_error(status);
+            }
+            connection->inbound_credit = NULL;
         }
         if (connection->detached && (connection->terminal || owner->stopped)) {
             *link = connection->next;
@@ -624,11 +632,23 @@ static int sg_route_accepted(p2p_cnet_owner_t *owner,
         };
         p2p_sg_ace_hint strategy = p2p_sg_ace_capacity_strategy(&capacity);
         if (cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK ||
-            !p2p_sg_ace_hint_valid(&strategy) ||
-            p2p_sg_ace_hint_evaluate(
-                &strategy, &snap,
-                (uint64_t)(uint32_t)(published >> 32),
-                (uint64_t)(uint32_t)published, &hints[i]) != SALTS_OK) {
+            !p2p_sg_ace_hint_valid(&strategy)) {
+            cnet_accepted_stream_close(accepted);
+            return P2P_ERR_INVALID_STATE;
+        }
+        const int hint_status = p2p_sg_ace_hint_evaluate(
+            &strategy, &snap,
+            (uint64_t)(uint32_t)(published >> 32),
+            (uint64_t)(uint32_t)published, &hints[i]);
+        if (hint_status == SALTS_ENOBUFS) {
+            /* Distinct P2P and CNet owner publications can race. An
+             * inconsistent transient is treated as candidate capacity
+             * pressure, never a global listener failure or a hidden
+             * post-selection retry to another Owner. */
+            hints[i] = (cnet_owner_placement_hint){0};
+            continue;
+        }
+        if (hint_status != SALTS_OK) {
             cnet_accepted_stream_close(accepted);
             return P2P_ERR_INVALID_STATE;
         }

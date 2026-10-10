@@ -37,9 +37,13 @@ publishes RESERVED/QUEUED/TAKEN.
     shared_host_pressure = p2p_occupancy + other_cnet_slots
 
 Unlike max(live, TAKEN), this also counts TAKEN tickets still awaiting Adopt
-alongside unrelated outbound P2P connections. Impossible intersections
-(adopted > live or adopted > TAKEN) fail closed, never become a negative or
-wrapped occupancy.
+alongside unrelated outbound P2P connections. Impossible published intersections (adopted > live) and malformed CNet
+Handoff capacity snapshots fail fast, never becoming negative or wrapped
+occupancy. Unlike these permanent corruptions, adopted > observed TAKEN
+can be a valid race between two separate atomic snapshot authorities.
+That candidate returns ENOBUFS with an ineligible hint; RR/LOWEST_PRESSURE
+still performs its original upstream one-time selection, while EXPLICIT
+fails closed without rerouting. The final CNet reserve remains authoritative.
 
 The actual SG Host uses p2p_cnet_owner_publish_sg_host_load() on the
 borrowed Owner shard and exact lease to publish **other CNet Client physical
