@@ -19,9 +19,17 @@
     (BENCH_SG_SHARDS != 1 && BENCH_SG_SHARDS != 2 && BENCH_SG_SHARDS != 4)
 #error "BENCH_SG_SHARDS must be 1, 2 or 4"
 #endif
+#ifndef BENCH_ACTIVE_SESSIONS
+#define BENCH_ACTIVE_SESSIONS (BENCH_SG_SHARDS - (BENCH_SG_SHARDS != 1))
+#endif
+#if BENCH_ACTIVE_SESSIONS < 1 || BENCH_ACTIVE_SESSIONS > \
+    (BENCH_SG_SHARDS - (BENCH_SG_SHARDS != 1))
+#error "BENCH_ACTIVE_SESSIONS must fit the real final Owner count"
+#endif
 enum {
     SG4_SHARDS = BENCH_SG_SHARDS,
     SG4_FINALS = BENCH_SG_SHARDS == 1 ? 1u : BENCH_SG_SHARDS - 1u,
+    SG4_ACTIVE_SESSIONS = BENCH_ACTIVE_SESSIONS,
     SG4_BATCH = 16u,
     SG4_TIMEOUT_MS = 12000u
 };
@@ -302,7 +310,7 @@ static void sg4_barrier(sg4_case *scenario) {
 }
 
 static void sg4_pump(sg4_case *scenario) {
-    for (size_t i = 0u; i < SG4_FINALS; ++i)
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
         check_equal(P2P_OK, p2p_poll(scenario->clients[i].node));
     for (size_t i = 0u; i < SG4_SHARDS; ++i)
         sg4_submit(scenario, i, sg4_progress);
@@ -367,7 +375,7 @@ static void sg4_run_benchmark(sg4_case *scenario) {
             cpu0 = sg4_clock_ns(CLOCK_PROCESS_CPUTIME_ID);
         }
         if (round >= warmup) started = sg4_clock_ns(CLOCK_MONOTONIC);
-        for (size_t i = 0u; i < SG4_FINALS; ++i) {
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
             const char request[8] = {'h','e','l','l','o','-',(char)('1' + i),'\0'};
             check_equal(P2P_OK, p2p_send_message(
                 scenario->clients[i].node, scenario->clients[i].peer,
@@ -376,26 +384,26 @@ static void sg4_run_benchmark(sg4_case *scenario) {
         uint64_t deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
         for (;;) {
             bool done = true;
-            for (size_t i = 0u; i < SG4_FINALS; ++i)
+            for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
                 if (scenario->servers[i].endpoint.messages < expected)
                     done = false;
             if (done || cmeta_monotonic_ms() >= deadline) break;
             sg4_pump(scenario);
         }
-        for (size_t i = 0u; i < SG4_FINALS; ++i)
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             check_equal(expected, scenario->servers[i].endpoint.messages);
-        for (size_t i = 0u; i < SG4_FINALS; ++i)
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             sg4_submit(scenario, sg4_final_shard(i), sg4_send);
         sg4_barrier(scenario);
         deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
         for (;;) {
             bool done = true;
-            for (size_t i = 0u; i < SG4_FINALS; ++i)
+            for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
                 if (scenario->clients[i].messages < expected) done = false;
             if (done || cmeta_monotonic_ms() >= deadline) break;
             sg4_pump(scenario);
         }
-        for (size_t i = 0u; i < SG4_FINALS; ++i)
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             check_equal(expected, scenario->clients[i].messages);
         if (round >= warmup)
             samples[round - warmup] =
@@ -406,10 +414,10 @@ static void sg4_run_benchmark(sg4_case *scenario) {
     qsort(samples, count, sizeof(*samples), sg4_sort_u64);
     double wall_s = (double)(wall1 - wall0) / 1e9;
     double cpu_s = (double)(cpu1 - cpu0) / 1e9;
-    double messages = (double)count * (double)SG4_FINALS * 2.0;
+    double messages = (double)count * (double)SG4_ACTIVE_SESSIONS * 2.0;
     check_true(wall_s > 0.0);
     printf("P2P_SG_BENCH,%u,%u,%zu,%zu,8,%.3f,%.3f,%.2f,%.2f,%.4f,%.3f,%.3f,%.3f\n",
-           (unsigned)SG4_SHARDS, (unsigned)SG4_FINALS, count, warmup,
+           (unsigned)SG4_SHARDS, (unsigned)SG4_ACTIVE_SESSIONS, count, warmup,
            wall_s * 1e3, cpu_s * 1e3, cpu_s * 100.0 / wall_s,
            messages / wall_s, messages * 8.0 / (1048576.0 * wall_s),
            (double)sg4_percentile(samples, count, 50u) / 1000.0,
@@ -450,7 +458,7 @@ static void test_four_sg_native_p2p_owners(void) {
     }
     check_true(scenario->lanes[0].listener.port != 0u);
 
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         endpoint_t *client = &scenario->clients[i];
         sg4_server *server = &scenario->servers[i];
         client->remote = &server->endpoint;
@@ -475,7 +483,7 @@ static void test_four_sg_native_p2p_owners(void) {
 
     /* Sequential accept admission ensures stable, signed identity/owner
      * correspondence. Once established, all sessions advance concurrently. */
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         endpoint_t *client = &scenario->clients[i];
         sg4_server *server = &scenario->servers[i];
         check_equal(P2P_OK, p2p_connect(client->node,
@@ -496,7 +504,7 @@ static void test_four_sg_native_p2p_owners(void) {
         }
     }
 
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         char request[8] = {'h','e','l','l','o','-',(char)('1' + i),'\0'};
         check_equal(P2P_OK, p2p_send_message(
             scenario->clients[i].node, scenario->clients[i].peer,
@@ -507,13 +515,13 @@ static void test_four_sg_native_p2p_owners(void) {
     const uint64_t exchange_deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
     for (;;) {
         bool all_done = true;
-        for (size_t i = 0u; i < SG4_FINALS; ++i)
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
             if (!scenario->servers[i].endpoint.messages ||
                 !scenario->clients[i].messages) all_done = false;
         if (all_done || cmeta_monotonic_ms() >= exchange_deadline) break;
         sg4_pump(scenario);
     }
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         const char request[8] = {'h','e','l','l','o','-',(char)('1' + i),'\0'};
         const char reply[8] = {'r','e','p','l','y','-',(char)('1' + i),'\0'};
         check_equal(1, scenario->clients[i].messages);
@@ -528,13 +536,13 @@ static void test_four_sg_native_p2p_owners(void) {
 
     sg4_run_benchmark(scenario);
 
-    for (size_t i = 0u; i < SG4_FINALS; ++i)
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i)
         p2p_peer_disconnect(scenario->clients[i].peer);
     const uint64_t drain_deadline = cmeta_monotonic_ms() + SG4_TIMEOUT_MS;
     for (;;) {
         bool drained = true;
         sg4_pump(scenario);
-        for (size_t i = 0u; i < SG4_FINALS; ++i) {
+        for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
             if (scenario->handoff) {
                 p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
                 if (snap.handoff.taken != 0u) drained = false;
@@ -544,7 +552,7 @@ static void test_four_sg_native_p2p_owners(void) {
         }
         if (drained || cmeta_monotonic_ms() >= drain_deadline) break;
     }
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         if (scenario->handoff) {
             p2p_cnet_sg_snapshot_v1_t snap = sg4_snapshot(scenario, i);
             check_equal((size_t)0u, snap.handoff.taken);
@@ -558,7 +566,9 @@ static void test_four_sg_native_p2p_owners(void) {
                 scenario->lanes[0].unwanted_local_accepts);
     for (size_t i = 0u; i < SG4_SHARDS; ++i) {
         check_true(scenario->lanes[i].turns > 0u);
-        check_true(scenario->lanes[i].observed > 0u);
+        /* Non-selected 4-shard final Owners are live but may have zero I/O. */
+        if (i == 0u || i <= (size_t)SG4_ACTIVE_SESSIONS)
+            check_true(scenario->lanes[i].observed > 0u);
         check_equal(1u, scenario->lanes[i].wrong_owner_rejections);
     }
 
@@ -600,7 +610,7 @@ static void test_four_sg_native_p2p_owners(void) {
     check_equal(SALTS_OK, native_io_sharded_shutdown(scenario->runtime));
     check_equal(SALTS_OK, native_io_sharded_destroy(scenario->runtime));
 
-    for (size_t i = 0u; i < SG4_FINALS; ++i) {
+    for (size_t i = 0u; i < SG4_ACTIVE_SESSIONS; ++i) {
         check_equal(P2P_OK,
             p2p_node_cnet_destroy(scenario->clients[i].owner));
         check_equal(P2P_OK,
