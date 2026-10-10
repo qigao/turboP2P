@@ -25,19 +25,37 @@ outbound streams or locally accepted non-handoff streams. Its local-owner
 special case added the live count to TAKEN, which can double-count the same
 established incoming connection.
 
-Now each P2P transport Owner publishes its exact live-list count with an
-atomic release-store when a connection enters or retires from the list.
-The acceptor uses an acquire-load: no unsynchronized read of a foreign
-Owner's linked list or mutable connection count.
+The exact calculation requires two facts published from one P2P Owner:
+live physical connections and how many of those still retain an *adopted*
+Handoff TAKEN ticket. They are atomically packed into one release/acquire
+publication to avoid cross-shard torn counts. CNet HandOff separately
+publishes RESERVED/QUEUED/TAKEN.
 
-The typed CMeta p2p_sg_ace_hint Strategy builds a pressure hint:
+    uncredited_p2p_live = p2p_live - p2p_adopted_taken
+    p2p_occupancy = uncredited_p2p_live
+                  + handoff_taken + handoff_reserved + handoff_queued
+    shared_host_pressure = p2p_occupancy + other_cnet_slots
 
-    pressure = max(owner_published_live_p2p, handoff_taken)
-             + handoff_reserved + handoff_queued
+Unlike max(live, TAKEN), this also counts TAKEN tickets still awaiting Adopt
+alongside unrelated outbound P2P connections. Impossible published intersections (adopted > live) and malformed CNet
+Handoff capacity snapshots fail fast, never becoming negative or wrapped
+occupancy. Unlike these permanent corruptions, adopted > observed TAKEN
+can be a valid race between two separate atomic snapshot authorities.
+That candidate returns ENOBUFS with an ineligible hint; RR/LOWEST_PRESSURE
+still performs its original upstream one-time selection, while EXPLICIT
+fails closed without rerouting. The final CNet reserve remains authoritative.
 
-An Owner is eligible only when it is not sealed, the handoff credit budget is
-not full, and this hint is below the Owner's actual CNet client connection
-capacity. Credit capacity and physical capacity are checked separately:
+The actual SG Host uses p2p_cnet_owner_publish_sg_host_load() on the
+borrowed Owner shard and exact lease to publish **other CNet Client physical
+slots** from CONNECTING until terminal plus an optional shared physical
+connection budget. Both values are published in one atomic word. If a P2P
+SG poll receives an extras[] group without prior Host publication, it fails
+before touching P2P admission state, key-worker completion or NativeIO observe.
+
+An Owner is eligible only when it is not sealed, the Handoff credit budget
+is not full, P2P occupancy is below that Owner's own physical CNet client
+capacity, and (if the Host supplies a shared budget) combined P2P+CNet
+pressure is below that shared Host capacity. Credit capacity and physical capacity are checked separately:
 an app may choose a tighter handoff credit limit than the underlying client.
 
 EXPLICIT computes only its pinned Owner's pressure (O(1) host snapshot),
@@ -56,12 +74,20 @@ Acceptor-Connector: CNet listener/client remain the only transport owners.
 ACT: CNet Handoff ticket and SG request generation, not a second tracker.
 Reactor/Proactor: NativeIO/CNet, not CMeta callbacks with their own loop.
 
-The published counter covers the P2P CNet transport Owner's own connections.
-An independently cohosted CNet client has its own physical capacity and is
-not included in the P2P owner's live-list count. For a complete mixed-SG
-pressure signal, add an explicit Host-owned capacity/telemetry publication
-contract instead of reading foreign cnet_client.impl or claiming that the
-pure placement decision reserves external clients.
+The published per-P2P Owner counters cover that P2P CNet Client only.
+Independent cohosted CNet clients supply **explicit Host-owned telemetry**:
+the host counts real connecting/live physical occupied slots across all
+additional CNet clients and publishes a separate shared budget. It must
+update the publication as connections are admitted/retired and keep callback
+storage alive until CNet terminal + stop/destroy. The publication is advisory
+and can become stale between Owner accept and CNet admission; the final
+CNet/Handoff reserve is the sole authoritative enforcement. There is no
+private CNet impl inspection or invented native backend pool.
+
+When multiple CNet consumers share one SG backend, this shared capacity is
+an application Host budget, not an SDK-owned physical capacity reservation.
+An additional Host-side reservation credit is still required if the product
+wants strict global shared-slot admission rather than a conservative hint.
 
 Client direction: signed management endpoint policy already selects stable
 identity through CNet destination strategies. CNet Manager, ClientPool,

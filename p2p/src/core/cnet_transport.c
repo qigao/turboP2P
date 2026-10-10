@@ -42,10 +42,15 @@ struct p2p_cnet_owner_s {
     p2p_cnet_config_t config;
     p2p_cnet_connection_t *connections;
     size_t connection_count;
-    /* The fixed Owner publishes live P2P connection pressure; another SG
-     * shard must not dereference its non-atomic linked list or size. This is
-     * advisory only, not a reserved CNet slot. */
-    atomic_uint_fast64_t published_connections;
+    size_t handed_off_connections;
+    /* Coherent Owner-published snapshot: high 32 live P2P connections,
+     * low 32 adopted TAKEN credits still retained by P2P callbacks.
+     * One release store avoids cross-shard torn pairs. */
+    atomic_uint_fast64_t published_occupancy;
+    /* Explicit Host-owned advisory only: high 32 shared SG connection limit,
+     * low 32 other cohosted CNet occupied/connecting slots. Zero means absent.
+     * CNet/Handoff still owns authoritative physical/credit admission. */
+    atomic_uint_fast64_t published_host_load;
     p2p_cnet_accept_fn accept;
     void *accept_context;
     int busy;
@@ -71,6 +76,16 @@ struct p2p_cnet_sg_s {
     atomic_uint_fast64_t denied;
     atomic_bool sealed;
 };
+
+static void publish_owner_occupancy(p2p_cnet_owner_t *owner) {
+    /* A CNet Owner's configured physical capacity is checked at create.
+     * Both values stay within uint32_t, and one atomic release publishes
+     * them as one generation-coherent advisory value to SG acceptor. */
+    uint64_t counts = ((uint64_t)owner->connection_count << 32) |
+                      (uint64_t)owner->handed_off_connections;
+    atomic_store_explicit(&owner->published_occupancy, counts,
+                          memory_order_release);
+}
 
 static int connection_send(void *handle, const void *data, size_t length);
 static void connection_close(void *handle);
@@ -151,17 +166,28 @@ static int sweep(p2p_cnet_owner_t *owner) {
         p2p_cnet_connection_t *connection = *link;
         if (connection->inbound_credit != NULL &&
             ((connection->detached && connection->terminal) || owner->stopped)) {
+            /* A release reduces CNet TAKEN before the acceptor's next
+             * placement snapshot. Decrement our published adopted subset
+             * FIRST: the brief conservative overcount is safe; the reverse
+             * order could create a false credited > TAKEN mismatch. */
+            if (!owner->handed_off_connections)
+                return P2P_ERR_INVALID_STATE;
+            --owner->handed_off_connections;
+            publish_owner_occupancy(owner);
             int status = cnet_handoff_release(connection->inbound_credit,
                                               connection->inbound_ticket);
-            if (status != SALTS_OK) return p2p_error(status);
+            if (status != SALTS_OK) {
+                /* Failed CNet release did not consume this TAKEN credit. */
+                ++owner->handed_off_connections;
+                publish_owner_occupancy(owner);
+                return p2p_error(status);
+            }
             connection->inbound_credit = NULL;
         }
         if (connection->detached && (connection->terminal || owner->stopped)) {
             *link = connection->next;
-            owner->connection_count--;
-            atomic_store_explicit(&owner->published_connections,
-                                  (uint64_t)owner->connection_count,
-                                  memory_order_release);
+            --owner->connection_count;
+            publish_owner_occupancy(owner);
             free_connection(connection);
         } else {
             link = &connection->next;
@@ -364,9 +390,8 @@ static void publish_connection(p2p_cnet_owner_t *owner,
                                  p2p_cnet_connection_t *connection) {
     connection->next = owner->connections;
     owner->connections = connection;
-    owner->connection_count++;
-    atomic_store_explicit(&owner->published_connections,
-                          (uint64_t)owner->connection_count, memory_order_release);
+    ++owner->connection_count;
+    publish_owner_occupancy(owner);
 }
 
 static cnet_observer observer(p2p_cnet_connection_t *connection) {
@@ -389,6 +414,8 @@ static int create_owner_impl(const p2p_cnet_config_t *config,
     if (!config || !config->send_hwm_bytes || !config->pending_write_limit ||
         config->pending_write_limit > SIZE_MAX / sizeof(p2p_cnet_write_t) ||
         !config->accept_budget || !config->stop_timeout_ms ||
+        !config->client.connection_capacity ||
+        config->client.connection_capacity > UINT32_MAX ||
         config->client.tls_io_buffer_bytes)
         return P2P_ERR_INVALID_ARG;
     if (external_backend &&
@@ -402,7 +429,8 @@ static int create_owner_impl(const p2p_cnet_config_t *config,
     owner = calloc(1, sizeof(*owner));
     if (!owner) return P2P_ERR_NO_MEM;
     owner->config = *config;
-    atomic_init(&owner->published_connections, 0u);
+    atomic_init(&owner->published_occupancy, 0u);
+    atomic_init(&owner->published_host_load, 0u);
     owner->external_backend = external_backend;
     owner->host_lease = host_lease;
     if (external_backend) {
@@ -556,6 +584,7 @@ static int adopt_detached(p2p_cnet_owner_t *owner,
     }
     connection->inbound_credit = credit_owner;
     connection->inbound_ticket = credit;
+    if (credit_owner) ++owner->handed_off_connections;
     publish_connection(owner, connection);
     status = owner->accept(owner, &connection->base, &peer,
                             owner->accept_context);
@@ -592,15 +621,34 @@ static int sg_route_accepted(p2p_cnet_owner_t *owner,
         ? first + 1u : sg->owner_count;
     for (size_t i = first; i < end; ++i) {
         cnet_handoff_snapshot snap = {0};
+        const uint64_t published = atomic_load_explicit(
+            &sg->finals[i]->published_occupancy, memory_order_acquire);
+        const uint64_t host = atomic_load_explicit(
+            &sg->finals[i]->published_host_load, memory_order_acquire);
         p2p_sg_ace_capacity capacity = {
-            (uint64_t)sg->finals[i]->config.client.connection_capacity
+            (uint64_t)sg->finals[i]->config.client.connection_capacity,
+            (uint64_t)(uint32_t)host,
+            (uint64_t)(uint32_t)(host >> 32)
         };
         p2p_sg_ace_hint strategy = p2p_sg_ace_capacity_strategy(&capacity);
         if (cnet_handoff_get_snapshot(&sg->inboxes[i], &snap) != SALTS_OK ||
-            !p2p_sg_ace_hint_valid(&strategy) ||
-            p2p_sg_ace_hint_evaluate(&strategy, &snap,
-                atomic_load_explicit(&sg->finals[i]->published_connections,
-                                     memory_order_acquire), &hints[i]) != SALTS_OK) {
+            !p2p_sg_ace_hint_valid(&strategy)) {
+            cnet_accepted_stream_close(accepted);
+            return P2P_ERR_INVALID_STATE;
+        }
+        const int hint_status = p2p_sg_ace_hint_evaluate(
+            &strategy, &snap,
+            (uint64_t)(uint32_t)(published >> 32),
+            (uint64_t)(uint32_t)published, &hints[i]);
+        if (hint_status == SALTS_ENOBUFS) {
+            /* Distinct P2P and CNet owner publications can race. An
+             * inconsistent transient is treated as candidate capacity
+             * pressure, never a global listener failure or a hidden
+             * post-selection retry to another Owner. */
+            hints[i] = (cnet_owner_placement_hint){0};
+            continue;
+        }
+        if (hint_status != SALTS_OK) {
             cnet_accepted_stream_close(accepted);
             return P2P_ERR_INVALID_STATE;
         }
@@ -884,6 +932,35 @@ int p2p_cnet_owner_poll(p2p_cnet_owner_t *owner) {
  * expiring admissions, pumping private-key work or advancing CNet on a
  * possibly foreign/stale SG lease. The transport repeats it at its boundary
  * so direct callers cannot bypass the ownership contract. */
+/* Only the real borrowed NativeIO SG host can publish other-client load.
+ * The host samples separately managed CNet clients' real physical slots,
+ * including CONNECTING / awaiting terminal. No CNet private impl inspection
+ * is done here, and this hint is not a replacement for physical reservation.
+ * Both values are published in one atomic release-store. */
+int p2p_cnet_owner_publish_sg_host_load(
+    p2p_cnet_owner_t *owner, native_io_sharded_context *context,
+    native_io_sharded_host_lease lease,
+    size_t other_client_slots, size_t shared_host_capacity) {
+    if (other_client_slots > UINT32_MAX ||
+        shared_host_capacity > UINT32_MAX ||
+        (shared_host_capacity == 0u && other_client_slots != 0u) ||
+        other_client_slots > shared_host_capacity)
+        return P2P_ERR_INVALID_ARG;
+    if (!owner || !context || !owner->external_backend ||
+        !owner->host_batch || owner->stopped ||
+        lease.version != NATIVE_IO_SHARDED_HOST_VERSION ||
+        owner->host_lease.owner_identity != lease.owner_identity ||
+        owner->host_lease.owner_shard != lease.owner_shard ||
+        owner->host_lease.generation != lease.generation ||
+        native_io_sharded_context_shard(context) != (size_t)lease.owner_shard)
+        return P2P_ERR_INVALID_STATE;
+    const uint64_t packed = ((uint64_t)shared_host_capacity << 32) |
+                            (uint64_t)other_client_slots;
+    atomic_store_explicit(&owner->published_host_load, packed,
+                          memory_order_release);
+    return P2P_OK;
+}
+
 int p2p_cnet_owner_preflight_sg_host(
     p2p_cnet_owner_t *owner, cnet_client *const *extras, size_t extra_count,
     native_io_sharded_context *context, native_io_sharded_host_lease lease) {
@@ -898,6 +975,11 @@ int p2p_cnet_owner_preflight_sg_host(
         owner->host_lease.owner_shard != lease.owner_shard ||
         owner->host_lease.generation != lease.generation ||
         native_io_sharded_context_shard(context) != (size_t)lease.owner_shard)
+        return P2P_ERR_INVALID_STATE;
+    /* Explicit Host capacity publication is mandatory for mixed consumers.
+     * Without it a P2P-only load snapshot would silently ignore extra CNet. */
+    if (extra_count && !(atomic_load_explicit(
+            &owner->published_host_load, memory_order_acquire) >> 32))
         return P2P_ERR_INVALID_STATE;
     for (size_t i = 0u; i < extra_count; ++i) {
         if (!extras[i] || !extras[i]->impl || extras[i] == &owner->client)
