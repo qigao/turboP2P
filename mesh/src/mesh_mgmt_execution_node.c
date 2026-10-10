@@ -105,6 +105,10 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_init_v1(
 
   if (!node || !config)
     return MESH_MGMT_EXECUTION_NODE_INVALID_ARG;
+  /* Reinit must not wipe a live callback's address-stable continuation. */
+  if (node->initialized ||
+      node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE)
+    return MESH_MGMT_EXECUTION_NODE_INVALID_ARG;
   memset(node, 0, sizeof(*node));
   if (!config_is_valid(config))
     return MESH_MGMT_EXECUTION_NODE_INVALID_CONFIG;
@@ -225,12 +229,14 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_send_next_v1(
 
   if (!node || !runtime || !node->initialized)
     return MESH_MGMT_EXECUTION_NODE_INVALID_ARG;
-  sender_result = mesh_mgmt_execution_sender_send_next_runtime_v1(
-      &node->egress, runtime);
+  sender_result = mesh_mgmt_execution_sender_send_next_runtime_v5(
+      &node->response_sender, &node->egress, runtime);
   if (sender_result == MESH_MGMT_EXECUTION_SENDER_OK)
-    return MESH_MGMT_EXECUTION_NODE_OK;
+    return MESH_MGMT_EXECUTION_NODE_OK; /* native full write, head committed */
   if (sender_result == MESH_MGMT_EXECUTION_SENDER_EMPTY)
     return MESH_MGMT_EXECUTION_NODE_EMPTY;
+  if (sender_result == MESH_MGMT_EXECUTION_SENDER_IN_FLIGHT)
+    return MESH_MGMT_EXECUTION_NODE_BUSY; /* admission != wire terminal */
   return MESH_MGMT_EXECUTION_NODE_SEND_FAILED;
 }
 
@@ -242,17 +248,33 @@ mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_shutdown_v1(
   if (mesh_mgmt_execution_worker_shutdown_v1(&node->worker) !=
       MESH_MGMT_EXECUTION_WORKER_OK)
     return MESH_MGMT_EXECUTION_NODE_WORKER_FAILED;
+  /* A confirmed native write must first be committed on the sender owner
+   * turn. A failure is indeterminate and cannot be silently discarded. */
+  if (node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE ||
+      (node->egress.initialized &&
+       atomic_load_explicit(&node->egress.pending, memory_order_acquire) != 0u))
+    return MESH_MGMT_EXECUTION_NODE_BUSY;
   return MESH_MGMT_EXECUTION_NODE_OK;
 }
 
-void mesh_mgmt_execution_node_destroy_v1(
+mesh_mgmt_execution_node_result_t mesh_mgmt_execution_node_destroy_v2(
     mesh_mgmt_execution_node_v1_t *node) {
-  if (!node)
-    return;
-  if (bytes_are_zero((const uint8_t *)node, sizeof(*node)))
-    return;
-  if (node->worker.initialized)
-    (void)mesh_mgmt_execution_worker_shutdown_v1(&node->worker);
+  if (!node || bytes_are_zero((const uint8_t *)node, sizeof(*node)))
+    return MESH_MGMT_EXECUTION_NODE_OK;
+  /* Never free the address-stable P2P terminal callback or any queued
+   * RESULT on early Destroy. The caller must continue original owner
+   * progress, commit the full-wire result and explicitly retry. */
+  if (node->response_sender.state != MESH_MGMT_EXECUTION_SEND_IDLE)
+    return MESH_MGMT_EXECUTION_NODE_BUSY;
+  if (node->worker.initialized &&
+      mesh_mgmt_execution_worker_shutdown_v1(&node->worker) !=
+          MESH_MGMT_EXECUTION_WORKER_OK)
+    return MESH_MGMT_EXECUTION_NODE_WORKER_FAILED;
+  /* Stop drained all accepted Work. Never silently erase an unsent or
+   * indeterminate durable Worker result from the still-owned Egress. */
+  if (node->egress.initialized &&
+      atomic_load_explicit(&node->egress.pending, memory_order_acquire) != 0u)
+    return MESH_MGMT_EXECUTION_NODE_BUSY;
   mesh_mgmt_execution_worker_destroy_v1(&node->worker);
   if (node->egress.initialized)
     (void)mesh_mgmt_execution_egress_close_v1(&node->egress);
@@ -262,4 +284,10 @@ void mesh_mgmt_execution_node_destroy_v1(
   mesh_mgmt_execution_store_close_v1(&node->store);
   mesh_mgmt_execution_runner_destroy_v1(&node->runner);
   mesh_mgmt_crypto_wipe(node, sizeof(*node));
+  return MESH_MGMT_EXECUTION_NODE_OK;
+}
+
+void mesh_mgmt_execution_node_destroy_v1(
+    mesh_mgmt_execution_node_v1_t *node) {
+  (void)mesh_mgmt_execution_node_destroy_v2(node);
 }

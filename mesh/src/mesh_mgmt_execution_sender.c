@@ -118,8 +118,42 @@ mesh_mgmt_execution_sender_result_t mesh_mgmt_execution_sender_send_next_v1(
   return MESH_MGMT_EXECUTION_SENDER_OK;
 }
 
+
+/* Native P2P/CNet write terminal runs only on the original owning Runtime
+ * thread, possibly after a logical peer detach. Record the terminal here;
+ * do NOT call application code or release the SPSC head from a reentrant
+ * NativeIO callback. The next explicit owner turn commits it. */
+static void sender_response_wire_terminal(void *context, uint64_t ticket,
+                                          int p2p_status) {
+  mesh_mgmt_execution_sender_pending_v5_t *pending = context;
+  if (!pending || pending->state != MESH_MGMT_EXECUTION_SEND_IN_FLIGHT)
+    return;
+  if (pending->ticket && pending->ticket != ticket)
+    p2p_status = P2P_ERR_INVALID_STATE; /* stale generation */
+  pending->ticket = ticket;
+  pending->last_terminal_ticket = ticket;
+  pending->terminal_status = p2p_status;
+  pending->state = p2p_status == P2P_OK
+      ? MESH_MGMT_EXECUTION_SEND_WIRE_OK
+      : MESH_MGMT_EXECUTION_SEND_WIRE_FAILED;
+}
+
+static int pending_matches_head(
+    const mesh_mgmt_execution_sender_pending_v5_t *pending,
+    const mesh_mgmt_execution_egress_item_v1_t *item) {
+  return memcmp(pending->command_id, item->command_id,
+                sizeof(pending->command_id)) == 0 &&
+         memcmp(pending->correlation_id, item->correlation_id,
+                sizeof(pending->correlation_id)) == 0 &&
+         memcmp(pending->request_digest, item->request_digest,
+                sizeof(pending->request_digest)) == 0 &&
+         memcmp(pending->target_node_id, item->target_node_id,
+                sizeof(pending->target_node_id)) == 0;
+}
+
 mesh_mgmt_execution_sender_result_t
-mesh_mgmt_execution_sender_send_next_runtime_v1(
+mesh_mgmt_execution_sender_send_next_runtime_v5(
+    mesh_mgmt_execution_sender_pending_v5_t *pending,
     mesh_mgmt_execution_egress_v1_t *egress,
     mesh_mgmt_agent_runtime_v1_t *runtime) {
   mesh_mgmt_execution_egress_item_v1_t item;
@@ -128,10 +162,39 @@ mesh_mgmt_execution_sender_send_next_runtime_v1(
   mesh_mgmt_execution_status_v1_t status;
   const uint8_t *payload = NULL;
   size_t payload_size = 0u;
+  uint64_t ticket = 0u;
   uint8_t kind = 0u;
 
-  if (!egress || !runtime)
+  if (!pending || !egress || !runtime)
     return MESH_MGMT_EXECUTION_SENDER_INVALID_ARG;
+  if (pending->state != MESH_MGMT_EXECUTION_SEND_IDLE) {
+    if (pending->runtime != runtime || pending->egress != egress)
+      return MESH_MGMT_EXECUTION_SENDER_INVALID_ARG;
+    if (pending->state == MESH_MGMT_EXECUTION_SEND_IN_FLIGHT)
+      return MESH_MGMT_EXECUTION_SENDER_IN_FLIGHT;
+    if (pending->state == MESH_MGMT_EXECUTION_SEND_WIRE_FAILED)
+      return MESH_MGMT_EXECUTION_SENDER_TERMINAL_FAILED;
+    if (pending->state == MESH_MGMT_EXECUTION_SEND_ADMISSION_FAILED)
+      return MESH_MGMT_EXECUTION_SENDER_SEND_FAILED;
+    if (pending->state != MESH_MGMT_EXECUTION_SEND_WIRE_OK)
+      return MESH_MGMT_EXECUTION_SENDER_INVALID_ARG;
+
+    /* Exactly one matching Egress head is consumed only after the real native
+     * CNet encrypted full-write terminal (NEVER mere send admission). */
+    egress_result = mesh_mgmt_execution_egress_peek_v1(egress, &item);
+    if (egress_result != MESH_MGMT_EXECUTION_EGRESS_OK ||
+        !pending_matches_head(pending, &item))
+      return MESH_MGMT_EXECUTION_SENDER_COMMIT_FAILED;
+    if (mesh_mgmt_execution_egress_consume_v1(egress) !=
+        MESH_MGMT_EXECUTION_EGRESS_OK)
+      return MESH_MGMT_EXECUTION_SENDER_COMMIT_FAILED;
+    pending->runtime = NULL;
+    pending->egress = NULL;
+    pending->ticket = 0u;
+    pending->state = MESH_MGMT_EXECUTION_SEND_IDLE;
+    return MESH_MGMT_EXECUTION_SENDER_OK;
+  }
+
   egress_result = mesh_mgmt_execution_egress_peek_v1(egress, &item);
   if (egress_result == MESH_MGMT_EXECUTION_EGRESS_EMPTY)
     return MESH_MGMT_EXECUTION_SENDER_EMPTY;
@@ -145,16 +208,39 @@ mesh_mgmt_execution_sender_send_next_runtime_v1(
 
   if (item.service_result != MESH_MGMT_EXECUTION_SERVICE_OK)
     memset(item.result_payload, 0, sizeof(item.result_payload));
-  prepare_result =
-      prepare_item(&item, &status, &kind, &payload, &payload_size);
+  prepare_result = prepare_item(
+      &item, &status, &kind, &payload, &payload_size);
   if (prepare_result != MESH_MGMT_EXECUTION_SENDER_OK)
     return prepare_result;
-  if (mesh_mgmt_agent_runtime_send_execution_response_v1(
-          runtime, kind, item.target_node_id, payload, payload_size) !=
-      MESH_MGMT_AGENT_RUNTIME_OK)
+
+  pending->runtime = runtime;
+  pending->egress = egress;
+  memcpy(pending->command_id, item.command_id, sizeof(pending->command_id));
+  memcpy(pending->correlation_id, item.correlation_id,
+         sizeof(pending->correlation_id));
+  memcpy(pending->request_digest, item.request_digest,
+         sizeof(pending->request_digest));
+  memcpy(pending->target_node_id, item.target_node_id,
+         sizeof(pending->target_node_id));
+  pending->ticket = 0u;
+  pending->terminal_status = P2P_ERR_INVALID_STATE;
+  pending->state = MESH_MGMT_EXECUTION_SEND_IN_FLIGHT;
+  const mesh_mgmt_agent_runtime_result_t send_status =
+      mesh_mgmt_agent_runtime_send_execution_response_terminal_v5(
+          runtime, kind, item.target_node_id, payload, payload_size,
+          sender_response_wire_terminal, pending, &ticket);
+  if (send_status != MESH_MGMT_AGENT_RUNTIME_OK) {
+    /* No native terminal callback follows rejected admission, but an
+     * encrypted nonce may already have advanced. Keep the head and require
+     * explicit caller reconciliation. NEVER auto replay. */
+    pending->state = MESH_MGMT_EXECUTION_SEND_ADMISSION_FAILED;
     return MESH_MGMT_EXECUTION_SENDER_SEND_FAILED;
-  if (mesh_mgmt_execution_egress_consume_v1(egress) !=
-      MESH_MGMT_EXECUTION_EGRESS_OK)
-    return MESH_MGMT_EXECUTION_SENDER_COMMIT_FAILED;
-  return MESH_MGMT_EXECUTION_SENDER_OK;
+  }
+  if (pending->ticket && pending->ticket != ticket) {
+    pending->state = MESH_MGMT_EXECUTION_SEND_WIRE_FAILED;
+    pending->terminal_status = P2P_ERR_INVALID_STATE;
+    return MESH_MGMT_EXECUTION_SENDER_TERMINAL_FAILED;
+  }
+  pending->ticket = ticket;
+  return MESH_MGMT_EXECUTION_SENDER_IN_FLIGHT;
 }
