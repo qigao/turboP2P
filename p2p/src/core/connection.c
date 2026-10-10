@@ -39,3 +39,11 @@ int p2p_connection_send_completed(p2p_connection_t *conn, const void *data,
     if (!conn->ops.send_completed) return P2P_ERR_INVALID_STATE;
     return conn->ops.send_completed(conn->ops.handle, data, len, complete, context);
 }
+
+int p2p_connection_send_terminal(p2p_connection_t *conn, const void *data,
+    size_t len, p2p_send_complete_fn complete, void *context) {
+    if (!data || !len || !complete) return P2P_ERR_INVALID_ARG;
+    if (!conn || !conn->is_connected) return P2P_ERR_NETWORK;
+    if (!conn->ops.send_terminal) return P2P_ERR_INVALID_STATE;
+    return conn->ops.send_terminal(conn->ops.handle, data, len, complete, context);
+}

@@ -424,17 +424,21 @@ void p2p_peer_disconnect(p2p_peer_t *peer) {
  * Peer I/O
  * ============================================================================= */
 
-static int peer_send_raw(p2p_peer_t *peer, const uint8_t *data, size_t len) {
+static int peer_send_raw(p2p_peer_t *peer, const uint8_t *data, size_t len,
+                         p2p_send_complete_fn complete, void *context) {
     int result;
 
     if (!peer || !peer->conn) return P2P_ERR_NETWORK;
-    result = p2p_connection_send(peer->conn, data, len);
+    result = complete
+        ? p2p_connection_send_terminal(peer->conn, data, len, complete, context)
+        : p2p_connection_send(peer->conn, data, len);
     if (result == 0) return P2P_OK;
     return result == P2P_ERR_RESOURCE_EXHAUSTED ? P2P_ERR_RESOURCE_EXHAUSTED
                                   : P2P_ERR_NETWORK;
 }
 
-int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
+static int peer_send_message_impl(p2p_peer_t *peer, const p2p_message_t *msg,
+                                  p2p_send_complete_fn complete, void *context) {
     if (!peer || !msg) {
         return P2P_ERR_INVALID_ARG;
     }
@@ -446,6 +450,11 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
                  p2p_peer_state_str(peer->state));
         return P2P_ERR_NETWORK;
     }
+
+    /* Reject unsupported legacy/incomplete terminal transport BEFORE Noise
+     * CipherState encrypt increments its nonce. Never fabricate success. */
+    if (complete && (!peer->conn || !peer->conn->ops.send_terminal))
+        return P2P_ERR_INVALID_STATE;
 
     /* Serialize message to frame */
     uint8_t *frame_buf = NULL;
@@ -504,7 +513,7 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
             return ret;
         }
 
-        ret = peer_send_raw(peer, ct_buf, encrypted_len + 2);
+        ret = peer_send_raw(peer, ct_buf, encrypted_len + 2, complete, context);
         free(ct_storage);
         if (ret != P2P_OK) {
             /* CipherState advanced before the transport admitted the frame.
@@ -520,6 +529,15 @@ int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
 
     free(frame_buf);
     return P2P_ERR_INVALID_STATE;
+}
+
+int p2p_peer_send(p2p_peer_t *peer, const p2p_message_t *msg) {
+    return peer_send_message_impl(peer, msg, NULL, NULL);
+}
+int p2p_peer_send_terminal(p2p_peer_t *peer, const p2p_message_t *msg,
+                           p2p_send_complete_fn complete, void *context) {
+    if (!complete) return P2P_ERR_INVALID_ARG;
+    return peer_send_message_impl(peer, msg, complete, context);
 }
 
 int p2p_peer_on_data(p2p_peer_t *peer, const void *data, size_t len) {

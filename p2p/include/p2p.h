@@ -716,6 +716,21 @@ CXX_C_API int p2p_send(p2p_node_t *node, p2p_peer_t *peer, const void *data, siz
 CXX_C_API int p2p_send_message(p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
                                const void *payload, size_t len);
 
+/* CNet-only durable encrypted application-wire send terminal (v3).
+ * After successful admission, complete(context, P2P_OK) runs exactly once
+ * after CNet reports the complete logical write. On physical close/failure
+ * complete receives a concrete non-OK P2P result even if the logical peer
+ * already detached. This is NOT remote MMP execution acknowledgment.
+ * The provided context must remain alive until completion; a successful
+ * checked P2P Owner stop ensures callback quiescence. No callback on rejected
+ * admission. Never use to retry/replay an encrypted frame: Noise nonces advance
+ * before CNet write admission. Legacy CoroNet fails closed as INVALID_STATE. */
+typedef void (*p2p_app_send_terminal_fn)(void *context, int status);
+CXX_C_API int p2p_send_message_terminal_v3(
+    p2p_node_t *node, p2p_peer_t *peer, p2p_msg_type_t type,
+    const void *payload, size_t len,
+    p2p_app_send_terminal_fn complete, void *context);
+
 /**
  * Broadcast to all peers
  */

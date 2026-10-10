@@ -10,6 +10,7 @@ typedef struct {
     size_t length;
     p2p_send_complete_fn complete;
     void *context;
+    uint8_t complete_after_detach; /* durable app-owned terminal, not Noise handshake */
 } p2p_cnet_write_t;
 
 typedef struct p2p_cnet_connection_s {
@@ -221,8 +222,8 @@ static int sweep(p2p_cnet_owner_t *owner) {
     return P2P_OK;
 }
 
-static int connection_send_completed(void *handle, const void *data, size_t length,
-    p2p_send_complete_fn complete, void *context) {
+static int connection_admit_write(void *handle, const void *data, size_t length,
+    p2p_send_complete_fn complete, void *context, int durable) {
     p2p_cnet_connection_t *connection = handle;
     mem_buffer_t *buffer;
     int status;
@@ -243,14 +244,23 @@ static int connection_send_completed(void *handle, const void *data, size_t leng
     /* CNet admission never calls the observer inline. */
     index = (connection->write_head + connection->write_count) %
             connection->owner->config.pending_write_limit;
-    connection->writes[index] = (p2p_cnet_write_t){length, complete, context};
+    connection->writes[index] = (p2p_cnet_write_t){length, complete, context, (uint8_t)durable};
     connection->write_count++;
     connection->pending_bytes += length;
     return P2P_OK;
 }
 
+static int connection_send_completed(void *handle, const void *data, size_t length,
+    p2p_send_complete_fn complete, void *context) {
+    return connection_admit_write(handle, data, length, complete, context, 0);
+}
+static int connection_send_terminal(void *handle, const void *data, size_t length,
+    p2p_send_complete_fn complete, void *context) {
+    if (!complete) return P2P_ERR_INVALID_ARG;
+    return connection_admit_write(handle, data, length, complete, context, 1);
+}
 static int connection_send(void *handle, const void *data, size_t length) {
-    return connection_send_completed(handle, data, length, NULL, NULL);
+    return connection_admit_write(handle, data, length, NULL, NULL, 0);
 }
 
 static int connection_pause(void *handle, int paused) {
@@ -339,7 +349,7 @@ static void on_send(void *context, cnet_connection handle, size_t length) {
                             connection->owner->config.pending_write_limit;
     connection->write_count--;
     connection->pending_bytes -= length;
-    if (!connection->detached && write.complete)
+    if (write.complete && (!connection->detached || write.complete_after_detach))
         write.complete(write.context, active(connection) ? P2P_OK : P2P_ERR_NETWORK);
     if (active(connection) && connection->callbacks.sent)
         connection->callbacks.sent(&connection->base, length,
@@ -380,7 +390,7 @@ static void on_state(void *context, cnet_connection handle,
                 connection->owner->config.pending_write_limit;
             connection->write_count--;
             connection->pending_bytes -= write.length;
-            if (!connection->detached && write.complete)
+            if (write.complete && (!connection->detached || write.complete_after_detach))
                 write.complete(write.context, connection->error ?
                     connection->error : P2P_ERR_NETWORK);
         }
@@ -406,6 +416,7 @@ static p2p_cnet_connection_t *allocate_connection(p2p_cnet_owner_t *owner,
     connection->base.ops.destroy = connection_destroy;
     connection->base.ops.pause = connection_pause;
     connection->base.ops.send_completed = connection_send_completed;
+    connection->base.ops.send_terminal = connection_send_terminal;
     connection->owner = owner;
     connection->send_hwm = owner->config.send_hwm_bytes;
     return connection;
