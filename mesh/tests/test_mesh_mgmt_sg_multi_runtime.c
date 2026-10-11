@@ -1997,6 +1997,82 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   check_equal((size_t)1u, next->pool.ready);
   check_true(next->manager != old->manager);
   check_equal(old->immutable_key.owner_id, next->immutable_key.owner_id);
+#ifdef MESH_SG_REAL_EXECUTION
+  if (command_mode == 2) {
+    /* B's independent authenticated typed STATUS is queued on its OWN SG
+     * Final/Manager while the A SG Host remains paused. It must never
+     * consume/retry A's earlier genuine signed RESULT or its Egress. */
+    check_equal(1u, old->command_terminals);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal(0u, old->rpc_result_events);
+    submit(sc, 2u, host_send_command);
+    barrier(sc);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)1u, next->pool.active_leases);
+    const uint64_t migration_result_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((next->command_terminals != 1u ||
+            sc->migration_b_status_events != 1u ||
+            old->client.runtime.response_terminal_active) &&
+           cmeta_monotonic_ms() < migration_result_deadline)
+      pump(sc);
+    check_equal(1u, next->command_terminals);
+    check_equal(P2P_OK, next->command_terminal_status);
+    check_equal(1u, sc->migration_b_status_events);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(1u, old->rpc_result_native_terminals +
+                    old->rpc_result_native_failures);
+    check_equal(0u, old->rpc_result_events);
+    check_equal(0u, old->rpc_errors);
+    check_equal(1u, old->command_terminals);
+    check_true(!old->client.runtime.response_terminal_active);
+    check_true(old->client.runtime.last_response_terminal_ticket != 0u);
+    check_equal((size_t)0u, next->pool.active_leases);
+    submit(sc, 1u, host_snapshot_rpc);
+    barrier(sc);
+    check_equal(MESH_MGMT_EXECUTION_RPC_PENDING,
+                old->rpc_completion.state); /* NO cross-generation ACK */
+    {
+      const mesh_mgmt_execution_sender_pending_v5_t *pending =
+          &old->execution_node.response_sender;
+      const size_t egress_pending =
+          atomic_load(&old->execution_node.egress.pending);
+      if (old->rpc_result_native_failures) {
+        check_equal(MESH_MGMT_EXECUTION_SEND_WIRE_FAILED, pending->state);
+        check_equal((size_t)1u, egress_pending);
+        check_equal(0u, old->rpc_reply_sent);
+      } else {
+        check_equal(MESH_MGMT_EXECUTION_SEND_IDLE, pending->state);
+        check_equal((size_t)0u, egress_pending);
+        check_equal(1u, old->rpc_reply_sent);
+      }
+    }
+
+    /* Now resume ONLY the original SG A observer. The actual old physical
+     * completion cannot mutate B's READY Pool, new Lease generations or
+     * independent native send ticket, even if A's RESULT reached the wire. */
+    sc->hold_retiring_final_progress = 0u;
+    const uint64_t retire_a_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while (!old->server.closed &&
+           cmeta_monotonic_ms() < retire_a_deadline)
+      pump(sc);
+    check_true(old->server.closed != 0u);
+    check_equal(1u, old->command_terminals);
+    check_equal(1u, next->command_terminals);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal((size_t)0u, next->pool.active_leases);
+    check_equal((size_t)1u, next->pool.ready);
+    /* Keep B's real application Lease through A retirement. */
+    submit(sc, 2u, host_acquire);
+    barrier(sc);
+    check_true(next->lease.slot != 0u);
+  } else
+#endif
   if (command_mode) {
     /* B's new authenticated command completes FIRST while A's original
      * CNet Owner is paused, so A retains its admitted send ticket/Lease. */
