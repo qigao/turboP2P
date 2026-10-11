@@ -79,6 +79,7 @@ struct signed_final {
   unsigned rpc_reply_sent, rpc_errors;
 #ifdef MESH_SG_REAL_EXECUTION
   unsigned rpc_result_admissions, rpc_result_native_terminals;
+  unsigned rpc_result_native_failures;
 #endif
 };
 
@@ -105,6 +106,10 @@ struct sg_multi_case {
   uint8_t exercise_typed_rpc;
   uint8_t exercise_signed_result;
   uint8_t exercise_real_execution;
+  uint8_t exercise_result_disconnect;
+  uint8_t defer_result_sends;
+  uint8_t result_disconnect_triggered;
+  unsigned migration_b_status_events;
   uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
@@ -187,6 +192,26 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
                   MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW) &&
              ep->rpc_final) {
     signed_final *f = ep->rpc_final;
+#ifdef MESH_SG_REAL_EXECUTION
+    if (f->scenario->exercise_result_disconnect &&
+        ep == &f->client &&
+        event->type == MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW) {
+      /* Distinct, newly authenticated SG Final B. Its independent typed
+       * STATUS does not acknowledge A's prior in-flight RESULT or complete
+       * A's pending RPC Registry. No old callback/credit may be borrowed. */
+      mesh_mgmt_execution_response_v1_t fresh = {0};
+      if (mesh_mgmt_agent_runtime_execution_response_from_event_v1(
+              &ep->runtime, peer, event, &fresh) !=
+              MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK ||
+          fresh.kind != MESH_MGMT_KIND_COMMAND_STATUS ||
+          fresh.status.code != MESH_MGMT_EXECUTION_STATUS_DISABLED) {
+        ++f->rpc_errors;
+        return -1;
+      }
+      ++f->scenario->migration_b_status_events;
+      return 0;
+    }
+#endif
     mesh_mgmt_execution_response_v1_t response = {0};
     const int is_result =
         event->type == MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW;
@@ -895,11 +920,13 @@ static void host_send_command(native_io_sharded_context *ctx, void *arg) {
       ? &lane->scenario->finals_data[0] : f;
   uint64_t denied = 97u;
   cnet_pool_snapshot pool = {0};
-  const uint8_t kind = lane->scenario->exercise_typed_rpc
+  const int typed_request = lane->scenario->exercise_typed_rpc &&
+      !(lane->scenario->exercise_result_disconnect && f->final_index > 0u);
+  const uint8_t kind = typed_request
       ? MESH_MGMT_KIND_COMMAND_REQUEST : MESH_MGMT_KIND_COMMAND_STATUS;
-  const uint8_t *payload = lane->scenario->exercise_typed_rpc
+  const uint8_t *payload = typed_request
       ? f->request_payload : f->command_payload;
-  const size_t payload_len = lane->scenario->exercise_typed_rpc
+  const size_t payload_len = typed_request
       ? f->request_payload_len : f->command_payload_len;
   SG_CHECK(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
       &f->server.runtime, kind,
@@ -1196,7 +1223,10 @@ static void pump(sg_multi_case *sc) {
 #ifdef MESH_SG_REAL_EXECUTION
       if (sc->exercise_real_execution) {
         if (f->rpc_request_events == 1u && !f->rpc_reply_sent &&
-            !f->rpc_errors) {
+            !f->rpc_errors &&
+            !(sc->exercise_result_disconnect && sc->defer_result_sends) &&
+            !(sc->exercise_result_disconnect &&
+              f->rpc_result_native_failures != 0u)) {
           const mesh_mgmt_execution_node_result_t sent =
               mesh_mgmt_execution_node_send_next_v1(
                   &f->execution_node, &client->runtime);
@@ -1229,7 +1259,29 @@ static void pump(sg_multi_case *sc) {
                           client->runtime.state);
               check_equal(MESH_MGMT_EXECUTION_NODE_BUSY,
                   mesh_mgmt_execution_node_destroy_v2(&f->execution_node));
+              if (sc->exercise_result_disconnect &&
+                  !sc->result_disconnect_triggered) {
+                /* AFTER a production encrypted RESULT has truly entered
+                 * native CNet, disconnect the original authenticated
+                 * outbound MMP connection BEFORE its native owner polls.
+                 * Keep the SG A observer paused until B is authenticated.
+                 * No second native observer, synthetic callback or replay. */
+                sc->result_disconnect_triggered = 1u;
+                sc->hold_retiring_final_progress = 1u;
+                check_not_null(client->peer);
+                p2p_disconnect_peer(client->peer);
+              }
             }
+          } else if (sc->exercise_result_disconnect &&
+                     sent == MESH_MGMT_EXECUTION_NODE_SEND_FAILED &&
+                     (f->execution_node.response_sender.state ==
+                          MESH_MGMT_EXECUTION_SEND_WIRE_FAILED ||
+                      f->execution_node.response_sender.state ==
+                          MESH_MGMT_EXECUTION_SEND_ADMISSION_FAILED)) {
+            /* Indeterminate native failure is sticky. Do NOT re-admit
+             * the previously encrypted RESULT on Final B. */
+            if (!f->rpc_result_native_failures)
+              ++f->rpc_result_native_failures;
           } else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
             ++f->rpc_errors;
         }
