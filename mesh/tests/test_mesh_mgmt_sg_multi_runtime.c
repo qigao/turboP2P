@@ -2061,6 +2061,11 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     check_equal(1u, old->command_terminals);
     check_true(!old->client.runtime.response_terminal_active);
     check_true(old->client.runtime.last_response_terminal_ticket != 0u);
+    /* Native completion changed upstream CNet Pool accounting; the copied
+     * test snapshot is stale until refreshed ON THE ORIGINAL B SG OWNER.
+     * Never infer credits from a cross-thread cached snapshot. */
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
     check_equal((size_t)0u, next->pool.active_leases);
     submit(sc, 1u, host_snapshot_rpc);
     barrier(sc);
