@@ -221,6 +221,106 @@ static void test_durable_terminal_after_logical_detach(void) {
     destroy_pair(&pair);
 }
 
+/* Genuine, per-connection CNet HWM (NOT a mocked runtime). A rejected
+ * terminal send must never create an application completion ticket, and an
+ * unrelated future write cannot inherit its callback. */
+static void test_terminal_hwm_rejection_has_no_callback(void) {
+    pair_t pair = {0};
+    p2p_cnet_config_t policy = config(4096);
+    durable_probe rejected = {0}, accepted = {0};
+    uint64_t deadline;
+    check_equal(P2P_OK, setup_pair(&pair, &policy));
+    wait_connected(&pair);
+    check_equal(P2P_OK,
+        p2p_cnet_connection_set_send_hwm(pair.client.connection, 4u));
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED,
+        p2p_connection_send_terminal(pair.client.connection,
+            "too large", 9u, terminal_done, &rejected));
+    check_equal((size_t)0,
+        p2p_cnet_connection_pending_bytes(pair.client.connection));
+    for (unsigned n = 0u; n < 4u; ++n) pump(&pair);
+    check_equal(0u, rejected.terminals);
+    check_equal(0u, pair.client.sends);
+    check_equal((size_t)0u, pair.server.received_bytes);
+
+    /* A NEW write, not a replay of the rejected payload/Noise nonce. */
+    check_equal(P2P_OK,
+        p2p_cnet_connection_set_send_hwm(pair.client.connection, 64u));
+    check_equal(P2P_OK,
+        p2p_connection_send_terminal(pair.client.connection,
+            "fresh", 5u, terminal_done, &accepted));
+    check_equal(0u, accepted.terminals);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((!accepted.terminals || pair.server.received_bytes < 5u) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1u, accepted.terminals);
+    check_equal(P2P_OK, accepted.last_status);
+    check_equal(0u, rejected.terminals);
+    check_equal((size_t)5u, pair.server.received_bytes);
+    for (unsigned n = 0u; n < 4u; ++n) pump(&pair);
+    check_equal(1u, accepted.terminals);
+    check_equal(0u, rejected.terminals);
+    destroy_pair(&pair);
+}
+
+/* Real transport A is logically detached before its queued native write
+ * completes. NativeIO/CNet may report either complete full-write or physical
+ * failure, but exactly one terminal belongs to A. A later independent TCP
+ * connection B on the SAME CNet Owner must never replay/reuse A's callback.
+ * This is a physical-generation test, not remote business acknowledgement. */
+static void test_native_terminal_isolated_across_reconnect_generation(void) {
+    pair_t pair = {0};
+    p2p_cnet_config_t policy = config(4096);
+    p2p_cnet_callbacks_t callbacks_b;
+    durable_probe old = {0}, fresh = {0};
+    uint64_t deadline;
+    check_equal(P2P_OK, setup_pair(&pair, &policy));
+    wait_connected(&pair);
+    check_equal(P2P_OK,
+        p2p_connection_send_terminal(pair.client.connection,
+            "old generation", 14u, terminal_done, &old));
+    check_equal(0u, old.terminals);
+    p2p_connection_destroy(pair.client.connection);
+    pair.client.connection = NULL;
+
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((!old.terminals ||
+            p2p_cnet_owner_connection_count(pair.client.owner) != 0u ||
+            pair.server.closed == 0u) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1u, old.terminals);
+    check_true(old.last_status == P2P_OK ||
+               old.last_status == P2P_ERR_NETWORK);
+    check_equal((size_t)0u,
+        p2p_cnet_owner_connection_count(pair.client.owner));
+    check_true(pair.server.closed != 0u);
+
+    callbacks_b = callbacks(&pair.client);
+    check_equal(P2P_OK,
+        p2p_cnet_owner_connect(pair.client.owner, &pair.remote,
+                               &callbacks_b, &pair.client.connection));
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((pair.client.connected != 2u || pair.server.connected != 2u) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(2u, pair.client.connected);
+    check_equal(2u, pair.server.connected);
+    check_equal(1u, old.terminals);
+
+    check_equal(P2P_OK,
+        p2p_connection_send_terminal(pair.client.connection,
+            "new", 3u, terminal_done, &fresh));
+    check_equal(0u, fresh.terminals);
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while (!fresh.terminals && cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1u, fresh.terminals);
+    check_equal(P2P_OK, fresh.last_status);
+    check_equal(1u, old.terminals);
+    for (unsigned n = 0u; n < 4u; ++n) pump(&pair);
+    check_equal(1u, old.terminals);
+    check_equal(1u, fresh.terminals);
+    destroy_pair(&pair);
+}
+
 static void test_fifo_copy_and_hwm(void) {
     pair_t pair = {0};
     p2p_cnet_config_t policy = config(7);
@@ -864,6 +964,43 @@ static void test_close_error_stops_owner(void) {
     destroy_pair(&pair);
 }
 
+/* Inject the actual SALTS_ENOBUFS return at the native CNet send_buffer
+ * boundary; unlike callback-only Sender tests this exercises the concrete
+ * P2P CNet admission path. Rejected admission MUST produce no wire terminal,
+ * including after more real polls and an independent successful write. */
+static void test_native_terminal_enobufs_rejects_without_callback(void) {
+    pair_t pair = {0};
+    p2p_cnet_config_t policy = config(4096);
+    durable_probe rejected = {0}, accepted = {0};
+    uint64_t deadline;
+    check_equal(P2P_OK, setup_pair(&pair, &policy));
+    wait_connected(&pair);
+    reject_send = 1;
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED,
+        p2p_connection_send_terminal(pair.client.connection,
+            "fail", 4u, terminal_done, &rejected));
+    check_equal(0u, rejected.terminals);
+    check_equal((size_t)0,
+        p2p_cnet_connection_pending_bytes(pair.client.connection));
+    for (unsigned n = 0u; n < 4u; ++n) pump(&pair);
+    check_equal(0u, rejected.terminals);
+    check_equal(0u, pair.client.sends);
+    check_equal((size_t)0u, pair.server.received_bytes);
+    /* This is a separate fresh raw CNet write. Higher-level signed
+     * Noise/MMP MUST NOT retry the failed encrypted application frame. */
+    check_equal(P2P_OK,
+        p2p_connection_send_terminal(pair.client.connection,
+            "next", 4u, terminal_done, &accepted));
+    deadline = cmeta_monotonic_ms() + TEST_DEADLINE_MS;
+    while ((!accepted.terminals || pair.server.received_bytes < 4u) &&
+           cmeta_monotonic_ms() < deadline) pump(&pair);
+    check_equal(1u, accepted.terminals);
+    check_equal(P2P_OK, accepted.last_status);
+    check_equal(0u, rejected.terminals);
+    check_equal((size_t)4u, pair.server.received_bytes);
+    destroy_pair(&pair);
+}
+
 static void test_send_admission_rejection(void) {
     pair_t pair = {0};
     p2p_cnet_config_t policy = config(4096);
@@ -928,11 +1065,14 @@ spec("P2P CNet connection ownership") {
     it("stops the owner on a non-capacity close error") { test_close_error_stops_owner(); }
     it("retains observers when close admission must be retried") { test_close_admission_retry(); }
     it("does not advance pending state after rejected send admission") { test_send_admission_rejection(); }
+    it("does not call an app terminal when real CNet send_buffer returns ENOBUFS") { test_native_terminal_enobufs_rejects_without_callback(); }
     it("ignores stale generations and closes a short logical completion") { test_stale_events_and_bad_completion(); }
     it("retains a timed-out owner until a later completed stop") { test_stop_timeout_retains_owner(); }
 #endif
     it("reports a durable full CNet wire-write only after progress") { test_durable_cnet_wire_terminal(); }
     it("settles a durable admitted write exactly once after logical detach") { test_durable_terminal_after_logical_detach(); }
+    it("denies an HWM-exhausted terminal send with zero native callbacks") { test_terminal_hwm_rejection_has_no_callback(); }
+    it("isolates an old queued terminal from a reconnect's new physical write") { test_native_terminal_isolated_across_reconnect_generation(); }
     it("retains builder bytes and completes bounded writes in FIFO order") { test_fifo_copy_and_hwm(); }
     it("preserves the unconsumed tail across receive pause") { test_pause_preserves_tail(); }
     it("retains one already-admitted receive while paused") { test_pause_with_admitted_receive(); }
