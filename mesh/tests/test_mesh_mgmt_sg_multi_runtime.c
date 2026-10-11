@@ -1105,6 +1105,29 @@ static void host_migration_retire_old(native_io_sharded_context *ctx, void *arg)
       return;
     }
   }
+#ifdef MESH_SG_REAL_EXECUTION
+  if (lane->scenario->exercise_result_disconnect) {
+    /* This is the ORIGINAL A SG registry. Even if the remote Result's local
+     * native write terminal reports P2P_OK, A's RPC is only RESULT after its
+     * independently authenticated dispatcher callback. The new Final B
+     * STATUS never settles or borrows this outstanding command. */
+    mesh_mgmt_execution_rpc_completion_v1_t completion = {0};
+    SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_get_v1(
+        &old->rpc_registry, old->rpc_binding.correlation_id,
+        TEST_NOW_MS + 2u, &completion));
+    const mesh_mgmt_execution_rpc_state_v1_t state =
+        old->rpc_result_events == 1u
+            ? MESH_MGMT_EXECUTION_RPC_RESULT
+            : MESH_MGMT_EXECUTION_RPC_PENDING;
+    if (completion.state != state) {
+      fail_lane(lane, SALTS_EPROTO, "old A execution RPC falsely completed by B");
+      return;
+    }
+    /* This is test shutdown of the original RPC Registry; production would
+     * carry PENDING records to control-plane persistence/reconciliation. */
+    mesh_mgmt_execution_rpc_registry_destroy_v1(&old->rpc_registry);
+  }
+#endif
   SG_CHECK(lane, mesh_mgmt_agent_runtime_stop_v1(&old->server.runtime));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_destroy_v2(&old->server.runtime));
   if (!old->node || !old->owner || old->server.runtime.node)
