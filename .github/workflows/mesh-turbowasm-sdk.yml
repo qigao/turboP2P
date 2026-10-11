@@ -7,6 +7,7 @@ on:
       - feature/mesh-execution-turbowasm-native-sdk
       - feature/mesh-execution-salts-worker-store-sdk
       - test/mesh-sg-real-worker-signed-result-e2e
+      - feature/mesh-mmp-result-wire-terminal-owner-23
   workflow_dispatch:
 
 permissions:
@@ -87,11 +88,11 @@ jobs:
             -DVCPKG_MANIFEST_MODE=OFF \
             -DP2P_TURBOWASM_SDK_GATE=ON
           cmake --build build/wasm-sdk --parallel 2 \
-            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk test_mesh_mgmt_sg_multi_execution_runtime_sdk
+            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk test_mesh_mgmt_sg_multi_execution_runtime_sdk test_mesh_mgmt_execution_sender_terminal_sdk
           ctest --test-dir build/wasm-sdk --output-on-failure \
-            -R '^test_mesh_mgmt_(execution_(runner|node)|sg_multi_execution_runtime)_sdk$'
+            -R '^test_mesh_mgmt_(execution_(runner|node|sender_terminal)|sg_multi_execution_runtime)_sdk$'
           ctest --test-dir build/wasm-sdk --output-on-failure \
-            -R '^test_mesh_mgmt_(execution_(runner|node)|sg_multi_execution_runtime)_sdk$' --repeat until-fail:10
+            -R '^test_mesh_mgmt_(execution_(runner|node|sender_terminal)|sg_multi_execution_runtime)_sdk$' --repeat until-fail:10
       - name: Real guest local ASan/UBSan qualification
         shell: bash
         env:
@@ -108,11 +109,11 @@ jobs:
             '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer -fno-pie' \
             '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined -no-pie'
           cmake --build build/wasm-sdk-sanitize --parallel 2 \
-            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk test_mesh_mgmt_sg_multi_execution_runtime_sdk
+            --target test_mesh_mgmt_execution_runner_sdk test_mesh_mgmt_execution_node_sdk test_mesh_mgmt_sg_multi_execution_runtime_sdk test_mesh_mgmt_execution_sender_terminal_sdk
           ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
-            -R '^test_mesh_mgmt_(execution_(runner|node)|sg_multi_execution_runtime)_sdk$'
+            -R '^test_mesh_mgmt_(execution_(runner|node|sender_terminal)|sg_multi_execution_runtime)_sdk$'
           ctest --test-dir build/wasm-sdk-sanitize --output-on-failure \
-            -R '^test_mesh_mgmt_(execution_(runner|node)|sg_multi_execution_runtime)_sdk$' --repeat until-fail:5
+            -R '^test_mesh_mgmt_(execution_(runner|node|sender_terminal)|sg_multi_execution_runtime)_sdk$' --repeat until-fail:5
       - name: Compiler cache statistics
         if: always()
         shell: bash
