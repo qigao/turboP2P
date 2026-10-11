@@ -1115,7 +1115,7 @@ static void host_migration_retire_old(native_io_sharded_context *ctx, void *arg)
     SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_get_v1(
         &old->rpc_registry, old->rpc_binding.correlation_id,
         TEST_NOW_MS + 2u, &completion));
-    const mesh_mgmt_execution_rpc_state_v1_t state =
+    const mesh_mgmt_execution_rpc_state_t state =
         old->rpc_result_events == 1u
             ? MESH_MGMT_EXECUTION_RPC_RESULT
             : MESH_MGMT_EXECUTION_RPC_PENDING;
