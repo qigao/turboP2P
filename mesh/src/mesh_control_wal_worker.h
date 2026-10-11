@@ -3,7 +3,7 @@
 
 #include "mesh_control_checkpoint_store.h"
 #include "mesh_control_wal.h"
-#include "turbo_thread.h"
+#include "cmeta_thread.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -61,12 +61,17 @@ typedef struct {
 /**
  * One-owner, one-in-flight persistence worker. The worker owns the WAL and a
  * fixed-size signed-frame slot. It never calls owner code from its thread.
+ * One domain thread submits/takes and exclusively shuts down/destroys; the
+ * persistence thread publishes one retained completion under the mutex.
+ * Persistence failure closes admission; that completion remains consumable
+ * until destruction. Recovery requires destroy/init, including checkpoint
+ * validation and durable republication before WAL replay.
  */
 typedef struct {
   mesh_control_wal_v1_t wal;
   mesh_control_checkpoint_store_v1_t checkpoint_store;
-  turbo_threadpool_t *pool;
-  turbo_mutex_t mutex;
+  cmeta_threadpool_t *pool;
+  cmeta_mutex_t mutex;
   uint64_t expected_index;
   uint64_t accepted_at_ms;
   uint16_t record_type;

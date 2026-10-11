@@ -1,6 +1,8 @@
 #include "mesh_mgmt_execution_store.h"
+#include "mesh_mgmt_execution_snapshot_io.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,20 +105,6 @@ static int calculate_snapshot_digest(
   return result;
 }
 
-static mesh_mgmt_execution_store_result_t write_all(
-    cmeta_file_t file, const uint8_t *bytes, size_t size) {
-  size_t written = 0u;
-
-  while (written < size) {
-    int result =
-        cmeta_fs_write(file, (const char *)bytes + written, size - written);
-    if (result <= 0)
-      return MESH_MGMT_EXECUTION_STORE_IO;
-    written += (size_t)result;
-  }
-  return MESH_MGMT_EXECUTION_STORE_OK;
-}
-
 static mesh_mgmt_execution_store_result_t read_exact_file(
     const char *path, uint8_t **out_bytes, size_t *out_size) {
   const uint64_t max_size =
@@ -148,7 +136,8 @@ static mesh_mgmt_execution_store_result_t read_exact_file(
     offset += (size_t)read_size;
   }
   read_size = cmeta_fs_read(file, (char *)&trailing, 1u);
-  if (read_size != 0 || cmeta_fs_close(file) != 0)
+  int close_result = cmeta_fs_close(file);
+  if (read_size != 0 || close_result != 0)
     goto failed_closed;
   *out_bytes = bytes;
   *out_size = offset;
@@ -162,18 +151,35 @@ failed_closed:
   return MESH_MGMT_EXECUTION_STORE_IO;
 }
 
+static mesh_mgmt_execution_store_result_t publish_snapshot_bytes(
+    mesh_mgmt_execution_store_v1_t *store, const uint8_t *bytes, size_t size) {
+  cmeta_fs_replace_state_t publication = SALTS_FS_REPLACE_NOT_PUBLISHED;
+  const int io_result = mesh_mgmt_execution_snapshot_write(
+      store->temp_path, store->path, bytes, size, &publication);
+  if (io_result == 0 && publication == SALTS_FS_REPLACE_PUBLISHED_DURABLE)
+    return MESH_MGMT_EXECUTION_STORE_OK;
+  /* Namespace publication has happened (or its state is contradictory).
+   * Keep this single writer's lock and refuse both reads and mutations;
+   * rolling memory back would invent an authority different from disk. */
+  if (publication != SALTS_FS_REPLACE_NOT_PUBLISHED || io_result == 0)
+    store->open = 2u;
+  return MESH_MGMT_EXECUTION_STORE_IO;
+}
+
 static mesh_mgmt_execution_store_result_t persist_snapshot(
-    const mesh_mgmt_execution_store_v1_t *store) {
+    mesh_mgmt_execution_store_v1_t *store) {
   uint8_t *bytes = NULL;
   uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  cmeta_file_t file = SALTS_INVALID_FILE;
   size_t count = 0u;
   size_t size;
   size_t index;
   mesh_mgmt_execution_store_result_t result =
       MESH_MGMT_EXECUTION_STORE_IO;
 
-  if (store->journal.count > UINT32_MAX)
+  if (store->journal.count > store->journal.capacity ||
+      store->journal.count > UINT32_MAX ||
+      store->journal.count > (SIZE_MAX - EXECUTION_STORE_HEADER_SIZE) /
+                                  EXECUTION_STORE_RECORD_SIZE_V2)
     return MESH_MGMT_EXECUTION_STORE_RESOURCE_EXHAUSTED;
   count = store->journal.count;
   size =
@@ -230,38 +236,16 @@ static mesh_mgmt_execution_store_result_t persist_snapshot(
   }
   memcpy(bytes + EXECUTION_STORE_DIGEST_OFFSET, digest, sizeof(digest));
 
-  file = cmeta_fs_open(store->temp_path,
-                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT |
-                           SALTS_FS_O_TRUNC,
-                       EXECUTION_STORE_MODE);
-  if (file == SALTS_INVALID_FILE)
-    goto cleanup;
-  result = write_all(file, bytes, size);
-  if (result != MESH_MGMT_EXECUTION_STORE_OK)
-    goto cleanup;
-  if (cmeta_fs_fsync(file) != 0 || cmeta_fs_close(file) != 0) {
-    file = SALTS_INVALID_FILE;
-    result = MESH_MGMT_EXECUTION_STORE_IO;
-    goto cleanup;
-  }
-  file = SALTS_INVALID_FILE;
-  if (cmeta_fs_rename(store->temp_path, store->path) != 0) {
-    result = MESH_MGMT_EXECUTION_STORE_IO;
-    goto cleanup;
-  }
-  result = MESH_MGMT_EXECUTION_STORE_OK;
+  result = publish_snapshot_bytes(store, bytes, size);
 
 cleanup:
-  if (file != SALTS_INVALID_FILE)
-    (void)cmeta_fs_close(file);
-  if (result != MESH_MGMT_EXECUTION_STORE_OK)
-    (void)cmeta_fs_unlink(store->temp_path);
   free(bytes);
   return result;
 }
 
 static mesh_mgmt_execution_store_result_t load_snapshot(
-    mesh_mgmt_execution_store_v1_t *store) {
+    mesh_mgmt_execution_store_v1_t *store, uint8_t **out_bytes,
+    size_t *out_size) {
   mesh_mgmt_execution_journal_entry_v1_t *entries = NULL;
   uint8_t *bytes = NULL;
   uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
@@ -396,6 +380,11 @@ static mesh_mgmt_execution_store_result_t load_snapshot(
   /* Terminal compaction may remove the entry carrying the highest mutation
    * generation. The integrity-checked header remains the monotonic fact. */
   store->journal.generation = generation;
+  /* Transfer the validated original encoding to open's durable admission.
+   * In particular, an unchanged v1 snapshot must not be upgraded on reopen. */
+  *out_bytes = bytes;
+  *out_size = size;
+  bytes = NULL;
   result = MESH_MGMT_EXECUTION_STORE_OK;
 
 cleanup:
@@ -428,6 +417,8 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
     mesh_mgmt_execution_store_v1_t *store, const char *path,
     size_t capacity, size_t *out_recovered) {
   cmeta_fs_stat_t stat;
+  uint8_t *snapshot = NULL;
+  size_t snapshot_size = 0u;
   size_t recovered = 0u;
   int path_length;
   mesh_mgmt_execution_store_result_t result;
@@ -485,32 +476,48 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
 
   store->open = 1u;
   /* First open has no journal yet; access() avoids ERROR logs for a missing file. */
-  if (cmeta_fs_access(store->path, SALTS_FS_ACCESS_EXISTS) == 0 &&
-      cmeta_fs_stat(store->path, &stat) == 0) {
-    result = load_snapshot(store);
+  const int exists = cmeta_fs_access(store->path, SALTS_FS_ACCESS_EXISTS);
+  if (exists == 0) {
+    if (cmeta_fs_stat(store->path, &stat) != 0) {
+      result = MESH_MGMT_EXECUTION_STORE_IO;
+      goto failed;
+    }
+    result = load_snapshot(store, &snapshot, &snapshot_size);
     if (result != MESH_MGMT_EXECUTION_STORE_OK)
       goto failed;
-    if (mesh_mgmt_execution_journal_recover_v1(&store->journal,
-                                                &recovered) !=
-        MESH_MGMT_EXECUTION_OK) {
-      result = MESH_MGMT_EXECUTION_STORE_CORRUPT;
+    const mesh_mgmt_execution_result_t recovery =
+        mesh_mgmt_execution_journal_recover_v1(&store->journal, &recovered);
+    if (recovery != MESH_MGMT_EXECUTION_OK) {
+      result = recovery == MESH_MGMT_EXECUTION_RESOURCE_EXHAUSTED
+                   ? MESH_MGMT_EXECUTION_STORE_RESOURCE_EXHAUSTED
+                   : MESH_MGMT_EXECUTION_STORE_CORRUPT;
       goto failed;
     }
     if (recovered > 0u) {
       result = persist_snapshot(store);
-      if (result != MESH_MGMT_EXECUTION_STORE_OK)
-        goto failed;
+    } else {
+      /* A previous owner may have observed durability UNKNOWN. Existence and
+       * integrity alone do not establish durability, so republish the exact
+       * loaded bytes before allowing idempotent success or reads. */
+      result = publish_snapshot_bytes(store, snapshot, snapshot_size);
     }
-  } else {
+    if (result != MESH_MGMT_EXECUTION_STORE_OK)
+      goto failed;
+  } else if (exists == -ENOENT) {
     result = persist_snapshot(store);
     if (result != MESH_MGMT_EXECUTION_STORE_OK)
       goto failed;
+  } else {
+    result = MESH_MGMT_EXECUTION_STORE_IO;
+    goto failed;
   }
   if (out_recovered)
     *out_recovered = recovered;
+  free(snapshot);
   return MESH_MGMT_EXECUTION_STORE_OK;
 
 failed:
+  free(snapshot);
   mesh_mgmt_execution_store_close_v1(store);
   return result;
 }
@@ -529,6 +536,13 @@ void mesh_mgmt_execution_store_close_v1(
   store->lock_file = SALTS_INVALID_FILE;
 }
 
+static mesh_mgmt_execution_store_result_t store_admission(
+    const mesh_mgmt_execution_store_v1_t *store) {
+  if (!store || !store->open) return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
+  return store->open == 1u ? MESH_MGMT_EXECUTION_STORE_OK :
+                             MESH_MGMT_EXECUTION_STORE_IO;
+}
+
 mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_submit_v1(
     mesh_mgmt_execution_store_v1_t *store,
     const uint8_t command_id[MESH_MGMT_EXECUTION_ID_SIZE],
@@ -539,8 +553,8 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_submit_v1(
   mesh_mgmt_execution_result_t journal_result;
   mesh_mgmt_execution_store_result_t result;
 
-  if (!store || !store->open)
-    return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
   save_rollback(store, &saved_count, &saved_generation);
   journal_result = mesh_mgmt_execution_journal_submit_v1(
       &store->journal, command_id, request_digest, out_entry);
@@ -550,7 +564,7 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_submit_v1(
   if (store->journal.generation == saved_generation)
     return MESH_MGMT_EXECUTION_STORE_OK;
   result = persist_snapshot(store);
-  if (result != MESH_MGMT_EXECUTION_STORE_OK)
+  if (result != MESH_MGMT_EXECUTION_STORE_OK && store->open == 1u)
     restore_rollback(store, saved_count, saved_generation);
   return result;
 }
@@ -601,7 +615,9 @@ mesh_mgmt_execution_store_commit_result_v1(
   mesh_mgmt_execution_result_t journal_result;
   mesh_mgmt_execution_store_result_t store_result;
 
-  if (!store || !store->open || !result ||
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
+  if (!result ||
       mesh_mgmt_execution_result_verify_v1(
           result, result->signer_public_key) !=
           MESH_MGMT_EXECUTION_RESULT_OK)
@@ -636,7 +652,7 @@ mesh_mgmt_execution_store_commit_result_v1(
   store->results[index].result = *result;
   store->results[index].occupied = 1u;
   store_result = persist_snapshot(store);
-  if (store_result != MESH_MGMT_EXECUTION_STORE_OK)
+  if (store_result != MESH_MGMT_EXECUTION_STORE_OK && store->open == 1u)
     restore_rollback(store, saved_count, saved_generation);
   return store_result;
 }
@@ -647,7 +663,9 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_get_result_v1(
     mesh_mgmt_execution_result_v1_t *out_result) {
   size_t index;
 
-  if (!store || !store->open || !command_id || !out_result)
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
+  if (!command_id || !out_result)
     return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
   index = find_entry_index(store, command_id);
   if (index == store->journal.capacity || !store->results[index].occupied)
@@ -660,8 +678,8 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_get_v1(
     const mesh_mgmt_execution_store_v1_t *store,
     const uint8_t command_id[MESH_MGMT_EXECUTION_ID_SIZE],
     mesh_mgmt_execution_journal_entry_v1_t *out_entry) {
-  if (!store || !store->open)
-    return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
   return map_journal_result(mesh_mgmt_execution_journal_get_v1(
       &store->journal, command_id, out_entry));
 }
@@ -676,8 +694,8 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_transition_v1(
   mesh_mgmt_execution_result_t journal_result;
   mesh_mgmt_execution_store_result_t result;
 
-  if (!store || !store->open)
-    return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
   if (mesh_mgmt_execution_state_is_terminal_v1(next_state))
     return MESH_MGMT_EXECUTION_STORE_INVALID_STATE;
   save_rollback(store, &saved_count, &saved_generation);
@@ -687,7 +705,7 @@ mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_transition_v1(
   if (result != MESH_MGMT_EXECUTION_STORE_OK)
     return result;
   result = persist_snapshot(store);
-  if (result != MESH_MGMT_EXECUTION_STORE_OK)
+  if (result != MESH_MGMT_EXECUTION_STORE_OK && store->open == 1u)
     restore_rollback(store, saved_count, saved_generation);
   return result;
 }
@@ -701,7 +719,9 @@ mesh_mgmt_execution_store_forget_terminal_v1(
   uint64_t saved_generation;
   mesh_mgmt_execution_store_result_t result;
 
-  if (!store || !store->open || !command_id)
+  const mesh_mgmt_execution_store_result_t admission = store_admission(store);
+  if (admission != MESH_MGMT_EXECUTION_STORE_OK) return admission;
+  if (!command_id)
     return MESH_MGMT_EXECUTION_STORE_INVALID_ARG;
   index = find_entry_index(store, command_id);
   if (index == store->journal.capacity)
@@ -709,6 +729,8 @@ mesh_mgmt_execution_store_forget_terminal_v1(
   if (!mesh_mgmt_execution_state_is_terminal_v1(
           store->journal.entries[index].state))
     return MESH_MGMT_EXECUTION_STORE_INVALID_STATE;
+  if (store->journal.generation == UINT64_MAX)
+    return MESH_MGMT_EXECUTION_STORE_RESOURCE_EXHAUSTED;
   save_rollback(store, &saved_count, &saved_generation);
   memset(&store->journal.entries[index], 0,
          sizeof(store->journal.entries[index]));
@@ -716,7 +738,7 @@ mesh_mgmt_execution_store_forget_terminal_v1(
   store->journal.count--;
   store->journal.generation++;
   result = persist_snapshot(store);
-  if (result != MESH_MGMT_EXECUTION_STORE_OK)
+  if (result != MESH_MGMT_EXECUTION_STORE_OK && store->open == 1u)
     restore_rollback(store, saved_count, saved_generation);
   return result;
 }

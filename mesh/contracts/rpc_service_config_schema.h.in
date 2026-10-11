@@ -1,0 +1,7 @@
+#ifndef MESH_RPC_SERVICE_CONFIG_SCHEMA_H
+#define MESH_RPC_SERVICE_CONFIG_SCHEMA_H
+
+static const char MESH_RPC_SERVICE_CONFIG_SCHEMA[] =
+"@rpc_config_schema@";
+
+#endif

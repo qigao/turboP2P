@@ -27,7 +27,7 @@ static size_t make_message(mesh_control_envelope_v1_t *envelope, uint8_t output[
   size_t output_size = 0u;
 
   memset(envelope, 0, sizeof(*envelope));
-  check_int_eq(mesh_control_intent_encode_v1(MESH_CONTROL_DESIRED_APPLY, document, sizeof(document),
+  check_equal(mesh_control_intent_encode_v1(MESH_CONTROL_DESIRED_APPLY, document, sizeof(document),
                                              output, 64u, &output_size),
                MESH_CONTROL_OK);
   envelope->schema_version = MESH_CONTROL_SCHEMA_V1;
@@ -49,7 +49,7 @@ static size_t make_message(mesh_control_envelope_v1_t *envelope, uint8_t output[
   envelope->incarnation = 5u;
   envelope->certificate_serial = 6u;
   envelope->payload_size = output_size;
-  check_int_eq(mesh_control_mmp_body_digest_v1(output, output_size, envelope->payload_digest),
+  check_equal(mesh_control_mmp_body_digest_v1(output, output_size, envelope->payload_digest),
                MESH_CONTROL_MMP_OK);
   return output_size;
 }
@@ -73,50 +73,50 @@ static void test_checkpoint_round_trip_binds_state_and_replay(void) {
   size_t body_size;
 
   make_config(&config, 2u);
-  check_int_eq(mesh_control_channel_init_v1(&source_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_channel_init_v1(&restored_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_init_v1(&source, &source_channel, &config), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_init_v1(&restored, &restored_channel, &config), MESH_CONTROL_OK);
+  check_equal(mesh_control_channel_init_v1(&source_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
+  check_equal(mesh_control_channel_init_v1(&restored_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
+  check_equal(mesh_control_owner_init_v1(&source, &source_channel, &config), MESH_CONTROL_OK);
+  check_equal(mesh_control_owner_init_v1(&restored, &restored_channel, &config), MESH_CONTROL_OK);
   body_size = make_message(&envelope, body);
-  check_int_eq(mesh_control_channel_try_push_v1(&source_channel, &envelope, body, body_size),
+  check_equal(mesh_control_channel_try_push_v1(&source_channel, &envelope, body, body_size),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_process_next_v1(&source, 1100u, &operation), MESH_CONTROL_OK);
-  check_uint_eq(source.committed_log_index, 1u);
-  check_int_eq(mesh_control_state_transition_operation_v1(&source.state, operation.operation_id,
+  check_equal(mesh_control_owner_process_next_v1(&source, 1100u, &operation), MESH_CONTROL_OK);
+  check_equal(source.committed_log_index, 1u);
+  check_equal(mesh_control_state_transition_operation_v1(&source.state, operation.operation_id,
                                                           MESH_CONTROL_OPERATION_RUNNING, 1110u),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_checkpoint_encode_v1(&source, &checkpoint, &checkpoint_size),
+  check_equal(mesh_control_checkpoint_encode_v1(&source, &checkpoint, &checkpoint_size),
                MESH_CONTROL_CHECKPOINT_OK);
   check_true(checkpoint != NULL);
   check_true(checkpoint_size > 256u);
 
-  check_int_eq(mesh_control_checkpoint_restore_v1(&restored, checkpoint, checkpoint_size, 1500u),
+  check_equal(mesh_control_checkpoint_restore_v1(&restored, checkpoint, checkpoint_size, 1500u),
                MESH_CONTROL_CHECKPOINT_OK);
-  check_uint_eq(restored.committed_log_index, 1u);
+  check_equal(restored.committed_log_index, 1u);
   mesh_control_checkpoint_free_v1(checkpoint);
-  check_int_eq(mesh_control_state_get_usage_v1(&restored.state, &usage), MESH_CONTROL_OK);
-  check_size_eq(usage.resource_count, 1u);
-  check_size_eq(usage.operation_count, 1u);
-  check_size_eq(usage.event_count, 2u);
-  check_int_eq(mesh_control_state_get_resource_v1(&restored.state, envelope.resource_kind,
+  check_equal(mesh_control_state_get_usage_v1(&restored.state, &usage), MESH_CONTROL_OK);
+  check_equal(usage.resource_count, 1u);
+  check_equal(usage.operation_count, 1u);
+  check_equal(usage.event_count, 2u);
+  check_equal(mesh_control_state_get_resource_v1(&restored.state, envelope.resource_kind,
                                                   envelope.resource_id, &status),
                MESH_CONTROL_OK);
-  check_int_eq(status.desired_epoch, 1u);
-  check_int_eq(mesh_control_state_get_operation_v1(&restored.state, operation.operation_id,
+  check_equal(status.desired_epoch, 1u);
+  check_equal(mesh_control_state_get_operation_v1(&restored.state, operation.operation_id,
                                                    &restored_operation),
                MESH_CONTROL_OK);
-  check_int_eq(restored_operation.state, MESH_CONTROL_OPERATION_RUNNING);
-  check_int_eq(mesh_control_state_get_desired_document_v1(&restored.state, envelope.resource_kind,
+  check_equal(restored_operation.state, MESH_CONTROL_OPERATION_RUNNING);
+  check_equal(mesh_control_state_get_desired_document_v1(&restored.state, envelope.resource_kind,
                                                           envelope.resource_id, &document,
                                                           &document_size),
                MESH_CONTROL_OK);
-  check_size_eq(document_size, 3u);
-  check_int_eq(document[0], 0xaau);
-  check_int_eq(document[2], 0xccu);
+  check_equal(document_size, 3u);
+  check_equal(document[0], 0xaau);
+  check_equal(document[2], 0xccu);
 
-  check_int_eq(mesh_control_channel_try_push_v1(&restored_channel, &envelope, body, body_size),
+  check_equal(mesh_control_channel_try_push_v1(&restored_channel, &envelope, body, body_size),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_process_next_v1(&restored, 1600u, NULL), MESH_CONTROL_CONFLICT);
+  check_equal(mesh_control_owner_process_next_v1(&restored, 1600u, NULL), MESH_CONTROL_CONFLICT);
 
   mesh_control_owner_destroy_v1(&restored);
   mesh_control_owner_destroy_v1(&source);
@@ -140,29 +140,29 @@ static void test_corruption_is_atomic_and_identity_is_bound(void) {
 
   make_config(&source_config, 2u);
   make_config(&target_config, 3u);
-  check_int_eq(mesh_control_channel_init_v1(&source_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_channel_init_v1(&target_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_init_v1(&source, &source_channel, &source_config),
+  check_equal(mesh_control_channel_init_v1(&source_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
+  check_equal(mesh_control_channel_init_v1(&target_channel, 4u, 4096u, 1024u), MESH_CONTROL_OK);
+  check_equal(mesh_control_owner_init_v1(&source, &source_channel, &source_config),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_init_v1(&target, &target_channel, &target_config),
+  check_equal(mesh_control_owner_init_v1(&target, &target_channel, &target_config),
                MESH_CONTROL_OK);
   body_size = make_message(&envelope, body);
-  check_int_eq(mesh_control_channel_try_push_v1(&source_channel, &envelope, body, body_size),
+  check_equal(mesh_control_channel_try_push_v1(&source_channel, &envelope, body, body_size),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_owner_process_next_v1(&source, 1100u, NULL), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_checkpoint_encode_v1(&source, &checkpoint, &checkpoint_size),
+  check_equal(mesh_control_owner_process_next_v1(&source, 1100u, NULL), MESH_CONTROL_OK);
+  check_equal(mesh_control_checkpoint_encode_v1(&source, &checkpoint, &checkpoint_size),
                MESH_CONTROL_CHECKPOINT_OK);
 
   checkpoint[checkpoint_size - 1u] ^= 1u;
-  check_int_eq(mesh_control_checkpoint_restore_v1(&target, checkpoint, checkpoint_size, 1500u),
+  check_equal(mesh_control_checkpoint_restore_v1(&target, checkpoint, checkpoint_size, 1500u),
                MESH_CONTROL_CHECKPOINT_CORRUPT);
-  check_int_eq(mesh_control_state_get_usage_v1(&target.state, &usage), MESH_CONTROL_OK);
-  check_size_eq(usage.resource_count, 0u);
+  check_equal(mesh_control_state_get_usage_v1(&target.state, &usage), MESH_CONTROL_OK);
+  check_equal(usage.resource_count, 0u);
   checkpoint[checkpoint_size - 1u] ^= 1u;
-  check_int_eq(mesh_control_checkpoint_restore_v1(&target, checkpoint, checkpoint_size, 1500u),
+  check_equal(mesh_control_checkpoint_restore_v1(&target, checkpoint, checkpoint_size, 1500u),
                MESH_CONTROL_CHECKPOINT_BINDING_MISMATCH);
-  check_int_eq(mesh_control_state_get_usage_v1(&target.state, &usage), MESH_CONTROL_OK);
-  check_size_eq(usage.resource_count, 0u);
+  check_equal(mesh_control_state_get_usage_v1(&target.state, &usage), MESH_CONTROL_OK);
+  check_equal(usage.resource_count, 0u);
 
   mesh_control_checkpoint_free_v1(checkpoint);
   mesh_control_owner_destroy_v1(&target);

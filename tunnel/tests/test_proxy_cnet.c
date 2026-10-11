@@ -4,6 +4,7 @@
 #include "../src/nat/tunnel_nat.h"
 #include "../src/stack/tunnel_ip_stack.h"
 #include <salts/clock.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TEST_TIMEOUT_MS 5000u
@@ -167,9 +168,21 @@ static void init_fixture_owner(tunnel_proxy_type_t type, int use_tls, const char
   config.proxy.use_tls = use_tls;
   config.proxy.tls_sni = name;
   config.proxy.tls_ca_file = TUNNEL_TEST_TLS_CA_FILE;
-  f.tunnel = tunnel_create(&config);
+  /* Match the module's existing packet/session fixtures: supply an Owner for
+   * real NAT/proxy/poll/teardown, with no TUN device. tunnel_create eagerly
+   * loads Wintun on Windows, so it is outside this transport fixture's scope.
+   * Config pointers here refer only to literals; proxy copies its credentials. */
+  config.dns.fake_dns = 0;
+  f.tunnel = calloc(1, sizeof(*f.tunnel));
   check_not_null(f.tunnel);
-  /* Exercise production tunnel_poll without requiring a privileged TUN device. */
+  f.tunnel->config = config;
+  cmeta_mutex_init(&f.tunnel->mutex);
+  check_not_null(f.tunnel->mutex);
+  f.tunnel->nat = tunnel_nat_create(f.tunnel);
+  check_not_null(f.tunnel->nat);
+  f.tunnel->proxy = tunnel_proxy_create(f.tunnel, &config.proxy);
+  check_not_null(f.tunnel->proxy);
+  /* Exercise production tunnel_poll; native TUN polling has no device/events. */
   f.tunnel->running = 1;
   if (!connect) return;
   f.conn = tunnel_proxy_connect_tcp(f.tunnel->proxy, "127.0.0.1",

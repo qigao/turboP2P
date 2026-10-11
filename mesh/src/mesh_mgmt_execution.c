@@ -309,7 +309,7 @@ mesh_mgmt_execution_result_t mesh_mgmt_execution_journal_submit_v1(
                ? MESH_MGMT_EXECUTION_OK
                : MESH_MGMT_EXECUTION_CONFLICT;
   }
-  if (journal->count >= journal->capacity)
+  if (journal->count >= journal->capacity || journal->generation == UINT64_MAX)
     return MESH_MGMT_EXECUTION_RESOURCE_EXHAUSTED;
   for (index = 0u; index < journal->capacity; index++) {
     if (!journal->entries[index].occupied) {
@@ -363,6 +363,8 @@ mesh_mgmt_execution_result_t mesh_mgmt_execution_journal_transition_v1(
   if (!mesh_mgmt_execution_state_is_terminal_v1(next_state) &&
       result_code != 0)
     return MESH_MGMT_EXECUTION_INVALID_SCHEMA;
+  if (journal->generation == UINT64_MAX)
+    return MESH_MGMT_EXECUTION_RESOURCE_EXHAUSTED;
   entry->state = next_state;
   entry->result_code = result_code;
   entry->generation = ++journal->generation;
@@ -373,10 +375,19 @@ mesh_mgmt_execution_result_t mesh_mgmt_execution_journal_transition_v1(
 mesh_mgmt_execution_result_t mesh_mgmt_execution_journal_recover_v1(
     mesh_mgmt_execution_journal_v1_t *journal, size_t *out_recovered) {
   size_t index;
+  size_t running = 0u;
 
   if (!journal || !journal->entries || !out_recovered)
     return MESH_MGMT_EXECUTION_INVALID_ARG;
   *out_recovered = 0u;
+  /* Recovery is one mutation: reserve every generation before changing state. */
+  for (index = 0u; index < journal->capacity; index++) {
+    const mesh_mgmt_execution_journal_entry_v1_t *entry = &journal->entries[index];
+    if (entry->occupied && entry->state == MESH_MGMT_EXECUTION_STATE_RUNNING)
+      running++;
+  }
+  if (running > UINT64_MAX - journal->generation)
+    return MESH_MGMT_EXECUTION_RESOURCE_EXHAUSTED;
   for (index = 0u; index < journal->capacity; index++) {
     mesh_mgmt_execution_journal_entry_v1_t *entry = &journal->entries[index];
     if (entry->occupied &&
@@ -444,7 +455,8 @@ mesh_mgmt_execution_result_t mesh_mgmt_execution_journal_import_v1(
     if (entries[index].generation > max_generation)
       max_generation = entries[index].generation;
   }
-  memcpy(journal->entries, entries, entry_count * sizeof(*entries));
+  if (entry_count != 0u)
+    memcpy(journal->entries, entries, entry_count * sizeof(*entries));
   journal->count = entry_count;
   journal->generation = max_generation;
   return MESH_MGMT_EXECUTION_OK;

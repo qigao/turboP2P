@@ -166,6 +166,9 @@ typedef struct {
 /**
  * Bounded in-memory E0 journal simulator. It models durable import/export and
  * state invariants but performs no file I/O. One owner must serialize calls.
+ * Mutations reject exhausted generations with RESOURCE_EXHAUSTED; matching
+ * dedupe remains available. Recovery checks all required generations before
+ * changing any entry, so exhaustion cannot produce partial recovery.
  */
 typedef struct {
   mesh_mgmt_execution_journal_entry_v1_t *entries;

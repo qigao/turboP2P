@@ -173,6 +173,15 @@ FlowMQ 只负责有界传输；调度可以在 Controller 端把 selector 展开
 节点端仍逐个执行带 generation、precondition、provider ID 和 digest 的确定性命令。控制消息不接受
 shell、任意 argv、宿主路径、下载后执行或未预注册 native binary。
 
+上述 RESULT/WAL/exact ACK 描述的是 desired-state control/provider 链。
+`mesh_mgmt_execution_*` 的 MMP `COMMAND_RESULT` 是另一条路径：本地 CNet 发送终态只证明
+本地完整写入，当前还没有对应的远端持久 ACK 消息，也不能据此清理 Execution Store。
+Control WAL、checkpoint store 和单任务 WAL worker 已接入当前 Salts Core，并通过其正式测试。
+checkpoint 必须确认 durable publication 后才允许 WAL 压缩；恢复时先逐字节持久化重新发布
+已校验文件，再提交 owner 状态。worker 的持久化失败会关闭接收，并保留一次完成结果供 owner
+消费。完整 agent/daemon 的 SDK 组合与 COMMAND_RESULT 远端 ACK 设计仍需分别完成，见
+[迁移记录](../../docs/SALTS_23_MIGRATION.md#checkpoint-and-wal-worker-durability-slice-2026-10-11)。
+
 `边界`：当前 Network 执行落在 userspace multi-Network fabric，尚不等于完整 OS TUN/route/DNS/IPAM
 事务；Function 只允许本机预部署的 Native/TurboWASM deployment。产品级用户/审批与 Grant 签发、
 Controller 数据库、跨节点 observation/audit 汇总、service-manager 安装、平台 keystore 和自动证书轮换

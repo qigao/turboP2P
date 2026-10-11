@@ -1,7 +1,10 @@
-#include "mesh_control_reconciler.h"
+#include "mesh_control_component_provider.h"
 #include "tinytest.h"
 
 #include <string.h>
+
+cmeta_component(MeshControlReconcilerFixture,
+                cmeta_provides(mesh_control_component_provider_v1));
 
 typedef struct {
   mesh_control_provider_request_v1_t request;
@@ -106,7 +109,7 @@ static void make_function_document(mesh_control_function_spec_v1_t *spec,
   spec->limits.output_bytes = 1024u;
   spec->limits.concurrency = 1u;
   spec->limits.host_calls = 1u;
-  check_int_eq(mesh_control_function_document_encode_v1(
+  check_equal(mesh_control_function_document_encode_v1(
                    spec, document, MESH_CONTROL_FUNCTION_DOCUMENT_SIZE_V1, out_size),
                MESH_CONTROL_OK);
 }
@@ -137,6 +140,18 @@ static void test_native_apply_and_delete_reconcile(void) {
   const mesh_control_state_config_v1_t state_config = {2u, 4u, 8u, 500u, 1024u, 2048u};
   fake_provider_v1_t fake = {0};
   mesh_control_provider_v1_t provider;
+  salts_component_provider_binding binding =
+      MESH_CONTROL_COMPONENT_BINDING_V1(MeshControlReconcilerFixture, &provider);
+  salts_component_deployment source = {&binding, NULL, NULL};
+  salts_component_deployment deployments[1];
+  salts_component_instance instances[1];
+  size_t activation_order[1];
+  const salts_component_plugin_generation_storage storage = {
+      deployments, 1, instances, 1, NULL, 0, activation_order, 1, NULL, 0};
+  salts_component_plugin_generation generation = SALTS_COMPONENT_PLUGIN_GENERATION_INIT;
+  salts_component_plugin_runtime runtime = SALTS_COMPONENT_PLUGIN_RUNTIME_INIT;
+  salts_component_plugin_generation *previous = NULL;
+  mesh_control_component_lease_v1_t lease = MESH_CONTROL_COMPONENT_LEASE_INIT_V1;
   mesh_control_reconciler_config_v1_t reconcile_config;
   mesh_control_reconciler_v1_t reconciler = {0};
   mesh_control_state_v1_t state = {0};
@@ -154,74 +169,85 @@ static void test_native_apply_and_delete_reconcile(void) {
   size_t progress = 0u;
 
   make_provider(&provider, &fake, MESH_CONTROL_FUNCTION_NATIVE);
+  check_equal(salts_component_plugin_runtime_init(&runtime), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_generation_build(&generation, 1, NULL, &storage,
+      &source, 1, NULL, 0, NULL, 0), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_runtime_publish(&runtime, &generation, &previous),
+              SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(mesh_control_component_lease_acquire_v1(&lease, &runtime,
+      "MeshControlReconcilerFixture"), SALTS_COMPONENT_PLUGIN_OK);
   memset(&reconcile_config, 0, sizeof(reconcile_config));
-  reconcile_config.providers = &provider;
+  reconcile_config.providers = mesh_control_component_lease_provider_v1(&lease);
   reconcile_config.provider_count = 1u;
   reconcile_config.inflight_capacity = 4u;
   make_function_document(&spec, document, &document_size);
   make_intent(&apply, &spec, 10u, 1u, 0u);
-  check_int_eq(mesh_control_state_init_v1(&state, &state_config), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_init_v1(&reconciler, &reconcile_config), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_state_submit_document_v1(&state, &apply, MESH_CONTROL_DESIRED_APPLY,
+  check_equal(mesh_control_state_init_v1(&state, &state_config), MESH_CONTROL_OK);
+  check_equal(mesh_control_reconciler_init_v1(&reconciler, &reconcile_config), MESH_CONTROL_OK);
+  check_equal(mesh_control_state_submit_document_v1(&state, &apply, MESH_CONTROL_DESIRED_APPLY,
                                                      document, document_size, 1100u, &operation),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, document, document_size),
+  check_equal(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, document, document_size),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1110u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1110u, &progress),
                MESH_CONTROL_OK);
-  check_int_eq(progress, 1u);
-  check_int_eq(mesh_control_state_get_operation_v1(&state, operation.operation_id, &operation),
+  check_equal(progress, 1u);
+  check_equal(mesh_control_state_get_operation_v1(&state, operation.operation_id, &operation),
                MESH_CONTROL_OK);
-  check_int_eq(operation.state, MESH_CONTROL_OPERATION_RUNNING);
+  check_equal(operation.state, MESH_CONTROL_OPERATION_RUNNING);
   fake_complete(&fake, MESH_CONTROL_PROVIDER_COMPLETED);
   fake.ack_failure = 1u;
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1120u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1120u, &progress),
                MESH_CONTROL_INVALID_STATE);
   check_true(fake.completion_ready);
   fake.ack_failure = 0u;
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1120u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1120u, &progress),
                MESH_CONTROL_OK);
   check_false(fake.completion_ready);
-  check_int_eq(mesh_control_state_get_resource_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
+  check_equal(mesh_control_state_get_resource_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
                                                   spec.function_id, &status),
                MESH_CONTROL_OK);
-  check_int_eq(status.observed_presence, MESH_CONTROL_PRESENCE_PRESENT);
+  check_equal(status.observed_presence, MESH_CONTROL_PRESENCE_PRESENT);
 
   make_intent(&remove, &spec, 20u, 2u, 1u);
-  check_int_eq(mesh_control_state_submit_document_v1(&state, &remove, MESH_CONTROL_DESIRED_DELETE,
+  check_equal(mesh_control_state_submit_document_v1(&state, &remove, MESH_CONTROL_DESIRED_DELETE,
                                                      NULL, 0u, 1200u, &operation),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_state_get_desired_document_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
+  check_equal(mesh_control_state_get_desired_document_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
                                                           spec.function_id, &retained_document,
                                                           &retained_document_size),
                MESH_CONTROL_OK);
-  check_int_eq(retained_document_size, document_size);
-  check_int_eq(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, retained_document,
+  check_equal(retained_document_size, document_size);
+  check_equal(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, retained_document,
                                                   retained_document_size),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1210u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 2u, 2u, 1210u, &progress),
                MESH_CONTROL_OK);
   fake_complete(&fake, MESH_CONTROL_PROVIDER_COMPLETED);
-  check_int_eq(mesh_control_reconciler_prepare_completion_v1(&reconciler, &prepared),
+  check_equal(mesh_control_reconciler_prepare_completion_v1(&reconciler, &prepared),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_apply_completion_v1(&reconciler, &state, 1220u),
+  check_equal(mesh_control_reconciler_apply_completion_v1(&reconciler, &state, 1220u),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_close_v1(&reconciler), MESH_CONTROL_OK);
+  check_equal(mesh_control_reconciler_close_v1(&reconciler), MESH_CONTROL_OK);
   check_true(fake.completion_ready);
   check_false(mesh_control_reconciler_is_drained_v1(&reconciler));
-  check_int_eq(mesh_control_reconciler_ack_completion_v1(&reconciler), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_state_get_resource_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
+  check_equal(mesh_control_reconciler_ack_completion_v1(&reconciler), MESH_CONTROL_OK);
+  check_equal(mesh_control_state_get_resource_v1(&state, MESH_CONTROL_RESOURCE_FUNCTION,
                                                   spec.function_id, &status),
                MESH_CONTROL_OK);
-  check_int_eq(status.observed_presence, MESH_CONTROL_PRESENCE_ABSENT);
-  check_int_eq(mesh_control_reconciler_get_stats_v1(&reconciler, &stats), MESH_CONTROL_OK);
-  check_int_eq(stats.started, 2u);
-  check_int_eq(stats.succeeded, 2u);
-  check_int_eq(stats.queued, 0u);
-  check_int_eq(stats.inflight, 0u);
+  check_equal(status.observed_presence, MESH_CONTROL_PRESENCE_ABSENT);
+  check_equal(mesh_control_reconciler_get_stats_v1(&reconciler, &stats), MESH_CONTROL_OK);
+  check_equal(stats.started, 2u);
+  check_equal(stats.succeeded, 2u);
+  check_equal(stats.queued, 0u);
+  check_equal(stats.inflight, 0u);
   check_true(mesh_control_reconciler_is_drained_v1(&reconciler));
   mesh_control_reconciler_destroy_v1(&reconciler);
   mesh_control_state_destroy_v1(&state);
+  check_equal(mesh_control_component_lease_release_v1(&lease), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_runtime_close(&runtime, &previous), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_generation_drain(&runtime, &generation), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_runtime_destroy(&runtime), SALTS_COMPONENT_PLUGIN_OK);
 }
 
 static void test_backpressure_and_shutdown_are_bounded(void) {
@@ -245,29 +271,29 @@ static void test_backpressure_and_shutdown_are_bounded(void) {
   reconcile_config.inflight_capacity = 1u;
   make_function_document(&spec, document, &document_size);
   make_intent(&apply, &spec, 30u, 1u, 0u);
-  check_int_eq(mesh_control_state_init_v1(&state, &state_config), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_init_v1(&reconciler, &reconcile_config), MESH_CONTROL_OK);
-  check_int_eq(mesh_control_state_submit_document_v1(&state, &apply, MESH_CONTROL_DESIRED_APPLY,
+  check_equal(mesh_control_state_init_v1(&state, &state_config), MESH_CONTROL_OK);
+  check_equal(mesh_control_reconciler_init_v1(&reconciler, &reconcile_config), MESH_CONTROL_OK);
+  check_equal(mesh_control_state_submit_document_v1(&state, &apply, MESH_CONTROL_DESIRED_APPLY,
                                                      document, document_size, 1100u, &operation),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, document, document_size),
+  check_equal(mesh_control_reconciler_enqueue_v1(&reconciler, &operation, document, document_size),
                MESH_CONTROL_OK);
   fake.backpressure = 1u;
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 1u, 1u, 1110u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 1u, 1u, 1110u, &progress),
                MESH_CONTROL_OK);
-  check_int_eq(progress, 0u);
-  check_int_eq(mesh_control_reconciler_get_stats_v1(&reconciler, &stats), MESH_CONTROL_OK);
-  check_int_eq(stats.queued, 1u);
-  check_int_eq(stats.provider_backpressure, 1u);
-  check_int_eq(mesh_control_reconciler_close_v1(&reconciler), MESH_CONTROL_OK);
+  check_equal(progress, 0u);
+  check_equal(mesh_control_reconciler_get_stats_v1(&reconciler, &stats), MESH_CONTROL_OK);
+  check_equal(stats.queued, 1u);
+  check_equal(stats.provider_backpressure, 1u);
+  check_equal(mesh_control_reconciler_close_v1(&reconciler), MESH_CONTROL_OK);
   check_false(mesh_control_reconciler_is_drained_v1(&reconciler));
-  check_int_eq(mesh_control_reconciler_poll_v1(&reconciler, &state, 1u, 1u, 1120u, &progress),
+  check_equal(mesh_control_reconciler_poll_v1(&reconciler, &state, 1u, 1u, 1120u, &progress),
                MESH_CONTROL_OK);
-  check_int_eq(progress, 1u);
+  check_equal(progress, 1u);
   check_true(mesh_control_reconciler_is_drained_v1(&reconciler));
-  check_int_eq(mesh_control_state_get_operation_v1(&state, operation.operation_id, &operation),
+  check_equal(mesh_control_state_get_operation_v1(&state, operation.operation_id, &operation),
                MESH_CONTROL_OK);
-  check_int_eq(operation.state, MESH_CONTROL_OPERATION_INTERRUPTED);
+  check_equal(operation.state, MESH_CONTROL_OPERATION_INTERRUPTED);
   mesh_control_reconciler_destroy_v1(&reconciler);
   mesh_control_state_destroy_v1(&state);
 }
@@ -282,13 +308,13 @@ static void test_wasm_provider_registration_is_supported(void) {
   config.providers = &provider;
   config.provider_count = 1u;
   config.inflight_capacity = 1u;
-  check_int_eq(mesh_control_reconciler_init_v1(&reconciler, &config),
+  check_equal(mesh_control_reconciler_init_v1(&reconciler, &config),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_has_provider_v1(
+  check_equal(mesh_control_reconciler_has_provider_v1(
                    &reconciler, provider.provider_id,
                    MESH_CONTROL_FUNCTION_WASM),
                MESH_CONTROL_OK);
-  check_int_eq(mesh_control_reconciler_close_v1(&reconciler),
+  check_equal(mesh_control_reconciler_close_v1(&reconciler),
                MESH_CONTROL_OK);
   check_true(mesh_control_reconciler_is_drained_v1(&reconciler));
   mesh_control_reconciler_destroy_v1(&reconciler);

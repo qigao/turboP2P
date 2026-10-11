@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #else
 #include <sys/stat.h>
+#include <sys/wait.h>
 #endif
 
 static int meshd_test_set_private_key_permissions(const char *path,
@@ -671,7 +672,7 @@ static void test_network_control_config_is_default_off_and_fail_fast(void) {
 
 static void test_management_epoch_state_rejects_corrupt_data(void) {
     meshd_management_epoch_state_t state;
-    char lock_path[TURBO_FS_MAX_PATH + 6];
+    char lock_path[SALTS_FS_MAX_PATH + 6];
     char *epoch_path = tt_make_temp_file("meshd-mgmt-epoch-corrupt", ".txt");
 
     check_not_null(epoch_path);
@@ -691,7 +692,7 @@ static void test_management_epoch_state_rejects_corrupt_data(void) {
 static void test_management_epoch_state_excludes_a_second_process(void) {
     meshd_management_epoch_state_t first;
     meshd_management_epoch_state_t second;
-    char lock_path[TURBO_FS_MAX_PATH + 6];
+    char lock_path[SALTS_FS_MAX_PATH + 6];
     char *epoch_path = tt_make_temp_file("meshd-mgmt-epoch-lock", ".txt");
 
     check_not_null(epoch_path);
@@ -702,12 +703,26 @@ static void test_management_epoch_state_excludes_a_second_process(void) {
     memset(&first, 0, sizeof(first));
     memset(&second, 0, sizeof(second));
     check_int_eq(meshd_management_epoch_open(&first, epoch_path, 10u), 0);
+#ifdef _WIN32
     check_int_eq(meshd_management_epoch_open(&second, epoch_path, 10u), -1);
     check_false(second.initialized);
-    meshd_management_epoch_close(&first);
+#else
+    /* POSIX byte-range locks are per-process; use a real process boundary. */
+    const pid_t child = fork();
+    check(child >= 0);
+    if (child == 0) {
+        meshd_management_epoch_state_t child_state = {0};
+        _exit(meshd_management_epoch_open(&child_state, epoch_path, 10u) == -1 ? 0 : 1);
+    }
+    int child_status = 0;
+    check(waitpid(child, &child_status, 0) == child);
+    check_true(WIFEXITED(child_status));
+    check_int_eq(WEXITSTATUS(child_status), 0);
+#endif
+    check_int_eq(meshd_management_epoch_close(&first), 0);
     check_int_eq(meshd_management_epoch_open(&second, epoch_path, 10u), 0);
     check_hex64_eq(second.next_epoch, 10u);
-    meshd_management_epoch_close(&second);
+    check_int_eq(meshd_management_epoch_close(&second), 0);
 
     snprintf(lock_path, sizeof(lock_path), "%s.lock", epoch_path);
     (void)tt_remove_file(epoch_path);
@@ -1482,7 +1497,7 @@ cleanup:
         free(transport_key_path);
     }
     if (epoch_path) {
-        char epoch_lock_path[TURBO_FS_MAX_PATH + 6];
+        char epoch_lock_path[SALTS_FS_MAX_PATH + 6];
         snprintf(epoch_lock_path, sizeof(epoch_lock_path), "%s.lock", epoch_path);
         (void)tt_remove_file(epoch_path);
         (void)tt_remove_file(epoch_lock_path);

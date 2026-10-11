@@ -35,6 +35,9 @@ typedef struct {
 /**
  * Single-writer durable command journal. Calls are synchronous and must not be
  * made from the Mesh/MMP event loop. One owner must serialize all access.
+ * A durability-unknown publication fences reads and mutations with STORE_IO
+ * while retaining the file lock. Close and reopen to validate the disk snapshot
+ * before resuming; never infer rollback or retry from this error.
  */
 typedef struct {
   mesh_mgmt_execution_journal_v1_t journal;
@@ -45,9 +48,17 @@ typedef struct {
   char temp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
   char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
   cmeta_file_t lock_file;
-  uint8_t open;
+  uint8_t open; /* 0 closed; 1 usable; 2 durability-fenced but still owns lock */
 } mesh_mgmt_execution_store_v1_t;
 
+/**
+ * Initialize a fresh output owner, or one already closed with close_v1.
+ * Never reopen a live/fenced owner in place: close it first to release its lock.
+ * An existing snapshot is validated and durably republished before admission;
+ * without recovery changes, its original bytes and format are preserved.
+ * out_recovered is assigned only on success. Generation exhaustion returns
+ * STORE_RESOURCE_EXHAUSTED without partially recovering the disk snapshot.
+ */
 mesh_mgmt_execution_store_result_t mesh_mgmt_execution_store_open_v1(
     mesh_mgmt_execution_store_v1_t *store, const char *path,
     size_t capacity, size_t *out_recovered);

@@ -3,7 +3,7 @@
 
 #include "mesh_control_owner.h"
 #include "mesh_mgmt_codec.h"
-#include "turbo_fs.h"
+#include <cmeta_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -98,14 +98,14 @@ typedef struct {
 
 /**
  * Synchronous single-writer append-only intent journal. Calls may block and
- * must run on a persistence worker, never a CoroNet/Iris event loop. The
+ * must run on a persistence worker, never a network event loop. The
  * struct must be zero-initialized and all calls are single-owner.
  */
 typedef struct {
   mesh_control_wal_config_v1_t config;
-  char path[TURBO_FS_MAX_PATH];
-  char lock_path[TURBO_FS_MAX_PATH];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char lock_path[SALTS_FS_MAX_PATH];
+  cmeta_file_t lock_file;
   uint64_t base_index;
   uint64_t tail_index;
   uint8_t base_authenticator[MESH_CONTROL_DIGEST_SIZE];
@@ -117,6 +117,11 @@ typedef struct {
   uint8_t faulted;
 } mesh_control_wal_v1_t;
 
+/**
+ * Validate the HMAC chain and durably republish existing bytes before admission.
+ * Only ENOENT creates a new authenticated header. A failed open releases its
+ * writer lock and wipes the owner; close a live/faulted owner before reuse.
+ */
 mesh_control_wal_result_t mesh_control_wal_open_v1(mesh_control_wal_v1_t *wal,
                                                    const mesh_control_wal_config_v1_t *config);
 
@@ -147,6 +152,10 @@ mesh_control_wal_result_t mesh_control_wal_replay_v1(const mesh_control_wal_v1_t
 /**
  * Atomically replaces a fully checkpointed WAL with an empty authenticated
  * segment anchored at the current tail. checkpoint_index must equal tail.
+ * Success requires durable namespace publication. An unpublished failure
+ * returns IO with the prior state intact. Unknown durability returns
+ * COMMIT_UNKNOWN and faults the owner while retaining its lock; append,
+ * replay and compact remain rejected until close and checked reopen.
  */
 mesh_control_wal_result_t mesh_control_wal_compact_v1(mesh_control_wal_v1_t *wal,
                                                       uint64_t checkpoint_index);

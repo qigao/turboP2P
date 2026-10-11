@@ -3,10 +3,14 @@ project(TurboP2PSaltsFoundationTests LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
+# Static production dependencies are also linked into the real Plugin fixture.
+# Match the root graph's PIC policy for that shared-library closure.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(CTest)
 get_filename_component(TURBOP2P_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
 list(APPEND CMAKE_MODULE_PATH "${TURBOP2P_SOURCE_DIR}/cmake")
 include(SaltsDependencies)
+include(CHttpDependencies)
 find_package(OpenSSL REQUIRED)
 
 # Compile real production sources against installed SDKs without admitting a
@@ -56,7 +60,25 @@ target_include_directories(foundation PUBLIC "${mesh_src}")
 target_link_libraries(foundation PUBLIC
   Salts::CSTL Salts::Platform Salts::Crypto Salts::CNet OpenSSL::Crypto monocypher)
 
+# The real control reconciler and Component bridge share the same owning mesh
+# tests with the product graph; no separate consumer validation project.
+add_library(mesh_control_reconciler STATIC
+  "${mesh_src}/mesh_control_reconciler.c"
+  "${mesh_src}/mesh_control_document.c"
+  "${mesh_src}/mesh_control_state.c")
+target_link_libraries(mesh_control_reconciler PUBLIC foundation)
+add_library(mesh_control_component_provider STATIC "${mesh_src}/mesh_control_component_provider.c")
+target_include_directories(mesh_control_component_provider PUBLIC "${mesh_src}")
+target_link_libraries(mesh_control_component_provider PUBLIC Salts::ComponentPlugin)
+set_property(TARGET mesh_control_component_provider PROPERTY POSITION_INDEPENDENT_CODE ON)
+add_executable(test_mesh_control_reconciler "${mesh_tests}/test_mesh_control_reconciler.c")
+set_property(TARGET test_mesh_control_reconciler PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_control_reconciler PRIVATE
+  mesh_control_reconciler mesh_control_component_provider Salts::TinyTest)
+add_test(NAME test_mesh_control_reconciler COMMAND test_mesh_control_reconciler)
+
 foreach(test_name IN ITEMS
+  test_mesh_mgmt_execution
   test_mesh_mgmt_session
   test_mesh_mgmt_execution_rpc_registry
   test_mesh_mgmt_execution_rpc_control
@@ -120,6 +142,9 @@ target_include_directories(p2p_security PUBLIC
   "${TURBOP2P_SOURCE_DIR}/p2p/include")
 target_link_libraries(p2p_security PUBLIC Salts::Core Salts::Platform Salts::Concurrency
   OpenSSL::Crypto monocypher TurboP2P::NoiseProtocol)
+# This formal graph compiles and consumes P2P as static libraries. Its public
+# header otherwise selects dllimport on Windows, including in definitions.
+target_compile_definitions(p2p_security PUBLIC CXX_C_API=)
 if(WIN32)
   target_link_libraries(p2p_security PUBLIC ws2_32)
 endif()
@@ -404,21 +429,50 @@ set_tests_properties(test_mesh_mgmt_client_config PROPERTIES TIMEOUT 60)
 
 # Host ACE typed RPC service Configurator validates against production
 # MMP service encoder. Dynamic DataBind ownership never enters P2P receive/send.
+add_subdirectory("${TURBOP2P_SOURCE_DIR}/mesh/contracts" mesh_contracts)
 add_library(mesh_mgmt_service_config STATIC
   "${mesh_src}/mesh_mgmt_service_config.c")
 target_include_directories(mesh_mgmt_service_config PUBLIC "${mesh_src}")
 target_link_libraries(mesh_mgmt_service_config PUBLIC mgmt_agent_runtime
-  PRIVATE Salts::DataBind)
+  PRIVATE Salts::DataBind mesh_rpc_service_config_contract_types)
+set_property(TARGET mesh_mgmt_service_config PROPERTY POSITION_INDEPENDENT_CODE ON)
+add_library(mesh_mgmt_service_component STATIC "${mesh_src}/mesh_mgmt_service_component.c")
+target_link_libraries(mesh_mgmt_service_component PUBLIC mesh_mgmt_service_config Salts::ComponentPlugin)
+set_property(TARGET mesh_mgmt_service_component PROPERTY POSITION_INDEPENDENT_CODE ON)
+add_library(mesh_mgmt_service_component_runtime STATIC "${mesh_src}/mesh_mgmt_service_component_runtime.c")
+target_link_libraries(mesh_mgmt_service_component_runtime PUBLIC
+  mesh_mgmt_service_component mgmt_agent_runtime)
+add_library(meshd_rpc_service_component STATIC "${mesh_src}/../examples/meshd_rpc_service_component.c")
+target_include_directories(meshd_rpc_service_component PUBLIC "${mesh_src}/../examples")
+target_link_libraries(meshd_rpc_service_component PUBLIC mesh_mgmt_service_component_runtime Salts::Platform Salts::Core)
+if(WIN32)
+  target_link_libraries(meshd_rpc_service_component PRIVATE ws2_32)
+endif()
+add_library(meshd_management_epoch STATIC "${mesh_src}/../examples/meshd_management_epoch.c")
+target_include_directories(meshd_management_epoch PUBLIC "${mesh_src}/../examples")
+target_link_libraries(meshd_management_epoch PUBLIC Salts::Core Salts::Platform)
+add_executable(test_meshd_management_epoch "${mesh_tests}/test_meshd_management_epoch.c")
+set_property(TARGET test_meshd_management_epoch PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_meshd_management_epoch PRIVATE meshd_management_epoch Salts::TinyTest)
+add_test(NAME test_meshd_management_epoch COMMAND test_meshd_management_epoch)
+set_tests_properties(test_meshd_management_epoch PROPERTIES TIMEOUT 30)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_compile_definitions(test_meshd_management_epoch PRIVATE MESH_MGMT_EPOCH_TEST_WRAP)
+  target_link_options(test_meshd_management_epoch PRIVATE "-Wl,--wrap=cmeta_fs_replace_durable")
+endif()
 add_executable(test_mesh_mgmt_service_config
-  "${mesh_tests}/test_mesh_mgmt_service_config.c")
+  "${mesh_tests}/test_mesh_mgmt_service_config.c"
+  "${mesh_tests}/service_config_native_fixture.c")
 set_property(TARGET test_mesh_mgmt_service_config PROPERTY LINKER_LANGUAGE CXX)
 target_link_libraries(test_mesh_mgmt_service_config PRIVATE
-  mesh_mgmt_service_config Salts::TinyTest)
+  mesh_mgmt_service_config mesh_rpc_service_config_contract_types Salts::DataBind Salts::TinyTest)
 add_test(NAME test_mesh_mgmt_service_config COMMAND test_mesh_mgmt_service_config)
 add_executable(test_mesh_mgmt_service_config_cpp
-  "${mesh_tests}/test_mesh_mgmt_service_config_cpp.cpp")
+  "${mesh_tests}/test_mesh_mgmt_service_config_cpp.cpp"
+  "${mesh_tests}/service_config_native_fixture.c")
 set_property(TARGET test_mesh_mgmt_service_config_cpp PROPERTY LINKER_LANGUAGE CXX)
-target_link_libraries(test_mesh_mgmt_service_config_cpp PRIVATE mesh_mgmt_service_config)
+target_link_libraries(test_mesh_mgmt_service_config_cpp PRIVATE
+  mesh_mgmt_service_config mesh_rpc_service_config_contract_types Salts::DataBind)
 add_test(NAME test_mesh_mgmt_service_config_cpp COMMAND test_mesh_mgmt_service_config_cpp)
 set_tests_properties(test_mesh_mgmt_service_config_cpp PROPERTIES TIMEOUT 60)
 
@@ -460,9 +514,11 @@ target_include_directories(mgmt_mesh_bridge_compile PRIVATE "${TURBOP2P_SOURCE_D
 target_link_libraries(mgmt_mesh_bridge_compile PRIVATE mgmt_agent_runtime)
 add_executable(test_mesh_mgmt_cnet_runtime "${mesh_tests}/test_mesh_mgmt_cnet_runtime.c")
 set_property(TARGET test_mesh_mgmt_cnet_runtime PROPERTY LINKER_LANGUAGE CXX)
-target_link_libraries(test_mesh_mgmt_cnet_runtime PRIVATE mgmt_agent_runtime mesh_mgmt_client_config mesh_mgmt_service_config Salts::TinyTest)
+target_link_libraries(test_mesh_mgmt_cnet_runtime PRIVATE mgmt_agent_runtime mesh_mgmt_client_config
+  mesh_mgmt_service_component_runtime meshd_rpc_service_component meshd_management_epoch Salts::TinyTest)
 add_test(NAME test_mesh_mgmt_cnet_runtime COMMAND test_mesh_mgmt_cnet_runtime)
 set_tests_properties(test_mesh_mgmt_cnet_runtime PROPERTIES TIMEOUT 60)
+add_subdirectory("${mesh_tests}/component_provider" component_provider)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_compile_definitions(test_mesh_mgmt_cnet_runtime PRIVATE MESH_MGMT_RUNTIME_TEST_WRAP)
   target_link_options(test_mesh_mgmt_cnet_runtime PRIVATE
@@ -542,6 +598,7 @@ if(P2P_TURBOWASM_SDK_GATE)
   add_library(mesh_execution_node_sdk STATIC
     "${mesh_src}/mesh_mgmt_execution_runner.c"
     "${mesh_src}/mesh_mgmt_execution_store.c"
+    "${mesh_src}/mesh_mgmt_execution_snapshot_io.c"
     "${mesh_src}/mesh_mgmt_execution_orchestrator.c"
     "${mesh_src}/mesh_mgmt_execution_service.c"
     "${mesh_src}/mesh_mgmt_execution_worker.c"
@@ -608,3 +665,162 @@ if(P2P_TURBOWASM_SDK_GATE)
   set_tests_properties(test_mesh_mgmt_sg_multi_execution_runtime_sdk
     PROPERTIES TIMEOUT 180)
 endif()
+
+# Real CLI RPC transport, using independently linked installed Client/Server.
+add_library(meshctl_rpc_http STATIC "${mesh_src}/meshctl_rpc_http.c")
+target_include_directories(meshctl_rpc_http PUBLIC "${mesh_src}")
+target_link_libraries(meshctl_rpc_http PUBLIC CHttp::Client PRIVATE Salts::Core)
+add_executable(test_meshctl_rpc_http "${mesh_tests}/test_meshctl_rpc_http.c")
+set_property(TARGET test_meshctl_rpc_http PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_meshctl_rpc_http PRIVATE
+  meshctl_rpc_http CHttp::Server Salts::Core Salts::TinyTest)
+add_test(NAME test_meshctl_rpc_http COMMAND test_meshctl_rpc_http)
+set_tests_properties(test_meshctl_rpc_http PROPERTIES TIMEOUT 60)
+set_target_properties(meshctl_rpc_http test_meshctl_rpc_http PROPERTIES FOLDER "mesh/tests")
+
+# Production synchronous Controller transport, independent of the legacy command tree.
+add_library(meshctl_controller_http STATIC "${mesh_src}/meshctl_controller_http.c")
+target_include_directories(meshctl_controller_http PUBLIC "${mesh_src}")
+target_link_libraries(meshctl_controller_http PUBLIC CHttp::Client
+  PRIVATE Salts::Core Salts::UriParser Salts::JsonParser)
+add_executable(test_meshctl_controller_http "${mesh_tests}/test_meshctl_controller_http.c")
+set_property(TARGET test_meshctl_controller_http PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_meshctl_controller_http PRIVATE
+  meshctl_controller_http CHttp::Server Salts::Core Salts::TinyTest)
+target_compile_definitions(test_meshctl_controller_http PRIVATE
+  MESHCTL_CONTROLLER_TLS_DIR="${mesh_tests}/data/controller_tls")
+add_test(NAME test_meshctl_controller_http COMMAND test_meshctl_controller_http)
+set_tests_properties(test_meshctl_controller_http PROPERTIES TIMEOUT 90)
+set_property(TARGET test_meshctl_controller_http PROPERTY FOLDER "mesh/tests")
+
+# Real durable execution Store against the installed Core filesystem contract.
+add_library(mesh_mgmt_execution_store STATIC
+  "${mesh_src}/mesh_mgmt_execution_store.c"
+  "${mesh_src}/mesh_mgmt_execution_snapshot_io.c")
+target_include_directories(mesh_mgmt_execution_store PUBLIC "${mesh_src}")
+target_link_libraries(mesh_mgmt_execution_store PUBLIC foundation Salts::Core
+  PRIVATE OpenSSL::Crypto)
+add_executable(test_mesh_mgmt_execution_store
+  "${mesh_tests}/test_mesh_mgmt_execution_store.c")
+set_property(TARGET test_mesh_mgmt_execution_store PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_execution_store PRIVATE
+  mesh_mgmt_execution_store Salts::TinyTest)
+add_test(NAME test_mesh_mgmt_execution_store COMMAND test_mesh_mgmt_execution_store)
+set_tests_properties(test_mesh_mgmt_execution_store PROPERTIES TIMEOUT 30)
+set_target_properties(mesh_mgmt_execution_store test_mesh_mgmt_execution_store
+  PROPERTIES FOLDER "mesh/tests")
+
+# Rename only the private native implementation in this test object. The
+# controlled wrapper delegates to the actual writer before injecting UNKNOWN;
+# there is no production hook, runtime callback table or filesystem mock.
+add_library(mesh_execution_snapshot_fault_io OBJECT
+  "${mesh_src}/mesh_mgmt_execution_snapshot_io.c")
+target_compile_definitions(mesh_execution_snapshot_fault_io PRIVATE
+  mesh_mgmt_execution_snapshot_write=mesh_mgmt_execution_snapshot_write_real)
+target_link_libraries(mesh_execution_snapshot_fault_io PRIVATE Salts::Core)
+add_executable(test_mesh_mgmt_execution_store_fault
+  "${mesh_tests}/test_mesh_mgmt_execution_store.c"
+  "${mesh_src}/mesh_mgmt_execution_store.c"
+  $<TARGET_OBJECTS:mesh_execution_snapshot_fault_io>)
+target_compile_definitions(test_mesh_mgmt_execution_store_fault PRIVATE
+  MESH_EXECUTION_SNAPSHOT_TEST_FAULT)
+set_property(TARGET test_mesh_mgmt_execution_store_fault PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_mgmt_execution_store_fault PRIVATE
+  foundation Salts::Core Salts::TinyTest OpenSSL::Crypto)
+add_test(NAME test_mesh_mgmt_execution_store_fault COMMAND test_mesh_mgmt_execution_store_fault)
+set_tests_properties(test_mesh_mgmt_execution_store_fault PROPERTIES TIMEOUT 30)
+set_target_properties(mesh_execution_snapshot_fault_io test_mesh_mgmt_execution_store_fault
+  PROPERTIES FOLDER "mesh/tests")
+
+# Authenticated control-plane WAL: the same production code and owning tests
+# as the root graph, with current Core filesystem and TinyTest contracts.
+add_library(mesh_control_mmp STATIC "${mesh_src}/mesh_control_mmp.c")
+target_include_directories(mesh_control_mmp PUBLIC "${mesh_src}")
+target_link_libraries(mesh_control_mmp PUBLIC foundation)
+add_library(mesh_control_wal STATIC
+  "${mesh_src}/mesh_control_wal.c"
+  "${mesh_src}/mesh_control_wal_snapshot_io.c")
+target_include_directories(mesh_control_wal PUBLIC "${mesh_src}")
+target_link_libraries(mesh_control_wal PUBLIC foundation mesh_control_mmp Salts::Core
+  PRIVATE OpenSSL::Crypto)
+add_executable(test_mesh_control_wal "${mesh_tests}/test_mesh_control_wal.c")
+set_property(TARGET test_mesh_control_wal PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_control_wal PRIVATE mesh_control_wal Salts::TinyTest)
+add_test(NAME test_mesh_control_wal COMMAND test_mesh_control_wal)
+set_tests_properties(test_mesh_control_wal PROPERTIES TIMEOUT 30)
+set_target_properties(mesh_control_wal test_mesh_control_wal PROPERTIES FOLDER "mesh/tests")
+
+add_library(mesh_control_wal_fault_io OBJECT "${mesh_src}/mesh_control_wal_snapshot_io.c")
+target_compile_definitions(mesh_control_wal_fault_io PRIVATE
+  mesh_control_wal_snapshot_write=mesh_control_wal_snapshot_write_real
+  mesh_control_wal_snapshot_republish=mesh_control_wal_snapshot_republish_real)
+target_link_libraries(mesh_control_wal_fault_io PRIVATE Salts::Core)
+add_executable(test_mesh_control_wal_fault
+  "${mesh_tests}/test_mesh_control_wal.c" "${mesh_src}/mesh_control_wal.c"
+  "${mesh_src}/mesh_control_mmp.c" $<TARGET_OBJECTS:mesh_control_wal_fault_io>)
+target_compile_definitions(test_mesh_control_wal_fault PRIVATE MESH_CONTROL_WAL_TEST_FAULT)
+set_property(TARGET test_mesh_control_wal_fault PROPERTY LINKER_LANGUAGE CXX)
+target_link_libraries(test_mesh_control_wal_fault PRIVATE
+  foundation Salts::Core Salts::TinyTest OpenSSL::Crypto)
+add_test(NAME test_mesh_control_wal_fault COMMAND test_mesh_control_wal_fault)
+set_tests_properties(test_mesh_control_wal_fault PROPERTIES TIMEOUT 30)
+set_target_properties(mesh_control_wal_fault_io test_mesh_control_wal_fault
+  PROPERTIES FOLDER "mesh/tests")
+
+# Checkpoint codec, single-writer store and bounded WAL worker use their formal
+# mesh tests and production sources against the same installed Core runtime.
+add_library(mesh_control_checkpoint STATIC
+  "${mesh_src}/mesh_control_checkpoint.c" "${mesh_src}/mesh_control_owner.c"
+  "${mesh_src}/mesh_control_channel.c")
+target_include_directories(mesh_control_checkpoint PUBLIC "${mesh_src}")
+target_link_libraries(mesh_control_checkpoint PUBLIC
+  mesh_control_reconciler mesh_control_mmp Salts::Core PRIVATE OpenSSL::Crypto)
+add_library(mesh_control_checkpoint_store STATIC
+  "${mesh_src}/mesh_control_checkpoint_store.c"
+  "${mesh_src}/mesh_control_checkpoint_snapshot_io.c")
+target_link_libraries(mesh_control_checkpoint_store PUBLIC mesh_control_checkpoint
+  Salts::Core PRIVATE OpenSSL::Crypto)
+add_library(mesh_control_wal_worker STATIC "${mesh_src}/mesh_control_wal_worker.c")
+target_link_libraries(mesh_control_wal_worker PUBLIC mesh_control_checkpoint_store
+  mesh_control_wal Salts::Core)
+foreach(test_name IN ITEMS test_mesh_control_checkpoint
+    test_mesh_control_checkpoint_store test_mesh_control_wal_worker)
+  add_executable(${test_name} "${mesh_tests}/${test_name}.c")
+  set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
+  if(test_name STREQUAL "test_mesh_control_checkpoint")
+    target_link_libraries(${test_name} PRIVATE mesh_control_checkpoint Salts::TinyTest)
+  elseif(test_name STREQUAL "test_mesh_control_checkpoint_store")
+    target_link_libraries(${test_name} PRIVATE mesh_control_checkpoint_store Salts::TinyTest)
+  else()
+    target_link_libraries(${test_name} PRIVATE mesh_control_wal_worker Salts::TinyTest)
+  endif()
+  add_test(NAME ${test_name} COMMAND ${test_name})
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+  set_target_properties(${test_name} PROPERTIES FOLDER "mesh/tests")
+endforeach()
+set_target_properties(mesh_control_mmp mesh_control_checkpoint mesh_control_checkpoint_store
+  mesh_control_wal_worker PROPERTIES FOLDER "mesh/internal")
+
+add_library(mesh_control_checkpoint_fault_io OBJECT "${mesh_src}/mesh_control_checkpoint_snapshot_io.c")
+target_compile_definitions(mesh_control_checkpoint_fault_io PRIVATE
+  mesh_control_checkpoint_snapshot_write=mesh_control_checkpoint_snapshot_write_real)
+target_link_libraries(mesh_control_checkpoint_fault_io PRIVATE Salts::Core)
+foreach(test_name IN ITEMS test_mesh_control_checkpoint_store_fault test_mesh_control_wal_worker_fault)
+  if(test_name STREQUAL "test_mesh_control_checkpoint_store_fault")
+    set(fault_source "${mesh_tests}/test_mesh_control_checkpoint_store.c")
+    set(fault_worker_source)
+  else()
+    set(fault_source "${mesh_tests}/test_mesh_control_wal_worker.c")
+    set(fault_worker_source "${mesh_src}/mesh_control_wal_worker.c")
+  endif()
+  add_executable(${test_name} "${fault_source}" ${fault_worker_source}
+    "${mesh_src}/mesh_control_checkpoint_store.c" $<TARGET_OBJECTS:mesh_control_checkpoint_fault_io>)
+  target_compile_definitions(${test_name} PRIVATE MESH_CONTROL_CHECKPOINT_TEST_FAULT)
+  set_property(TARGET ${test_name} PROPERTY LINKER_LANGUAGE CXX)
+  target_link_libraries(${test_name} PRIVATE mesh_control_checkpoint mesh_control_wal
+    Salts::Core Salts::TinyTest OpenSSL::Crypto)
+  add_test(NAME ${test_name} COMMAND ${test_name})
+  set_tests_properties(${test_name} PROPERTIES TIMEOUT 30)
+  set_target_properties(${test_name} PROPERTIES FOLDER "mesh/tests")
+endforeach()
+set_target_properties(mesh_control_checkpoint_fault_io PROPERTIES FOLDER "mesh/tests")

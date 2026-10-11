@@ -119,8 +119,8 @@ add_executable(meshctl
 target_link_libraries(meshctl
     PRIVATE mesh
     meshctl_product
+    meshctl_rpc_http
     TurboP2P::P2P
-    TurboHttp::TurboHttp
     TurboUtils::Core)
 
 target_compile_definitions(meshctl PRIVATE USING_EXAMPLES)
@@ -151,6 +151,7 @@ add_executable(meshd
 
 target_link_libraries(meshd
     PRIVATE mesh tunnel mesh_mgmt_agent_runtime
+    meshd_rpc_service_component meshd_management_epoch
     mesh_mgmt_execution_rpc_control
     meshd_key_file TurboP2P::P2P Salts::Crypto)
 

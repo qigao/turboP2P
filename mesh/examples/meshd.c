@@ -1,8 +1,9 @@
 #include <turbo_mesh.h>
 #include <turbo_tunnel.h>
-#include <turbo_fs.h>
+#include "meshd_management_epoch.h"
 #include <tlog.h>
 #include "mesh_mgmt_agent_runtime.h"
+#include "meshd_rpc_service_component.h"
 #include "mesh_mgmt_crypto.h"
 #include "mesh_mgmt_execution_rpc_control.h"
 #include "mesh_mgmt_execution_wire.h"
@@ -42,7 +43,6 @@
 #define MESHD_NETWORK_CONTROL_JSON_MAX_SIZE 2048u
 #define MESHD_NODE_ID_HEX_LENGTH 64
 #define MESHD_MGMT_FRAME_TTL_MS 30000u
-#define MESHD_MGMT_SERVICE_PUBLISH_INTERVAL_MS 10000u
 #define MESHD_MGMT_REPLAY_CAPACITY 256u
 #define MESHD_MGMT_REPLAY_TTL_MS 60000u
 #define MESHD_MGMT_RUNTIME_MAX_PEERS 64u
@@ -364,10 +364,10 @@ static uint64_t g_started_ms = 0;
 static uint32_t g_mgmt_task_counter = 0;
 static meshd_mgmt_server_t g_mgmt_server;
 static mesh_mgmt_agent_runtime_v1_t g_management_runtime;
+static meshd_rpc_service_component_t g_management_rpc_service;
 static mesh_mgmt_peer_signer_config_v1_t g_management_signer;
 static mesh_mgmt_dispatch_config_v1_t g_management_dispatch;
 static int g_management_configured = 0;
-static uint64_t g_management_last_publish_ms = 0;
 static mesh_mgmt_execution_rpc_registry_v1_t g_execution_rpc_registry;
 static mesh_mgmt_execution_rpc_control_v1_t g_execution_rpc_control;
 static int g_execution_rpc_configured = 0;
@@ -377,15 +377,6 @@ static mesh_mgmt_execution_node_v1_t g_execution_node;
 static mesh_mgmt_execution_process_v1_t g_execution_process;
 static int g_execution_node_configured = 0;
 #endif
-
-typedef struct {
-    char path[TURBO_FS_MAX_PATH];
-    uint64_t next_epoch;
-    turbo_file_t lock_file;
-    int lock_file_open;
-    int lock_held;
-    int initialized;
-} meshd_management_epoch_state_t;
 
 static meshd_management_epoch_state_t g_management_epoch_state;
 
@@ -536,176 +527,8 @@ static int meshd_management_admit_peer(
                : -1;
 }
 
-static int meshd_management_epoch_write(const char *path, uint64_t next_epoch) {
-    char temp_path[TURBO_FS_MAX_PATH + 5];
-    char encoded[32];
-    size_t written = 0u;
-    int encoded_len;
-    int path_len;
-    turbo_file_t file = TURBO_INVALID_FILE;
-
-    if (!path || path[0] == '\0' || next_epoch == 0u) {
-        return -1;
-    }
-    path_len = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-    encoded_len = snprintf(encoded, sizeof(encoded), "%llu\n",
-                           (unsigned long long)next_epoch);
-    if (path_len < 0 || (size_t)path_len >= sizeof(temp_path) ||
-        encoded_len < 0 || (size_t)encoded_len >= sizeof(encoded)) {
-        return -1;
-    }
-
-    file = turbo_fs_open(temp_path,
-                         TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
-                         0600);
-    if (file == TURBO_INVALID_FILE) {
-        return -1;
-    }
-    while (written < (size_t)encoded_len) {
-        int result = turbo_fs_write(file, encoded + written,
-                                    (size_t)encoded_len - written);
-        if (result <= 0) {
-            (void)turbo_fs_close(file);
-            (void)turbo_fs_unlink(temp_path);
-            return -1;
-        }
-        written += (size_t)result;
-    }
-    if (turbo_fs_fsync(file) != 0 || turbo_fs_close(file) != 0) {
-        (void)turbo_fs_unlink(temp_path);
-        return -1;
-    }
-    if (turbo_fs_rename(temp_path, path) != 0) {
-        (void)turbo_fs_unlink(temp_path);
-        return -1;
-    }
-    return 0;
-}
-
-static void meshd_management_epoch_close(
-    meshd_management_epoch_state_t *state) {
-    if (!state) {
-        return;
-    }
-    if (state->lock_held) {
-        (void)turbo_fs_unlock(state->lock_file, 0, 1u);
-    }
-    if (state->lock_file_open) {
-        (void)turbo_fs_close(state->lock_file);
-    }
-    memset(state, 0, sizeof(*state));
-    state->lock_file = TURBO_INVALID_FILE;
-}
-
-static int meshd_management_epoch_open(
-    meshd_management_epoch_state_t *state,
-    const char *path,
-    uint64_t first_record_epoch) {
-    turbo_fs_buf_t file_data;
-    char encoded[64];
-    char lock_path[TURBO_FS_MAX_PATH + 6];
-    char *cursor;
-    char *end;
-    unsigned long long parsed;
-    int lock_path_len;
-
-    if (!state || !path || path[0] == '\0' || first_record_epoch == 0u ||
-        strlen(path) >= sizeof(state->path)) {
-        return -1;
-    }
-    memset(state, 0, sizeof(*state));
-    state->lock_file = TURBO_INVALID_FILE;
-    memset(&file_data, 0, sizeof(file_data));
-    lock_path_len = snprintf(lock_path, sizeof(lock_path), "%s.lock", path);
-    if (lock_path_len < 0 || (size_t)lock_path_len >= sizeof(lock_path)) {
-        return -1;
-    }
-
-    state->lock_file = turbo_fs_open(
-        lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT, 0600);
-    if (state->lock_file == TURBO_INVALID_FILE) {
-        fprintf(stderr, "Failed to open management epoch lock: %s\n", lock_path);
-        return -1;
-    }
-    state->lock_file_open = 1;
-    if (turbo_fs_lock(state->lock_file,
-                      TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK,
-                      0, 1u) != 0) {
-        fprintf(stderr, "Management epoch state is already in use: %s\n", path);
-        meshd_management_epoch_close(state);
-        return -1;
-    }
-    state->lock_held = 1;
-
-    if (turbo_fs_access(path, TURBO_FS_ACCESS_EXISTS) != 0) {
-        if (meshd_management_epoch_write(path, first_record_epoch) != 0) {
-            fprintf(stderr, "Failed to initialize management epoch file: %s\n", path);
-            meshd_management_epoch_close(state);
-            return -1;
-        }
-        state->next_epoch = first_record_epoch;
-    } else {
-        if (turbo_fs_read_file(path, &file_data) != 0 ||
-            file_data.len == 0u || file_data.len >= sizeof(encoded)) {
-            turbo_fs_buf_free(&file_data);
-            fprintf(stderr, "Invalid management epoch file: %s\n", path);
-            meshd_management_epoch_close(state);
-            return -1;
-        }
-        memcpy(encoded, file_data.base, file_data.len);
-        encoded[file_data.len] = '\0';
-        turbo_fs_buf_free(&file_data);
-
-        cursor = encoded;
-        while (*cursor != '\0' && isspace((unsigned char)*cursor)) {
-            cursor++;
-        }
-        errno = 0;
-        parsed = strtoull(cursor, &end, 10);
-        if (cursor == end || errno == ERANGE || parsed == 0u ||
-            parsed == (unsigned long long)UINT64_MAX) {
-            fprintf(stderr, "Invalid management epoch value: %s\n", path);
-            meshd_management_epoch_close(state);
-            return -1;
-        }
-        while (*end != '\0' && isspace((unsigned char)*end)) {
-            end++;
-        }
-        if (*end != '\0') {
-            fprintf(stderr, "Invalid management epoch value: %s\n", path);
-            meshd_management_epoch_close(state);
-            return -1;
-        }
-        state->next_epoch = (uint64_t)parsed;
-    }
-
-    memcpy(state->path, path, strlen(path) + 1u);
-    state->initialized = 1;
-    return 0;
-}
-
-static int meshd_management_epoch_allocate(void *context,
-                                           uint64_t *out_record_epoch) {
-    meshd_management_epoch_state_t *state =
-        (meshd_management_epoch_state_t *)context;
-    uint64_t reserved_epoch;
-
-    if (!state || !out_record_epoch || !state->initialized ||
-        state->next_epoch == 0u || state->next_epoch == UINT64_MAX) {
-        return -1;
-    }
-    *out_record_epoch = 0u;
-    reserved_epoch = state->next_epoch;
-    if (meshd_management_epoch_write(state->path, reserved_epoch + 1u) != 0) {
-        fprintf(stderr, "Failed to reserve management record epoch\n");
-        return -1;
-    }
-    state->next_epoch = reserved_epoch + 1u;
-    *out_record_epoch = reserved_epoch;
-    return 0;
-}
-
 static void meshd_management_reset(void) {
+    salts_component_plugin_status service_status;
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
     if (g_execution_node_configured || g_execution_node.initialized) {
         if (mesh_mgmt_execution_node_destroy_v2(&g_execution_node) !=
@@ -718,7 +541,16 @@ static void meshd_management_reset(void) {
     mesh_mgmt_execution_process_destroy_v1(&g_execution_process);
     g_execution_node_configured = 0;
 #endif
-    meshd_management_epoch_close(&g_management_epoch_state);
+    service_status = meshd_rpc_service_component_destroy(&g_management_rpc_service);
+    if (service_status != SALTS_COMPONENT_PLUGIN_OK) {
+        TLOG_ERROR("RPC service Component cleanup failed: {}; retaining management contexts",
+                   salts_component_plugin_status_string(service_status));
+        return;
+    }
+    if (meshd_management_epoch_close(&g_management_epoch_state) != 0) {
+        TLOG_ERROR("Management epoch cleanup failed; retaining management contexts");
+        return;
+    }
     memset(&g_execution_rpc_control, 0, sizeof(g_execution_rpc_control));
     mesh_mgmt_execution_rpc_registry_destroy_v1(&g_execution_rpc_registry);
     mesh_mgmt_crypto_wipe(&g_management_signer, sizeof(g_management_signer));
@@ -726,7 +558,6 @@ static void meshd_management_reset(void) {
     memset(&g_management_runtime, 0, sizeof(g_management_runtime));
     g_management_configured = 0;
     g_execution_rpc_configured = 0;
-    g_management_last_publish_ms = 0;
 }
 
 static uint64_t meshd_execution_clock_now_ms(void *context) {
@@ -894,6 +725,7 @@ static int meshd_execution_drain(void) {
 #endif
 
 static void meshd_management_stop(void) {
+    salts_component_plugin_status service_status;
 #ifdef TURBO_P2P_ENABLE_NODE_EXECUTION
     if (g_execution_node_configured) {
         mesh_mgmt_execution_node_result_t send_result;
@@ -929,6 +761,12 @@ static void meshd_management_stop(void) {
         g_execution_node_configured = 0;
     }
 #endif
+    service_status = meshd_rpc_service_component_destroy(&g_management_rpc_service);
+    if (service_status != SALTS_COMPONENT_PLUGIN_OK) {
+        TLOG_ERROR("RPC service Component drain failed: {}; retaining management contexts",
+                   salts_component_plugin_status_string(service_status));
+        return;
+    }
     if (mesh_mgmt_agent_runtime_destroy_v2(&g_management_runtime) !=
         MESH_MGMT_AGENT_RUNTIME_OK) {
         fprintf(stderr, "Failed to destroy shared management runtime; retaining contexts\n");
@@ -959,6 +797,10 @@ static int meshd_management_start(mesh_network_t *mesh,
         return -1;
     }
     meshd_management_reset();
+    if (g_management_epoch_state.affinity.owner != NULL ||
+        g_management_rpc_service.affinity.owner != NULL) {
+        return -1;
+    }
     if (!mesh_node_config_management_enabled(config)) {
         return 0;
     }
@@ -1173,6 +1015,8 @@ static int meshd_management_start(mesh_network_t *mesh,
     if (meshd_management_epoch_open(&g_management_epoch_state,
                                     config->mgmt_record_epoch_file,
                                     config->mgmt_first_record_epoch) != 0) {
+        TLOG_ERROR("Management epoch admission failed: {}; existing state retained",
+                   config->mgmt_record_epoch_file);
         goto failed;
     }
     runtime_config.allocate_record_epoch = meshd_management_epoch_allocate;
@@ -1251,7 +1095,6 @@ static meshd_service_resolve_result_t meshd_management_resolve_service(
 }
 
 static int meshd_management_publish_rpc_service(void) {
-    mesh_mgmt_service_publish_v1_t service;
     uint64_t record_epoch = 0u;
 
     if (!g_management_configured ||
@@ -1259,23 +1102,29 @@ static int meshd_management_publish_rpc_service(void) {
         g_mgmt_server.service_port == 0u) {
         return -1;
     }
-    memset(&service, 0, sizeof(service));
-    service.address_family = MESH_MGMT_SERVICE_ADDRESS_IPV4;
-    if (inet_pton(AF_INET, g_config.virtual_ip, service.virtual_address) != 1) {
-        return -1;
-    }
-    service.dns_name =
-        strcmp(g_mgmt_server.virtual_host, g_config.virtual_ip) == 0
-            ? ""
-            : g_mgmt_server.virtual_host;
-    service.port = g_mgmt_server.service_port;
-    if (mesh_mgmt_agent_runtime_publish_cached_service_v1(
-            &g_management_runtime, &service, &record_epoch) !=
+    if (meshd_rpc_service_component_refresh(
+            &g_management_rpc_service, &g_management_runtime, meshd_now_ms, &record_epoch) !=
         MESH_MGMT_AGENT_RUNTIME_OK) {
         return -1;
     }
-    g_management_last_publish_ms = meshd_now_ms();
     return 0;
+}
+
+static int meshd_management_start_rpc_service(void) {
+    if (!g_management_configured ||
+        g_management_runtime.state != MESH_MGMT_AGENT_RUNTIME_RUNNING ||
+        g_mgmt_server.service_port == 0u) {
+        return -1;
+    }
+    if (meshd_rpc_service_component_init_native(
+            &g_management_rpc_service,
+            vstr_from_buf(g_config.virtual_ip, sizeof(g_config.virtual_ip)),
+            vstr_from_buf(g_mgmt_server.virtual_host, sizeof(g_mgmt_server.virtual_host)),
+            g_mgmt_server.service_port) !=
+        SALTS_COMPONENT_PLUGIN_OK) {
+        return -1;
+    }
+    return meshd_management_publish_rpc_service();
 }
 
 static int meshd_socket_is_valid(meshd_socket_t socket_fd) {
@@ -4439,7 +4288,7 @@ static int meshd_run(const char *config_path,
     if (g_management_configured && g_mgmt_server.service_port != 0u) {
         g_mgmt_server.resolve_service = meshd_management_resolve_service;
         g_mgmt_server.resolve_service_context = &g_management_runtime;
-        if (meshd_management_publish_rpc_service() != 0) {
+        if (meshd_management_start_rpc_service() != 0) {
             fprintf(stderr, "Failed to publish signed RPC virtual service\n");
             meshd_mgmt_server_stop(&g_mgmt_server);
             tunnel_stop(g_tunnel);
@@ -4471,12 +4320,9 @@ static int meshd_run(const char *config_path,
 #endif
 
         if (g_management_configured &&
-            g_mgmt_server.service_port != 0u &&
-            meshd_now_ms() - g_management_last_publish_ms >=
-                MESHD_MGMT_SERVICE_PUBLISH_INTERVAL_MS) {
+            g_mgmt_server.service_port != 0u) {
             if (meshd_management_publish_rpc_service() != 0) {
                 fprintf(stderr, "Failed to refresh signed RPC virtual service\n");
-                g_management_last_publish_ms = meshd_now_ms();
             }
         }
 

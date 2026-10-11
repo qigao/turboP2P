@@ -1,4 +1,8 @@
 #include "mesh_control_wal.h"
+#include "mesh_control_wal_snapshot_io.h"
+
+#include <fmt.h>
+#include <errno.h>
 
 #include "mesh_control_mmp.h"
 #include "mesh_mgmt_crypto.h"
@@ -131,7 +135,7 @@ static int config_valid(const mesh_control_wal_config_v1_t *config) {
   size_t minimum_size = WAL_HEADER_SIZE + WAL_RECORD_FIXED_SIZE + 1u;
 
   return config && config->path && config->path[0] != '\0' &&
-         turbo_fs_path_is_absolute(config->path) && strlen(config->path) < TURBO_FS_MAX_PATH - 6u &&
+         cmeta_fs_path_is_absolute(config->path) && strlen(config->path) < SALTS_FS_MAX_PATH - 6u &&
          config->record_capacity != 0u &&
          config->record_capacity <= MESH_CONTROL_WAL_MAX_RECORDS_V1 &&
          config->byte_capacity >= minimum_size &&
@@ -146,10 +150,10 @@ static int config_valid(const mesh_control_wal_config_v1_t *config) {
          !bytes_zero(config->authentication_key, sizeof(config->authentication_key));
 }
 
-static mesh_control_wal_result_t write_all(turbo_file_t file, const uint8_t *bytes, size_t size) {
+static mesh_control_wal_result_t write_all(cmeta_file_t file, const uint8_t *bytes, size_t size) {
   size_t offset = 0u;
   while (offset < size) {
-    int written = turbo_fs_write(file, (const char *)bytes + offset, size - offset);
+    int written = cmeta_fs_write(file, (const char *)bytes + offset, size - offset);
     if (written <= 0)
       return MESH_CONTROL_WAL_IO;
     offset += (size_t)written;
@@ -157,10 +161,10 @@ static mesh_control_wal_result_t write_all(turbo_file_t file, const uint8_t *byt
   return MESH_CONTROL_WAL_OK;
 }
 
-static mesh_control_wal_result_t read_exact(turbo_file_t file, uint8_t *bytes, size_t size) {
+static mesh_control_wal_result_t read_exact(cmeta_file_t file, uint8_t *bytes, size_t size) {
   size_t offset = 0u;
   while (offset < size) {
-    int read_size = turbo_fs_read(file, (char *)bytes + offset, size - offset);
+    int read_size = cmeta_fs_read(file, (char *)bytes + offset, size - offset);
     if (read_size <= 0)
       return MESH_CONTROL_WAL_CORRUPT;
     offset += (size_t)read_size;
@@ -323,25 +327,46 @@ validate_record(const mesh_control_wal_v1_t *wal, const uint8_t header[WAL_RECOR
   return MESH_CONTROL_WAL_OK;
 }
 
+static mesh_control_wal_result_t publication_result(
+    mesh_control_wal_v1_t *wal, int status, cmeta_fs_replace_state_t publication) {
+  if (!status && publication == SALTS_FS_REPLACE_PUBLISHED_DURABLE)
+    return MESH_CONTROL_WAL_OK;
+  if (publication != SALTS_FS_REPLACE_NOT_PUBLISHED || !status) {
+    wal->faulted = 1u;
+    return MESH_CONTROL_WAL_COMMIT_UNKNOWN;
+  }
+  return MESH_CONTROL_WAL_IO;
+}
+
+static mesh_control_wal_result_t publish_header(
+    mesh_control_wal_v1_t *wal, const uint8_t header[WAL_HEADER_SIZE]) {
+  tstr staging = tstr_format("{}.compact", wal->path);
+  if (!staging) return MESH_CONTROL_WAL_RESOURCE_EXHAUSTED;
+  cmeta_fs_replace_state_t publication = SALTS_FS_REPLACE_NOT_PUBLISHED;
+  int status = mesh_control_wal_snapshot_write(staging, wal->path, header,
+                                               WAL_HEADER_SIZE, &publication);
+  tstr_freep(&staging);
+  return publication_result(wal, status, publication);
+}
+
 static mesh_control_wal_result_t create_empty_file(mesh_control_wal_v1_t *wal) {
   uint8_t header[WAL_HEADER_SIZE];
-  turbo_file_t file = TURBO_INVALID_FILE;
-  mesh_control_wal_result_t result = MESH_CONTROL_WAL_IO;
-
-  if (!encode_header(wal, header))
-    return MESH_CONTROL_WAL_AUTH_FAILED;
-  file = turbo_fs_open(wal->path, TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
-                       WAL_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
-    return MESH_CONTROL_WAL_IO;
-  result = write_all(file, header, sizeof(header));
-  if (result == MESH_CONTROL_WAL_OK && turbo_fs_fsync(file) != 0)
-    result = MESH_CONTROL_WAL_COMMIT_UNKNOWN;
-  if (turbo_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
-    result = MESH_CONTROL_WAL_COMMIT_UNKNOWN;
-  if (result == MESH_CONTROL_WAL_OK)
-    wal->file_size = WAL_HEADER_SIZE;
+  if (!encode_header(wal, header)) return MESH_CONTROL_WAL_AUTH_FAILED;
+  mesh_control_wal_result_t result = publish_header(wal, header);
+  if (result == MESH_CONTROL_WAL_OK) wal->file_size = WAL_HEADER_SIZE;
   return result;
+}
+
+static mesh_control_wal_result_t admit_existing(mesh_control_wal_v1_t *wal) {
+  tstr staging = tstr_format("{}.compact", wal->path);
+  if (!staging) return MESH_CONTROL_WAL_RESOURCE_EXHAUSTED;
+  cmeta_fs_replace_state_t publication = SALTS_FS_REPLACE_NOT_PUBLISHED;
+  /* Integrity validates content; durable republication resolves an earlier
+   * owner's ambiguous append or namespace publication before tail dedupe. */
+  int status = mesh_control_wal_snapshot_republish(staging, wal->path,
+                                                   wal->file_size, &publication);
+  tstr_freep(&staging);
+  return publication_result(wal, status, publication);
 }
 
 static mesh_control_wal_result_t scan_existing(mesh_control_wal_v1_t *wal, size_t size) {
@@ -350,15 +375,15 @@ static mesh_control_wal_result_t scan_existing(mesh_control_wal_v1_t *wal, size_
   uint8_t frame[MESH_MGMT_FRAME_MAX];
   uint8_t authenticator[MESH_CONTROL_DIGEST_SIZE];
   uint8_t previous[MESH_CONTROL_DIGEST_SIZE];
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   size_t offset = 0u;
   uint64_t next_index;
   mesh_control_wal_result_t result;
 
   if (size < WAL_HEADER_SIZE || size > wal->config.byte_capacity)
     return MESH_CONTROL_WAL_CORRUPT;
-  file = turbo_fs_open(wal->path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = cmeta_fs_open(wal->path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     return MESH_CONTROL_WAL_IO;
   result = read_exact(file, header, sizeof(header));
   if (result != MESH_CONTROL_WAL_OK)
@@ -414,49 +439,58 @@ static mesh_control_wal_result_t scan_existing(mesh_control_wal_v1_t *wal, size_
   result = MESH_CONTROL_WAL_OK;
 
 cleanup:
-  if (turbo_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
+  if (cmeta_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
     result = MESH_CONTROL_WAL_IO;
   return result;
 }
 
 mesh_control_wal_result_t mesh_control_wal_open_v1(mesh_control_wal_v1_t *wal,
                                                    const mesh_control_wal_config_v1_t *config) {
-  turbo_fs_stat_t stat;
+  cmeta_fs_stat_t stat;
   int path_length;
   mesh_control_wal_result_t result = MESH_CONTROL_WAL_INVALID_ARG;
 
   if (!wal || wal->open || !config_valid(config))
     return result;
   memset(wal, 0, sizeof(*wal));
-  wal->lock_file = TURBO_INVALID_FILE;
+  wal->lock_file = SALTS_INVALID_FILE;
   wal->config = *config;
   wal->config.path = wal->path;
   memcpy(wal->path, config->path, strlen(config->path) + 1u);
   path_length = snprintf(wal->lock_path, sizeof(wal->lock_path), "%s.lock", wal->path);
   if (path_length < 0 || (size_t)path_length >= sizeof(wal->lock_path))
     goto failed;
-  if (turbo_fs_lstat(wal->lock_path, &stat) == 0 && stat.is_symlink) {
+  const int lock_status = cmeta_fs_lstat(wal->lock_path, &stat);
+  if (lock_status == 0 && stat.is_symlink) {
     result = MESH_CONTROL_WAL_CORRUPT;
     goto failed;
   }
-  wal->lock_file = turbo_fs_open(wal->lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT, WAL_FILE_MODE);
-  if (wal->lock_file == TURBO_INVALID_FILE) {
+  if (lock_status != 0 && lock_status != -ENOENT) {
     result = MESH_CONTROL_WAL_IO;
     goto failed;
   }
-  if (turbo_fs_lock(wal->lock_file, TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK, 0, 1u) != 0) {
+  wal->lock_file = cmeta_fs_open(wal->lock_path, SALTS_FS_O_RDWR | SALTS_FS_O_CREAT, WAL_FILE_MODE);
+  if (wal->lock_file == SALTS_INVALID_FILE) {
+    result = MESH_CONTROL_WAL_IO;
+    goto failed;
+  }
+  if (cmeta_fs_lock(wal->lock_file, SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK, 0, 1u) != 0) {
     result = MESH_CONTROL_WAL_LOCKED;
     goto failed;
   }
   wal->open = 1u;
-  if (turbo_fs_lstat(wal->path, &stat) == 0) {
+  const int exists = cmeta_fs_lstat(wal->path, &stat);
+  if (exists == 0) {
     if (!stat.is_file || stat.is_symlink || stat.size > SIZE_MAX) {
       result = MESH_CONTROL_WAL_CORRUPT;
       goto failed;
     }
     result = scan_existing(wal, (size_t)stat.size);
-  } else {
+    if (result == MESH_CONTROL_WAL_OK) result = admit_existing(wal);
+  } else if (exists == -ENOENT) {
     result = create_empty_file(wal);
+  } else {
+    result = MESH_CONTROL_WAL_IO;
   }
   if (result != MESH_CONTROL_WAL_OK)
     goto failed;
@@ -517,7 +551,7 @@ static mesh_control_wal_result_t append_record(mesh_control_wal_v1_t *wal, uint1
                                                uint64_t *out_log_index) {
   uint8_t record_header[WAL_RECORD_HEADER_SIZE];
   uint8_t authenticator[MESH_CONTROL_DIGEST_SIZE];
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   size_t record_size;
   mesh_control_wal_result_t result;
 
@@ -552,19 +586,19 @@ static mesh_control_wal_result_t append_record(mesh_control_wal_v1_t *wal, uint1
   if (!calculate_record_authenticator(wal, record_header, payload, payload_size, authenticator)) {
     return MESH_CONTROL_WAL_AUTH_FAILED;
   }
-  file = turbo_fs_open(wal->path, TURBO_FS_O_WRONLY | TURBO_FS_O_APPEND, WAL_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
+  file = cmeta_fs_open(wal->path, SALTS_FS_O_WRONLY | SALTS_FS_O_APPEND, WAL_FILE_MODE);
+  if (file == SALTS_INVALID_FILE)
     return MESH_CONTROL_WAL_IO;
   result = write_all(file, record_header, sizeof(record_header));
   if (result == MESH_CONTROL_WAL_OK)
     result = write_all(file, payload, payload_size);
   if (result == MESH_CONTROL_WAL_OK)
     result = write_all(file, authenticator, sizeof(authenticator));
-  if (result != MESH_CONTROL_WAL_OK || turbo_fs_fsync(file) != 0) {
+  if (result != MESH_CONTROL_WAL_OK || cmeta_fs_fsync(file) != 0) {
     wal->faulted = 1u;
     result = MESH_CONTROL_WAL_COMMIT_UNKNOWN;
   }
-  if (turbo_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK) {
+  if (cmeta_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK) {
     wal->faulted = 1u;
     result = MESH_CONTROL_WAL_COMMIT_UNKNOWN;
   }
@@ -609,7 +643,7 @@ mesh_control_wal_result_t mesh_control_wal_replay_v1(const mesh_control_wal_v1_t
   uint8_t frame[MESH_MGMT_FRAME_MAX];
   uint8_t authenticator[MESH_CONTROL_DIGEST_SIZE];
   uint8_t previous[MESH_CONTROL_DIGEST_SIZE];
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   uint64_t next_index;
   size_t replayed = 0u;
   size_t index;
@@ -624,8 +658,8 @@ mesh_control_wal_result_t mesh_control_wal_replay_v1(const mesh_control_wal_v1_t
     return MESH_CONTROL_WAL_INVALID_STATE;
   if (after_index < wal->base_index || after_index > wal->tail_index)
     return MESH_CONTROL_WAL_CONFLICT;
-  file = turbo_fs_open(wal->path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = cmeta_fs_open(wal->path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     return MESH_CONTROL_WAL_IO;
   result = read_exact(file, file_header, sizeof(file_header));
   if (result != MESH_CONTROL_WAL_OK)
@@ -679,7 +713,7 @@ mesh_control_wal_result_t mesh_control_wal_replay_v1(const mesh_control_wal_v1_t
   result = MESH_CONTROL_WAL_OK;
 
 cleanup:
-  if (turbo_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
+  if (cmeta_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
     result = MESH_CONTROL_WAL_IO;
   if (result == MESH_CONTROL_WAL_OK)
     *out_replayed = replayed;
@@ -690,45 +724,15 @@ mesh_control_wal_result_t mesh_control_wal_compact_v1(mesh_control_wal_v1_t *wal
                                                       uint64_t checkpoint_index) {
   mesh_control_wal_v1_t next;
   uint8_t header[WAL_HEADER_SIZE];
-  char temp_path[TURBO_FS_MAX_PATH + 9u];
-  turbo_file_t file = TURBO_INVALID_FILE;
-  mesh_control_wal_result_t result = MESH_CONTROL_WAL_IO;
-  int path_length;
-
-  if (!wal)
-    return MESH_CONTROL_WAL_INVALID_ARG;
-  if (!wal->open || wal->faulted)
-    return MESH_CONTROL_WAL_INVALID_STATE;
-  if (checkpoint_index != wal->tail_index)
-    return MESH_CONTROL_WAL_CONFLICT;
+  if (!wal) return MESH_CONTROL_WAL_INVALID_ARG;
+  if (!wal->open || wal->faulted) return MESH_CONTROL_WAL_INVALID_STATE;
+  if (checkpoint_index != wal->tail_index) return MESH_CONTROL_WAL_CONFLICT;
   next = *wal;
   next.base_index = checkpoint_index;
   memcpy(next.base_authenticator, wal->tail_authenticator, sizeof(next.base_authenticator));
-  if (!encode_header(&next, header))
-    return MESH_CONTROL_WAL_AUTH_FAILED;
-  path_length = snprintf(temp_path, sizeof(temp_path), "%s.compact", wal->path);
-  if (path_length < 0 || (size_t)path_length >= sizeof(temp_path))
-    return MESH_CONTROL_WAL_INVALID_ARG;
-  file = turbo_fs_open(temp_path, TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
-                       WAL_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
-    return MESH_CONTROL_WAL_IO;
-  result = write_all(file, header, sizeof(header));
-  if (result == MESH_CONTROL_WAL_OK && turbo_fs_fsync(file) != 0)
-    result = MESH_CONTROL_WAL_IO;
-  if (turbo_fs_close(file) != 0 && result == MESH_CONTROL_WAL_OK)
-    result = MESH_CONTROL_WAL_IO;
-  file = TURBO_INVALID_FILE;
-  if (result == MESH_CONTROL_WAL_OK && turbo_fs_rename(temp_path, wal->path) != 0) {
-    result = MESH_CONTROL_WAL_IO;
-  }
-  if (result != MESH_CONTROL_WAL_OK) {
-    if (file != TURBO_INVALID_FILE)
-      (void)turbo_fs_close(file);
-    if (turbo_fs_access(temp_path, TURBO_FS_ACCESS_EXISTS) == 0)
-      (void)turbo_fs_unlink(temp_path);
-    return result;
-  }
+  if (!encode_header(&next, header)) return MESH_CONTROL_WAL_AUTH_FAILED;
+  mesh_control_wal_result_t result = publish_header(wal, header);
+  if (result != MESH_CONTROL_WAL_OK) return result;
   wal->base_index = checkpoint_index;
   memcpy(wal->base_authenticator, next.base_authenticator, sizeof(wal->base_authenticator));
   memcpy(wal->tail_previous_authenticator, wal->base_authenticator,
@@ -758,11 +762,11 @@ mesh_control_wal_result_t mesh_control_wal_get_stats_v1(const mesh_control_wal_v
 void mesh_control_wal_close_v1(mesh_control_wal_v1_t *wal) {
   if (!wal)
     return;
-  if (wal->lock_file != TURBO_INVALID_FILE) {
+  if (wal->lock_file != SALTS_INVALID_FILE) {
     if (wal->open)
-      (void)turbo_fs_unlock(wal->lock_file, 0, 1u);
-    (void)turbo_fs_close(wal->lock_file);
+      (void)cmeta_fs_unlock(wal->lock_file, 0, 1u);
+    (void)cmeta_fs_close(wal->lock_file);
   }
   mesh_mgmt_crypto_wipe(wal, sizeof(*wal));
-  wal->lock_file = TURBO_INVALID_FILE;
+  wal->lock_file = SALTS_INVALID_FILE;
 }

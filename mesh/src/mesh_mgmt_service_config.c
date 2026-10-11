@@ -1,24 +1,20 @@
 #include "mesh_mgmt_service_config.h"
 
-#include <data_bind.h>
-#include <data_bind_validation_plan.h>
+#define DATABIND_NATIVE_ENABLE_CMETA
+#define DATABIND_NATIVE_ENABLE_DATABIND
+#include "mesh_rpc_service_config_contract_native.h"
+#include "rpc_service_config_schema.h"
+
+#include <data_bind_message_plan.h>
+#include <data_bind_json_provider.h>
 
 #include <string.h>
 
-/* SaltsUtils 4.3 validates the canonical Binary field order while compiling
- * any schema, including this JSON-only one: fixed scalars first, variable
- * string last. No Binary layout or admission is inferred for live MMP. */
-static const char MESH_RPC_SERVICE_CONFIG_SCHEMA[] =
-    "message MeshRpcServiceConfig {"
-    " @Min(1) @Max(1) uint32 schema_version;"
-    " @Min(4) @Max(4) uint32 address_family;"
-    " @Min(1) @Max(223) uint32 octet0;"
-    " @Min(0) @Max(255) uint32 octet1;"
-    " @Min(0) @Max(255) uint32 octet2;"
-    " @Min(0) @Max(255) uint32 octet3;"
-    " @Min(1) @Max(65535) uint32 port;"
-    " string dns_name;"
-    "}";
+/* Bounded scratch for a flat eight-field startup record. Generated descriptor
+ * storage stays at its final address until the borrowing plan is freed. The
+ * compiler-owned text carrier exists only in staging and never reaches CNet. */
+enum { RPC_CONFIG_WORKSPACE_BYTES = 4096, RPC_CONFIG_DEPTH = 4,
+       RPC_CONFIG_ITEMS = 32 };
 
 /* Reuse the canonical MMP wire encoder strictly as startup validation.
  * A dummy nonzero signer identity/epoch/expiry makes the address/DNS policy
@@ -53,17 +49,19 @@ mesh_mgmt_service_config_result_t mesh_mgmt_service_config_from_json_v1(
     const char *json, size_t json_length,
     mesh_mgmt_service_config_v1_t *out_config) {
   DataBind *codec = NULL;
-  DataBindValidationPlan *plan = NULL;
-  DataBindRecord *record = NULL;
+  DataBindMessagePlan *plan = NULL;
+  MeshRpcServiceConfig_native_cmeta_binding metadata = {0};
+  DataBindNativeTypeBinding binding = DATA_BIND_NATIVE_TYPE_BINDING_INIT(NULL, NULL);
+  MeshRpcServiceConfig record = {0};
   DataBindError error = DATA_BIND_ERROR_INIT;
-  DataBindJsonOptions exact = DATA_BIND_JSON_OPTIONS_INIT;
-  DataBindStringView dns = DATA_BIND_STRING_VIEW_INIT;
+  DataBindMessagePlanDiagnostic diagnostic = DATA_BIND_MESSAGE_PLAN_DIAGNOSTIC_INIT;
+  DataBindNativeOptions options = DATA_BIND_NATIVE_OPTIONS_INIT;
+  DataBindFormatReader reader = DATA_BIND_FORMAT_READER_INIT;
+  unsigned char workspace[RPC_CONFIG_WORKSPACE_BYTES];
+  cserde_token tail;
   mesh_mgmt_service_config_v1_t pending = {0};
   mesh_mgmt_service_config_result_t result = MESH_MGMT_SERVICE_CONFIG_RECORD_FAILED;
-  uint32_t schema_version = 0u;
-  uint32_t family = 0u;
-  uint32_t octets[4] = {0};
-  uint32_t port = 0u;
+  uint32_t octets[4];
 
   if (!out_config)
     return MESH_MGMT_SERVICE_CONFIG_INVALID_ARG;
@@ -78,46 +76,47 @@ mesh_mgmt_service_config_result_t mesh_mgmt_service_config_from_json_v1(
     result = MESH_MGMT_SERVICE_CONFIG_SCHEMA_FAILED;
     goto completed;
   }
-  if (data_bind_validation_plan_compile(
-          codec, "MeshRpcServiceConfig", &plan, &error) != DATA_BIND_OK) {
+  if (MeshRpcServiceConfig_native_type_binding(&metadata, &binding) != 0 ||
+      data_bind_message_plan_compile(
+          codec, binding.idl_type_name, &binding, &plan, &diagnostic) != DATA_BIND_OK) {
     result = MESH_MGMT_SERVICE_CONFIG_SCHEMA_FAILED;
     goto completed;
   }
-  exact.flags = DATA_BIND_JSON_BIND_EXACT_SCALAR_TOKENS |
-                DATA_BIND_JSON_BIND_REJECT_UNKNOWN_FIELDS;
-  if (data_bind_record_from_json_ex(
-          codec, "MeshRpcServiceConfig", json, json_length, &exact,
-          &record, &error) != DATA_BIND_OK || !record)
+  options.workspace = workspace;
+  options.workspace_bytes = sizeof(workspace);
+  options.max_depth = RPC_CONFIG_DEPTH;
+  options.max_items = RPC_CONFIG_ITEMS;
+  options.max_owned_bytes = MESH_MGMT_SERVICE_CONFIG_MAX_JSON_BYTES;
+  if (data_bind_format_reader_open(data_bind_json_format_provider(),
+          json, json_length, RPC_CONFIG_DEPTH, &reader, &error) != DATA_BIND_OK)
     goto completed;
-  if (data_bind_validation_plan_validate(
-          plan, data_bind_object_value((const DataBindObject *)record),
+  if (data_bind_message_plan_decode_native(plan, &options, reader.reader,
+          &record, sizeof(record), &diagnostic) != DATA_BIND_OK ||
+      cserde_reader_next(reader.reader, &tail) != CSERDE_DONE ||
+      data_bind_message_plan_validate_native(plan, &record, sizeof(record),
           &error) != DATA_BIND_OK)
     goto completed;
-
-  if (data_bind_record_get_u32(record, "schema_version", &schema_version, &error) !=
-          DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "address_family", &family, &error) !=
-          DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "octet0", &octets[0], &error) != DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "octet1", &octets[1], &error) != DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "octet2", &octets[2], &error) != DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "octet3", &octets[3], &error) != DATA_BIND_OK ||
-      data_bind_record_get_u32(record, "port", &port, &error) != DATA_BIND_OK ||
-      data_bind_record_get_string(record, "dns_name", &dns, &error) != DATA_BIND_OK)
+  if (data_bind_format_reader_close(&reader) != DATA_BIND_OK)
     goto completed;
 
-  if (schema_version != 1u || family != MESH_MGMT_SERVICE_ADDRESS_IPV4 ||
-      !port || port > UINT16_MAX ||
-      dns.length > MESH_MGMT_SERVICE_DNS_NAME_MAX ||
-      (dns.length && (!dns.data || memchr(dns.data, '\0', dns.length))) ) {
+  if (record.schema_version != MESH_MGMT_SERVICE_CONFIG_VERSION ||
+      record.address_family != MESH_MGMT_SERVICE_ADDRESS_IPV4 ||
+      !record.port || record.port > UINT16_MAX ||
+      record.dns_name.size > MESH_MGMT_SERVICE_DNS_NAME_MAX ||
+      (record.dns_name.size && (!record.dns_name.data ||
+          memchr(record.dns_name.data, '\0', record.dns_name.size)))) {
     result = MESH_MGMT_SERVICE_CONFIG_SERVICE_INVALID;
     goto completed;
   }
 
   pending.size = sizeof(pending);
   pending.version = MESH_MGMT_SERVICE_CONFIG_VERSION;
-  pending.address_family = (uint8_t)family;
-  pending.port = (uint16_t)port;
+  pending.address_family = (uint8_t)record.address_family;
+  pending.port = (uint16_t)record.port;
+  octets[0] = record.octet0;
+  octets[1] = record.octet1;
+  octets[2] = record.octet2;
+  octets[3] = record.octet3;
   for (size_t i = 0u; i < 4u; ++i) {
     if (octets[i] > 255u) {
       result = MESH_MGMT_SERVICE_CONFIG_SERVICE_INVALID;
@@ -125,8 +124,9 @@ mesh_mgmt_service_config_result_t mesh_mgmt_service_config_from_json_v1(
     }
     pending.virtual_address[i] = (uint8_t)octets[i];
   }
-  if (dns.length != 0u) memcpy(pending.dns_name, dns.data, dns.length);
-  pending.dns_name[dns.length] = '\0';
+  if (record.dns_name.size != 0u)
+    memcpy(pending.dns_name, record.dns_name.data, record.dns_name.size);
+  pending.dns_name[record.dns_name.size] = '\0';
   if (!service_is_canonical(&pending)) {
     result = MESH_MGMT_SERVICE_CONFIG_SERVICE_INVALID;
     goto completed;
@@ -135,8 +135,9 @@ mesh_mgmt_service_config_result_t mesh_mgmt_service_config_from_json_v1(
   result = MESH_MGMT_SERVICE_CONFIG_OK;
 
 completed:
-  data_bind_record_free(record);
-  data_bind_validation_plan_free(plan);
+  data_bind_format_reader_close(&reader);
+  MeshRpcServiceConfig_clear(&record);
+  data_bind_message_plan_free(plan);
   data_bind_free(codec);
   return result;
 }

@@ -85,7 +85,7 @@ mesh_mgmt_execution_orchestrator_result_t
 mesh_mgmt_execution_orchestrator_init_v1(
     mesh_mgmt_execution_orchestrator_v1_t *orchestrator,
     const mesh_mgmt_execution_orchestrator_config_v1_t *config) {
-  if (!orchestrator || !config || !config->store || !config->store->open ||
+  if (!orchestrator || !config || !config->store || config->store->open != 1u ||
       !config->runner || !config->runner->entries ||
       bytes_are_zero(config->local_node_id,
                      sizeof(config->local_node_id)) ||

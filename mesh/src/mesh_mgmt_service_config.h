@@ -35,7 +35,8 @@ typedef struct mesh_mgmt_service_config_v1 {
 
 /* ACE host Configurator: parse a bounded, strict, versioned DataBind 4.3 JSON
  * record and validate it against the canonical signed MMP service encoder.
- * Schema/ValidationPlan/record are released before this call returns.
+ * The build-time IDL generates private C11/CMeta value bindings. The codec,
+ * MessagePlan, reader and generated owned staging are released before return.
  * No partial result survives a failure. No network, DHT or MMP publish.
  * Required fields: schema_version=1, address_family=4, octet0..3 [0..255],
  * port [1..65535], dns_name (canonical lowercase or empty).

@@ -45,7 +45,7 @@ static void wal_worker_run(void *argument) {
   }
   (void)mesh_control_wal_get_stats_v1(&worker->wal, &wal_stats);
 
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   worker->completion = completion;
   worker->wal_stats = wal_stats;
   worker->completed++;
@@ -56,18 +56,20 @@ static void wal_worker_run(void *argument) {
     } else {
       worker->checkpoint_failures++;
       worker->persistence_failures++;
+      worker->accepting = 0u;
     }
   } else if (completion.wal_result != MESH_CONTROL_WAL_OK) {
     worker->persistence_failures++;
+    worker->accepting = 0u;
   }
   worker->completion_ready = 1u;
-  turbo_mutex_unlock(&worker->mutex);
+  cmeta_mutex_unlock(&worker->mutex);
 }
 
 mesh_control_wal_worker_result_t
 mesh_control_wal_worker_init_v1(mesh_control_wal_worker_v1_t *worker,
                                 const mesh_control_wal_worker_config_v1_t *config) {
-  turbo_threadpool_config_t pool_config;
+  cmeta_threadpool_config_t pool_config;
   size_t replayed = 0u;
   uint8_t checkpoint_found = 0u;
   uint64_t replay_after_index;
@@ -77,7 +79,8 @@ mesh_control_wal_worker_init_v1(mesh_control_wal_worker_v1_t *worker,
       ((config->checkpoint_path == NULL) != (config->checkpoint_owner == NULL)))
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
   memset(worker, 0, sizeof(*worker));
-  worker->checkpoint_store.lock_file = TURBO_INVALID_FILE;
+  worker->wal.lock_file = SALTS_INVALID_FILE;
+  worker->checkpoint_store.lock_file = SALTS_INVALID_FILE;
   replay_after_index = config->recovery_after_index;
   if (config->checkpoint_path) {
     mesh_control_checkpoint_store_result_t checkpoint_result =
@@ -112,12 +115,16 @@ mesh_control_wal_worker_init_v1(mesh_control_wal_worker_v1_t *worker,
   }
   (void)mesh_control_wal_get_stats_v1(&worker->wal, &worker->wal_stats);
 
-  turbo_mutex_init(&worker->mutex);
+  cmeta_mutex_init(&worker->mutex);
+  if (!worker->mutex) {
+    mesh_control_wal_worker_destroy_v1(worker);
+    return MESH_CONTROL_WAL_WORKER_RESOURCE_EXHAUSTED;
+  }
   worker->mutex_initialized = 1u;
   memset(&pool_config, 0, sizeof(pool_config));
   pool_config.num_threads = 1u;
   pool_config.queue_capacity = WAL_WORKER_QUEUE_CAPACITY;
-  worker->pool = turbo_threadpool_create_with_config(&pool_config);
+  worker->pool = cmeta_threadpool_create_with_config(&pool_config);
   if (!worker->pool) {
     mesh_control_wal_worker_destroy_v1(worker);
     return MESH_CONTROL_WAL_WORKER_RESOURCE_EXHAUSTED;
@@ -142,14 +149,14 @@ submit_job(mesh_control_wal_worker_v1_t *worker, uint16_t record_type, uint64_t 
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
   }
 
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   if (!worker->accepting) {
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_INVALID_STATE;
   }
   if (worker->busy || worker->completion_ready) {
     worker->rejected_full++;
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_FULL;
   }
   worker->expected_index = expected_index;
@@ -162,25 +169,25 @@ submit_job(mesh_control_wal_worker_v1_t *worker, uint16_t record_type, uint64_t 
     worker->operation_result = *operation_result;
   }
   worker->busy = 1u;
-  turbo_mutex_unlock(&worker->mutex);
+  cmeta_mutex_unlock(&worker->mutex);
 
-  submit_result = turbo_threadpool_try_submit(worker->pool, wal_worker_run, worker);
+  submit_result = cmeta_threadpool_try_submit(worker->pool, wal_worker_run, worker);
   if (submit_result == 0) {
-    turbo_mutex_lock(&worker->mutex);
+    cmeta_mutex_lock(&worker->mutex);
     worker->submitted++;
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_OK;
   }
 
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   worker->busy = 0u;
   worker->record_type = 0u;
   worker->signed_frame_size = 0u;
   mesh_mgmt_crypto_wipe(worker->signed_frame, sizeof(worker->signed_frame));
   mesh_mgmt_crypto_wipe(&worker->operation_result, sizeof(worker->operation_result));
-  turbo_mutex_unlock(&worker->mutex);
-  return turbo_threadpool_is_accepting(worker->pool) ? MESH_CONTROL_WAL_WORKER_FULL
-                                                     : MESH_CONTROL_WAL_WORKER_INVALID_STATE;
+  cmeta_mutex_unlock(&worker->mutex);
+  return submit_result == SALTS_ENOBUFS ? MESH_CONTROL_WAL_WORKER_FULL
+                                        : MESH_CONTROL_WAL_WORKER_INVALID_STATE;
 }
 
 mesh_control_wal_worker_result_t
@@ -215,14 +222,14 @@ mesh_control_wal_worker_result_t mesh_control_wal_worker_try_submit_checkpoint_v
       encoded_checkpoint_index != checkpoint_index) {
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
   }
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   if (!worker->accepting) {
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_INVALID_STATE;
   }
   if (worker->busy || worker->completion_ready) {
     worker->rejected_full++;
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_FULL;
   }
   worker->expected_index = checkpoint_index;
@@ -231,23 +238,23 @@ mesh_control_wal_worker_result_t mesh_control_wal_worker_try_submit_checkpoint_v
   worker->checkpoint_bytes = checkpoint_bytes;
   worker->checkpoint_size = checkpoint_size;
   worker->busy = 1u;
-  turbo_mutex_unlock(&worker->mutex);
+  cmeta_mutex_unlock(&worker->mutex);
 
-  submit_result = turbo_threadpool_try_submit(worker->pool, wal_worker_run, worker);
+  submit_result = cmeta_threadpool_try_submit(worker->pool, wal_worker_run, worker);
   if (submit_result == 0) {
-    turbo_mutex_lock(&worker->mutex);
+    cmeta_mutex_lock(&worker->mutex);
     worker->submitted++;
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_OK;
   }
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   worker->checkpoint_bytes = NULL;
   worker->checkpoint_size = 0u;
   worker->busy = 0u;
   worker->record_type = 0u;
-  turbo_mutex_unlock(&worker->mutex);
-  return turbo_threadpool_is_accepting(worker->pool) ? MESH_CONTROL_WAL_WORKER_FULL
-                                                     : MESH_CONTROL_WAL_WORKER_INVALID_STATE;
+  cmeta_mutex_unlock(&worker->mutex);
+  return submit_result == SALTS_ENOBUFS ? MESH_CONTROL_WAL_WORKER_FULL
+                                        : MESH_CONTROL_WAL_WORKER_INVALID_STATE;
 }
 
 mesh_control_wal_worker_result_t
@@ -255,9 +262,9 @@ mesh_control_wal_worker_try_take_v1(mesh_control_wal_worker_v1_t *worker,
                                     mesh_control_wal_worker_completion_v1_t *out_completion) {
   if (!worker || !out_completion || !worker->initialized)
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   if (!worker->completion_ready) {
-    turbo_mutex_unlock(&worker->mutex);
+    cmeta_mutex_unlock(&worker->mutex);
     return MESH_CONTROL_WAL_WORKER_EMPTY;
   }
   *out_completion = worker->completion;
@@ -268,7 +275,7 @@ mesh_control_wal_worker_try_take_v1(mesh_control_wal_worker_v1_t *worker,
   worker->signed_frame_size = 0u;
   worker->busy = 0u;
   worker->completion_ready = 0u;
-  turbo_mutex_unlock(&worker->mutex);
+  cmeta_mutex_unlock(&worker->mutex);
   return MESH_CONTROL_WAL_WORKER_OK;
 }
 
@@ -276,11 +283,12 @@ mesh_control_wal_worker_result_t
 mesh_control_wal_worker_shutdown_v1(mesh_control_wal_worker_v1_t *worker) {
   if (!worker || !worker->initialized || !worker->pool)
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   worker->accepting = 0u;
-  turbo_mutex_unlock(&worker->mutex);
-  turbo_threadpool_shutdown(worker->pool);
-  turbo_threadpool_wait(worker->pool);
+  cmeta_mutex_unlock(&worker->mutex);
+  if (cmeta_threadpool_shutdown_with_policy(worker->pool, SALTS_THREADPOOL_SHUTDOWN_DRAIN) !=
+      SALTS_OK || cmeta_threadpool_wait_status(worker->pool) != SALTS_OK)
+    return MESH_CONTROL_WAL_WORKER_INVALID_STATE;
   return MESH_CONTROL_WAL_WORKER_OK;
 }
 
@@ -290,7 +298,7 @@ mesh_control_wal_worker_get_stats_v1(mesh_control_wal_worker_v1_t *worker,
   if (!worker || !out_stats || !worker->initialized)
     return MESH_CONTROL_WAL_WORKER_INVALID_ARG;
   memset(out_stats, 0, sizeof(*out_stats));
-  turbo_mutex_lock(&worker->mutex);
+  cmeta_mutex_lock(&worker->mutex);
   out_stats->submitted = worker->submitted;
   out_stats->completed = worker->completed;
   out_stats->rejected_full = worker->rejected_full;
@@ -301,7 +309,7 @@ mesh_control_wal_worker_get_stats_v1(mesh_control_wal_worker_v1_t *worker,
   out_stats->busy = worker->busy;
   out_stats->completion_ready = worker->completion_ready;
   out_stats->wal = worker->wal_stats;
-  turbo_mutex_unlock(&worker->mutex);
+  cmeta_mutex_unlock(&worker->mutex);
   return MESH_CONTROL_WAL_WORKER_OK;
 }
 
@@ -309,18 +317,21 @@ void mesh_control_wal_worker_destroy_v1(mesh_control_wal_worker_v1_t *worker) {
   if (!worker)
     return;
   if (worker->pool) {
-    turbo_threadpool_shutdown(worker->pool);
-    turbo_threadpool_wait(worker->pool);
-    turbo_threadpool_destroy(worker->pool);
+    cmeta_threadpool_shutdown(worker->pool);
+    cmeta_threadpool_wait(worker->pool);
+    cmeta_threadpool_destroy(worker->pool);
   }
   if (worker->checkpoint_bytes) {
     mesh_mgmt_crypto_wipe(worker->checkpoint_bytes, worker->checkpoint_size);
     free(worker->checkpoint_bytes);
   }
-  mesh_control_wal_close_v1(&worker->wal);
+  if (worker->wal.open)
+    mesh_control_wal_close_v1(&worker->wal);
   if (worker->checkpoint_store_initialized)
     mesh_control_checkpoint_store_close_v1(&worker->checkpoint_store);
   if (worker->mutex_initialized)
-    turbo_mutex_destroy(&worker->mutex);
+    cmeta_mutex_destroy(&worker->mutex);
   mesh_mgmt_crypto_wipe(worker, sizeof(*worker));
+  worker->wal.lock_file = SALTS_INVALID_FILE;
+  worker->checkpoint_store.lock_file = SALTS_INVALID_FILE;
 }

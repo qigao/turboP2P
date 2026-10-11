@@ -1,4 +1,4 @@
-#include "mesh_control_checkpoint.h"
+#include "mesh_control_checkpoint_internal.h"
 
 #include <limits.h>
 #include <openssl/evp.h>
@@ -531,9 +531,9 @@ initialize_restore_targets(const mesh_control_owner_v1_t *owner, mesh_control_st
   return MESH_CONTROL_CHECKPOINT_OK;
 }
 
-mesh_control_checkpoint_result_t mesh_control_checkpoint_restore_v1(mesh_control_owner_v1_t *owner,
-                                                                    const uint8_t *bytes,
-                                                                    size_t size, uint64_t now_ms) {
+mesh_control_checkpoint_result_t mesh_control_checkpoint_restore_before_commit(
+    mesh_control_owner_v1_t *owner, const uint8_t *bytes, size_t size,
+    uint64_t now_ms, int (*before_commit)(void *), void *context) {
   mesh_control_state_resource_record_v1_t *resources = NULL;
   mesh_control_state_operation_record_v1_t *operations = NULL;
   mesh_control_event_v1_t *events = NULL;
@@ -679,6 +679,11 @@ mesh_control_checkpoint_result_t mesh_control_checkpoint_restore_v1(mesh_control
     goto cleanup;
   }
 
+  if (before_commit && !before_commit(context)) {
+    result = MESH_CONTROL_CHECKPOINT_INVALID_STATE;
+    goto cleanup;
+  }
+
   mesh_control_state_destroy_v1(&owner->state);
   mesh_mgmt_replay_destroy_v1(&owner->replay);
   owner->state = restored_state;
@@ -697,6 +702,11 @@ cleanup:
   free(events);
   free(replay_entries);
   return result;
+}
+
+mesh_control_checkpoint_result_t mesh_control_checkpoint_restore_v1(
+    mesh_control_owner_v1_t *owner, const uint8_t *bytes, size_t size, uint64_t now_ms) {
+  return mesh_control_checkpoint_restore_before_commit(owner, bytes, size, now_ms, NULL, NULL);
 }
 
 void mesh_control_checkpoint_free_v1(uint8_t *bytes) { free(bytes); }

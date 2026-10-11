@@ -4,6 +4,10 @@
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
+#include <cmeta/data.h>
+#include <data_bind.h>
+
+extern "C" const cmeta_data_desc *mesh_test_service_config_native_data(void);
 
 static_assert(std::is_standard_layout<mesh_mgmt_service_config_v1_t>::value,
               "Typed service config must retain public C11/C++17 layout");
@@ -11,6 +15,15 @@ static_assert(std::is_standard_layout<mesh_mgmt_service_publish_v1_t>::value,
               "MMP service publish view must retain C-compatible layout");
 
 int main() {
+  // The private generated header is C11. C++ consumes its retained producer
+  // descriptor through the C ABI, alongside the unchanged native config ABI.
+  const cmeta_data_desc *generated = mesh_test_service_config_native_data();
+  if (data_bind_abi_version() != DATA_BIND_ABI_VERSION ||
+      !cmeta_data_desc_valid(generated) ||
+      !cmeta_data_value_traits_supported(generated) ||
+      std::strcmp(generated->stable_id,
+          "tbe.native.MeshRpcServiceConfigContract.v1.MeshRpcServiceConfig.data") != 0)
+    return 4;
   static constexpr char json[] =
       "{\"schema_version\":1,\"address_family\":4,\"octet0\":100,"
       "\"octet1\":64,\"octet2\":0,\"octet3\":2,\"port\":7878,"

@@ -1,0 +1,45 @@
+{
+  "version": 6,
+  "include": ["CMakePresets.json"],
+  "configurePresets": [
+    {
+      "name": "win-foundation-release",
+      "inherits": "foundation-release",
+      "condition": {
+        "type": "notEquals",
+        "lhs": "$penv{VCPKG_VISUAL_STUDIO_PATH}",
+        "rhs": ""
+      },
+      "toolchainFile": "$env{VCPKG_CACHE_REPOSITORY_ROOT}/cmake/QigaoVcpkgToolchain.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_HOST_TRIPLET": "x64-windows",
+        "VCPKG_OVERLAY_PORTS": "$env{VCPKG_CACHE_REPOSITORY_ROOT}/ports",
+        "CMAKE_PREFIX_PATH": "${sourceDir}/../../build/${presetName}/vcpkg_installed/x64-windows",
+        "CMAKE_INSTALL_PREFIX": "$env{PKG_ROOT}/turbo-p2p/release"
+      },
+      "environment": {
+        "PKG_ROOT": "C:/projects/cpp/external/pkgs",
+        "VCPKG_ROOT": "C:/tools/vcpkg",
+        "VCPKG_VISUAL_STUDIO_PATH": "$penv{VCPKG_VISUAL_STUDIO_PATH}",
+        "VCPKG_CACHE_REPOSITORY_ROOT": "$penv{LOCALAPPDATA}/qigao/vcpkg-cache",
+        "VCPKG_BINARY_SOURCES": "clear;default,readwrite;nugettimeout,1800;nugetconfig,${sourceDir}/../../cmake/vcpkg-cache.nuget.config,read",
+        "SALTS_ROOT": "$env{PKG_ROOT}/salts/release",
+        "SALTS_UTILS_ROOT": "$env{PKG_ROOT}/salts-utils/release",
+        "HTTP_SERVICES_ROOT": "$env{PKG_ROOT}/http-services/release",
+        "PATH": "${sourceDir}/../../build/${presetName}/vcpkg_installed/x64-windows/bin;$env{SALTS_ROOT}/bin;$env{SALTS_UTILS_ROOT}/bin;$env{HTTP_SERVICES_ROOT}/bin;$penv{PATH}"
+      }
+    }
+  ],
+  "buildPresets": [
+    {"name": "win-foundation-release", "configurePreset": "win-foundation-release"}
+  ],
+  "testPresets": [
+    {
+      "name": "win-foundation-release",
+      "configurePreset": "win-foundation-release",
+      "output": {"outputOnFailure": true},
+      "execution": {"noTestsAction": "error"}
+    }
+  ]
+}

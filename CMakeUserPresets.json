@@ -105,7 +105,8 @@
                 "TURBO_NET_ROOT": "$env{PKG_ROOT}/turbonet-debug"
             },
             "environment": {
-                "PATH": "$env{PKG_ROOT}/turbonet-debug/bin${pathListSep}$env{PKG_ROOT}/turboutils/bin${pathListSep}${sourceDir}/vcpkg_installed/x64-windows/debug/bin${pathListSep}$env{MSVC_ROOT}/bin/Hostx64/x64${pathListSep}$env{TURBOUTILS_ROOT}/bin${pathListSep}C:/tools/vcpkg/installed/x64-windows/bin${pathListSep}$penv{PATH}"
+                "HTTP_SERVICES_ROOT": "$env{PKG_ROOT}/http-services/debug",
+                "PATH": "$env{HTTP_SERVICES_ROOT}/bin${pathListSep}$env{PKG_ROOT}/turbonet-debug/bin${pathListSep}$env{PKG_ROOT}/turboutils/bin${pathListSep}${sourceDir}/vcpkg_installed/x64-windows/debug/bin${pathListSep}$env{MSVC_ROOT}/bin/Hostx64/x64${pathListSep}$env{TURBOUTILS_ROOT}/bin${pathListSep}C:/tools/vcpkg/installed/x64-windows/bin${pathListSep}$penv{PATH}"
             },
             "inherits": [
                 "base-win-dev-user",
@@ -121,7 +122,8 @@
                 "TURBO_NET_ROOT": "$env{PKG_ROOT}/turbonet"
             },
             "environment": {
-                "PATH": "$env{PKG_ROOT}/turbonet/bin${pathListSep}$env{PROJECT_ROOT}/turbonet/turbo-utils/build/Msvc-Release/bin${pathListSep}${sourceDir}/vcpkg_installed/x64-windows/bin${pathListSep}$env{TURBOUTILS_ROOT}/bin${pathListSep}C:/tools/vcpkg/installed/x64-windows/bin${pathListSep}$penv{PATH}"
+                "HTTP_SERVICES_ROOT": "$env{PKG_ROOT}/http-services/release",
+                "PATH": "$env{HTTP_SERVICES_ROOT}/bin${pathListSep}$env{PKG_ROOT}/turbonet/bin${pathListSep}$env{PROJECT_ROOT}/turbonet/turbo-utils/build/Msvc-Release/bin${pathListSep}${sourceDir}/vcpkg_installed/x64-windows/bin${pathListSep}$env{TURBOUTILS_ROOT}/bin${pathListSep}C:/tools/vcpkg/installed/x64-windows/bin${pathListSep}$penv{PATH}"
             },
             "inherits": [
                 "base-win-release-user",
@@ -130,6 +132,9 @@
         },
         {
             "name": "linux-dev-user",
+            "environment": {
+                "HTTP_SERVICES_ROOT": "$env{PKG_ROOT}/http-services/debug"
+            },
             "cacheVariables": {
                 "ENABLE_SANITIZER_ADDRESS": "ON",
                 "CMAKE_PREFIX_PATH": "$env{PKG_ROOT}/turboutils;$env{PKG_ROOT}/turbonet;${sourceDir}/vcpkg_installed/x64-linux/debug"
@@ -141,6 +146,9 @@
         },
         {
             "name": "linux-release-user",
+            "environment": {
+                "HTTP_SERVICES_ROOT": "$env{PKG_ROOT}/http-services/release"
+            },
             "cacheVariables": {
                 "CMAKE_PREFIX_PATH": "$env{PKG_ROOT}/turboutils;$env{PKG_ROOT}/turbonet;${sourceDir}/vcpkg_installed/x64-linux"
             },

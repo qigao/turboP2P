@@ -7,6 +7,8 @@
  */
  
 #ifdef _WIN32
+/* Winsock2 must precede Windows.h, which otherwise includes Winsock1. */
+#include <winsock2.h>
 #include <Windows.h>
 #include "tunnel_tun.h"
 #include "../stack/tunnel_ip_stack.h"

@@ -2,6 +2,10 @@
 #include "mesh_mgmt_agent_runtime.h"
 #include "mesh_mgmt_client_config.h"
 #include "mesh_mgmt_service_config.h"
+#include "mesh_mgmt_service_component_runtime.h"
+#include "meshd_rpc_service_component.h"
+#include "meshd_management_epoch.h"
+#include <fmt.h>
 #include "mesh_mgmt_test_identity.h"
 #include "mesh_mgmt_execution_wire.h"
 #include "core/node_state.h"
@@ -23,7 +27,28 @@ typedef struct {
   uint8_t secret[P2P_KEY_SIZE], public_key[P2P_KEY_SIZE];
   unsigned established, failures, closed, admitted, commands;
   int port, reject, random_fail;
+  meshd_rpc_service_component_t *service_owner;
+  unsigned service_reentry_checks;
+  salts_component_plugin_status service_reentry_destroy;
+  mesh_mgmt_agent_runtime_result_t service_reentry_publish;
+  mesh_mgmt_agent_runtime_result_t service_reentry_refresh;
+  uint64_t service_reentry_epoch;
 } endpoint_t;
+static meshd_rpc_service_component_t discovery_service_owner;
+static meshd_management_epoch_state_t discovery_epochs;
+static char *discovery_epoch_path;
+static tstr discovery_epoch_lock, discovery_epoch_staging;
+static uint64_t service_clock_ms;
+static uint64_t service_clock_delay_ms;
+static uint64_t service_clock(void) { return service_clock_ms; }
+/* Deterministic clock input for the production loop step; transport, Component,
+ * signer and epoch storage are real. No test timer or publication replacement. */
+static mesh_mgmt_agent_runtime_result_t refresh_at(
+    meshd_rpc_service_component_t *owner, mesh_mgmt_agent_runtime_v1_t *agent,
+    uint64_t now_ms, uint64_t *epoch) {
+  service_clock_ms = now_ms;
+  return meshd_rpc_service_component_refresh(owner, agent, service_clock, epoch);
+}
 
 static void check_reentry(endpoint_t *endpoint) {
   check_equal(MESH_MGMT_AGENT_RUNTIME_INVALID_STATE,
@@ -73,6 +98,22 @@ static int namespace_random(void *context, uint8_t *output, size_t length) {
   check_reentry(endpoint);
   if (endpoint->random_fail) return -1;
   return runtime_random_bytes(&endpoint->signer_callbacks, output, length);
+}
+/* Exercise the public epoch callback used by meshd before the publisher copies
+ * borrowed DNS. Namespace randomness belongs to the router, not this publisher. */
+static int service_epoch_allocate(void *context, uint64_t *epoch) {
+  endpoint_t *endpoint = context;
+  if (endpoint->service_owner != NULL) {
+    endpoint->service_reentry_destroy = meshd_rpc_service_component_destroy(endpoint->service_owner);
+    endpoint->service_reentry_epoch = 99;
+    endpoint->service_reentry_publish = meshd_rpc_service_component_publish(
+        endpoint->service_owner, &endpoint->runtime, &endpoint->service_reentry_epoch);
+    endpoint->service_reentry_refresh = meshd_rpc_service_component_refresh(
+        endpoint->service_owner, &endpoint->runtime, service_clock, &endpoint->service_reentry_epoch);
+    ++endpoint->service_reentry_checks;
+  }
+  service_clock_ms += service_clock_delay_ms;
+  return meshd_management_epoch_allocate(&discovery_epochs, epoch);
 }
 static void prepare(endpoint_t *endpoint, uint8_t seed) {
   uint8_t management_key[P2P_KEY_SIZE] = {0};
@@ -190,6 +231,21 @@ static void wait_record(endpoint_t *server, endpoint_t *client, const char *key,
     if (result == P2P_OK) { *length = available; break; }
   }
   check_equal(P2P_OK, result);
+}
+static void wait_verified_service_epoch(endpoint_t *server, endpoint_t *client,
+    uint64_t epoch, mesh_mgmt_service_record_v1_t *record) {
+  uint64_t deadline = cmeta_monotonic_ms() + WAIT_MS;
+  mesh_mgmt_agent_runtime_result_t result = MESH_MGMT_AGENT_RUNTIME_DISCOVERY_FAILED;
+  memset(record, 0, sizeof(*record));
+  while (cmeta_monotonic_ms() < deadline) {
+    poll_pair(server, client);
+    result = mesh_mgmt_agent_runtime_resolve_cached_service_v1(&server->runtime,
+        client->identity.signer.hello.managed_node_id, TEST_NOW_MS,
+        client->identity.signer.frame_ttl_ms, record);
+    if (result == MESH_MGMT_AGENT_RUNTIME_OK && record->record_epoch == epoch) break;
+  }
+  check_equal(result, MESH_MGMT_AGENT_RUNTIME_OK);
+  check_equal(record->record_epoch, epoch);
 }
 
 /* These READY facts originate from real signed MMP SESSION_ESTABLISHED,
@@ -1400,10 +1456,70 @@ static void test_runtime_signed_pool_two_peer_terminal_isolation(void) {
   destroy(&server);
 }
 
+/* Publish through a real DSO, then destroy all Component/module storage before
+ * the remote owner receives the record. The signed cache/transport must own
+ * the encoded frame independently of the provider and its DNS snapshot. */
+static void publish_component_service(endpoint_t *client,
+    const mesh_mgmt_service_config_v1_t *config, uint64_t *epoch) {
+  cmeta_plugin_registry registry = {0};
+  const cmeta_plugin_registry_config options = {1};
+  cmeta_plugin_ref ref;
+  salts_component_plugin_runtime runtime = SALTS_COMPONENT_PLUGIN_RUNTIME_INIT;
+  salts_component_plugin_generation generation = SALTS_COMPONENT_PLUGIN_GENERATION_INIT;
+  salts_component_plugin_generation *previous = NULL;
+  salts_component_plugin_scope scope = SALTS_COMPONENT_PLUGIN_SCOPE_INIT;
+  mesh_mgmt_service_component_view_v1_t view = MESH_MGMT_SERVICE_COMPONENT_VIEW_INIT_V1;
+  salts_component_deployment deployments[1];
+  salts_component_instance instances[1];
+  salts_component_dependency dependencies[1];
+  size_t order[1];
+  salts_component_plugin_module modules[1];
+  const salts_component_plugin_generation_storage storage = {
+    deployments, 1, instances, 1, dependencies, 1, order, 1, modules, 1
+  };
+  bool quiet = false;
+  uint64_t rejected_epoch = 99;
+  check_equal(cmeta_plugin_registry_init(&registry, &options), CMETA_PLUGIN_OK);
+  check_equal(cmeta_plugin_registry_load(&registry, MESH_PROVIDER_PLUGIN_PATH, &ref), CMETA_PLUGIN_OK);
+  check_equal(cmeta_plugin_registry_start(&registry, ref), CMETA_PLUGIN_OK);
+  {
+    const salts_component_plugin_source source = {
+      ref, "mesh-rpc-service", cmeta_reflected_data(mesh_mgmt_service_config_v1_t), config
+    };
+    check_equal(salts_component_plugin_generation_build(&generation, 1, &registry, &storage,
+        NULL, 0, &source, 1, NULL, 0), SALTS_COMPONENT_PLUGIN_OK);
+  }
+  check_equal(salts_component_plugin_runtime_init(&runtime), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_runtime_publish(&runtime, &generation, &previous), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_scope_acquire(&runtime, &scope), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(mesh_mgmt_service_component_bind_v1(&scope, "MeshMgmtRpcServiceV1", &view), SALTS_COMPONENT_PLUGIN_OK);
+  client->runtime.in_api = 1;
+  check_equal(mesh_mgmt_agent_runtime_publish_component_service_v1(&client->runtime, &view, &rejected_epoch),
+              MESH_MGMT_AGENT_RUNTIME_INVALID_STATE);
+  client->runtime.in_api = 0;
+  check_equal(rejected_epoch, (uint64_t)0);
+  check_equal(mesh_mgmt_agent_runtime_publish_component_service_v1(&client->runtime, &view, epoch),
+              MESH_MGMT_AGENT_RUNTIME_OK);
+  check_equal(salts_component_plugin_runtime_close(&runtime, &previous), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_generation_drain(&runtime, &generation), SALTS_COMPONENT_PLUGIN_BUSY);
+  check_equal(cmeta_plugin_registry_request_stop(&registry, ref), CMETA_PLUGIN_OK);
+  check_equal(cmeta_plugin_registry_unload(&registry, ref), CMETA_PLUGIN_BUSY);
+  check_equal(salts_component_plugin_scope_release(&scope), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(mesh_mgmt_agent_runtime_publish_component_service_v1(&client->runtime, &view, &rejected_epoch),
+              MESH_MGMT_AGENT_RUNTIME_INVALID_ARG);
+  check_equal(rejected_epoch, (uint64_t)0);
+  memset(&view, 0, sizeof(view));
+  check_equal(salts_component_plugin_generation_drain(&runtime, &generation), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(salts_component_plugin_runtime_destroy(&runtime), SALTS_COMPONENT_PLUGIN_OK);
+  check_equal(cmeta_plugin_registry_poll_quiescent(&registry, ref, &quiet), CMETA_PLUGIN_OK);
+  check_true(quiet);
+  check_equal(cmeta_plugin_registry_unload(&registry, ref), CMETA_PLUGIN_OK);
+  check_equal(cmeta_plugin_registry_destroy(&registry), CMETA_PLUGIN_OK);
+}
+
 static void test_session_records_reconnect(void) {
   endpoint_t server = {0}, client = {0};
   mesh_mgmt_endpoint_snapshot_v1_t snapshot;
-  mesh_mgmt_service_publish_v1_t service = {0};
   mesh_mgmt_service_config_v1_t service_config = {0};
   static const char SERVICE_JSON[] =
       "{\"schema_version\":1,\"address_family\":4,\"octet0\":100,"
@@ -1427,11 +1543,7 @@ static void test_session_records_reconnect(void) {
   check_equal(MESH_MGMT_SERVICE_CONFIG_OK,
       mesh_mgmt_service_config_from_json_v1(
           SERVICE_JSON, sizeof(SERVICE_JSON) - 1u, &service_config));
-  check_equal(MESH_MGMT_SERVICE_CONFIG_OK,
-      mesh_mgmt_service_config_publish_view_v1(&service_config, &service));
-  check_true(service.dns_name == service_config.dns_name);
-  check_equal(MESH_MGMT_AGENT_RUNTIME_OK, mesh_mgmt_agent_runtime_publish_cached_service_v1(
-      &client.runtime, &service, &epoch));
+  publish_component_service(&client, &service_config, &epoch);
   check_equal(1u, epoch);
   check_equal(MESH_MGMT_SERVICE_RECORD_OK, mesh_mgmt_service_dht_key_build_v1(
       client.identity.signer.expected_mesh_id_hash, client.identity.signer.hello.managed_node_id,
@@ -1449,6 +1561,135 @@ static void test_session_records_reconnect(void) {
           client.identity.signer.hello.managed_node_id, TEST_NOW_MS,
           client.identity.signer.frame_ttl_ms, &record));
   check_equal(MESH_MGMT_SERVICE_RECORD_AUTH_FAILED, server.runtime.last_service_record_result);
+
+  /* The daemon's concrete static Owner refreshes using the same immutable
+   * Component; the existing agent owns signing/epochs and copied wire frames.
+   * Destroy that Owner before remote progress to exercise the real cache and
+   * transport boundary independently of its config and scope storage. */
+  {
+    meshd_rpc_service_component_t *service_owner = &discovery_service_owner;
+    char native_ip[16] = "100.64.0.2";
+    char native_host[128] = "node-b.mesh";
+    unsigned attempts;
+    check_equal(meshd_rpc_service_component_init_native(service_owner,
+        vstr_from_buf(native_ip, sizeof(native_ip)), vstr_from_buf(native_host, sizeof(native_host)), 7878),
+        SALTS_COMPONENT_PLUGIN_OK);
+    memset(native_ip, 'x', sizeof(native_ip));
+    memset(native_host, 'x', sizeof(native_host));
+    memset(&service_config, 0, sizeof(service_config));
+    discovery_epoch_path = tt_make_temp_file("meshd-signed-epochs", ".txt");
+    check_not_null(discovery_epoch_path);
+    discovery_epoch_lock = tstr_format("{}.lock", discovery_epoch_path);
+    discovery_epoch_staging = tstr_format("{}.tmp", discovery_epoch_path);
+    check_not_null(discovery_epoch_lock);
+    check_not_null(discovery_epoch_staging);
+    check_equal(tt_remove_file(discovery_epoch_path), 0);
+    client.service_owner = service_owner;
+    check_equal(mesh_mgmt_service_publisher_set_epoch_allocator_v1(
+        &client.runtime.service_publisher, service_epoch_allocate, &client), MESH_MGMT_SERVICE_PUBLISHER_OK);
+    /* A first attempt is due even at time zero. A real unavailable disk Owner
+     * fails closed and the loop must throttle that failure before retrying. */
+    check_equal(refresh_at(service_owner, &client.runtime, 0, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.runtime.last_service_publisher_result, MESH_MGMT_SERVICE_PUBLISHER_EPOCH_FAILED);
+    attempts = client.service_reentry_checks;
+    check_equal(meshd_management_epoch_open(&discovery_epochs, discovery_epoch_path, 2), 0);
+    check_equal(refresh_at(service_owner, &client.runtime, 9999, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts);
+    check_equal(discovery_epochs.next_epoch, UINT64_C(2));
+    check_equal(refresh_at(service_owner, &client.runtime, 10000, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(2));
+    /* Reopen the actual daemon storage with a lower seed. The signed refresh
+     * must consume persisted next=3 rather than repeat the already issued 2. */
+    check_equal(meshd_management_epoch_close(&discovery_epochs), 0);
+    check_equal(refresh_at(service_owner, &client.runtime, 20000, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_PUBLISH_FAILED);
+    check_equal(epoch, UINT64_C(0));
+    attempts = client.service_reentry_checks;
+    check_equal(meshd_management_epoch_open(&discovery_epochs, discovery_epoch_path, 1), 0);
+    check_equal(refresh_at(service_owner, &client.runtime, 29999, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts);
+    check_equal(discovery_epochs.next_epoch, UINT64_C(3));
+    service_clock_delay_ms = 250;
+    check_equal(refresh_at(service_owner, &client.runtime, 30000, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_OK);
+    service_clock_delay_ms = 0;
+    check_equal(epoch, UINT64_C(3));
+    check_equal(discovery_epochs.next_epoch, UINT64_C(4));
+    check_equal(discovery_epochs.publication, SALTS_FS_REPLACE_PUBLISHED_DURABLE);
+    attempts = client.service_reentry_checks;
+    check_equal(refresh_at(service_owner, &client.runtime, 29999, &epoch),
+                MESH_MGMT_AGENT_RUNTIME_INVALID_ARG);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts);
+    /* The 250ms spent in the real epoch callback must shift the deadline from
+     * 40000 to 40250. Preserve the daemon's completion-based retry policy. */
+    check_equal(refresh_at(service_owner, &client.runtime, 40000, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts);
+    check_equal(refresh_at(service_owner, &client.runtime, 40249, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts);
+    /* Late polling emits one record, not a catch-up burst. Subtraction, rather
+     * than an added deadline, preserves the interval at the uint64 boundary. */
+    check_equal(refresh_at(service_owner, &client.runtime,
+        UINT64_MAX - MESHD_MGMT_SERVICE_PUBLISH_INTERVAL_MS, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(4));
+    check_equal(client.service_reentry_checks, attempts + 1);
+    check_equal(refresh_at(service_owner, &client.runtime,
+        UINT64_MAX - 1, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(0));
+    check_equal(client.service_reentry_checks, attempts + 1);
+    check_equal(discovery_epochs.next_epoch, UINT64_C(5));
+    check_equal(refresh_at(service_owner, &client.runtime,
+        UINT64_MAX, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(5));
+    check_equal(client.service_reentry_checks, attempts + 2);
+    check_equal(discovery_epochs.next_epoch, UINT64_C(6));
+    check_equal(client.service_reentry_destroy, SALTS_COMPONENT_PLUGIN_BUSY);
+    check_equal(client.service_reentry_publish, MESH_MGMT_AGENT_RUNTIME_INVALID_STATE);
+    check_equal(client.service_reentry_refresh, MESH_MGMT_AGENT_RUNTIME_INVALID_STATE);
+    check_equal(client.service_reentry_epoch, UINT64_C(0));
+    client.service_owner = NULL;
+    check_equal(service_owner->generation.active_scopes, (size_t)1);
+    check_equal(meshd_rpc_service_component_destroy(service_owner), SALTS_COMPONENT_PLUGIN_OK);
+    /* Reusing fully retired storage starts immediately even after the prior
+     * lifetime sampled UINT64_MAX; no old retry deadline crosses lifetimes. */
+    check_equal(meshd_rpc_service_component_init_native(service_owner,
+        vstr_from_buf("100.64.0.2", sizeof("100.64.0.2")),
+        vstr_from_buf("node-b.mesh", sizeof("node-b.mesh")), 7878), SALTS_COMPONENT_PLUGIN_OK);
+    client.service_owner = service_owner;
+    check_equal(refresh_at(service_owner, &client.runtime, 0, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(6));
+    check_equal(discovery_epochs.next_epoch, UINT64_C(7));
+    client.service_owner = NULL;
+    check_equal(meshd_rpc_service_component_destroy(service_owner), SALTS_COMPONENT_PLUGIN_OK);
+    wait_verified_service_epoch(&server, &client, 6, &record);
+    check_equal(record.virtual_host, "node-b.mesh");
+    check_equal(record.virtual_ip, "100.64.0.2");
+    /* The no-MagicDNS native startup form must sign empty DNS and resolve to
+     * the virtual IP, never a transport/bind address. Retire before progress. */
+    check_equal(meshd_rpc_service_component_init_native(service_owner,
+        vstr_from_buf("100.64.0.2", sizeof("100.64.0.2")),
+        vstr_from_buf("100.64.0.2", sizeof("100.64.0.2")), 7878), SALTS_COMPONENT_PLUGIN_OK);
+    client.service_owner = service_owner;
+    check_equal(refresh_at(service_owner, &client.runtime, 0, &epoch), MESH_MGMT_AGENT_RUNTIME_OK);
+    check_equal(epoch, UINT64_C(7));
+    check_equal(discovery_epochs.next_epoch, UINT64_C(8));
+    client.service_owner = NULL;
+    check_equal(meshd_rpc_service_component_destroy(service_owner), SALTS_COMPONENT_PLUGIN_OK);
+    wait_verified_service_epoch(&server, &client, 7, &record);
+    check_equal(record.dns_name, "");
+    check_equal(record.virtual_host, "100.64.0.2");
+    check_equal(record.virtual_ip, "100.64.0.2");
+    check_equal(record.port, (uint16_t)7878);
+  }
 
   p2p_disconnect_peer(client.peer);
   wait_established(&server, &client, 2u);
@@ -1747,6 +1988,24 @@ static void test_listener_conflict(int timeout) {
   destroy(&client); destroy(&server);
 }
 spec("Dedicated management runtime on CNet") {
+  before_each() {
+    service_clock_ms = 0;
+    service_clock_delay_ms = 0;
+  }
+  after_each() {
+    /* Fatal assertions must not strand the newly added Component scope/config. */
+    if (discovery_service_owner.affinity.owner != NULL)
+      check_equal(meshd_rpc_service_component_destroy(&discovery_service_owner), SALTS_COMPONENT_PLUGIN_OK);
+    if (discovery_epochs.affinity.owner != NULL)
+      check_equal(meshd_management_epoch_close(&discovery_epochs), 0);
+    if (discovery_epoch_staging != NULL) (void)tt_remove_file(discovery_epoch_staging);
+    if (discovery_epoch_lock != NULL) (void)tt_remove_file(discovery_epoch_lock);
+    if (discovery_epoch_path != NULL) (void)tt_remove_file(discovery_epoch_path);
+    free(discovery_epoch_path);
+    discovery_epoch_path = NULL;
+    tstr_freep(&discovery_epoch_lock);
+    tstr_freep(&discovery_epoch_staging);
+  }
   it("retains signed execution ClientPool Lease until real CNet wire terminal") {
     test_signed_execution_command_wire_terminal_v4();
   }

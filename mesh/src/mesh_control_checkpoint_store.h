@@ -2,7 +2,7 @@
 #define MESH_CONTROL_CHECKPOINT_STORE_H
 
 #include "mesh_control_checkpoint.h"
-#include "turbo_fs.h"
+#include "cmeta_fs.h"
 
 #include <stdint.h>
 
@@ -31,10 +31,10 @@ typedef enum {
  * event loop or transport callback.
  */
 typedef struct {
-  char path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH + 5u];
-  char lock_path[TURBO_FS_MAX_PATH + 6u];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH + 5u];
+  char lock_path[SALTS_FS_MAX_PATH + 6u];
+  cmeta_file_t lock_file;
   uint8_t authentication_key[MESH_CONTROL_CHECKPOINT_STORE_AUTH_KEY_SIZE_V1];
   uint8_t open;
   uint8_t authenticated;
@@ -52,14 +52,21 @@ mesh_control_checkpoint_store_result_t mesh_control_checkpoint_store_open_authen
 /**
  * Loads and atomically restores an existing checkpoint. A missing file is a
  * successful first start with out_found=0; malformed or mismatched files fail
- * closed and leave owner unchanged.
+ * closed and leave owner unchanged. A validated file is republished byte for
+ * byte with durable namespace replacement before owner state is committed;
+ * publication failure returns IO with out_found=0 and owner unchanged.
  */
 mesh_control_checkpoint_store_result_t
 mesh_control_checkpoint_store_load_v1(const mesh_control_checkpoint_store_v1_t *store,
                                       mesh_control_owner_v1_t *owner, uint64_t now_ms,
                                       uint8_t *out_found);
 
-/** Writes temp -> fsync(file) -> close -> atomic rename. */
+/**
+ * Writes a snapshot with durable namespace replacement. IO may mean the new
+ * file is visible with unknown durability; only OK permits WAL compaction.
+ * The store remains single-writer. Retrying an immutable snapshot is safe,
+ * but carries no success or durability guarantee until this call returns OK.
+ */
 mesh_control_checkpoint_store_result_t
 mesh_control_checkpoint_store_save_v1(const mesh_control_checkpoint_store_v1_t *store,
                                       const mesh_control_owner_v1_t *owner);
@@ -68,6 +75,7 @@ mesh_control_checkpoint_store_save_v1(const mesh_control_checkpoint_store_v1_t *
  * Persists an already encoded immutable checkpoint. The caller retains bytes
  * for the duration of this synchronous call. Intended for a persistence
  * worker after the owner thread has produced a bounded canonical snapshot.
+ * Only OK confirms durable publication; the IO/retry contract matches save_v1.
  */
 mesh_control_checkpoint_store_result_t
 mesh_control_checkpoint_store_save_bytes_v1(const mesh_control_checkpoint_store_v1_t *store,

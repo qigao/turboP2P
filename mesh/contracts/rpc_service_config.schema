@@ -1,0 +1,13 @@
+// Startup JSON contract only. The signed MMP TLV service record is independent.
+schema MeshRpcServiceConfigContract [version(1)];
+
+message MeshRpcServiceConfig {
+  @Min(1) @Max(1) uint32 schema_version;
+  @Min(4) @Max(4) uint32 address_family;
+  @Min(1) @Max(223) uint32 octet0;
+  @Min(0) @Max(255) uint32 octet1;
+  @Min(0) @Max(255) uint32 octet2;
+  @Min(0) @Max(255) uint32 octet3;
+  @Min(1) @Max(65535) uint32 port;
+  string dns_name;
+}

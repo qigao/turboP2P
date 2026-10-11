@@ -1,0 +1,8 @@
+if(NOT DEFINED ENV{HTTP_SERVICES_ROOT} OR
+   NOT IS_DIRECTORY "$ENV{HTTP_SERVICES_ROOT}")
+  message(FATAL_ERROR "HTTP_SERVICES_ROOT must name the installed CHttp SDK profile")
+endif()
+unset(Chttp_DIR CACHE)
+unset(Chttp_DIR)
+find_package(Chttp CONFIG REQUIRED PATHS "$ENV{HTTP_SERVICES_ROOT}"
+             NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)

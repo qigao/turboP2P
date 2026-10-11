@@ -95,13 +95,29 @@ target_include_directories(mesh_control_primitives PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 set_property(TARGET mesh_control_primitives PROPERTY FOLDER "mesh/internal")
 
+include(CHttpDependencies)
+add_library(meshctl_controller_http STATIC
+  src/meshctl_controller_http.c src/meshctl_controller_http.h
+  src/meshctl_controller_validation.h)
+target_include_directories(meshctl_controller_http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(meshctl_controller_http PUBLIC CHttp::Client
+  PRIVATE Salts::Core Salts::UriParser Salts::JsonParser)
+set_property(TARGET meshctl_controller_http PROPERTY FOLDER "mesh/internal")
+
+if(BUILD_TESTS OR BUILD_EXAMPLES)
+  add_library(meshctl_rpc_http STATIC src/meshctl_rpc_http.c src/meshctl_rpc_http.h)
+  target_include_directories(meshctl_rpc_http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(meshctl_rpc_http PUBLIC CHttp::Client PRIVATE Salts::Core)
+  set_property(TARGET meshctl_rpc_http PROPERTY FOLDER "mesh/internal")
+endif()
+
 add_library(meshctl_product STATIC
   src/meshctl_product.c
   src/meshctl_product.h)
 target_include_directories(meshctl_product PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
 target_link_libraries(meshctl_product PUBLIC
-  TurboParser::Parser TurboParser::Selector TurboHttp::TurboHttp
+  TurboParser::Parser TurboParser::Selector meshctl_controller_http
   TurboUtils::Core)
 set_property(TARGET meshctl_product PROPERTY FOLDER "mesh/internal")
 
@@ -389,6 +405,13 @@ target_link_libraries(mesh_control_reconciler PUBLIC
   mesh_control_document mesh_control_state)
 set_property(TARGET mesh_control_reconciler PROPERTY FOLDER "mesh/internal")
 
+add_library(mesh_control_component_provider STATIC
+  src/mesh_control_component_provider.c src/mesh_control_component_provider.h)
+target_include_directories(mesh_control_component_provider PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_control_component_provider PUBLIC Salts::ComponentPlugin)
+set_property(TARGET mesh_control_component_provider PROPERTY FOLDER "mesh/internal")
+set_property(TARGET mesh_control_component_provider PROPERTY POSITION_INDEPENDENT_CODE ON)
+
 add_library(mesh_control_owner STATIC
   src/mesh_control_owner.c
   src/mesh_control_owner.h)
@@ -400,7 +423,8 @@ set_property(TARGET mesh_control_owner PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_checkpoint STATIC
   src/mesh_control_checkpoint.c
-  src/mesh_control_checkpoint.h)
+  src/mesh_control_checkpoint.h
+  src/mesh_control_checkpoint_internal.h)
 target_include_directories(mesh_control_checkpoint PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_checkpoint
@@ -410,22 +434,26 @@ set_property(TARGET mesh_control_checkpoint PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_checkpoint_store STATIC
   src/mesh_control_checkpoint_store.c
-  src/mesh_control_checkpoint_store.h)
+  src/mesh_control_checkpoint_store.h
+  src/mesh_control_checkpoint_snapshot_io.c
+  src/mesh_control_checkpoint_snapshot_io.h)
 target_include_directories(mesh_control_checkpoint_store PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_checkpoint_store
-  PUBLIC mesh_control_checkpoint TurboUtils::Core
+  PUBLIC mesh_control_checkpoint Salts::Core
   PRIVATE OpenSSL::Crypto)
 set_property(TARGET mesh_control_checkpoint_store PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_wal STATIC
   src/mesh_control_wal.c
-  src/mesh_control_wal.h)
+  src/mesh_control_wal.h
+  src/mesh_control_wal_snapshot_io.c
+  src/mesh_control_wal_snapshot_io.h)
 target_include_directories(mesh_control_wal PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_wal
-  PUBLIC mesh_control_owner mesh_control_mmp
-  PRIVATE mesh_mgmt_crypto OpenSSL::Crypto TurboUtils::Core)
+  PUBLIC mesh_control_owner mesh_control_mmp Salts::Core
+  PRIVATE mesh_mgmt_crypto OpenSSL::Crypto)
 set_property(TARGET mesh_control_wal PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_wal_worker STATIC
@@ -434,7 +462,7 @@ add_library(mesh_control_wal_worker STATIC
 target_include_directories(mesh_control_wal_worker PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_control_wal_worker
-  PUBLIC mesh_control_checkpoint_store mesh_control_wal TurboUtils::Core
+  PUBLIC mesh_control_checkpoint_store mesh_control_wal Salts::Core
   PRIVATE mesh_mgmt_crypto)
 set_property(TARGET mesh_control_wal_worker PROPERTY FOLDER "mesh/internal")
 
@@ -818,7 +846,9 @@ set_property(TARGET m3_chunk_read_service PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_mgmt_execution_store STATIC
   src/mesh_mgmt_execution_store.c
-  src/mesh_mgmt_execution_store.h)
+  src/mesh_mgmt_execution_store.h
+  src/mesh_mgmt_execution_snapshot_io.c
+  src/mesh_mgmt_execution_snapshot_io.h)
 target_include_directories(mesh_mgmt_execution_store PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_execution_store
@@ -1148,14 +1178,23 @@ set_property(TARGET mesh_mgmt_service_publisher PROPERTY FOLDER "mesh/internal")
 # DataBind 4.3 ACE service configuration is a startup-only adapter and borrows
 # no schema/record into P2P or MMP owner callbacks. Canonical service encoding
 # enforces DNS and address rules before a signed service is published.
+add_subdirectory(contracts)
 add_library(mesh_mgmt_service_config STATIC
   src/mesh_mgmt_service_config.c
   src/mesh_mgmt_service_config.h)
 target_include_directories(mesh_mgmt_service_config PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(mesh_mgmt_service_config PUBLIC
-  mesh_mgmt_service_publisher PRIVATE Salts::DataBind)
+  mesh_mgmt_service_publisher PRIVATE Salts::DataBind mesh_rpc_service_config_contract_types)
 set_property(TARGET mesh_mgmt_service_config PROPERTY FOLDER "mesh/internal")
+set_property(TARGET mesh_mgmt_service_config PROPERTY POSITION_INDEPENDENT_CODE ON)
+
+add_library(mesh_mgmt_service_component STATIC
+  src/mesh_mgmt_service_component.c src/mesh_mgmt_service_component.h)
+target_include_directories(mesh_mgmt_service_component PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(mesh_mgmt_service_component PUBLIC mesh_mgmt_service_config Salts::ComponentPlugin)
+set_target_properties(mesh_mgmt_service_component PROPERTIES
+  FOLDER "mesh/internal" POSITION_INDEPENDENT_CODE ON)
 
 
 # Dedicated mesh-agent composition root. It owns a private P2P listener, the
@@ -1172,6 +1211,27 @@ target_link_libraries(mesh_mgmt_agent_runtime PUBLIC
   mesh_mgmt_service_publisher
   Salts::Platform)
 set_property(TARGET mesh_mgmt_agent_runtime PROPERTY FOLDER "mesh/internal")
+
+add_library(mesh_mgmt_service_component_runtime STATIC
+  src/mesh_mgmt_service_component_runtime.c src/mesh_mgmt_service_component_runtime.h)
+target_link_libraries(mesh_mgmt_service_component_runtime PUBLIC
+  mesh_mgmt_service_component mesh_mgmt_agent_runtime)
+set_property(TARGET mesh_mgmt_service_component_runtime PROPERTY FOLDER "mesh/internal")
+
+add_library(meshd_rpc_service_component STATIC
+  examples/meshd_rpc_service_component.c examples/meshd_rpc_service_component.h)
+target_include_directories(meshd_rpc_service_component PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+target_link_libraries(meshd_rpc_service_component PUBLIC mesh_mgmt_service_component_runtime Salts::Platform Salts::Core)
+if(WIN32)
+  target_link_libraries(meshd_rpc_service_component PRIVATE ws2_32)
+endif()
+set_property(TARGET meshd_rpc_service_component PROPERTY FOLDER "mesh/examples")
+
+add_library(meshd_management_epoch STATIC
+  examples/meshd_management_epoch.c examples/meshd_management_epoch.h)
+target_include_directories(meshd_management_epoch PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/examples)
+target_link_libraries(meshd_management_epoch PUBLIC Salts::Core Salts::Platform)
+set_property(TARGET meshd_management_epoch PROPERTY FOLDER "mesh/examples")
 
 # Length-first framing for future reliable byte-stream transports. This codec
 # is internal and transport-agnostic; it is not linked into the mesh data path.

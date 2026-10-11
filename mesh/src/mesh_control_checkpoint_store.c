@@ -1,10 +1,14 @@
 #include "mesh_control_checkpoint_store.h"
+#include "mesh_control_checkpoint_internal.h"
+#include "mesh_control_checkpoint_snapshot_io.h"
+#include <fmt.h>
+#include <errno.h>
+#include <limits.h>
 
 #include <ctype.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -60,54 +64,47 @@ map_checkpoint_result(mesh_control_checkpoint_result_t result) {
   }
 }
 
-static mesh_control_checkpoint_store_result_t write_all(turbo_file_t file, const uint8_t *bytes,
-                                                        size_t size) {
-  size_t offset = 0u;
-  while (offset < size) {
-    int written = turbo_fs_write(file, (const char *)bytes + offset, size - offset);
-    if (written <= 0)
-      return MESH_CONTROL_CHECKPOINT_STORE_IO;
-    offset += (size_t)written;
-  }
-  return MESH_CONTROL_CHECKPOINT_STORE_OK;
-}
-
 static mesh_control_checkpoint_store_result_t
 read_exact_file(const char *path, size_t max_size, uint8_t **out_bytes, size_t *out_size) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  cmeta_fs_stat_t stat;
+  cmeta_file_t file = SALTS_INVALID_FILE;
   uint8_t *bytes = NULL;
   uint8_t trailing;
   size_t offset = 0u;
   int read_size;
 
-  if (!path || !out_bytes || !out_size || turbo_fs_stat(path, &stat) != 0 || !stat.is_file ||
-      stat.size < CHECKPOINT_STORE_MIN_FILE_SIZE || stat.size > max_size || stat.size > SIZE_MAX) {
+  if (cmeta_fs_lstat(path, &stat) != 0)
+    return MESH_CONTROL_CHECKPOINT_STORE_IO;
+  if (!stat.is_file || stat.is_symlink || stat.size < CHECKPOINT_STORE_MIN_FILE_SIZE ||
+      stat.size > max_size || stat.size > SIZE_MAX) {
     return MESH_CONTROL_CHECKPOINT_STORE_CORRUPT;
   }
   bytes = (uint8_t *)malloc((size_t)stat.size);
   if (!bytes)
     return MESH_CONTROL_CHECKPOINT_STORE_RESOURCE_EXHAUSTED;
-  file = turbo_fs_open(path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = cmeta_fs_open(path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     goto io_failed;
   while (offset < (size_t)stat.size) {
-    read_size = turbo_fs_read(file, (char *)bytes + offset, (size_t)stat.size - offset);
-    if (read_size <= 0)
+    read_size = cmeta_fs_read(file, (char *)bytes + offset, (size_t)stat.size - offset);
+    if (read_size <= 0 || (size_t)read_size > (size_t)stat.size - offset)
       goto io_failed;
     offset += (size_t)read_size;
   }
-  read_size = turbo_fs_read(file, (char *)&trailing, 1u);
-  if (read_size != 0 || turbo_fs_close(file) != 0)
+  read_size = cmeta_fs_read(file, (char *)&trailing, 1u);
+  int close_result = cmeta_fs_close(file);
+  file = SALTS_INVALID_FILE;
+  if (read_size != 0 || close_result != 0)
     goto io_failed_closed;
   *out_bytes = bytes;
   *out_size = offset;
   return MESH_CONTROL_CHECKPOINT_STORE_OK;
 
 io_failed:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)cmeta_fs_close(file);
 io_failed_closed:
+  OPENSSL_cleanse(bytes, (size_t)stat.size);
   free(bytes);
   return MESH_CONTROL_CHECKPOINT_STORE_IO;
 }
@@ -115,27 +112,45 @@ io_failed_closed:
 static mesh_control_checkpoint_store_result_t checkpoint_store_open(
     mesh_control_checkpoint_store_v1_t *store, const char *path,
     const uint8_t authentication_key[MESH_CONTROL_CHECKPOINT_STORE_AUTH_KEY_SIZE_V1]) {
-  int length;
+  tstr suffix = NULL;
   mesh_control_checkpoint_store_result_t result = MESH_CONTROL_CHECKPOINT_STORE_INVALID_ARG;
 
-  if (!store || !path || !path_is_absolute(path) || strlen(path) >= TURBO_FS_MAX_PATH)
+  if (!store || !path || !path_is_absolute(path) || strlen(path) >= SALTS_FS_MAX_PATH)
     return result;
   memset(store, 0, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
   memcpy(store->path, path, strlen(path) + 1u);
-  length = snprintf(store->temp_path, sizeof(store->temp_path), "%s.tmp", path);
-  if (length < 0 || (size_t)length >= sizeof(store->temp_path))
+  suffix = tstr_format("{}.tmp", path);
+  if (!suffix) {
+    result = MESH_CONTROL_CHECKPOINT_STORE_RESOURCE_EXHAUSTED;
     goto failed;
-  length = snprintf(store->lock_path, sizeof(store->lock_path), "%s.lock", path);
-  if (length < 0 || (size_t)length >= sizeof(store->lock_path))
+  }
+  memcpy(store->temp_path, suffix, tstr_len(suffix) + 1u);
+  tstr_free(suffix);
+  suffix = tstr_format("{}.lock", path);
+  if (!suffix) {
+    result = MESH_CONTROL_CHECKPOINT_STORE_RESOURCE_EXHAUSTED;
     goto failed;
-  store->lock_file =
-      turbo_fs_open(store->lock_path, TURBO_FS_O_RDWR | TURBO_FS_O_CREAT, CHECKPOINT_STORE_MODE);
-  if (store->lock_file == TURBO_INVALID_FILE) {
+  }
+  memcpy(store->lock_path, suffix, tstr_len(suffix) + 1u);
+  tstr_free(suffix);
+  cmeta_fs_stat_t lock_stat;
+  int lookup = cmeta_fs_lstat(store->lock_path, &lock_stat);
+  if (lookup != 0 && lookup != -ENOENT) {
     result = MESH_CONTROL_CHECKPOINT_STORE_IO;
     goto failed;
   }
-  if (turbo_fs_lock(store->lock_file, TURBO_FS_LOCK_EXCLUSIVE | TURBO_FS_LOCK_NONBLOCK, 0, 1u) !=
+  if (!lookup && (!lock_stat.is_file || lock_stat.is_symlink)) {
+    result = MESH_CONTROL_CHECKPOINT_STORE_IO;
+    goto failed;
+  }
+  store->lock_file = cmeta_fs_open(store->lock_path,
+      SALTS_FS_O_RDWR | (lookup == -ENOENT ? SALTS_FS_O_CREAT : 0), CHECKPOINT_STORE_MODE);
+  if (store->lock_file == SALTS_INVALID_FILE) {
+    result = MESH_CONTROL_CHECKPOINT_STORE_IO;
+    goto failed;
+  }
+  if (cmeta_fs_lock(store->lock_file, SALTS_FS_LOCK_EXCLUSIVE | SALTS_FS_LOCK_NONBLOCK, 0, 1u) !=
       0) {
     result = MESH_CONTROL_CHECKPOINT_STORE_LOCKED;
     goto failed;
@@ -165,6 +180,22 @@ mesh_control_checkpoint_store_result_t mesh_control_checkpoint_store_open_authen
   return checkpoint_store_open(store, path, authentication_key);
 }
 
+typedef struct {
+  const mesh_control_checkpoint_store_v1_t *store;
+  const uint8_t *bytes;
+  size_t size;
+  uint8_t failed;
+} checkpoint_publication;
+
+static int republish_before_restore(void *argument) {
+  checkpoint_publication *pending = (checkpoint_publication *)argument;
+  cmeta_fs_replace_state_t publication = SALTS_FS_REPLACE_NOT_PUBLISHED;
+  int status = mesh_control_checkpoint_snapshot_write(pending->store->temp_path,
+      pending->store->path, pending->bytes, pending->size, NULL, 0u, &publication);
+  pending->failed = status != 0 || publication != SALTS_FS_REPLACE_PUBLISHED_DURABLE;
+  return !pending->failed;
+}
+
 mesh_control_checkpoint_store_result_t
 mesh_control_checkpoint_store_load_v1(const mesh_control_checkpoint_store_v1_t *store,
                                       mesh_control_owner_v1_t *owner, uint64_t now_ms,
@@ -177,8 +208,12 @@ mesh_control_checkpoint_store_load_v1(const mesh_control_checkpoint_store_v1_t *
   if (!store || store->open == 0u || !owner || !out_found)
     return MESH_CONTROL_CHECKPOINT_STORE_INVALID_ARG;
   *out_found = 0u;
-  if (turbo_fs_access(store->path, TURBO_FS_ACCESS_EXISTS) != 0)
+  cmeta_fs_stat_t stat;
+  int lookup = cmeta_fs_lstat(store->path, &stat);
+  if (lookup == -ENOENT)
     return MESH_CONTROL_CHECKPOINT_STORE_OK;
+  if (lookup != 0)
+    return MESH_CONTROL_CHECKPOINT_STORE_IO;
   result = read_exact_file(
       store->path,
       MESH_CONTROL_CHECKPOINT_MAX_SIZE_V1 +
@@ -202,8 +237,10 @@ mesh_control_checkpoint_store_load_v1(const mesh_control_checkpoint_store_v1_t *
     }
     OPENSSL_cleanse(expected, sizeof(expected));
   }
-  result =
-      map_checkpoint_result(mesh_control_checkpoint_restore_v1(owner, bytes, payload_size, now_ms));
+  checkpoint_publication pending = {store, bytes, size, 0u};
+  result = map_checkpoint_result(mesh_control_checkpoint_restore_before_commit(
+      owner, bytes, payload_size, now_ms, republish_before_restore, &pending));
+  if (pending.failed) result = MESH_CONTROL_CHECKPOINT_STORE_IO;
 cleanup:
   OPENSSL_cleanse(bytes, size);
   free(bytes);
@@ -215,55 +252,25 @@ cleanup:
 mesh_control_checkpoint_store_result_t
 mesh_control_checkpoint_store_save_bytes_v1(const mesh_control_checkpoint_store_v1_t *store,
                                             const uint8_t *bytes, size_t size) {
-  turbo_file_t file = TURBO_INVALID_FILE;
-  uint8_t authenticator[MESH_CONTROL_CHECKPOINT_STORE_AUTH_TAG_SIZE_V1];
-  mesh_control_checkpoint_store_result_t result = MESH_CONTROL_CHECKPOINT_STORE_IO;
-  int close_result;
-  int fsync_result;
+  uint8_t authenticator[MESH_CONTROL_CHECKPOINT_STORE_AUTH_TAG_SIZE_V1] = {0};
+  size_t tag_size = 0u;
+  cmeta_fs_replace_state_t publication = SALTS_FS_REPLACE_NOT_PUBLISHED;
 
   if (!store || store->open == 0u || !bytes || size == 0u ||
       size > MESH_CONTROL_CHECKPOINT_MAX_SIZE_V1)
     return MESH_CONTROL_CHECKPOINT_STORE_INVALID_ARG;
-  file = turbo_fs_open(store->temp_path, TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
-                       CHECKPOINT_STORE_MODE);
-  if (file == TURBO_INVALID_FILE) {
-    result = MESH_CONTROL_CHECKPOINT_STORE_IO;
-    goto cleanup;
-  }
-  result = write_all(file, bytes, size);
-  if (result != MESH_CONTROL_CHECKPOINT_STORE_OK)
-    goto cleanup;
   if (store->authenticated) {
     if (!checkpoint_authenticate(store->authentication_key, bytes, size, authenticator)) {
-      result = MESH_CONTROL_CHECKPOINT_STORE_AUTH_FAILED;
-      goto cleanup;
+      OPENSSL_cleanse(authenticator, sizeof(authenticator));
+      return MESH_CONTROL_CHECKPOINT_STORE_AUTH_FAILED;
     }
-    result = write_all(file, authenticator, sizeof(authenticator));
-    if (result != MESH_CONTROL_CHECKPOINT_STORE_OK)
-      goto cleanup;
+    tag_size = sizeof(authenticator);
   }
-  fsync_result = turbo_fs_fsync(file);
-  close_result = turbo_fs_close(file);
-  file = TURBO_INVALID_FILE;
-  if (fsync_result != 0 || close_result != 0) {
-    result = MESH_CONTROL_CHECKPOINT_STORE_IO;
-    goto cleanup;
-  }
-  if (turbo_fs_rename(store->temp_path, store->path) != 0) {
-    result = MESH_CONTROL_CHECKPOINT_STORE_IO;
-    goto cleanup;
-  }
-  result = MESH_CONTROL_CHECKPOINT_STORE_OK;
-
-cleanup:
+  int status = mesh_control_checkpoint_snapshot_write(store->temp_path, store->path,
+      bytes, size, authenticator, tag_size, &publication);
   OPENSSL_cleanse(authenticator, sizeof(authenticator));
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
-  if (result != MESH_CONTROL_CHECKPOINT_STORE_OK &&
-      turbo_fs_access(store->temp_path, TURBO_FS_ACCESS_EXISTS) == 0) {
-    (void)turbo_fs_unlink(store->temp_path);
-  }
-  return result;
+  return !status && publication == SALTS_FS_REPLACE_PUBLISHED_DURABLE
+      ? MESH_CONTROL_CHECKPOINT_STORE_OK : MESH_CONTROL_CHECKPOINT_STORE_IO;
 }
 
 mesh_control_checkpoint_store_result_t
@@ -285,11 +292,11 @@ mesh_control_checkpoint_store_save_v1(const mesh_control_checkpoint_store_v1_t *
 void mesh_control_checkpoint_store_close_v1(mesh_control_checkpoint_store_v1_t *store) {
   if (!store)
     return;
-  if (store->lock_file != TURBO_INVALID_FILE) {
+  if (store->lock_file != SALTS_INVALID_FILE) {
     if (store->open != 0u)
-      (void)turbo_fs_unlock(store->lock_file, 0, 1u);
-    (void)turbo_fs_close(store->lock_file);
+      (void)cmeta_fs_unlock(store->lock_file, 0, 1u);
+    (void)cmeta_fs_close(store->lock_file);
   }
   OPENSSL_cleanse(store, sizeof(*store));
-  store->lock_file = TURBO_INVALID_FILE;
+  store->lock_file = SALTS_INVALID_FILE;
 }

@@ -1,6 +1,6 @@
 #include "meshctl_product.h"
 
-#include <turbo_http.h>
+#include "meshctl_controller_validation.h"
 #include <turbo_parser.h>
 #include <turbo_selector.h>
 #include <turbo_fs.h>
@@ -18,9 +18,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
-
-#define MESHCTL_PRODUCT_MEDIA_TYPE \
-  "application/vnd.turbop2p.control+json;version=1"
 
 static const char *const MESHCTL_SELECTOR_FIELDS_V1[] = {
     "region", "role", "node.id", "node.name", "platform", "arch"};
@@ -132,62 +129,6 @@ static int meshctl_selector_canonicalize(
                            message);
     return result == TURBO_SELECTOR_NO_MEMORY ? -1 : 0;
   }
-  return 1;
-}
-
-static int meshctl_endpoint_valid(const char *endpoint) {
-  uri_t *uri = NULL;
-  const char *path;
-  int valid = 0;
-  if (!endpoint || strlen(endpoint) >= MESHCTL_PRODUCT_ENDPOINT_CAPACITY ||
-      turbo_parse_uri((const uint8_t *)endpoint, strlen(endpoint), &uri) != 0 ||
-      !uri)
-    return 0;
-  path = turbo_uri_path(uri);
-  valid = turbo_uri_is_valid(uri) && turbo_uri_scheme(uri) &&
-          strcmp(turbo_uri_scheme(uri), "https") == 0 &&
-          turbo_uri_host(uri) && turbo_uri_host(uri)[0] != '\0' &&
-          (!turbo_uri_userinfo(uri) || turbo_uri_userinfo(uri)[0] == '\0') &&
-          (!turbo_uri_query(uri) || turbo_uri_query(uri)[0] == '\0') &&
-          (!turbo_uri_fragment(uri) || turbo_uri_fragment(uri)[0] == '\0') &&
-          (!path || path[0] == '\0' || strcmp(path, "/") == 0);
-  turbo_free_uri(&uri);
-  return valid;
-}
-
-static int meshctl_route_valid(const char *route) {
-  static const char prefix[] = "/v1/meshes/";
-  size_t size;
-  if (!route) return 0;
-  size = strlen(route);
-  return size > sizeof(prefix) - 1u &&
-         size < MESHCTL_PRODUCT_ROUTE_CAPACITY &&
-         strncmp(route, prefix, sizeof(prefix) - 1u) == 0 &&
-         !strchr(route, '\r') && !strchr(route, '\n') &&
-         !strchr(route, '#');
-}
-
-static int meshctl_credential_file_valid(const char *path, int private_key) {
-  if (!path || path[0] == '\0' || strlen(path) >= MESHCTL_PRODUCT_PATH_CAPACITY ||
-      strchr(path, '\r') || strchr(path, '\n'))
-    return 0;
-#ifdef _WIN32
-  {
-    DWORD attributes = GetFileAttributesA(path);
-    if (attributes == INVALID_FILE_ATTRIBUTES ||
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0u ||
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0u)
-      return 0;
-  }
-#else
-  {
-    struct stat info;
-    if (lstat(path, &info) != 0 || !S_ISREG(info.st_mode) ||
-        info.st_uid != geteuid() || (info.st_mode & (S_IWGRP | S_IWOTH)) != 0)
-      return 0;
-    if (private_key && (info.st_mode & (S_IRGRP | S_IROTH)) != 0) return 0;
-  }
-#endif
   return 1;
 }
 
@@ -367,11 +308,11 @@ int meshctl_product_parse(int argc, char **argv,
     return_value = 0;
     goto cleanup;
   }
-  if (!meshctl_endpoint_valid(storage.endpoint) ||
+  if (!meshctl_controller_endpoint_valid(storage.endpoint) ||
       !meshctl_identifier_valid(storage.mesh) ||
-      !meshctl_credential_file_valid(storage.ca_file, 0) ||
-      !meshctl_credential_file_valid(storage.cert_file, 0) ||
-      !meshctl_credential_file_valid(storage.key_file, 1) ||
+      !meshctl_controller_credential_file_valid(storage.ca_file, 0) ||
+      !meshctl_controller_credential_file_valid(storage.cert_file, 0) ||
+      !meshctl_controller_credential_file_valid(storage.key_file, 1) ||
       storage.timeout_ms < 1 ||
       storage.timeout_ms > MESHCTL_PRODUCT_MAX_TIMEOUT_MS ||
       storage.page_size < 1 ||
@@ -513,137 +454,6 @@ uint32_t meshctl_deadline_remaining_at(const meshctl_deadline_t *deadline,
   if (!deadline || now_ms >= deadline->deadline_ms) return 0u;
   remaining = deadline->deadline_ms - now_ms;
   return remaining > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining;
-}
-
-void meshctl_controller_response_destroy(
-    meshctl_controller_response_t *response) {
-  if (!response) return;
-  free(response->body);
-  memset(response, 0, sizeof(*response));
-}
-
-meshctl_controller_result_t meshctl_controller_request_http2(
-    void *context, const meshctl_product_common_options_t *options,
-    const meshctl_controller_request_t *request, uint32_t remaining_ms,
-    meshctl_controller_response_t *out_response) {
-  turbo_http_options_t http_options;
-  turbo_tls_client_config_t tls;
-  turbo_http_t *client = NULL;
-  http_response_t *response = NULL;
-  turbo_json_doc_t *json = NULL;
-  char url[MESHCTL_PRODUCT_ENDPOINT_CAPACITY + MESHCTL_PRODUCT_ROUTE_CAPACITY];
-  const char *headers[] = {"Accept: " MESHCTL_PRODUCT_MEDIA_TYPE,
-                           "Content-Type: " MESHCTL_PRODUCT_MEDIA_TYPE};
-  http_method_t method;
-  int header_count;
-  size_t endpoint_size;
-  int written;
-  meshctl_controller_result_t result = MESHCTL_CONTROLLER_TRANSPORT_ERROR;
-  (void)context;
-  if (!options || !meshctl_endpoint_valid(options->endpoint) ||
-      !meshctl_credential_file_valid(options->ca_file, 0) ||
-      !meshctl_credential_file_valid(options->cert_file, 0) ||
-      !meshctl_credential_file_valid(options->key_file, 1) ||
-      !request || !meshctl_route_valid(request->route) || !out_response ||
-      remaining_ms == 0u || remaining_ms > MESHCTL_PRODUCT_MAX_TIMEOUT_MS)
-    return MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-  if (request->method == MESHCTL_CONTROLLER_METHOD_GET) {
-    if (request->body || request->body_size != 0u || request->content_type)
-      return MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-    method = HTTP_GET;
-    header_count = 1;
-  } else if (request->method == MESHCTL_CONTROLLER_METHOD_POST) {
-    if (!request->body || request->body_size == 0u ||
-        request->body_size > MESHCTL_PRODUCT_MAX_REQUEST_SIZE ||
-        !request->content_type ||
-        strcmp(request->content_type, MESHCTL_PRODUCT_MEDIA_TYPE) != 0)
-      return MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-    method = HTTP_POST;
-    header_count = 2;
-  } else {
-    return MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-  }
-  memset(out_response, 0, sizeof(*out_response));
-  endpoint_size = strlen(options->endpoint);
-  if (endpoint_size > 0u && options->endpoint[endpoint_size - 1u] == '/')
-    --endpoint_size;
-  written = snprintf(url, sizeof(url), "%.*s%s", (int)endpoint_size,
-                     options->endpoint, request->route);
-  if (written < 0 || (size_t)written >= sizeof(url))
-    return MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-  if (turbo_http_options_init(&http_options, sizeof(http_options)) != TURBO_OK)
-    return MESHCTL_CONTROLLER_TRANSPORT_ERROR;
-  http_options.transport = TURBO_HTTP_TRANSPORT_H2;
-  http_options.h2_fallback_to_h1 = 0;
-  http_options.follow_redirects = 0;
-  http_options.max_redirects = 0;
-  memset(&http_options.retry, 0, sizeof(http_options.retry));
-  http_options.timeout_ms = (int64_t)remaining_ms;
-  if (turbo_http_create_sync(&http_options, &client) != TURBO_OK || !client)
-    return MESHCTL_CONTROLLER_NO_MEMORY;
-  turbo_http_set_max_response_size(client,
-                                   MESHCTL_PRODUCT_MAX_RESPONSE_SIZE);
-  turbo_http_set_max_response_header_size(
-      client, MESHCTL_PRODUCT_MAX_RESPONSE_HEADER_SIZE);
-  memset(&tls, 0, sizeof(tls));
-  tls.ca_file = options->ca_file;
-  tls.cert_file = options->cert_file;
-  tls.key_file = options->key_file;
-  tls.verify_peer = 1;
-  if (turbo_http_set_tls_config(client, &tls) != TURBO_OK) {
-    result = MESHCTL_CONTROLLER_INVALID_ARGUMENT;
-    goto cleanup;
-  }
-  response = turbo_http_request_sync(client, method, url, headers, header_count,
-                                     request->body, request->body_size);
-  if (!response) {
-    result = MESHCTL_CONTROLLER_NO_MEMORY;
-    goto cleanup;
-  }
-  if (response->error_code != HTTP_ERROR_NONE) {
-    result = response->error_code == HTTP_ERROR_TIMEOUT
-                 ? MESHCTL_CONTROLLER_TIMEOUT
-                 : MESHCTL_CONTROLLER_TRANSPORT_ERROR;
-    goto cleanup;
-  }
-  if (!response->body || response->body_len == 0u ||
-      response->body_len > MESHCTL_PRODUCT_MAX_RESPONSE_SIZE ||
-      turbo_parse_json((const uint8_t *)response->body, response->body_len,
-                       &json) != 0 ||
-      !json) {
-    result = MESHCTL_CONTROLLER_PROTOCOL_ERROR;
-    goto cleanup;
-  }
-  out_response->body = (char *)malloc(response->body_len + 1u);
-  if (!out_response->body) {
-    result = MESHCTL_CONTROLLER_NO_MEMORY;
-    goto cleanup;
-  }
-  memcpy(out_response->body, response->body, response->body_len);
-  out_response->body[response->body_len] = '\0';
-  out_response->body_size = response->body_len;
-  out_response->status_code = response->status_code;
-  result = MESHCTL_CONTROLLER_OK;
-
-cleanup:
-  turbo_free_json(&json);
-  if (response) http_response_free(response);
-  turbo_http_destroy(client);
-  if (result != MESHCTL_CONTROLLER_OK)
-    meshctl_controller_response_destroy(out_response);
-  return result;
-}
-
-meshctl_controller_result_t meshctl_controller_query_http2(
-    void *context, const meshctl_product_common_options_t *options,
-    const char *route, uint32_t remaining_ms,
-    meshctl_controller_response_t *out_response) {
-  meshctl_controller_request_t request;
-  memset(&request, 0, sizeof(request));
-  request.method = MESHCTL_CONTROLLER_METHOD_GET;
-  request.route = route;
-  return meshctl_controller_request_http2(context, options, &request,
-                                          remaining_ms, out_response);
 }
 
 static int meshctl_product_build_route(const meshctl_product_command_t *command,
