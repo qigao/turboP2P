@@ -300,6 +300,105 @@ static void test_roundtrip(size_t receive_bytes, int blocking) {
     check_equal("authenticated payload", pair.server.received, 21);
     teardown(&pair);
 }
+/* Authoritative physical P2P/CNet Owner callbacks, not an injected
+ * upper-layer MMP response or a simulated TLS transport. These probes cross
+ * the real authenticated Noise serialize/encrypt -> CNet terminal boundary.
+ * Local P2P_OK still NEVER means the remote application ACKed a command. */
+typedef struct {
+    unsigned callbacks;
+    int status;
+} encrypted_terminal_probe_t;
+
+static void encrypted_terminal_done(void *context, int status) {
+    encrypted_terminal_probe_t *probe = context;
+    ++probe->callbacks;
+    probe->status = status;
+}
+
+static p2p_message_t *make_terminal_application_message(void) {
+    p2p_message_t *msg = calloc(1u, sizeof(*msg));
+    check_not_null(msg);
+    if (!msg) return NULL;
+    p2p_message_init(msg, P2P_MSG_CUSTOM);
+    memcpy(msg->payload.raw, "typed execution result", 22u);
+    msg->header.payload_len = 22u;
+    return msg;
+}
+
+/* A P2P encrypted application frame larger than the live connection's
+ * actual native CNet HWM advances Noise's CipherState before the transport
+ * rejects it. No terminal callback was admitted; the protocol MUST close
+ * this Noise session, not retry an already-encrypted frame. */
+static void test_authenticated_terminal_hwm_fail_closed(void) {
+    pair_t pair = {0};
+    encrypted_terminal_probe_t probe = {0};
+    p2p_message_t *message;
+    uint64_t deadline;
+    setup(&pair, TEST_SEND_BYTES, 0);
+    wait_ready(&pair);
+    check_not_null(pair.client.peer);
+    check_not_null(pair.client.peer->conn);
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (pair.client.peer->conn &&
+           p2p_cnet_connection_pending_bytes(pair.client.peer->conn) &&
+           cmeta_monotonic_ms() < deadline)
+        pump(&pair);
+    check_not_null(pair.client.peer->conn);
+    check_equal((size_t)0u,
+        p2p_cnet_connection_pending_bytes(pair.client.peer->conn));
+    check_equal(P2P_OK,
+        p2p_cnet_connection_set_send_hwm(pair.client.peer->conn, 1u));
+    message = make_terminal_application_message();
+    check_not_null(message);
+    if (!message) { teardown(&pair); return; }
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED,
+        p2p_peer_send_terminal(pair.client.peer, message,
+                               encrypted_terminal_done, &probe));
+    free(message);
+
+    check_equal(0u, probe.callbacks);
+    check_true(pair.client.peer->conn == NULL);
+    check_true(pair.client.failures > 0);
+    check_equal(P2P_ERR_RESOURCE_EXHAUSTED, pair.client.last_error);
+    for (unsigned i = 0u; i < 5u; ++i) pump(&pair);
+    check_equal(0u, probe.callbacks); /* no phantom send/ACK after close */
+    check_equal(0, pair.server.messages);
+    teardown(&pair);
+}
+
+/* The native send WAS admitted, so the application-owned callback context
+ * survives a logical Noise peer detach. The original CNet Owner alone settles
+ * it exactly once as P2P_OK if full-write beat close, or P2P_ERR_NETWORK if
+ * the physical close won. Neither status asserts remote business success. */
+static void test_authenticated_terminal_survives_logical_disconnect(void) {
+    pair_t pair = {0};
+    encrypted_terminal_probe_t probe = {0};
+    p2p_message_t *message;
+    uint64_t deadline;
+    setup(&pair, TEST_SEND_BYTES, 0);
+    wait_ready(&pair);
+    message = make_terminal_application_message();
+    check_not_null(message);
+    if (!message) { teardown(&pair); return; }
+    check_equal(P2P_OK,
+        p2p_peer_send_terminal(pair.client.peer, message,
+                               encrypted_terminal_done, &probe));
+    free(message);
+    check_equal(0u, probe.callbacks); /* queue admission, NOT wire terminal */
+    p2p_peer_disconnect(pair.client.peer);
+    check_true(pair.client.peer->conn == NULL);
+
+    deadline = cmeta_monotonic_ms() + TEST_WAIT_MS;
+    while (!probe.callbacks && cmeta_monotonic_ms() < deadline)
+        pump(&pair);
+    check_equal(1u, probe.callbacks);
+    check_true(probe.status == P2P_ERR_NETWORK ||
+               probe.status == P2P_OK);
+    for (unsigned i = 0u; i < 5u; ++i) pump(&pair);
+    check_equal(1u, probe.callbacks);
+    teardown(&pair);
+}
+
 static void test_reject(int ready_mismatch) {
     pair_t pair = {0};
     uint64_t deadline;
@@ -467,6 +566,12 @@ static void test_close_pending_preface(void) {
 
 spec("P2P production peer over CNet") {
     it("authenticates actual peers and exchanges canonical encrypted messages") { test_roundtrip(TEST_SEND_BYTES, 0); }
+    it("closes the Noise sender without a phantom terminal when native CNet HWM rejects encrypted bytes") {
+        test_authenticated_terminal_hwm_fail_closed();
+    }
+    it("retains exactly one CNet write terminal across authenticated peer disconnect") {
+        test_authenticated_terminal_survives_logical_disconnect();
+    }
     it("preserves the wire under seven-byte receive fragmentation") { test_roundtrip(7, 0); }
     it("runs both actual node executors and reaches READY after send completion") { test_roundtrip(7, 1); }
     it("rejects a credential through the actual peer verifier") { test_reject(0); }
