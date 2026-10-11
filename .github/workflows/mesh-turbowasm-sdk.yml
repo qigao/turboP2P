@@ -10,6 +10,7 @@ on:
       - feature/mesh-mmp-result-wire-terminal-owner-23
       - test/mesh-mmp-result-terminal-failure-injection
       - test/mmp-native-write-admission-reconnect-isolation
+      - test/mmp-noise-result-wire-failure-lifecycle
   workflow_dispatch:
 
 permissions:

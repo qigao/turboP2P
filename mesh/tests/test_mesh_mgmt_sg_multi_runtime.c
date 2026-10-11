@@ -79,6 +79,7 @@ struct signed_final {
   unsigned rpc_reply_sent, rpc_errors;
 #ifdef MESH_SG_REAL_EXECUTION
   unsigned rpc_result_admissions, rpc_result_native_terminals;
+  unsigned rpc_result_native_failures;
 #endif
 };
 
@@ -105,6 +106,10 @@ struct sg_multi_case {
   uint8_t exercise_typed_rpc;
   uint8_t exercise_signed_result;
   uint8_t exercise_real_execution;
+  uint8_t exercise_result_disconnect;
+  uint8_t defer_result_sends;
+  uint8_t result_disconnect_triggered;
+  unsigned migration_b_status_events;
   uint8_t hold_retiring_final_progress;
   native_io_sharded *host;
   p2p_cnet_sg_t *handoff;
@@ -187,6 +192,26 @@ static int on_event(void *ctx, p2p_peer_t *peer, const uint8_t key[32],
                   MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW) &&
              ep->rpc_final) {
     signed_final *f = ep->rpc_final;
+#ifdef MESH_SG_REAL_EXECUTION
+    if (f->scenario->exercise_result_disconnect &&
+        ep == &f->client &&
+        event->type == MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_STATUS_SHADOW) {
+      /* Distinct, newly authenticated SG Final B. Its independent typed
+       * STATUS does not acknowledge A's prior in-flight RESULT or complete
+       * A's pending RPC Registry. No old callback/credit may be borrowed. */
+      mesh_mgmt_execution_response_v1_t fresh = {0};
+      if (mesh_mgmt_agent_runtime_execution_response_from_event_v1(
+              &ep->runtime, peer, event, &fresh) !=
+              MESH_MGMT_EXECUTION_RESPONSE_CONSUMER_OK ||
+          fresh.kind != MESH_MGMT_KIND_COMMAND_STATUS ||
+          fresh.status.code != MESH_MGMT_EXECUTION_STATUS_DISABLED) {
+        ++f->rpc_errors;
+        return -1;
+      }
+      ++f->scenario->migration_b_status_events;
+      return 0;
+    }
+#endif
     mesh_mgmt_execution_response_v1_t response = {0};
     const int is_result =
         event->type == MESH_MGMT_DISPATCH_EVENT_NODE_EXECUTION_RESULT_SHADOW;
@@ -895,11 +920,13 @@ static void host_send_command(native_io_sharded_context *ctx, void *arg) {
       ? &lane->scenario->finals_data[0] : f;
   uint64_t denied = 97u;
   cnet_pool_snapshot pool = {0};
-  const uint8_t kind = lane->scenario->exercise_typed_rpc
+  const int typed_request = lane->scenario->exercise_typed_rpc &&
+      !(lane->scenario->exercise_result_disconnect && f->final_index > 0u);
+  const uint8_t kind = typed_request
       ? MESH_MGMT_KIND_COMMAND_REQUEST : MESH_MGMT_KIND_COMMAND_STATUS;
-  const uint8_t *payload = lane->scenario->exercise_typed_rpc
+  const uint8_t *payload = typed_request
       ? f->request_payload : f->command_payload;
-  const size_t payload_len = lane->scenario->exercise_typed_rpc
+  const size_t payload_len = typed_request
       ? f->request_payload_len : f->command_payload_len;
   SG_CHECK(lane, mesh_mgmt_agent_runtime_send_execution_leased_v4(
       &f->server.runtime, kind,
@@ -1078,6 +1105,29 @@ static void host_migration_retire_old(native_io_sharded_context *ctx, void *arg)
       return;
     }
   }
+#ifdef MESH_SG_REAL_EXECUTION
+  if (lane->scenario->exercise_result_disconnect) {
+    /* This is the ORIGINAL A SG registry. Even if the remote Result's local
+     * native write terminal reports P2P_OK, A's RPC is only RESULT after its
+     * independently authenticated dispatcher callback. The new Final B
+     * STATUS never settles or borrows this outstanding command. */
+    mesh_mgmt_execution_rpc_completion_v1_t completion = {0};
+    SG_CHECK(lane, mesh_mgmt_execution_rpc_registry_get_v1(
+        &old->rpc_registry, old->rpc_binding.correlation_id,
+        TEST_NOW_MS + 2u, &completion));
+    const mesh_mgmt_execution_rpc_state_t state =
+        old->rpc_result_events == 1u
+            ? MESH_MGMT_EXECUTION_RPC_RESULT
+            : MESH_MGMT_EXECUTION_RPC_PENDING;
+    if (completion.state != state) {
+      fail_lane(lane, SALTS_EPROTO, "old A execution RPC falsely completed by B");
+      return;
+    }
+    /* This is test shutdown of the original RPC Registry; production would
+     * carry PENDING records to control-plane persistence/reconciliation. */
+    mesh_mgmt_execution_rpc_registry_destroy_v1(&old->rpc_registry);
+  }
+#endif
   SG_CHECK(lane, mesh_mgmt_agent_runtime_stop_v1(&old->server.runtime));
   SG_CHECK(lane, mesh_mgmt_agent_runtime_destroy_v2(&old->server.runtime));
   if (!old->node || !old->owner || old->server.runtime.node)
@@ -1196,7 +1246,10 @@ static void pump(sg_multi_case *sc) {
 #ifdef MESH_SG_REAL_EXECUTION
       if (sc->exercise_real_execution) {
         if (f->rpc_request_events == 1u && !f->rpc_reply_sent &&
-            !f->rpc_errors) {
+            !f->rpc_errors &&
+            !(sc->exercise_result_disconnect && sc->defer_result_sends) &&
+            !(sc->exercise_result_disconnect &&
+              f->rpc_result_native_failures != 0u)) {
           const mesh_mgmt_execution_node_result_t sent =
               mesh_mgmt_execution_node_send_next_v1(
                   &f->execution_node, &client->runtime);
@@ -1229,7 +1282,29 @@ static void pump(sg_multi_case *sc) {
                           client->runtime.state);
               check_equal(MESH_MGMT_EXECUTION_NODE_BUSY,
                   mesh_mgmt_execution_node_destroy_v2(&f->execution_node));
+              if (sc->exercise_result_disconnect &&
+                  !sc->result_disconnect_triggered) {
+                /* AFTER a production encrypted RESULT has truly entered
+                 * native CNet, disconnect the original authenticated
+                 * outbound MMP connection BEFORE its native owner polls.
+                 * Keep the SG A observer paused until B is authenticated.
+                 * No second native observer, synthetic callback or replay. */
+                sc->result_disconnect_triggered = 1u;
+                sc->hold_retiring_final_progress = 1u;
+                check_not_null(client->peer);
+                p2p_disconnect_peer(client->peer);
+              }
             }
+          } else if (sc->exercise_result_disconnect &&
+                     sent == MESH_MGMT_EXECUTION_NODE_SEND_FAILED &&
+                     (f->execution_node.response_sender.state ==
+                          MESH_MGMT_EXECUTION_SEND_WIRE_FAILED ||
+                      f->execution_node.response_sender.state ==
+                          MESH_MGMT_EXECUTION_SEND_ADMISSION_FAILED)) {
+            /* Indeterminate native failure is sticky. Do NOT re-admit
+             * the previously encrypted RESULT on Final B. */
+            if (!f->rpc_result_native_failures)
+              ++f->rpc_result_native_failures;
           } else if (sent != MESH_MGMT_EXECUTION_NODE_EMPTY)
             ++f->rpc_errors;
         }
@@ -1771,6 +1846,13 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   sc->shards = final_count + 1u;
   sc->same_signed_identity = 1u;
   sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
+#ifdef MESH_SG_REAL_EXECUTION
+  sc->exercise_typed_rpc = (uint8_t)(command_mode == 2);
+  sc->exercise_signed_result = (uint8_t)(command_mode == 2);
+  sc->exercise_real_execution = (uint8_t)(command_mode == 2);
+  sc->exercise_result_disconnect = (uint8_t)(command_mode == 2);
+  sc->defer_result_sends = (uint8_t)(command_mode == 2);
+#endif
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -1789,6 +1871,19 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     f->scenario = sc;
     f->final_index = i;
     if (command_mode) enable_command_status(f);
+#ifdef MESH_SG_REAL_EXECUTION
+    if (command_mode == 2 && i == 0u) {
+      f->server.rpc_final = f;
+      f->client.rpc_final = f;
+      init_real_execution_node(f);
+      prepare_typed_request(f);
+      uint8_t signer_private[32] = {0};
+      memset(signer_private, 0x81, sizeof(signer_private));
+      check_equal(MESH_MGMT_CRYPTO_OK,
+          mesh_mgmt_ed25519_public_from_private(
+              signer_private, f->result_signer_public));
+    }
+#endif
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
     f->server.config.p2p_private_key = NULL;
@@ -1839,6 +1934,53 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   submit(sc, 1u, host_snapshot);
   barrier(sc);
   check_equal((size_t)1u, old->pool.ready);
+#ifdef MESH_SG_REAL_EXECUTION
+  if (command_mode == 2) {
+    /* A sends a REAL signed COMMAND_REQUEST to its authenticated remote
+     * TurboWasm Execution Node, and the actual Worker commits a signed
+     * result to Store. Hold the response Egress before its first send;
+     * A's REQUEST must complete normally before we test RESULT failure. */
+    submit(sc, 1u, host_register_rpc);
+    barrier(sc);
+    submit(sc, 1u, host_send_command);
+    barrier(sc);
+    const uint64_t worker_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((old->command_terminals != 1u ||
+            old->rpc_request_events != 1u ||
+            atomic_load(&old->execution_node.egress.pending) != 1u) &&
+           cmeta_monotonic_ms() < worker_deadline)
+      pump(sc);
+    check_equal(1u, old->command_terminals);
+    check_equal(P2P_OK, old->command_terminal_status);
+    check_equal(1u, old->rpc_request_events);
+    check_equal((size_t)1u,
+                atomic_load(&old->execution_node.egress.pending));
+    check_equal((size_t)0u,
+                old->server.runtime.command_terminal_inflight);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 1u, host_snapshot_rpc);
+    barrier(sc);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal(MESH_MGMT_EXECUTION_RPC_PENDING,
+                old->rpc_completion.state);
+    /* Allow ONE real RESULT admission; the live client disconnect is
+     * triggered by pump() BEFORE the client CNet Owner can progress it. */
+    sc->defer_result_sends = 0u;
+    const uint64_t admission_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((!sc->result_disconnect_triggered ||
+            old->client.closed == 0u) &&
+           cmeta_monotonic_ms() < admission_deadline)
+      pump(sc);
+    check_true(sc->result_disconnect_triggered);
+    /* Logical P2P close is asynchronous: the original outbound Client
+     * CNet owner must progress the actual closed callback. */
+    check_true(old->client.closed != 0u);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(0u, old->rpc_result_events);
+  } else
+#endif
   if (command_mode) {
     /* One REAL command fills A's one-slot Pool; until original SG Host A
      * resumes, no fake logical terminal or premature Lease reclaim. */
@@ -1863,8 +2005,13 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   /* Real disconnect, then only EndpointPool retries. The acceptor
    * Round-Robin selection moves the REAUTHENTICATED same transport key
    * to a different final CNet Owner without moving any existing socket. */
-  check_not_null(old->client.peer);
-  p2p_disconnect_peer(old->client.peer);
+  if (sc->exercise_result_disconnect) {
+    check_true(sc->result_disconnect_triggered);
+    check_true(old->client.closed != 0u);
+  } else {
+    check_not_null(old->client.peer);
+    p2p_disconnect_peer(old->client.peer);
+  }
   const uint64_t reconnect_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
   while ((!next->server.established || old->client.established < 2u ||
           (!command_mode && !old->server.closed)) &&
@@ -1881,6 +2028,89 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   check_equal((size_t)1u, next->pool.ready);
   check_true(next->manager != old->manager);
   check_equal(old->immutable_key.owner_id, next->immutable_key.owner_id);
+#ifdef MESH_SG_REAL_EXECUTION
+  if (command_mode == 2) {
+    /* B's independent authenticated typed STATUS is queued on its OWN SG
+     * Final/Manager while the A SG Host remains paused. It must never
+     * consume/retry A's earlier genuine signed RESULT or its Egress. */
+    check_equal(1u, old->command_terminals);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal(0u, old->rpc_result_events);
+    submit(sc, 2u, host_send_command);
+    barrier(sc);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)1u, next->pool.active_leases);
+    const uint64_t migration_result_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((next->command_terminals != 1u ||
+            sc->migration_b_status_events != 1u ||
+            old->client.runtime.response_terminal_active ||
+            old->rpc_result_native_terminals +
+                old->rpc_result_native_failures != 1u) &&
+           cmeta_monotonic_ms() < migration_result_deadline)
+      pump(sc);
+    check_equal(1u, next->command_terminals);
+    check_equal(P2P_OK, next->command_terminal_status);
+    check_equal(1u, sc->migration_b_status_events);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(1u, old->rpc_result_native_terminals +
+                    old->rpc_result_native_failures);
+    check_equal(0u, old->rpc_result_events);
+    check_equal(0u, old->rpc_errors);
+    check_equal(1u, old->command_terminals);
+    check_true(!old->client.runtime.response_terminal_active);
+    check_true(old->client.runtime.last_response_terminal_ticket != 0u);
+    /* Native completion changed upstream CNet Pool accounting; the copied
+     * test snapshot is stale until refreshed ON THE ORIGINAL B SG OWNER.
+     * Never infer credits from a cross-thread cached snapshot. */
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)0u, next->pool.active_leases);
+    submit(sc, 1u, host_snapshot_rpc);
+    barrier(sc);
+    check_equal(MESH_MGMT_EXECUTION_RPC_PENDING,
+                old->rpc_completion.state); /* NO cross-generation ACK */
+    {
+      const mesh_mgmt_execution_sender_pending_v5_t *pending =
+          &old->execution_node.response_sender;
+      const size_t egress_pending =
+          atomic_load(&old->execution_node.egress.pending);
+      if (old->rpc_result_native_failures) {
+        check_equal(MESH_MGMT_EXECUTION_SEND_WIRE_FAILED, pending->state);
+        check_equal((size_t)1u, egress_pending);
+        check_equal(0u, old->rpc_reply_sent);
+      } else {
+        check_equal(MESH_MGMT_EXECUTION_SEND_IDLE, pending->state);
+        check_equal((size_t)0u, egress_pending);
+        check_equal(1u, old->rpc_reply_sent);
+      }
+    }
+
+    /* Now resume ONLY the original SG A observer. The actual old physical
+     * completion cannot mutate B's READY Pool, new Lease generations or
+     * independent native send ticket, even if A's RESULT reached the wire. */
+    sc->hold_retiring_final_progress = 0u;
+    const uint64_t retire_a_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while (!old->server.closed &&
+           cmeta_monotonic_ms() < retire_a_deadline)
+      pump(sc);
+    check_true(old->server.closed != 0u);
+    check_equal(1u, old->command_terminals);
+    check_equal(1u, next->command_terminals);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 2u, host_snapshot);
+    barrier(sc);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal((size_t)0u, next->pool.active_leases);
+    check_equal((size_t)1u, next->pool.ready);
+    /* Keep B's real application Lease through A retirement. */
+    submit(sc, 2u, host_acquire);
+    barrier(sc);
+    check_true(next->lease.slot != 0u);
+  } else
+#endif
   if (command_mode) {
     /* B's new authenticated command completes FIRST while A's original
      * CNet Owner is paused, so A retains its admitted send ticket/Lease. */
@@ -1976,6 +2206,77 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   /* Shut down the ONLY dialing client before stopping the new signed
    * Final B. This avoids another round-robin reauthentication while the
    * test qualifies B's checked Stop/Destroy with its Lease outstanding. */
+#ifdef MESH_SG_REAL_EXECUTION
+  if (sc->exercise_result_disconnect) {
+    /* The original genuine Worker RESULT remains cryptographically signed
+     * and COMMITTED TO DISK regardless of whether the native write lost the
+     * close race. In particular a B-native STATUS cannot retire A's Store. */
+    mesh_mgmt_execution_result_v1_t saved = {0};
+    mesh_mgmt_execution_worker_stats_v1_t stats = {0};
+    mesh_mgmt_execution_node_v1_t *node = &old->execution_node;
+    const size_t waiting = atomic_load(&node->egress.pending);
+    char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
+    char tmp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
+    check_true(!old->client.runtime.response_terminal_active);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(1u, old->rpc_result_native_terminals +
+                    old->rpc_result_native_failures);
+    check_equal(waiting != 0u,
+                mesh_mgmt_execution_node_shutdown_v1(node) ==
+                    MESH_MGMT_EXECUTION_NODE_BUSY);
+    check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
+        mesh_mgmt_execution_worker_get_stats_v1(&node->worker, &stats));
+    check_equal((uint64_t)1u, stats.submitted);
+    check_equal((uint64_t)1u, stats.completed);
+    check_equal(MESH_MGMT_EXECUTION_STORE_OK,
+        mesh_mgmt_execution_store_get_result_v1(
+            &node->store, old->expected_command_id, &saved));
+    check_equal(MESH_MGMT_EXECUTION_RESULT_OK,
+        mesh_mgmt_execution_result_verify_v1(
+            &saved, old->result_signer_public));
+    check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, saved.state);
+    check_equal(0, saved.guest_exit_code);
+    check_equal((uint64_t)1u, saved.usage.invocations);
+    check_equal(old->expected_request_digest, saved.request_digest,
+                sizeof(old->expected_request_digest));
+    if (waiting) {
+      check_equal((size_t)1u, waiting);
+      check_equal((unsigned)1u, old->rpc_result_native_failures);
+      check_equal(MESH_MGMT_EXECUTION_SEND_WIRE_FAILED,
+                  node->response_sender.state);
+      check_equal(MESH_MGMT_EXECUTION_NODE_BUSY,
+          mesh_mgmt_execution_node_destroy_v2(node));
+      /* TEST-FIXTURE-ONLY explicit abandonment for cleaning this ephemeral
+       * journal. This is NOT a production reconciliation API or an ACK:
+       * a real product must first persist unresolved delivery to its own
+       * durable control WAL before releasing this signed Egress item.
+       * Crucially the production code never does this silently. */
+      check_equal(MESH_MGMT_EXECUTION_EGRESS_OK,
+          mesh_mgmt_execution_egress_consume_v1(&node->egress));
+      node->response_sender.runtime = NULL;
+      node->response_sender.egress = NULL;
+      node->response_sender.ticket = 0u;
+      node->response_sender.state = MESH_MGMT_EXECUTION_SEND_IDLE;
+    } else {
+      check_equal((size_t)0u, waiting);
+      check_equal((unsigned)1u, old->rpc_result_native_terminals);
+      check_equal(MESH_MGMT_EXECUTION_SEND_IDLE,
+                  node->response_sender.state);
+    }
+    check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+        mesh_mgmt_execution_node_destroy_v2(node));
+    check_not_null(old->execution_store_path);
+    (void)snprintf(lock_path, sizeof(lock_path), "%s.lock",
+                   old->execution_store_path);
+    (void)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+                   old->execution_store_path);
+    (void)remove(old->execution_store_path);
+    (void)remove(lock_path);
+    (void)remove(tmp_path);
+    free(old->execution_store_path);
+    old->execution_store_path = NULL;
+  }
+#endif
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_destroy_v2(&old->client.runtime));
   submit(sc, 2u, host_stop_retaining);
@@ -2026,6 +2327,12 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
 #ifdef MESH_SG_REAL_EXECUTION
+  it("retains actual signed Worker RESULT through A disconnect and separates new B across 2 SG Finals") {
+    test_signed_reconnect_across_finals(2u, 2);
+  }
+  it("retains actual signed Worker RESULT through A disconnect and separates new B across 4 SG Finals") {
+    test_signed_reconnect_across_finals(4u, 2);
+  }
   it("executes genuine signed remote Wasm on 2 SG Final Worker Owners") {
     test_multi_final(2u, 4);
   }
