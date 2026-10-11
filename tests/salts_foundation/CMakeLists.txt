@@ -578,7 +578,9 @@ if(P2P_TURBOWASM_SDK_GATE)
   set_property(TARGET test_mesh_mgmt_execution_sender_terminal_sdk
     PROPERTY LINKER_LANGUAGE CXX)
   target_include_directories(test_mesh_mgmt_execution_sender_terminal_sdk
-    PRIVATE "${mesh_src}")
+    PRIVATE "${mesh_src}"
+            "${TURBOP2P_SOURCE_DIR}/p2p/include"
+            "${TURBOP2P_SOURCE_DIR}/p2p/src")
   target_link_libraries(test_mesh_mgmt_execution_sender_terminal_sdk PRIVATE
     foundation Salts::TinyTest Salts::Concurrency Salts::Core OpenSSL::Crypto)
   add_test(NAME test_mesh_mgmt_execution_sender_terminal_sdk
