@@ -2191,6 +2191,77 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   /* Shut down the ONLY dialing client before stopping the new signed
    * Final B. This avoids another round-robin reauthentication while the
    * test qualifies B's checked Stop/Destroy with its Lease outstanding. */
+#ifdef MESH_SG_REAL_EXECUTION
+  if (sc->exercise_result_disconnect) {
+    /* The original genuine Worker RESULT remains cryptographically signed
+     * and COMMITTED TO DISK regardless of whether the native write lost the
+     * close race. In particular a B-native STATUS cannot retire A's Store. */
+    mesh_mgmt_execution_result_v1_t saved = {0};
+    mesh_mgmt_execution_worker_stats_v1_t stats = {0};
+    mesh_mgmt_execution_node_v1_t *node = &old->execution_node;
+    const size_t waiting = atomic_load(&node->egress.pending);
+    char lock_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 6u];
+    char tmp_path[MESH_MGMT_EXECUTION_STORE_PATH_MAX + 5u];
+    check_true(!old->client.runtime.response_terminal_active);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(1u, old->rpc_result_native_terminals +
+                    old->rpc_result_native_failures);
+    check_equal(MESH_MGMT_EXECUTION_NODE_BUSY == (waiting != 0u),
+                mesh_mgmt_execution_node_shutdown_v1(node) ==
+                    MESH_MGMT_EXECUTION_NODE_BUSY);
+    check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
+        mesh_mgmt_execution_worker_get_stats_v1(&node->worker, &stats));
+    check_equal((uint64_t)1u, stats.submitted);
+    check_equal((uint64_t)1u, stats.completed);
+    check_equal(MESH_MGMT_EXECUTION_STORE_OK,
+        mesh_mgmt_execution_store_get_result_v1(
+            &node->store, old->expected_command_id, &saved));
+    check_equal(MESH_MGMT_EXECUTION_RESULT_OK,
+        mesh_mgmt_execution_result_verify_v1(
+            &saved, old->result_signer_public));
+    check_equal(MESH_MGMT_EXECUTION_STATE_SUCCEEDED, saved.state);
+    check_equal(0, saved.guest_exit_code);
+    check_equal((uint64_t)1u, saved.usage.invocations);
+    check_equal(old->expected_request_digest, saved.request_digest,
+                sizeof(old->expected_request_digest));
+    if (waiting) {
+      check_equal((size_t)1u, waiting);
+      check_equal((unsigned)1u, old->rpc_result_native_failures);
+      check_equal(MESH_MGMT_EXECUTION_SEND_WIRE_FAILED,
+                  node->response_sender.state);
+      check_equal(MESH_MGMT_EXECUTION_NODE_BUSY,
+          mesh_mgmt_execution_node_destroy_v2(node));
+      /* TEST-FIXTURE-ONLY explicit abandonment for cleaning this ephemeral
+       * journal. This is NOT a production reconciliation API or an ACK:
+       * a real product must first persist unresolved delivery to its own
+       * durable control WAL before releasing this signed Egress item.
+       * Crucially the production code never does this silently. */
+      check_equal(MESH_MGMT_EXECUTION_EGRESS_OK,
+          mesh_mgmt_execution_egress_consume_v1(&node->egress));
+      node->response_sender.runtime = NULL;
+      node->response_sender.egress = NULL;
+      node->response_sender.ticket = 0u;
+      node->response_sender.state = MESH_MGMT_EXECUTION_SEND_IDLE;
+    } else {
+      check_equal((size_t)0u, waiting);
+      check_equal((unsigned)1u, old->rpc_result_native_terminals);
+      check_equal(MESH_MGMT_EXECUTION_SEND_IDLE,
+                  node->response_sender.state);
+    }
+    check_equal(MESH_MGMT_EXECUTION_NODE_OK,
+        mesh_mgmt_execution_node_destroy_v2(node));
+    check_not_null(old->execution_store_path);
+    (void)snprintf(lock_path, sizeof(lock_path), "%s.lock",
+                   old->execution_store_path);
+    (void)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp",
+                   old->execution_store_path);
+    (void)remove(old->execution_store_path);
+    (void)remove(lock_path);
+    (void)remove(tmp_path);
+    free(old->execution_store_path);
+    old->execution_store_path = NULL;
+  }
+#endif
   check_equal(MESH_MGMT_AGENT_RUNTIME_OK,
       mesh_mgmt_agent_runtime_destroy_v2(&old->client.runtime));
   submit(sc, 2u, host_stop_retaining);
