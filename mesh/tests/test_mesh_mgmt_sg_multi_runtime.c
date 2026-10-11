@@ -1969,10 +1969,14 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     sc->defer_result_sends = 0u;
     const uint64_t admission_deadline =
         cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
-    while (!sc->result_disconnect_triggered &&
+    while ((!sc->result_disconnect_triggered ||
+            old->client.closed == 0u) &&
            cmeta_monotonic_ms() < admission_deadline)
       pump(sc);
     check_true(sc->result_disconnect_triggered);
+    /* Logical P2P close is asynchronous: the original outbound Client
+     * CNet owner must progress the actual closed callback. */
+    check_true(old->client.closed != 0u);
     check_equal(1u, old->rpc_result_admissions);
     check_equal(0u, old->rpc_result_events);
   } else
