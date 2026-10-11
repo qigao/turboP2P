@@ -1823,6 +1823,13 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   sc->shards = final_count + 1u;
   sc->same_signed_identity = 1u;
   sc->exercise_command_terminal = (uint8_t)(command_mode != 0);
+#ifdef MESH_SG_REAL_EXECUTION
+  sc->exercise_typed_rpc = (uint8_t)(command_mode == 2);
+  sc->exercise_signed_result = (uint8_t)(command_mode == 2);
+  sc->exercise_real_execution = (uint8_t)(command_mode == 2);
+  sc->exercise_result_disconnect = (uint8_t)(command_mode == 2);
+  sc->defer_result_sends = (uint8_t)(command_mode == 2);
+#endif
   check_true(final_count == 2u || final_count == 4u);
   const native_io_sharded_config cfg = {
       sc->shards, 8u, {sg_backend(), 64u, 128u, 16u}};
@@ -1841,6 +1848,19 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     f->scenario = sc;
     f->final_index = i;
     if (command_mode) enable_command_status(f);
+#ifdef MESH_SG_REAL_EXECUTION
+    if (command_mode == 2 && i == 0u) {
+      f->server.rpc_final = f;
+      f->client.rpc_final = f;
+      init_real_execution_node(f);
+      prepare_typed_request(f);
+      uint8_t signer_private[32] = {0};
+      memset(signer_private, 0x81, sizeof(signer_private));
+      check_equal(MESH_MGMT_CRYPTO_OK,
+          mesh_mgmt_ed25519_public_from_private(
+              signer_private, f->result_signer_public));
+    }
+#endif
     f->server.config.listen_host = NULL;
     f->server.config.listen_port = 0u;
     f->server.config.p2p_private_key = NULL;
@@ -1891,6 +1911,49 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   submit(sc, 1u, host_snapshot);
   barrier(sc);
   check_equal((size_t)1u, old->pool.ready);
+#ifdef MESH_SG_REAL_EXECUTION
+  if (command_mode == 2) {
+    /* A sends a REAL signed COMMAND_REQUEST to its authenticated remote
+     * TurboWasm Execution Node, and the actual Worker commits a signed
+     * result to Store. Hold the response Egress before its first send;
+     * A's REQUEST must complete normally before we test RESULT failure. */
+    submit(sc, 1u, host_register_rpc);
+    barrier(sc);
+    submit(sc, 1u, host_send_command);
+    barrier(sc);
+    const uint64_t worker_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while ((old->command_terminals != 1u ||
+            old->rpc_request_events != 1u ||
+            atomic_load(&old->execution_node.egress.pending) != 1u) &&
+           cmeta_monotonic_ms() < worker_deadline)
+      pump(sc);
+    check_equal(1u, old->command_terminals);
+    check_equal(P2P_OK, old->command_terminal_status);
+    check_equal(1u, old->rpc_request_events);
+    check_equal((size_t)1u,
+                atomic_load(&old->execution_node.egress.pending));
+    check_equal((size_t)0u,
+                old->server.runtime.command_terminal_inflight);
+    submit(sc, 1u, host_snapshot);
+    submit(sc, 1u, host_snapshot_rpc);
+    barrier(sc);
+    check_equal((size_t)0u, old->pool.active_leases);
+    check_equal(MESH_MGMT_EXECUTION_RPC_PENDING,
+                old->rpc_completion.state);
+    /* Allow ONE real RESULT admission; the live client disconnect is
+     * triggered by pump() BEFORE the client CNet Owner can progress it. */
+    sc->defer_result_sends = 0u;
+    const uint64_t admission_deadline =
+        cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
+    while (!sc->result_disconnect_triggered &&
+           cmeta_monotonic_ms() < admission_deadline)
+      pump(sc);
+    check_true(sc->result_disconnect_triggered);
+    check_equal(1u, old->rpc_result_admissions);
+    check_equal(0u, old->rpc_result_events);
+  } else
+#endif
   if (command_mode) {
     /* One REAL command fills A's one-slot Pool; until original SG Host A
      * resumes, no fake logical terminal or premature Lease reclaim. */
@@ -1916,7 +1979,8 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
    * Round-Robin selection moves the REAUTHENTICATED same transport key
    * to a different final CNet Owner without moving any existing socket. */
   check_not_null(old->client.peer);
-  p2p_disconnect_peer(old->client.peer);
+  if (!sc->exercise_result_disconnect)
+    p2p_disconnect_peer(old->client.peer);
   const uint64_t reconnect_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
   while ((!next->server.established || old->client.established < 2u ||
           (!command_mode && !old->server.closed)) &&
