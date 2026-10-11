@@ -2001,9 +2001,13 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
   /* Real disconnect, then only EndpointPool retries. The acceptor
    * Round-Robin selection moves the REAUTHENTICATED same transport key
    * to a different final CNet Owner without moving any existing socket. */
-  check_not_null(old->client.peer);
-  if (!sc->exercise_result_disconnect)
+  if (sc->exercise_result_disconnect) {
+    check_true(sc->result_disconnect_triggered);
+    check_true(old->client.closed != 0u);
+  } else {
+    check_not_null(old->client.peer);
     p2p_disconnect_peer(old->client.peer);
+  }
   const uint64_t reconnect_deadline = cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
   while ((!next->server.established || old->client.established < 2u ||
           (!command_mode && !old->server.closed)) &&
@@ -2037,7 +2041,9 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
         cmeta_monotonic_ms() + SG_MULTI_TIMEOUT_MS;
     while ((next->command_terminals != 1u ||
             sc->migration_b_status_events != 1u ||
-            old->client.runtime.response_terminal_active) &&
+            old->client.runtime.response_terminal_active ||
+            old->rpc_result_native_terminals +
+                old->rpc_result_native_failures != 1u) &&
            cmeta_monotonic_ms() < migration_result_deadline)
       pump(sc);
     check_equal(1u, next->command_terminals);
@@ -2206,7 +2212,7 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
     check_equal(1u, old->rpc_result_admissions);
     check_equal(1u, old->rpc_result_native_terminals +
                     old->rpc_result_native_failures);
-    check_equal(MESH_MGMT_EXECUTION_NODE_BUSY == (waiting != 0u),
+    check_equal(waiting != 0u,
                 mesh_mgmt_execution_node_shutdown_v1(node) ==
                     MESH_MGMT_EXECUTION_NODE_BUSY);
     check_equal(MESH_MGMT_EXECUTION_WORKER_OK,
