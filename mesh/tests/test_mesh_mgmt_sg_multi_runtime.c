@@ -2318,6 +2318,12 @@ static void test_signed_reconnect_across_finals(size_t final_count, int command_
 
 spec("Concurrent signed MMP ClientPools on real CNet SG final Owners") {
 #ifdef MESH_SG_REAL_EXECUTION
+  it("retains actual signed Worker RESULT through A disconnect and separates new B across 2 SG Finals") {
+    test_signed_reconnect_across_finals(2u, 2);
+  }
+  it("retains actual signed Worker RESULT through A disconnect and separates new B across 4 SG Finals") {
+    test_signed_reconnect_across_finals(4u, 2);
+  }
   it("executes genuine signed remote Wasm on 2 SG Final Worker Owners") {
     test_multi_final(2u, 4);
   }
