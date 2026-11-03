@@ -2,7 +2,7 @@
 
 #include "mesh_mgmt_crypto.h"
 #include "platform.h"
-#include "turbo_thread.h"
+#include <salts/thread_pool.h>
 
 #include <openssl/evp.h>
 #include <stdatomic.h>
@@ -50,7 +50,7 @@ struct mesh_control_execution_provider_impl_v1 {
   execution_deployment_v1_t *deployments;
   mesh_mgmt_execution_store_v1_t journal;
   uint8_t result_public_key[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  turbo_threadpool_t *pool;
+  salts_threadpool_t *pool;
   mesh_control_provider_completion_v1_t completion;
   uint8_t completion_journaled;
   atomic_int phase;
@@ -441,7 +441,7 @@ static mesh_control_result_t provider_try_start(
   job->provider = provider;
   job->request = *request;
   job->deployment_index = deployment_index;
-  if (turbo_threadpool_try_submit(provider->pool, run_job, job) != 0) {
+  if (salts_threadpool_try_submit(provider->pool, run_job, job) != 0) {
     memset(job, 0, sizeof(*job));
     free(job);
     atomic_store_explicit(&provider->phase, EXECUTION_PROVIDER_IDLE,
@@ -504,7 +504,7 @@ static mesh_control_result_t provider_ack(
            sizeof(cleanup->operation_id));
     atomic_store_explicit(&provider->phase, EXECUTION_PROVIDER_CLEANING,
                           memory_order_release);
-    if (turbo_threadpool_try_submit(provider->pool, cleanup_terminal_claim,
+    if (salts_threadpool_try_submit(provider->pool, cleanup_terminal_claim,
                                     cleanup) != 0) {
       atomic_store_explicit(&provider->phase, EXECUTION_PROVIDER_READY,
                             memory_order_release);
@@ -527,7 +527,7 @@ static void provider_close(void *context) {
   if (!provider) return;
   if (atomic_exchange_explicit(&provider->accepting, false,
                                memory_order_acq_rel))
-    turbo_threadpool_shutdown(provider->pool);
+    salts_threadpool_shutdown(provider->pool);
 }
 
 static int provider_is_drained(void *context) {
@@ -544,7 +544,7 @@ mesh_control_result_t mesh_control_execution_provider_init_v1(
     const mesh_control_execution_provider_config_v1_t *config,
     mesh_control_provider_v1_t *out_descriptor) {
   struct mesh_control_execution_provider_impl_v1 *impl = NULL;
-  turbo_threadpool_config_t pool_config;
+  salts_threadpool_config_t pool_config;
   mesh_control_result_t failure_result = MESH_CONTROL_INVALID_ARG;
   size_t index;
   if (!provider || provider->impl || !config || !out_descriptor ||
@@ -624,7 +624,7 @@ mesh_control_result_t mesh_control_execution_provider_init_v1(
   memset(&pool_config, 0, sizeof(pool_config));
   pool_config.num_threads = 1u;
   pool_config.queue_capacity = 1u;
-  impl->pool = turbo_threadpool_create_with_config(&pool_config);
+  impl->pool = salts_threadpool_create_with_config(&pool_config);
   if (!impl->pool) goto failed;
   if (mesh_mgmt_execution_store_open_v1(
           &impl->journal, config->journal_path,
@@ -650,7 +650,7 @@ mesh_control_result_t mesh_control_execution_provider_init_v1(
 
 failed:
   if (impl) {
-    if (impl->pool) turbo_threadpool_destroy(impl->pool);
+    if (impl->pool) salts_threadpool_destroy(impl->pool);
     if (impl->journal.open)
       mesh_mgmt_execution_store_close_v1(&impl->journal);
     mesh_mgmt_execution_runner_destroy_v1(&impl->runner);
@@ -730,8 +730,8 @@ void mesh_control_execution_provider_destroy_v1(
       atomic_load_explicit(&impl->phase, memory_order_acquire) !=
           EXECUTION_PROVIDER_IDLE)
     return;
-  turbo_threadpool_wait(impl->pool);
-  turbo_threadpool_destroy(impl->pool);
+  salts_threadpool_wait(impl->pool);
+  salts_threadpool_destroy(impl->pool);
   mesh_mgmt_execution_store_close_v1(&impl->journal);
   mesh_mgmt_execution_runner_destroy_v1(&impl->runner);
   free(impl->deployments);
