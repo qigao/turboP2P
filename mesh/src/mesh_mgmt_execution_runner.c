@@ -1,6 +1,6 @@
 #include "mesh_mgmt_execution_runner.h"
 
-#include "turbo_fs.h"
+#include <salts_fs.h>
 #include "turbo_runtime.h"
 
 #include <ctype.h>
@@ -14,7 +14,7 @@ struct mesh_mgmt_execution_deployment_entry_v1_s {
   uint8_t deployment_id[MESH_MGMT_EXECUTION_ID_SIZE];
   uint64_t generation;
   uint8_t module_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE];
-  char module_path[TURBO_FS_MAX_PATH];
+  char module_path[SALTS_FS_MAX_PATH];
   mesh_mgmt_execution_deployment_runtime_v1_t runtime;
   uint8_t occupied;
 };
@@ -122,8 +122,8 @@ mesh_mgmt_execution_runner_module_digest_v1(
     const char *module_path, uint32_t max_module_bytes,
     uint8_t out_digest[MESH_MGMT_EXECUTION_DIGEST_SIZE],
     uint64_t *out_module_bytes) {
-  turbo_fs_stat_t stat;
-  turbo_file_t file = TURBO_INVALID_FILE;
+  salts_fs_stat_t stat;
+  salts_file_t file = SALTS_INVALID_FILE;
   EVP_MD_CTX *hash = NULL;
   uint8_t buffer[MESH_MGMT_EXECUTION_RUNNER_HASH_CHUNK];
   uint64_t total = 0u;
@@ -135,9 +135,9 @@ mesh_mgmt_execution_runner_module_digest_v1(
   if (!module_path || !out_digest || max_module_bytes == 0u)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
   if (!path_is_absolute(module_path) ||
-      strlen(module_path) >= TURBO_FS_MAX_PATH)
+      strlen(module_path) >= SALTS_FS_MAX_PATH)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_DEPLOYMENT;
-  if (turbo_fs_stat(module_path, &stat) != 0 || !stat.is_file)
+  if (salts_fs_stat(module_path, &stat) != 0 || !stat.is_file)
     return MESH_MGMT_EXECUTION_RUNNER_IO;
   if (stat.size == 0u || stat.size > max_module_bytes)
     return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
@@ -147,11 +147,11 @@ mesh_mgmt_execution_runner_module_digest_v1(
     return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
   if (EVP_DigestInit_ex(hash, EVP_sha256(), NULL) != 1)
     goto cleanup;
-  file = turbo_fs_open(module_path, TURBO_FS_O_RDONLY, 0);
-  if (file == TURBO_INVALID_FILE)
+  file = salts_fs_open(module_path, SALTS_FS_O_RDONLY, 0);
+  if (file == SALTS_INVALID_FILE)
     goto cleanup;
 
-  while ((read_size = turbo_fs_read(file, (char *)buffer, sizeof(buffer))) > 0) {
+  while ((read_size = salts_fs_read(file, (char *)buffer, sizeof(buffer))) > 0) {
     total += (uint64_t)read_size;
     if (total > max_module_bytes ||
         EVP_DigestUpdate(hash, buffer, (size_t)read_size) != 1) {
@@ -169,7 +169,7 @@ mesh_mgmt_execution_runner_module_digest_v1(
   result = MESH_MGMT_EXECUTION_RUNNER_OK;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE && turbo_fs_close(file) != 0)
+  if (file != SALTS_INVALID_FILE && salts_fs_close(file) != 0)
     result = MESH_MGMT_EXECUTION_RUNNER_IO;
   EVP_MD_CTX_free(hash);
   return result;
@@ -218,7 +218,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_runner_register_v1(
        deployment->runtime !=
            MESH_MGMT_EXECUTION_DEPLOYMENT_NATIVE_PROCESS_V1) ||
       !path_is_absolute(deployment->module_path) || path_size == 0u ||
-      path_size >= TURBO_FS_MAX_PATH)
+      path_size >= SALTS_FS_MAX_PATH)
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_DEPLOYMENT;
 
   for (index = 0u; index < runner->capacity; ++index) {
