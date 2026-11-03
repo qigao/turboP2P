@@ -2,7 +2,7 @@
 #define MESH_MGMT_EXECUTION_PROCESS_H
 
 #include "mesh_mgmt_execution_orchestrator.h"
-#include "turbo_fs.h"
+#include <salts_fs.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,8 +34,8 @@ typedef struct {
 
 typedef struct {
   mesh_mgmt_execution_process_config_v1_t config;
-  char worker_program[TURBO_FS_MAX_PATH];
-  char sandbox_program[TURBO_FS_MAX_PATH];
+  char worker_program[SALTS_FS_MAX_PATH];
+  char sandbox_program[SALTS_FS_MAX_PATH];
   const char *sandbox_args[MESH_MGMT_EXECUTION_PROCESS_MAX_SANDBOX_ARGS_V1];
   char sandbox_arg_storage[MESH_MGMT_EXECUTION_PROCESS_MAX_SANDBOX_ARGS_V1]
                           [MESH_MGMT_EXECUTION_PROCESS_MAX_SANDBOX_ARG_SIZE_V1];
