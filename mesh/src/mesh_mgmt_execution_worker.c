@@ -45,7 +45,7 @@ static void mesh_mgmt_execution_worker_run_job(void *argument) {
 mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_init_v1(
     mesh_mgmt_execution_worker_v1_t *worker,
     const mesh_mgmt_execution_worker_config_v1_t *config) {
-  turbo_threadpool_config_t pool_config;
+  salts_threadpool_config_t pool_config;
 
   if (worker == NULL || config == NULL || config->service == NULL ||
       config->completion == NULL || config->queue_capacity == 0u ||
@@ -64,7 +64,7 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_init_v1(
   memset(&pool_config, 0, sizeof(pool_config));
   pool_config.num_threads = 1;
   pool_config.queue_capacity = config->queue_capacity;
-  worker->pool = turbo_threadpool_create_with_config(&pool_config);
+  worker->pool = salts_threadpool_create_with_config(&pool_config);
   if (worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_RESOURCE_EXHAUSTED;
   }
@@ -92,7 +92,7 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_try_submit_v1(
       worker->initialized == 0u || worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_INVALID_ARG;
   }
-  if (turbo_threadpool_is_accepting(worker->pool) == 0) {
+  if (salts_threadpool_is_accepting(worker->pool) == 0) {
     return MESH_MGMT_EXECUTION_WORKER_CLOSED;
   }
 
@@ -103,12 +103,12 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_try_submit_v1(
   job->worker = worker;
   job->command = *command;
   job->authorization = *authorization;
-  if (turbo_threadpool_try_submit(
+  if (salts_threadpool_try_submit(
           worker->pool, mesh_mgmt_execution_worker_run_job, job) == 0) {
     return MESH_MGMT_EXECUTION_WORKER_OK;
   }
 
-  accepting = turbo_threadpool_is_accepting(worker->pool);
+  accepting = salts_threadpool_is_accepting(worker->pool);
   free(job);
   return accepting != 0 ? MESH_MGMT_EXECUTION_WORKER_FULL
                         : MESH_MGMT_EXECUTION_WORKER_CLOSED;
@@ -119,15 +119,15 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_shutdown_v1(
   if (worker == NULL || worker->initialized == 0u || worker->pool == NULL) {
     return MESH_MGMT_EXECUTION_WORKER_INVALID_ARG;
   }
-  turbo_threadpool_shutdown(worker->pool);
-  turbo_threadpool_wait(worker->pool);
+  salts_threadpool_shutdown(worker->pool);
+  salts_threadpool_wait(worker->pool);
   return MESH_MGMT_EXECUTION_WORKER_OK;
 }
 
 mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_get_stats_v1(
     mesh_mgmt_execution_worker_v1_t *worker,
     mesh_mgmt_execution_worker_stats_v1_t *out_stats) {
-  turbo_threadpool_stats_t pool_stats;
+  salts_threadpool_stats_t pool_stats;
 
   if (worker == NULL || out_stats == NULL || worker->initialized == 0u ||
       worker->pool == NULL) {
@@ -135,7 +135,7 @@ mesh_mgmt_execution_worker_result_t mesh_mgmt_execution_worker_get_stats_v1(
   }
   memset(&pool_stats, 0, sizeof(pool_stats));
   memset(out_stats, 0, sizeof(*out_stats));
-  turbo_threadpool_get_stats(worker->pool, &pool_stats);
+  salts_threadpool_get_stats(worker->pool, &pool_stats);
   out_stats->queue_capacity = pool_stats.queue_capacity;
   out_stats->accepting = pool_stats.accepting != 0;
   out_stats->submitted = (uint64_t)pool_stats.submitted_tasks;
@@ -151,9 +151,9 @@ void mesh_mgmt_execution_worker_destroy_v1(
   if (worker == NULL)
     return;
   if (worker->pool != NULL) {
-    turbo_threadpool_shutdown(worker->pool);
-    turbo_threadpool_wait(worker->pool);
-    turbo_threadpool_destroy(worker->pool);
+    salts_threadpool_shutdown(worker->pool);
+    salts_threadpool_wait(worker->pool);
+    salts_threadpool_destroy(worker->pool);
   }
   memset(worker, 0, sizeof(*worker));
 }
