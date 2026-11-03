@@ -9,7 +9,8 @@
 #include "turbo_tunnel.h"
 #include <CoroNet/turbo_coro_context.h>
 #include <CoroNet/turbo_stream.h>
-#include <turbo_thread.h>
+#include <salts/thread.h>
+#include <salts/clock.h>
 #include <fmt.h>
 
 /* =============================================================================
@@ -346,7 +347,7 @@ struct tunnel_s {
     int stopping;
 
     /* Thread safety */
-    turbo_mutex_t mutex;
+    salts_mutex_t mutex;
 };
 
 /* =============================================================================
