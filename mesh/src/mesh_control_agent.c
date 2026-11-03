@@ -1,6 +1,9 @@
 #include "mesh_control_agent.h"
 
-#include <turbo_crypto.h>
+#include <salts_crypto.h>
+#include <salts_fs.h>
+#include <salts/clock.h>
+#include <salts/thread.h>
 
 #include <ctype.h>
 #include <limits.h>
@@ -33,12 +36,12 @@ static int durability_config_valid(const mesh_control_agent_config_v1_t *config)
   checkpoint_disabled =
       config->checkpoint_path == NULL && config->checkpoint_interval_records == 0u;
   checkpoint_enabled = config->checkpoint_path != NULL && config->checkpoint_path[0] != '\0' &&
-                       turbo_fs_path_is_absolute(config->checkpoint_path) &&
+                       salts_fs_path_is_absolute(config->checkpoint_path) &&
                        config->checkpoint_interval_records != 0u &&
                        config->checkpoint_interval_records < wal->record_capacity &&
                        wal->byte_capacity >= MESH_CONTROL_WAL_FILE_HEADER_SIZE_V1 +
                                                  2u * MESH_CONTROL_WAL_MAX_RECORD_SIZE_V1;
-  return wal->path && wal->path[0] != '\0' && turbo_fs_path_is_absolute(wal->path) &&
+  return wal->path && wal->path[0] != '\0' && salts_fs_path_is_absolute(wal->path) &&
          wal->record_capacity != 0u && wal->record_capacity <= MESH_CONTROL_WAL_MAX_RECORDS_V1 &&
          wal->byte_capacity != 0u && wal->byte_capacity <= MESH_CONTROL_WAL_MAX_FILE_SIZE_V1 &&
          !bytes_zero(wal->authentication_key, sizeof(wal->authentication_key)) &&
@@ -811,9 +814,9 @@ static mesh_control_result_t agent_make_network_restore_operation(
   for (index = 0u; index < 8u; ++index)
     input[domain_size + MESH_CONTROL_DIGEST_SIZE + index] =
         (uint8_t)(status->desired_epoch >> (56u - index * 8u));
-  if (turbo_crypto_sha256(input,
+  if (salts_sha256(input,
                           domain_size + MESH_CONTROL_DIGEST_SIZE + 8u,
-                          digest) != TURBO_CRYPTO_OK)
+                          digest) != SALTS_OK)
     return MESH_CONTROL_INVALID_STATE;
   memcpy(out_operation->operation_id, digest,
          sizeof(out_operation->operation_id));
@@ -825,9 +828,9 @@ static mesh_control_result_t agent_make_network_restore_operation(
   for (index = 0u; index < 8u; ++index)
     input[domain_size + MESH_CONTROL_DIGEST_SIZE + index] =
         (uint8_t)(status->desired_epoch >> (56u - index * 8u));
-  if (turbo_crypto_sha256(input,
+  if (salts_sha256(input,
                           domain_size + MESH_CONTROL_DIGEST_SIZE + 8u,
-                          digest) != TURBO_CRYPTO_OK) {
+                          digest) != SALTS_OK) {
     memset(input, 0, sizeof(input));
     return MESH_CONTROL_INVALID_STATE;
   }
@@ -1687,7 +1690,7 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
     return MESH_CONTROL_INVALID_ARG;
   (void)mesh_control_iris_close_v1(&agent->iris);
   (void)mesh_control_channel_close_v1(&agent->inbound);
-  drain_started_at_ms = turbo_monotonic_ms();
+  drain_started_at_ms = salts_monotonic_ms();
 
   while (agent->network_provider_initialized &&
          (agent->network_provider_restore_pending ||
@@ -1696,11 +1699,11 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
     result = agent_poll_network_provider_restore(agent, &restore_progress);
     if (result != MESH_CONTROL_OK)
       return result;
-    if (turbo_monotonic_ms() - drain_started_at_ms >=
+    if (salts_monotonic_ms() - drain_started_at_ms >=
         agent->config.shutdown_drain_timeout_ms)
       return MESH_CONTROL_INVALID_STATE;
     if (restore_progress == 0u)
-      turbo_sleep_ms(1u);
+      salts_sleep_ms(1u);
   }
 
   if (agent->wal_worker_initialized) {
@@ -1721,10 +1724,10 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
                                            0u, &processed);
       if (result != MESH_CONTROL_OK)
         return result;
-      if (turbo_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
+      if (salts_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
         return MESH_CONTROL_INVALID_STATE;
       }
-      turbo_sleep_ms(1u);
+      salts_sleep_ms(1u);
     }
   } else if (agent->network_provider_initialized) {
     while (agent->network_provider_active ||
@@ -1735,11 +1738,11 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
           &network_progress);
       if (result != MESH_CONTROL_OK)
         return result;
-      if (turbo_monotonic_ms() - drain_started_at_ms >=
+      if (salts_monotonic_ms() - drain_started_at_ms >=
           agent->config.shutdown_drain_timeout_ms)
         return MESH_CONTROL_INVALID_STATE;
       if (network_progress == 0u)
-        turbo_sleep_ms(1u);
+        salts_sleep_ms(1u);
     }
   }
 
@@ -1766,11 +1769,11 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
         return MESH_CONTROL_INVALID_STATE;
       if (mesh_control_reconciler_is_drained_v1(&agent->function_reconciler))
         break;
-      if (turbo_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
+      if (salts_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
         return MESH_CONTROL_INVALID_STATE;
       }
       if (durable_progress == 0u && shutdown_progress == 0u)
-        turbo_sleep_ms(1u);
+        salts_sleep_ms(1u);
     }
   }
 
@@ -1784,10 +1787,10 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
     agent->network_provider.ops.close(agent->network_provider.context);
     while (!agent->network_provider.ops.is_drained(
         agent->network_provider.context)) {
-      if (turbo_monotonic_ms() - drain_started_at_ms >=
+      if (salts_monotonic_ms() - drain_started_at_ms >=
           agent->config.shutdown_drain_timeout_ms)
         return MESH_CONTROL_INVALID_STATE;
-      turbo_sleep_ms(1u);
+      salts_sleep_ms(1u);
     }
     agent->network_provider_initialized = 0u;
   }
@@ -1802,10 +1805,10 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
                                            0u, &processed);
       if (result != MESH_CONTROL_OK)
         return result;
-      if (turbo_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
+      if (salts_monotonic_ms() - drain_started_at_ms >= agent->config.shutdown_drain_timeout_ms) {
         return MESH_CONTROL_INVALID_STATE;
       }
-      turbo_sleep_ms(1u);
+      salts_sleep_ms(1u);
     }
   }
 
@@ -1819,7 +1822,7 @@ mesh_control_result_t mesh_control_agent_stop_v1(mesh_control_agent_v1_t *agent)
   }
   coro_context_stop(agent->context);
   while (coro_context_alive(agent->context) &&
-         turbo_monotonic_ms() - drain_started_at_ms < agent->config.shutdown_drain_timeout_ms) {
+         salts_monotonic_ms() - drain_started_at_ms < agent->config.shutdown_drain_timeout_ms) {
     (void)coro_context_run(agent->context, TURBO_RUN_ONCE);
   }
   if (coro_context_alive(agent->context))
