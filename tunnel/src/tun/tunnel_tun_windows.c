@@ -16,7 +16,6 @@
 #include <stdio.h>
 #include <objbase.h>
 #include <fmt.h>
-#include <turbo_thread.h>
 
 /* Wintun API typedefs */
 typedef void *WINTUN_ADAPTER_HANDLE;
