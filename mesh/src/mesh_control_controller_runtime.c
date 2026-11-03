@@ -344,7 +344,7 @@ mesh_control_result_t mesh_control_controller_runtime_stop_v1(
     coro_socket_destroy(runtime->listener);
     runtime->listener = NULL;
   }
-  started_at_ms = turbo_monotonic_ms();
+  started_at_ms = salts_monotonic_ms();
   for (;;) {
     (void)coro_context_run(runtime->context, TURBO_RUN_NOWAIT);
     result = mesh_control_controller_session_get_stats_v1(&runtime->session,
@@ -365,16 +365,16 @@ mesh_control_result_t mesh_control_controller_runtime_stop_v1(
         !runtime->session.pending_operation && !runtime->session.response_ready &&
         !runtime->session.submit_completion_ready)
       break;
-    if (turbo_monotonic_ms() - started_at_ms >=
+    if (salts_monotonic_ms() - started_at_ms >=
         runtime->shutdown_drain_timeout_ms)
       return MESH_CONTROL_TIMEOUT;
-    turbo_sleep_ms(1u);
+    salts_sleep_ms(1u);
   }
   result = mesh_control_controller_session_shutdown_v1(&runtime->session);
   if (result != MESH_CONTROL_OK) return result;
   coro_context_stop(runtime->context);
   while (coro_context_alive(runtime->context) &&
-         turbo_monotonic_ms() - started_at_ms <
+         salts_monotonic_ms() - started_at_ms <
              runtime->shutdown_drain_timeout_ms)
     (void)coro_context_run(runtime->context, TURBO_RUN_ONCE);
   if (coro_context_alive(runtime->context)) return MESH_CONTROL_TIMEOUT;
