@@ -236,7 +236,7 @@ m3_chunk_receipt_result_t m3_chunk_receipt_digest_v1(
 m3_chunk_receipt_result_t m3_chunk_receipt_check_binding_v1(
     const m3_chunk_receipt_v1_t *receipt,
     const uint8_t store_node_id[M3_CHUNK_RECEIPT_STORE_NODE_ID_SIZE],
-    const m3_chunk_cid_v1_t *cid, const turbo_uuid_t *request_id,
+    const m3_chunk_cid_v1_t *cid, const salts_uuid_t *request_id,
     uint64_t now_ms, uint64_t max_age_ms) {
   m3_chunk_receipt_result_t result;
 
@@ -254,7 +254,7 @@ m3_chunk_receipt_result_t m3_chunk_receipt_check_binding_v1(
       memcmp(receipt->cid.digest, cid->digest, sizeof(cid->digest)) != 0) {
     return M3_CHUNK_RECEIPT_CID_MISMATCH;
   }
-  if (!turbo_uuid_equal(&receipt->request_id, request_id))
+  if (!salts_uuid_equal(&receipt->request_id, request_id))
     return M3_CHUNK_RECEIPT_REQUEST_MISMATCH;
   if (max_age_ms != 0u &&
       (now_ms < receipt->issued_at_ms ||
