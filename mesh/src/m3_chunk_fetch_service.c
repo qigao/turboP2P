@@ -8,7 +8,7 @@ typedef struct m3_chunk_fetch_request_s {
   m3_chunk_cid_v1_t cid;
   m3_chunk_fetch_complete_cb complete_cb;
   void *user_data;
-  char seed_path[TURBO_FS_MAX_PATH];
+  char seed_path[SALTS_FS_MAX_PATH];
   struct m3_chunk_fetch_request_s *next;
 } m3_chunk_fetch_request_t;
 
@@ -45,13 +45,13 @@ static void digest_to_hex(
 
 static m3_chunk_fetch_result_t seed_path_for_cid(
     const m3_chunk_fetch_service_v1_t *service,
-    const m3_chunk_cid_v1_t *cid, char output[TURBO_FS_MAX_PATH]) {
+    const m3_chunk_cid_v1_t *cid, char output[SALTS_FS_MAX_PATH]) {
   char key[65];
 
   if (!service || !cid || !output)
     return M3_CHUNK_FETCH_INVALID_ARG;
   digest_to_hex(cid->digest, key);
-  if (turbo_fs_path_join(output, TURBO_FS_MAX_PATH, service->seed_root,
+  if (salts_fs_path_join(output, SALTS_FS_MAX_PATH, service->seed_root,
                          key) != 0) {
     return M3_CHUNK_FETCH_INVALID_ARG;
   }
@@ -82,29 +82,29 @@ static m3_chunk_fetch_result_t map_store_result(
 static m3_chunk_fetch_result_t import_seed(
     m3_chunk_fetch_service_v1_t *service, const m3_chunk_cid_v1_t *cid,
     const char *seed_path, uint8_t *out_created) {
-  turbo_fs_stat_t stat;
-  turbo_fs_buf_t bytes = {0};
+  salts_fs_stat_t stat;
+  salts_fs_buf_t bytes = {0};
   m3_chunk_store_result_t store_result;
 
   if (!service || !cid || !seed_path || !out_created)
     return M3_CHUNK_FETCH_INVALID_ARG;
   *out_created = 0u;
-  if (turbo_fs_lstat(seed_path, &stat) != 0)
+  if (salts_fs_lstat(seed_path, &stat) != 0)
     return M3_CHUNK_FETCH_IO;
   if (!stat.is_file || stat.is_symlink || stat.size != cid->size ||
       stat.size > service->max_fetch_bytes || stat.size > SIZE_MAX) {
     return M3_CHUNK_FETCH_INTEGRITY;
   }
-  if (turbo_fs_read_file(seed_path, &bytes) != 0)
+  if (salts_fs_read_file(seed_path, &bytes) != 0)
     return M3_CHUNK_FETCH_IO;
   if (bytes.len != (size_t)cid->size) {
-    turbo_fs_buf_free(&bytes);
+    salts_fs_buf_free(&bytes);
     return M3_CHUNK_FETCH_INTEGRITY;
   }
   store_result = m3_chunk_store_put_bytes_v1(
       service->store, cid, (const uint8_t *)bytes.base, bytes.len,
       out_created);
-  turbo_fs_buf_free(&bytes);
+  salts_fs_buf_free(&bytes);
   return map_store_result(store_result);
 }
 
@@ -173,7 +173,7 @@ static void on_p2p_fetch_complete(p2p_transfer_t *transfer, int success,
   if (!request || !request->service)
     return;
   if (!success) {
-    (void)turbo_fs_unlink(request->seed_path);
+    (void)salts_fs_unlink(request->seed_path);
     finish_request(request, M3_CHUNK_FETCH_NETWORK, 0u);
     return;
   }
@@ -186,16 +186,16 @@ m3_chunk_fetch_result_t m3_chunk_fetch_service_init_v1(
     m3_chunk_fetch_service_v1_t *service, p2p_node_t *node,
     m3_chunk_store_v1_t *store, const char *seed_root,
     uint64_t max_fetch_bytes, size_t max_pending) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
 
   if (!service || service->open || !node || !store || !store->open ||
-      !seed_root || !turbo_fs_path_is_absolute(seed_root) ||
+      !seed_root || !salts_fs_path_is_absolute(seed_root) ||
       strlen(seed_root) >= sizeof(service->seed_root) ||
       max_fetch_bytes == 0u ||
       max_fetch_bytes > store->max_chunk_bytes || max_pending == 0u) {
     return M3_CHUNK_FETCH_INVALID_ARG;
   }
-  if (turbo_fs_lstat(seed_root, &stat) != 0 || !stat.is_directory ||
+  if (salts_fs_lstat(seed_root, &stat) != 0 || !stat.is_directory ||
       stat.is_symlink) {
     return M3_CHUNK_FETCH_IO;
   }
@@ -224,9 +224,9 @@ m3_chunk_fetch_result_t m3_chunk_fetch_service_fetch_v1(
     const m3_chunk_cid_v1_t *cid,
     m3_chunk_fetch_complete_cb complete_cb, void *user_data) {
   m3_chunk_fetch_request_t *request;
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
   char key[65];
-  char seed_path[TURBO_FS_MAX_PATH];
+  char seed_path[SALTS_FS_MAX_PATH];
   uint8_t created = 0u;
   m3_chunk_fetch_result_t result;
   int p2p_result;
@@ -241,7 +241,7 @@ m3_chunk_fetch_result_t m3_chunk_fetch_service_fetch_v1(
   if (result != M3_CHUNK_FETCH_OK)
     return result;
 
-  if (turbo_fs_lstat(seed_path, &stat) == 0) {
+  if (salts_fs_lstat(seed_path, &stat) == 0) {
     result = import_seed(service, cid, seed_path, &created);
     if (result != M3_CHUNK_FETCH_OK)
       return result;
