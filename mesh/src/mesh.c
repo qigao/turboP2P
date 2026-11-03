@@ -12,6 +12,8 @@
 #include <fmt.h>
 #include <p2p.h>
 #include <salts/crypto.h>
+#include <salts/clock.h>
+#include <salts/thread.h>
 #include <openssl/crypto.h>
 #include <turbo_coro.h>
 #include <CoroNet/turbo_coro_context.h>
@@ -1011,7 +1013,7 @@ static uint32_t extract_src_ip(const uint8_t *ip_packet, size_t len) {
 }
 
 static uint64_t mesh_now_ms(void) {
-    return turbo_hrtime() / 1000000;
+    return salts_hrtime() / 1000000;
 }
 
 static int mesh_refresh_stream_metrics(mesh_network_t *mesh) {
@@ -1892,7 +1894,7 @@ static void mesh_ice_drain_context(coro_context_t *ctx, uint64_t drain_ms) {
         if (!coro_context_alive(ctx)) {
             break;
         }
-        turbo_sleep_ms(1);
+        salts_sleep_ms(1);
     } while (mesh_now_ms() < deadline_ms);
 }
 
@@ -3748,7 +3750,7 @@ static void mesh_disconnect_all_p2p_peers(mesh_network_t *mesh) {
 
     for (int i = 0; i < 100; i++) {
         coro_context_run(ctx, TURBO_RUN_NOWAIT);
-        turbo_sleep_ms(1);
+        salts_sleep_ms(1);
     }
 }
 
