@@ -115,7 +115,8 @@ m3_chunk_capability_result_t m3_chunk_capability_authorize_v1(
              sizeof(request->local_node_id)) != 0) {
     return M3_CHUNK_CAPABILITY_AUDIENCE_MISMATCH;
   }
-  if (!turbo_uuid_equal(&request->request_id, &claims->request_id))
+  if (memcmp(request->request_id.bytes, claims->request_id.bytes,
+             sizeof(request->request_id.bytes)) != 0)
     return M3_CHUNK_CAPABILITY_REQUEST_MISMATCH;
   if (request->operation != claims->operation)
     return M3_CHUNK_CAPABILITY_OPERATION_MISMATCH;
