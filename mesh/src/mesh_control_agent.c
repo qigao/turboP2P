@@ -1,6 +1,6 @@
 #include "mesh_control_agent.h"
 
-#include <salts_crypto.h>
+#include <salts/crypto.h>
 #include <salts_fs.h>
 #include <salts/clock.h>
 #include <salts/thread.h>
@@ -814,9 +814,9 @@ static mesh_control_result_t agent_make_network_restore_operation(
   for (index = 0u; index < 8u; ++index)
     input[domain_size + MESH_CONTROL_DIGEST_SIZE + index] =
         (uint8_t)(status->desired_epoch >> (56u - index * 8u));
-  if (salts_sha256(input,
+  if (salts_crypto_sha256(input,
                           domain_size + MESH_CONTROL_DIGEST_SIZE + 8u,
-                          digest) != SALTS_OK)
+                          digest) != SALTS_CRYPTO_OK)
     return MESH_CONTROL_INVALID_STATE;
   memcpy(out_operation->operation_id, digest,
          sizeof(out_operation->operation_id));
@@ -828,9 +828,9 @@ static mesh_control_result_t agent_make_network_restore_operation(
   for (index = 0u; index < 8u; ++index)
     input[domain_size + MESH_CONTROL_DIGEST_SIZE + index] =
         (uint8_t)(status->desired_epoch >> (56u - index * 8u));
-  if (salts_sha256(input,
+  if (salts_crypto_sha256(input,
                           domain_size + MESH_CONTROL_DIGEST_SIZE + 8u,
-                          digest) != SALTS_OK) {
+                          digest) != SALTS_CRYPTO_OK) {
     memset(input, 0, sizeof(input));
     return MESH_CONTROL_INVALID_STATE;
   }
