@@ -3,8 +3,6 @@
 
 #include "m3_chunk_store.h"
 
-#include <turbo_uuid.h>
-
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -13,6 +11,12 @@ extern "C" {
 
 #define M3_CHUNK_CAPABILITY_TENANT_ID_SIZE 32u
 #define M3_CHUNK_CAPABILITY_NODE_ID_SIZE 32u
+#define M3_CHUNK_REQUEST_ID_SIZE 16u
+
+/** Opaque request correlation token; no UUID parsing/generation semantics. */
+typedef struct {
+  uint8_t bytes[M3_CHUNK_REQUEST_ID_SIZE];
+} m3_chunk_request_id_v1_t;
 
 typedef enum {
   M3_CHUNK_OPERATION_READ = 1,
@@ -47,7 +51,7 @@ typedef struct {
   uint64_t range_offset;
   uint64_t range_length;
   uint8_t audience_node_id[M3_CHUNK_CAPABILITY_NODE_ID_SIZE];
-  turbo_uuid_t request_id;
+  m3_chunk_request_id_v1_t request_id;
   uint64_t issued_at_ms;
   uint64_t expires_at_ms;
 } m3_chunk_capability_claims_v1_t;
@@ -59,7 +63,7 @@ typedef struct {
   uint64_t range_offset;
   uint64_t range_length;
   uint8_t local_node_id[M3_CHUNK_CAPABILITY_NODE_ID_SIZE];
-  turbo_uuid_t request_id;
+  m3_chunk_request_id_v1_t request_id;
   uint64_t now_ms;
 } m3_chunk_access_request_v1_t;
 
@@ -81,7 +85,7 @@ typedef struct {
   uint64_t range_offset;
   uint64_t range_length;
   uint8_t audience_node_id[M3_CHUNK_CAPABILITY_NODE_ID_SIZE];
-  turbo_uuid_t request_id;
+  m3_chunk_request_id_v1_t request_id;
   uint64_t expires_at_ms;
 } m3_chunk_authorized_access_v1_t;
 
