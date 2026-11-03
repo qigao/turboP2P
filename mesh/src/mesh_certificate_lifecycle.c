@@ -17,7 +17,7 @@ static int path_valid(const char *path) {
   size_t size;
   if (!path) return 0;
   size = strlen(path);
-  if (size == 0u || size >= TURBO_FS_MAX_PATH) return 0;
+  if (size == 0u || size >= SALTS_FS_MAX_PATH) return 0;
   if (path[0] == '/') return 1;
   return size >= 3u && path[1] == ':' &&
          (path[2] == '/' || path[2] == '\\');
