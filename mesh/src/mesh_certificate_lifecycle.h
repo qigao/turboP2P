@@ -2,7 +2,7 @@
 #define MESH_CERTIFICATE_LIFECYCLE_H
 
 #include "mesh_control_primitives.h"
-#include "turbo_fs.h"
+#include <salts_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -40,8 +40,8 @@ typedef struct {
 } mesh_certificate_lifecycle_config_v1_t;
 
 typedef struct {
-  char certificate_file[TURBO_FS_MAX_PATH];
-  char private_key_file[TURBO_FS_MAX_PATH];
+  char certificate_file[SALTS_FS_MAX_PATH];
+  char private_key_file[SALTS_FS_MAX_PATH];
   uint8_t certificate_sha256[MESH_CONTROL_DIGEST_SIZE];
   uint64_t serial;
   uint64_t not_before_ms;
@@ -52,7 +52,7 @@ typedef struct {
 
 /** Single-owner immutable snapshot; reload commits only a fully valid candidate. */
 typedef struct {
-  char ca_file[TURBO_FS_MAX_PATH];
+  char ca_file[SALTS_FS_MAX_PATH];
   mesh_certificate_leaf_v1_t current;
   mesh_certificate_leaf_v1_t next;
   uint64_t revoked_serials[MESH_CERTIFICATE_MAX_REVOKED_SERIALS_V1];
