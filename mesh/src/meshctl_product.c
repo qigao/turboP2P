@@ -2,8 +2,12 @@
 
 #include <turbo_http.h>
 #include <turbo_parser.h>
+#include <cmd_arger.h>
+#include <json_parser.h>
+#include <uri_parser.h>
 #include <salts_selector.h>
-#include <turbo_fs.h>
+#include <salts_fs.h>
+#include <salts/clock.h>
 #include <platform.h>
 
 #include <ctype.h>
@@ -136,23 +140,18 @@ static int meshctl_selector_canonicalize(
 }
 
 static int meshctl_endpoint_valid(const char *endpoint) {
-  uri_t *uri = NULL;
-  const char *path;
-  int valid = 0;
-  if (!endpoint || strlen(endpoint) >= MESHCTL_PRODUCT_ENDPOINT_CAPACITY ||
-      turbo_parse_uri((const uint8_t *)endpoint, strlen(endpoint), &uri) != 0 ||
-      !uri)
+  uri_t uri;
+  if (!endpoint || strlen(endpoint) >= MESHCTL_PRODUCT_ENDPOINT_CAPACITY)
     return 0;
-  path = turbo_uri_path(uri);
-  valid = turbo_uri_is_valid(uri) && turbo_uri_scheme(uri) &&
-          strcmp(turbo_uri_scheme(uri), "https") == 0 &&
-          turbo_uri_host(uri) && turbo_uri_host(uri)[0] != '\0' &&
-          (!turbo_uri_userinfo(uri) || turbo_uri_userinfo(uri)[0] == '\0') &&
-          (!turbo_uri_query(uri) || turbo_uri_query(uri)[0] == '\0') &&
-          (!turbo_uri_fragment(uri) || turbo_uri_fragment(uri)[0] == '\0') &&
-          (!path || path[0] == '\0' || strcmp(path, "/") == 0);
-  turbo_free_uri(&uri);
-  return valid;
+  memset(&uri, 0, sizeof(uri));
+  if (!uri_parse(endpoint, &uri) || !uri.valid)
+    return 0;
+  return strcmp(uri.scheme, "https") == 0 &&
+         uri.host[0] != '\0' &&
+         uri.userinfo[0] == '\0' &&
+         uri.query[0] == '\0' &&
+         uri.fragment[0] == '\0' &&
+         (uri.path[0] == '\0' || strcmp(uri.path, "/") == 0);
 }
 
 static int meshctl_route_valid(const char *route) {
@@ -530,7 +529,7 @@ meshctl_controller_result_t meshctl_controller_request_http2(
   turbo_tls_client_config_t tls;
   turbo_http_t *client = NULL;
   http_response_t *response = NULL;
-  turbo_json_doc_t *json = NULL;
+  json_value_t *json = NULL;
   char url[MESHCTL_PRODUCT_ENDPOINT_CAPACITY + MESHCTL_PRODUCT_ROUTE_CAPACITY];
   const char *headers[] = {"Accept: " MESHCTL_PRODUCT_MEDIA_TYPE,
                            "Content-Type: " MESHCTL_PRODUCT_MEDIA_TYPE};
@@ -608,9 +607,7 @@ meshctl_controller_result_t meshctl_controller_request_http2(
   }
   if (!response->body || response->body_len == 0u ||
       response->body_len > MESHCTL_PRODUCT_MAX_RESPONSE_SIZE ||
-      turbo_parse_json((const uint8_t *)response->body, response->body_len,
-                       &json) != 0 ||
-      !json) {
+      !(json = json_parse(response->body, response->body_len))) {
     result = MESHCTL_CONTROLLER_PROTOCOL_ERROR;
     goto cleanup;
   }
@@ -626,7 +623,7 @@ meshctl_controller_result_t meshctl_controller_request_http2(
   result = MESHCTL_CONTROLLER_OK;
 
 cleanup:
-  turbo_free_json(&json);
+  json_free(json);
   if (response) http_response_free(response);
   turbo_http_destroy(client);
   if (result != MESHCTL_CONTROLLER_OK)
@@ -700,8 +697,8 @@ static int meshctl_product_build_route(const meshctl_product_command_t *command,
 
 static int meshctl_json_add(json_value_t *object, const char *key,
                             json_value_t *value) {
-  if (!value || !turbo_json_object_add_checked(object, key, value)) {
-    turbo_free_json((turbo_json_doc_t **)&value);
+  if (!value || !json_object_add_checked(object, key, value)) {
+    json_free(value);
     return -1;
   }
   return 0;
@@ -731,44 +728,44 @@ static int meshctl_product_build_plan_body(
           sizeof(canonical), &diagnostic) != 1 ||
       strcmp(canonical, command->args.placements_plan.selector) != 0)
     return -1;
-  root = turbo_json_create_object();
+  root = json_create_object();
   if (!root ||
       meshctl_json_add(root, "schema_version",
-                       turbo_json_create_uint64(1u)) != 0 ||
+                       json_create_uint64(1u)) != 0 ||
       meshctl_json_add(
           root, "subject",
-          turbo_json_create_string(command->args.placements_plan.subject)) !=
+          json_create_string(command->args.placements_plan.subject)) !=
           0 ||
       meshctl_json_add(
           root, "selector_language_version",
-          turbo_json_create_uint64(
+          json_create_uint64(
               command->args.placements_plan.selector_language_version)) != 0 ||
       meshctl_json_add(
           root, "selector",
-          turbo_json_create_string(command->args.placements_plan.selector)) !=
+          json_create_string(command->args.placements_plan.selector)) !=
           0)
     goto cleanup;
-  body = turbo_json_serialize(root, &body_size);
+  body = json_serialize(root, &body_size);
   if (!body || body_size == 0u ||
       body_size > MESHCTL_PRODUCT_MAX_REQUEST_SIZE)
     goto cleanup;
   *out_body = body;
   *out_body_size = body_size;
   body = NULL;
-  turbo_free_json((turbo_json_doc_t **)&root);
+  json_free(root);
   return 0;
 
 cleanup:
-  turbo_json_serialize_free(body);
-  turbo_free_json((turbo_json_doc_t **)&root);
+  json_serialize_free(body);
+  json_free(root);
   return -1;
 }
 
 static int meshctl_product_build_network_body(
     const meshctl_product_command_t *command, char **out_body,
     size_t *out_body_size) {
-  turbo_fs_buf_t bytes = {0};
-  turbo_json_doc_t *json = NULL;
+  salts_fs_buf_t bytes = {0};
+  json_value_t *json = NULL;
   char *body = NULL;
   int result = -1;
   if (!command || !out_body || !out_body_size) return -1;
@@ -789,11 +786,10 @@ static int meshctl_product_build_network_body(
   if (command->kind != MESHCTL_PRODUCT_COMMAND_NETWORKS_PLAN &&
       command->kind != MESHCTL_PRODUCT_COMMAND_NETWORKS_APPLY)
     return -1;
-  if (turbo_fs_read_file(command->args.networks_mutation.file, &bytes) != 0 ||
+  if (salts_fs_read_file(command->args.networks_mutation.file, &bytes) != 0 ||
       !bytes.base || bytes.len == 0u ||
       bytes.len > MESHCTL_PRODUCT_MAX_REQUEST_SIZE ||
-      turbo_parse_json((const uint8_t *)bytes.base, bytes.len, &json) != 0 ||
-      !json)
+      !(json = json_parse((const char *)bytes.base, bytes.len)))
     goto cleanup;
   body = (char *)malloc(bytes.len + 1u);
   if (!body) goto cleanup;
@@ -805,8 +801,8 @@ static int meshctl_product_build_network_body(
   result = 0;
 cleanup:
   free(body);
-  turbo_free_json(&json);
-  turbo_fs_buf_free(&bytes);
+  json_free(json);
+  salts_fs_buf_free(&bytes);
   return result;
 }
 
@@ -835,7 +831,7 @@ int meshctl_product_execute(const meshctl_product_command_t *command,
   if (!command || !client || (!client->request && !client->query) || !out ||
       !err ||
       meshctl_product_build_route(command, route, sizeof(route)) != 0 ||
-      meshctl_deadline_init_at(&deadline, turbo_monotonic_ms(),
+      meshctl_deadline_init_at(&deadline, salts_monotonic_ms(),
                                command->common.timeout_ms) != 0) {
     fprintf(err, "meshctl: invalid product command\n");
     return 2;
@@ -870,9 +866,9 @@ int meshctl_product_execute(const meshctl_product_command_t *command,
     request.method = MESHCTL_CONTROLLER_METHOD_GET;
   }
   remaining_ms =
-      meshctl_deadline_remaining_at(&deadline, turbo_monotonic_ms());
+      meshctl_deadline_remaining_at(&deadline, salts_monotonic_ms());
   if (remaining_ms == 0u) {
-    turbo_json_serialize_free(request_body);
+    json_serialize_free(request_body);
     fprintf(err, "meshctl: deadline expired before send\n");
     return 7;
   }
@@ -883,7 +879,7 @@ int meshctl_product_execute(const meshctl_product_command_t *command,
   else
     result = client->query(client->context, &command->common, route,
                            remaining_ms, &response);
-  turbo_json_serialize_free(request_body);
+  json_serialize_free(request_body);
   if (result != MESHCTL_CONTROLLER_OK) {
     meshctl_controller_response_destroy(&response);
     fprintf(err, "meshctl: Controller query failed (%d)\n", (int)result);
