@@ -3,8 +3,9 @@
 #include "mesh_mgmt_execution_result.h"
 #include "mesh_mgmt_wire.h"
 #include "platform.h"
-#include "turbo_error.h"
-#include "turbo_process.h"
+#include <salts/error_codes.h>
+#include <salts_process.h>
+#include <salts_fs.h>
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -41,7 +42,7 @@ static int absolute_path(const char *path) {
   size_t size;
   if (!path) return 0;
   size = strlen(path);
-  if (size == 0u || size >= TURBO_FS_MAX_PATH) return 0;
+  if (size == 0u || size >= SALTS_FS_MAX_PATH) return 0;
   if (path[0] == '/') return 1;
   return size >= 3u && path[1] == ':' &&
          (path[2] == '/' || path[2] == '\\');
@@ -210,33 +211,33 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_init_v1(
   return MESH_MGMT_EXECUTION_RUNNER_OK;
 }
 
-static int write_bytes(turbo_process_t *child, const uint8_t *data, size_t size) {
+static int write_bytes(salts_process_t *child, const uint8_t *data, size_t size) {
   size_t offset = 0u;
   while (offset < size) {
     size_t written = 0u;
-    if (turbo_process_write_stdin(child, data + offset, size - offset,
-                                  &written) != TURBO_OK || written == 0u)
+    if (salts_process_write_stdin(child, data + offset, size - offset,
+                                  &written) != SALTS_OK || written == 0u)
       return 0;
     offset += written;
   }
   return 1;
 }
 
-static size_t read_stdout_all(turbo_process_t *child, uint8_t *output,
+static size_t read_stdout_all(salts_process_t *child, uint8_t *output,
                               size_t capacity) {
   size_t total = 0u;
   for (;;) {
     size_t count = 0u;
-    int result = turbo_process_read_stdout(child, output + total,
+    int result = salts_process_read_stdout(child, output + total,
                                            capacity - total, &count);
     total += count;
     if (result == TURBO_EOF) return total;
-    if (result != TURBO_OK || total == capacity) return 0u;
+    if (result != SALTS_OK || total == capacity) return 0u;
   }
 }
 
 static mesh_mgmt_execution_runner_result_t hash_captured_stream(
-    turbo_process_t *child, int stderr_stream, uint64_t maximum_bytes,
+    salts_process_t *child, int stderr_stream, uint64_t maximum_bytes,
     uint8_t digest[MESH_MGMT_EXECUTION_DIGEST_SIZE], uint64_t *out_bytes) {
   EVP_MD_CTX *hash = NULL;
   uint8_t buffer[4096];
@@ -250,9 +251,9 @@ static mesh_mgmt_execution_runner_result_t hash_captured_stream(
   for (;;) {
     size_t count = 0u;
     int read_result = stderr_stream
-                          ? turbo_process_read_stderr(child, buffer,
+                          ? salts_process_read_stderr(child, buffer,
                                                       sizeof(buffer), &count)
-                          : turbo_process_read_stdout(child, buffer,
+                          : salts_process_read_stdout(child, buffer,
                                                       sizeof(buffer), &count);
     if (count > maximum_bytes - total) {
       result = MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
@@ -263,7 +264,7 @@ static mesh_mgmt_execution_runner_result_t hash_captured_stream(
       goto cleanup;
     total += count;
     if (read_result == TURBO_EOF) break;
-    if (read_result != TURBO_OK) goto cleanup;
+    if (read_result != SALTS_OK) goto cleanup;
   }
   if (EVP_DigestFinal_ex(hash, digest, &digest_size) != 1 ||
       digest_size != MESH_MGMT_EXECUTION_DIGEST_SIZE)
@@ -287,9 +288,9 @@ static mesh_mgmt_execution_runner_result_t run_native_process(
   size_t index;
   size_t capture_limit;
   uint64_t policy_output_limit;
-  turbo_process_options_t options;
-  turbo_process_t *child = NULL;
-  turbo_process_result_t child_result;
+  salts_process_options_t options;
+  salts_process_t *child = NULL;
+  salts_process_result_t child_result;
   mesh_mgmt_execution_runner_result_t result =
       MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
 
@@ -325,36 +326,36 @@ static mesh_mgmt_execution_runner_result_t run_native_process(
     args[arg_count++] = module_path;
     args[arg_count] = NULL;
   }
-  turbo_process_options_init(&options);
+  salts_process_options_init(&options);
   options.program = process->config.sandbox_program
                         ? process->sandbox_program
                         : module_path;
   options.args = process->config.sandbox_program ? args : NULL;
   options.env = NULL;
-  options.flags = TURBO_PROCESS_PIPE_STDIN | TURBO_PROCESS_CAPTURE_STDOUT |
-                  TURBO_PROCESS_CAPTURE_STDERR;
+  options.flags = SALTS_PROCESS_PIPE_STDIN | SALTS_PROCESS_CAPTURE_STDOUT |
+                  SALTS_PROCESS_CAPTURE_STDERR;
   if (process->config.sandbox_program)
-    options.flags |= TURBO_PROCESS_CLEAN_ENVIRONMENT;
+    options.flags |= SALTS_PROCESS_CLEAN_ENVIRONMENT;
   options.timeout_ms = policy->limits.timeout_ms;
   options.max_output_bytes = capture_limit;
   process->started++;
-  if (turbo_process_spawn(&options, &child) != TURBO_OK || !child)
+  if (salts_process_spawn(&options, &child) != SALTS_OK || !child)
     goto cleanup;
   if ((request->inline_input_size != 0u &&
        !write_bytes(child, request->inline_input,
                     request->inline_input_size)) ||
-      turbo_process_close_stdin(child) != TURBO_OK ||
-      turbo_process_wait(child, &child_result) != TURBO_OK)
+      salts_process_close_stdin(child) != SALTS_OK ||
+      salts_process_wait(child, &child_result) != SALTS_OK)
     goto cleanup;
-  if (child_result.state == TURBO_PROCESS_TIMED_OUT) {
+  if (child_result.state == SALTS_PROCESS_TIMED_OUT) {
     process->timed_out++;
     goto cleanup;
   }
-  if (child_result.state == TURBO_PROCESS_OUTPUT_LIMIT_EXCEEDED) {
+  if (child_result.state == SALTS_PROCESS_OUTPUT_LIMIT_EXCEEDED) {
     result = MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
     goto cleanup;
   }
-  if (child_result.state != TURBO_PROCESS_EXITED) {
+  if (child_result.state != SALTS_PROCESS_EXITED) {
     process->crashed++;
     goto cleanup;
   }
@@ -372,7 +373,7 @@ static mesh_mgmt_execution_runner_result_t run_native_process(
   process->succeeded++;
   result = MESH_MGMT_EXECUTION_RUNNER_OK;
 cleanup:
-  if (child) turbo_process_destroy(child);
+  if (child) salts_process_destroy(child);
   return result;
 }
 
@@ -385,7 +386,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_run_v1(
   mesh_mgmt_execution_process_v1_t *process =
       (mesh_mgmt_execution_process_v1_t *)context;
   mesh_mgmt_execution_deployment_v1_t deployment;
-  char module_path[TURBO_FS_MAX_PATH];
+  char module_path[SALTS_FS_MAX_PATH];
   char generation[32];
   char deployment_hex[33];
   char digest_hex[65];
@@ -400,9 +401,9 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_run_v1(
   size_t input_size;
   size_t response_size;
   size_t index;
-  turbo_process_options_t options;
-  turbo_process_t *child = NULL;
-  turbo_process_result_t child_result;
+  salts_process_options_t options;
+  salts_process_t *child = NULL;
+  salts_process_result_t child_result;
   int32_t runner_code;
   mesh_mgmt_execution_runner_result_t result = MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
   (void)io;
@@ -447,7 +448,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_run_v1(
     return MESH_MGMT_EXECUTION_RUNNER_INVALID_ARG;
   mesh_mgmt_wire_write_u64(frame + 80u, now_ms);
   memcpy(frame + PROCESS_REQUEST_HEADER_SIZE, request_bytes, request_size);
-  if (turbo_secure_random(key, sizeof(key)) != 0)
+  if (salts_secure_random(key, sizeof(key)) != 0)
     return MESH_MGMT_EXECUTION_RUNNER_RESOURCE_EXHAUSTED;
   if (!request_hmac(key, frame, request_bytes, request_size,
                     frame + PROCESS_REQUEST_HMAC_OFFSET)) {
@@ -470,33 +471,33 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_run_v1(
   args[arg_count++] = generation;
   args[arg_count++] = digest_hex;
   args[arg_count] = NULL;
-  turbo_process_options_init(&options);
+  salts_process_options_init(&options);
   options.program = process->config.sandbox_program
                         ? process->sandbox_program
                         : process->worker_program;
   options.args = args;
   options.env = NULL;
-  options.flags = TURBO_PROCESS_PIPE_STDIN | TURBO_PROCESS_CAPTURE_STDOUT |
-                  TURBO_PROCESS_CAPTURE_STDERR;
+  options.flags = SALTS_PROCESS_PIPE_STDIN | SALTS_PROCESS_CAPTURE_STDOUT |
+                  SALTS_PROCESS_CAPTURE_STDERR;
   if (process->config.sandbox_program)
-    options.flags |= TURBO_PROCESS_CLEAN_ENVIRONMENT;
+    options.flags |= SALTS_PROCESS_CLEAN_ENVIRONMENT;
   options.timeout_ms = policy->limits.timeout_ms;
   options.max_output_bytes = process->config.maximum_output_bytes;
   process->started++;
-  if (turbo_process_spawn(&options, &child) != TURBO_OK || !child)
+  if (salts_process_spawn(&options, &child) != SALTS_OK || !child)
     goto cleanup;
   input_size = PROCESS_REQUEST_HEADER_SIZE + request_size;
   if (!write_bytes(child, key, sizeof(key)) ||
       !write_bytes(child, frame, input_size) ||
-      turbo_process_close_stdin(child) != TURBO_OK ||
-      turbo_process_wait(child, &child_result) != TURBO_OK)
+      salts_process_close_stdin(child) != SALTS_OK ||
+      salts_process_wait(child, &child_result) != SALTS_OK)
     goto cleanup;
-  if (child_result.state == TURBO_PROCESS_TIMED_OUT) {
+  if (child_result.state == SALTS_PROCESS_TIMED_OUT) {
     process->timed_out++;
     result = MESH_MGMT_EXECUTION_RUNNER_RUNTIME;
     goto cleanup;
   }
-  if (child_result.state != TURBO_PROCESS_EXITED || child_result.exit_code != 0) {
+  if (child_result.state != SALTS_PROCESS_EXITED || child_result.exit_code != 0) {
     process->crashed++;
     goto cleanup;
   }
@@ -514,7 +515,7 @@ mesh_mgmt_execution_runner_result_t mesh_mgmt_execution_process_run_v1(
   process->succeeded++;
   result = (mesh_mgmt_execution_runner_result_t)runner_code;
 cleanup:
-  if (child) turbo_process_destroy(child);
+  if (child) salts_process_destroy(child);
   OPENSSL_cleanse(key, sizeof(key));
   OPENSSL_cleanse(expected_hmac, sizeof(expected_hmac));
   return result;
