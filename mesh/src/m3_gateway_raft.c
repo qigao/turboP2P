@@ -35,7 +35,7 @@ static uint32_t election_timeout_ticks(uint32_t min_ticks, uint32_t max_ticks) {
   if (min_ticks >= max_ticks) {
     return min_ticks;
   }
-  if (turbo_secure_random(&value, sizeof(value)) != 0) {
+  if (salts_secure_random(&value, sizeof(value)) != 0) {
     value = (uint32_t)rand();
   }
   range = max_ticks - min_ticks + 1u;
