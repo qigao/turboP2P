@@ -3,7 +3,7 @@
 
 #include "mesh_control_owner.h"
 #include "mesh_mgmt_codec.h"
-#include "turbo_fs.h"
+#include <salts_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -103,9 +103,9 @@ typedef struct {
  */
 typedef struct {
   mesh_control_wal_config_v1_t config;
-  char path[TURBO_FS_MAX_PATH];
-  char lock_path[TURBO_FS_MAX_PATH];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char lock_path[SALTS_FS_MAX_PATH];
+  salts_file_t lock_file;
   uint64_t base_index;
   uint64_t tail_index;
   uint8_t base_authenticator[MESH_CONTROL_DIGEST_SIZE];
