@@ -4,6 +4,7 @@
 
 #include <platform.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 static int bytes_are_zero(const uint8_t *bytes, size_t length) {
@@ -17,12 +18,16 @@ static int bytes_are_zero(const uint8_t *bytes, size_t length) {
 
 static mesh_mgmt_agent_router_slot_v1_t *slot_at(mesh_mgmt_agent_router_v1_t *router,
                                                  size_t index) {
-  return (mesh_mgmt_agent_router_slot_v1_t *)turbo_vec_at(&router->slots, index);
+  return router && router->slots && index < router->max_peers
+             ? &router->slots[index]
+             : NULL;
 }
 
 static const mesh_mgmt_agent_router_slot_v1_t *
 slot_at_const(const mesh_mgmt_agent_router_v1_t *router, size_t index) {
-  return (const mesh_mgmt_agent_router_slot_v1_t *)turbo_vec_at_const(&router->slots, index);
+  return router && router->slots && index < router->max_peers
+             ? &router->slots[index]
+             : NULL;
 }
 
 static mesh_mgmt_agent_router_slot_v1_t *find_slot(mesh_mgmt_agent_router_v1_t *router,
@@ -379,7 +384,7 @@ mesh_mgmt_agent_router_init_v1(mesh_mgmt_agent_router_v1_t *router,
       !config->dispatch_template || !config->on_event || config->max_peers == 0u ||
       config->max_peers > MESH_MGMT_AGENT_ROUTER_MAX_PEERS)
     return MESH_MGMT_AGENT_ROUTER_INVALID_ARG;
-  if (router->state != MESH_MGMT_AGENT_ROUTER_UNINITIALIZED || router->slots.data)
+  if (router->state != MESH_MGMT_AGENT_ROUTER_UNINITIALIZED || router->slots)
     return MESH_MGMT_AGENT_ROUTER_INVALID_STATE;
 
   memset(local_transport_peer_id, 0, sizeof(local_transport_peer_id));
@@ -416,15 +421,12 @@ mesh_mgmt_agent_router_init_v1(mesh_mgmt_agent_router_v1_t *router,
     mesh_mgmt_crypto_wipe(router, sizeof(*router));
     return result;
   }
-  if (turbo_vec_init(&router->slots, sizeof(mesh_mgmt_agent_router_slot_v1_t)) != TURBO_OK ||
-      turbo_vec_reserve(&router->slots, router->max_peers) != TURBO_OK ||
-      turbo_vec_resize(&router->slots, router->max_peers) != TURBO_OK) {
-    turbo_vec_destroy(&router->slots);
+  router->slots = (mesh_mgmt_agent_router_slot_v1_t *)calloc(
+      router->max_peers, sizeof(*router->slots));
+  if (!router->slots) {
     mesh_mgmt_crypto_wipe(router, sizeof(*router));
     return MESH_MGMT_AGENT_ROUTER_RESOURCE_EXHAUSTED;
   }
-  memset(turbo_vec_data(&router->slots), 0,
-         router->max_peers * sizeof(mesh_mgmt_agent_router_slot_v1_t));
   router->state = MESH_MGMT_AGENT_ROUTER_READY;
   router->last_error = MESH_MGMT_AGENT_ROUTER_OK;
   router->last_peer_result = MESH_MGMT_P2P_PEER_OK;
@@ -496,10 +498,11 @@ void mesh_mgmt_agent_router_destroy_v1(mesh_mgmt_agent_router_v1_t *router) {
   if (router->state == MESH_MGMT_AGENT_ROUTER_INSTALLED &&
       mesh_mgmt_agent_router_stop_v1(router) != MESH_MGMT_AGENT_ROUTER_OK)
     return;
-  if (router->slots.data) {
-    bytes = turbo_vec_size(&router->slots) * sizeof(mesh_mgmt_agent_router_slot_v1_t);
-    mesh_mgmt_crypto_wipe(turbo_vec_data(&router->slots), bytes);
-    turbo_vec_destroy(&router->slots);
+  if (router->slots) {
+    bytes = router->max_peers * sizeof(*router->slots);
+    mesh_mgmt_crypto_wipe(router->slots, bytes);
+    free(router->slots);
+    router->slots = NULL;
   }
   mesh_mgmt_crypto_wipe(router, sizeof(*router));
 }
