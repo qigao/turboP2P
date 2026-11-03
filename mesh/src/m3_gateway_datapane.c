@@ -22,7 +22,7 @@ static int policy_is_valid(const m3_chunk_capability_policy_v1_t *policy) {
 
 static void next_request_id(m3_gateway_datapane_v1_t *datapane,
                             size_t chunk_index, size_t store_index,
-                            turbo_uuid_t *out) {
+                            salts_uuid_t *out) {
   uint64_t seq = datapane->request_seq++;
 
   memset(out, 0, sizeof(*out));
@@ -36,7 +36,7 @@ static void next_request_id(m3_gateway_datapane_v1_t *datapane,
 static void build_put_claims(
     m3_gateway_datapane_v1_t *datapane,
     const m3_gateway_datapane_store_v1_t *store, const m3_chunk_cid_v1_t *cid,
-    const turbo_uuid_t *request_id, uint64_t now_ms,
+    const salts_uuid_t *request_id, uint64_t now_ms,
     m3_chunk_capability_claims_v1_t *out_claims) {
   memset(out_claims, 0, sizeof(*out_claims));
   memcpy(out_claims->tenant_id, datapane->tenant_id,
@@ -55,7 +55,7 @@ static void build_put_claims(
 static void build_put_request(
     m3_gateway_datapane_v1_t *datapane,
     const m3_gateway_datapane_store_v1_t *store, const m3_chunk_cid_v1_t *cid,
-    const turbo_uuid_t *request_id, uint64_t now_ms,
+    const salts_uuid_t *request_id, uint64_t now_ms,
     m3_chunk_access_request_v1_t *out_request) {
   memset(out_request, 0, sizeof(*out_request));
   memcpy(out_request->tenant_id, datapane->tenant_id,
@@ -203,7 +203,7 @@ m3_gateway_datapane_result_t m3_gateway_datapane_put_chunk_v1(
   m3_chunk_capability_claims_v1_t claims;
   m3_chunk_access_request_v1_t request;
   m3_chunk_receipt_v1_t receipt;
-  turbo_uuid_t request_id;
+  salts_uuid_t request_id;
   m3_store_node_result_t store_result;
 
   if (out_receipt)
@@ -436,7 +436,7 @@ m3_gateway_datapane_result_t m3_gateway_datapane_read_chunk_v1(
     m3_chunk_capability_claims_v1_t claims;
     m3_chunk_access_request_v1_t request;
     m3_store_node_result_t store_result;
-    turbo_uuid_t request_id;
+    salts_uuid_t request_id;
     size_t read = 0u;
 
     if (!store)
