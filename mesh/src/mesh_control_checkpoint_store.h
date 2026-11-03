@@ -2,7 +2,7 @@
 #define MESH_CONTROL_CHECKPOINT_STORE_H
 
 #include "mesh_control_checkpoint.h"
-#include "turbo_fs.h"
+#include <salts_fs.h>
 
 #include <stdint.h>
 
@@ -31,10 +31,10 @@ typedef enum {
  * event loop or transport callback.
  */
 typedef struct {
-  char path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH + 5u];
-  char lock_path[TURBO_FS_MAX_PATH + 6u];
-  turbo_file_t lock_file;
+  char path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH + 5u];
+  char lock_path[SALTS_FS_MAX_PATH + 6u];
+  salts_file_t lock_file;
   uint8_t authentication_key[MESH_CONTROL_CHECKPOINT_STORE_AUTH_KEY_SIZE_V1];
   uint8_t open;
   uint8_t authenticated;
