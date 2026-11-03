@@ -1,7 +1,7 @@
 #ifndef TURBO_P2P_MESH_STREAM_LIVE_HLS_H
 #define TURBO_P2P_MESH_STREAM_LIVE_HLS_H
 
-#include <turbo_thread.h>
+#include <salts/thread.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -36,7 +36,7 @@ typedef struct {
 
 typedef struct {
   mesh_stream_live_hls_config_v1_t config;
-  turbo_mutex_t mutex; /* guards push vs playlist/segment (producer/HTTP) */
+  salts_mutex_t mutex; /* guards push vs playlist/segment (producer/HTTP) */
   uint8_t *pool;   /* window * max_segment_bytes */
   size_t *lens;    /* per-slot lengths */
   uint64_t *indexes; /* per-slot segment index, UINT64_MAX = empty */
