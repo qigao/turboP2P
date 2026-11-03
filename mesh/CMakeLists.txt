@@ -447,7 +447,8 @@ target_include_directories(mesh_control_agent PUBLIC
 target_link_libraries(mesh_control_agent PUBLIC
   mesh_control_iris mesh_control_owner mesh_control_policy
   mesh_control_reconciler mesh_network_reconciler mesh_control_status mesh_control_wal_worker
-  Salts::CNet CHttp::Server)
+  Salts::CNet CHttp::Server
+  PRIVATE Salts::Crypto)
 set_property(TARGET mesh_control_agent PROPERTY FOLDER "mesh/internal")
 
 add_library(mesh_control_agent_service STATIC
