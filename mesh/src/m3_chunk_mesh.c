@@ -3,6 +3,7 @@
 #include "mesh_mgmt_crypto.h"
 
 #include <salts/thread.h>
+#include <salts/clock.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -602,9 +603,9 @@ void m3_chunk_mesh_client_destroy_v1(m3_chunk_mesh_client_v1_t *client) {
 
 static m3_chunk_mesh_result_t mesh_client_wait(
     m3_chunk_mesh_client_v1_t *client, uint64_t timeout_ms) {
-  uint64_t deadline = turbo_monotonic_ms() + timeout_ms;
+  uint64_t deadline = salts_monotonic_ms() + timeout_ms;
 
-  while (turbo_monotonic_ms() < deadline &&
+  while (salts_monotonic_ms() < deadline &&
          (!client->peer || !client->done))
     salts_sleep_ms(1);
   if (!client->peer)
