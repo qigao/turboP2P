@@ -39,7 +39,7 @@ typedef enum {
 typedef struct {
   uint8_t store_node_id[M3_CHUNK_RECEIPT_STORE_NODE_ID_SIZE];
   m3_chunk_cid_v1_t cid;
-  turbo_uuid_t request_id;
+  salts_uuid_t request_id;
   uint64_t issued_at_ms;
   uint8_t signature[M3_CHUNK_RECEIPT_SIGNATURE_SIZE];
 } m3_chunk_receipt_v1_t;
@@ -92,7 +92,7 @@ m3_chunk_receipt_result_t m3_chunk_receipt_digest_v1(
 m3_chunk_receipt_result_t m3_chunk_receipt_check_binding_v1(
     const m3_chunk_receipt_v1_t *receipt,
     const uint8_t store_node_id[M3_CHUNK_RECEIPT_STORE_NODE_ID_SIZE],
-    const m3_chunk_cid_v1_t *cid, const turbo_uuid_t *request_id,
+    const m3_chunk_cid_v1_t *cid, const salts_uuid_t *request_id,
     uint64_t now_ms, uint64_t max_age_ms);
 
 #ifdef __cplusplus
