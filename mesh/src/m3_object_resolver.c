@@ -230,7 +230,7 @@ m3_object_resolver_result_t m3_object_resolver_get_v1(
                     resolver->max_object_key_bytes) ||
       !output_path || output_path[0] == '\0' ||
       strlen(output_path) >= TURBO_FS_MAX_PATH ||
-      !turbo_fs_path_is_absolute(output_path) || !complete_cb) {
+      !salts_fs_path_is_absolute(output_path) || !complete_cb) {
     return M3_OBJECT_RESOLVER_INVALID_ARG;
   }
   if (find_output(resolver, output_path))
