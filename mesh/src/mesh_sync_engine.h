@@ -3,7 +3,7 @@
 
 #include "m3_object_manifest.h"
 
-#include <turbo_fs.h>
+#include <salts_fs.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -42,8 +42,8 @@ typedef struct {
 typedef struct {
   mesh_sync_io_v1_t io;
   mesh_sync_conflict_policy_v1_t conflict_policy;
-  char state_path[TURBO_FS_MAX_PATH];
-  char output_path[TURBO_FS_MAX_PATH];
+  char state_path[SALTS_FS_MAX_PATH];
+  char output_path[SALTS_FS_MAX_PATH];
   uint64_t max_object_bytes;
   size_t max_chunks;
   uint64_t max_chunk_bytes;
@@ -56,11 +56,11 @@ typedef struct {
   m3_object_manifest_owned_v2_t source;
   uint8_t *present;
   size_t present_count;
-  char temp_path[TURBO_FS_MAX_PATH];
-  char conflict_path[TURBO_FS_MAX_PATH];
-  char local_read_path[TURBO_FS_MAX_PATH];
-  turbo_file_t temp_file;
-  turbo_file_t local_file;
+  char temp_path[SALTS_FS_MAX_PATH];
+  char conflict_path[SALTS_FS_MAX_PATH];
+  char local_read_path[SALTS_FS_MAX_PATH];
+  salts_file_t temp_file;
+  salts_file_t local_file;
   uint8_t *scratch;
   uint64_t *local_offsets;   /* per source chunk: offset in old output or SIZE_MAX */
   mesh_sync_prev_chunk_v1_t *prev_chunks; /* previous committed version's chunks */
