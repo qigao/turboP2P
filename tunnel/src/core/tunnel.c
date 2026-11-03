@@ -113,7 +113,7 @@ static void tunnel_destroy_allocated(tunnel_t *tunnel, int stop_running)
     if (tunnel->ctx) {
         coro_context_destroy(tunnel->ctx);
     }
-    turbo_mutex_destroy(&tunnel->mutex);
+    salts_mutex_destroy(&tunnel->mutex);
     free(tunnel);
 }
 
@@ -177,7 +177,7 @@ tunnel_t* tunnel_create(const tunnel_config_t *config)
     }
 
     /* Initialize mutex */
-    turbo_mutex_init(&tunnel->mutex);
+    salts_mutex_init(&tunnel->mutex);
     if (!tunnel->mutex) {
         if (tunnel->ctx) {
             coro_context_destroy(tunnel->ctx);
@@ -375,7 +375,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
 {
     int should_tunnel = 1;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
 
     /* Check exclude rules first */
     tunnel_route_rule_t *rule = tunnel->exclude_rules;
@@ -392,14 +392,14 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
     }
 
     if (!should_tunnel) {
-        turbo_mutex_unlock(&tunnel->mutex);
+        salts_mutex_unlock(&tunnel->mutex);
         return 0;  /* Excluded */
     }
 
     /* Check include rules */
     rule = tunnel->include_rules;
     if (!rule) {
-        turbo_mutex_unlock(&tunnel->mutex);
+        salts_mutex_unlock(&tunnel->mutex);
         return 1;  /* No include rules = tunnel all */
     }
 
@@ -416,7 +416,7 @@ static int tunnel_should_tunnel(tunnel_t *tunnel, tunnel_packet_t *pkt)
         rule = rule->next;
     }
 
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
     return should_tunnel;
 }
 
@@ -502,7 +502,7 @@ static void tunnel_run_maintenance(tunnel_t *tunnel)
         return;
     }
 
-    now_ms = turbo_hrtime() / 1000000;
+    now_ms = salts_hrtime() / 1000000;
 
     if (now_ms - tunnel->last_session_maintenance_ms >= 1000) {
         tcp_timeout = tunnel->config.session_timeout * 1000;
@@ -574,7 +574,7 @@ int tunnel_start(tunnel_t *tunnel)
 
     /* Set TUN read callback */
     tunnel_tun_set_read_cb(tunnel->tun, on_tun_read);
-    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->start_time = salts_hrtime() / 1000000;
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
     tunnel->running = 1;
@@ -624,7 +624,7 @@ int tunnel_run(tunnel_t *tunnel)
         tunnel_run_maintenance(tunnel);
 
         if (!tun_active && !coro_active) {
-            turbo_sleep_ms(1);
+            salts_sleep_ms(1);
         }
     }
 
@@ -714,7 +714,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
         return ret;
     }
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     tunnel_route_rule_t *old_include = tunnel->include_rules;
     tunnel_route_rule_t *old_exclude = tunnel->exclude_rules;
     tunnel->include_rules = parsed.include_rules;
@@ -722,7 +722,7 @@ int tunnel_set_routes(tunnel_t *tunnel, const tunnel_route_config_t *route)
     tunnel->config.route = *route;
     tunnel_route_rules_free(old_include);
     tunnel_route_rules_free(old_exclude);
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -735,9 +735,9 @@ int tunnel_get_stats(tunnel_t *tunnel, tunnel_stats_t *stats)
 {
     if (!tunnel || !stats) return TUNNEL_ERR_INVALID_ARG;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     memcpy(stats, &tunnel->stats, sizeof(tunnel_stats_t));
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 
     return TUNNEL_OK;
 }
@@ -746,12 +746,12 @@ void tunnel_reset_stats(tunnel_t *tunnel)
 {
     if (!tunnel) return;
 
-    turbo_mutex_lock(&tunnel->mutex);
+    salts_mutex_lock(&tunnel->mutex);
     memset(&tunnel->stats, 0, sizeof(tunnel_stats_t));
-    tunnel->start_time = turbo_hrtime() / 1000000;
+    tunnel->start_time = salts_hrtime() / 1000000;
     tunnel->last_session_maintenance_ms = tunnel->start_time;
     tunnel->last_stats_update_ms = tunnel->start_time;
-    turbo_mutex_unlock(&tunnel->mutex);
+    salts_mutex_unlock(&tunnel->mutex);
 }
 
 /* =============================================================================
