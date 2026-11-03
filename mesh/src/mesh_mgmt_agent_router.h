@@ -6,7 +6,6 @@
 #include "mesh_mgmt_execution_consumer.h"
 #include "mesh_mgmt_execution_response_consumer.h"
 
-#include <turbo_vec.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -116,7 +115,7 @@ struct mesh_mgmt_agent_router_v1_s {
   mesh_mgmt_agent_router_failure_fn on_failure;
   mesh_mgmt_agent_router_peer_closed_fn on_peer_closed;
   void *callback_context;
-  turbo_vec_t slots;
+  mesh_mgmt_agent_router_slot_v1_t *slots;
   size_t max_peers;
   size_t active_peers;
   uint8_t connection_namespace[16];
