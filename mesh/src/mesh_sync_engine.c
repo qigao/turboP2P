@@ -49,11 +49,11 @@ static size_t state_bitmap_bytes(size_t chunk_count) {
   return (chunk_count + 7u) / 8u;
 }
 
-static int write_all(turbo_file_t file, const uint8_t *bytes, size_t size) {
+static int write_all(salts_file_t file, const uint8_t *bytes, size_t size) {
   size_t written = 0u;
 
   while (written < size) {
-    int result = turbo_fs_write(file, (const char *)bytes + written, size - written);
+    int result = salts_fs_write(file, (const char *)bytes + written, size - written);
 
     if (result <= 0)
       return -1;
@@ -67,7 +67,7 @@ static int write_state(mesh_sync_engine_v1_t *engine) {
   size_t size = STATE_HEADER_SIZE + bitmap_bytes + STATE_PREV_HEADER +
                 engine->prev_count * STATE_CHUNK_RECORD;
   uint8_t *buffer;
-  turbo_file_t file;
+  salts_file_t file;
   int result = -1;
 
   buffer = (uint8_t *)calloc(1, size);
@@ -94,29 +94,29 @@ static int write_state(mesh_sync_engine_v1_t *engine) {
       cursor += STATE_CHUNK_RECORD;
     }
   }
-  file = turbo_fs_open(engine->config.state_path,
-                       TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+  file = salts_fs_open(engine->config.state_path,
+                       SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
                        STATE_FILE_MODE);
-  if (file == TURBO_INVALID_FILE)
+  if (file == SALTS_INVALID_FILE)
     goto cleanup;
   if (write_all(file, buffer, size) != 0)
     goto cleanup;
   result = 0;
 
 cleanup:
-  if (file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(file);
+  if (file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(file);
   free(buffer);
   return result;
 }
 
 /* Returns 0 resume (version matches), 1 version differs, -1 none/corrupt. */
 static int load_state(mesh_sync_engine_v1_t *engine) {
-  turbo_fs_buf_t file = {0};
+  salts_fs_buf_t file = {0};
   size_t bitmap_bytes;
   int result = -1;
 
-  if (turbo_fs_read_file(engine->config.state_path, &file) != 0)
+  if (salts_fs_read_file(engine->config.state_path, &file) != 0)
     return -1;
   if (file.len < STATE_HEADER_SIZE ||
       memcmp(file.base, STATE_MAGIC, sizeof(STATE_MAGIC)) != 0)
@@ -173,7 +173,7 @@ static int load_state(mesh_sync_engine_v1_t *engine) {
   result = 0;
 
 cleanup:
-  turbo_fs_buf_free(&file);
+  salts_fs_buf_free(&file);
   return result;
 }
 
@@ -213,7 +213,7 @@ static void compute_local_offsets(mesh_sync_engine_v1_t *engine) {
 mesh_sync_result_t mesh_sync_engine_init_v1(
     mesh_sync_engine_v1_t *engine, const mesh_sync_config_v1_t *config,
     const uint8_t *manifest_bytes, size_t manifest_size) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
   int state;
   int has_local_use = 0;
 
@@ -227,8 +227,8 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
     return MESH_SYNC_INVALID_ARG;
   }
   memset(engine, 0, sizeof(*engine));
-  engine->temp_file = TURBO_INVALID_FILE;
-  engine->local_file = TURBO_INVALID_FILE;
+  engine->temp_file = SALTS_INVALID_FILE;
+  engine->local_file = SALTS_INVALID_FILE;
   engine->config = *config;
   if (m3_object_manifest_decode_v2(
           manifest_bytes, manifest_size, config->max_object_bytes,
@@ -251,7 +251,7 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
   state = load_state(engine);
   if (state == 1) {
     /* A different committed version occupies the output: conflict policy. */
-    if (turbo_fs_lstat(config->output_path, &stat) == 0 && stat.is_file &&
+    if (salts_fs_lstat(config->output_path, &stat) == 0 && stat.is_file &&
         !stat.is_symlink) {
       if (config->conflict_policy == MESH_SYNC_CONFLICT_KEEP_BOTH) {
         char hex[sizeof(engine->source.manifest.object_cid.digest) * 2u + 1u];
@@ -260,7 +260,7 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
                      sizeof(engine->source.manifest.object_cid.digest), hex);
         snprintf(engine->conflict_path, sizeof(engine->conflict_path),
                  "%s.conflict-%.16s", config->output_path, hex);
-        if (turbo_fs_rename(config->output_path, engine->conflict_path) != 0) {
+        if (salts_fs_rename(config->output_path, engine->conflict_path) != 0) {
           mesh_sync_engine_destroy_v1(engine);
           return MESH_SYNC_IO;
         }
@@ -285,8 +285,8 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
   if (has_local_use && engine->local_read_path[0] != '\0') {
     /* Open the previous committed output to copy reused chunks from it. */
     engine->local_file =
-        turbo_fs_open(engine->local_read_path, TURBO_FS_O_RDONLY, 0);
-    if (engine->local_file == TURBO_INVALID_FILE) {
+        salts_fs_open(engine->local_read_path, SALTS_FS_O_RDONLY, 0);
+    if (engine->local_file == SALTS_INVALID_FILE) {
       mesh_sync_engine_destroy_v1(engine);
       return MESH_SYNC_IO;
     }
@@ -295,11 +295,11 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
     engine->open = 1u;
     return MESH_SYNC_OK;
   }
-  engine->temp_file = turbo_fs_open(
-      engine->temp_path, TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT |
-                             (engine->present_count > 0u ? 0u : TURBO_FS_O_TRUNC),
+  engine->temp_file = salts_fs_open(
+      engine->temp_path, SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT |
+                             (engine->present_count > 0u ? 0u : SALTS_FS_O_TRUNC),
       STATE_FILE_MODE);
-  if (engine->temp_file == TURBO_INVALID_FILE) {
+  if (engine->temp_file == SALTS_INVALID_FILE) {
     mesh_sync_engine_destroy_v1(engine);
     return MESH_SYNC_IO;
   }
@@ -316,10 +316,10 @@ mesh_sync_result_t mesh_sync_engine_init_v1(
 void mesh_sync_engine_destroy_v1(mesh_sync_engine_v1_t *engine) {
   if (!engine)
     return;
-  if (engine->temp_open && engine->temp_file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(engine->temp_file);
-  if (engine->local_file != TURBO_INVALID_FILE)
-    (void)turbo_fs_close(engine->local_file);
+  if (engine->temp_open && engine->temp_file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(engine->temp_file);
+  if (engine->local_file != SALTS_INVALID_FILE)
+    (void)salts_fs_close(engine->local_file);
   m3_object_manifest_owned_destroy_v2(&engine->source);
   free(engine->present);
   free(engine->scratch);
@@ -329,24 +329,24 @@ void mesh_sync_engine_destroy_v1(mesh_sync_engine_v1_t *engine) {
 }
 
 static mesh_sync_result_t finalize(mesh_sync_engine_v1_t *engine) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
   size_t i;
 
-  if (engine->temp_open && engine->temp_file != TURBO_INVALID_FILE) {
-    if (turbo_fs_fsync(engine->temp_file) != 0 ||
-        turbo_fs_close(engine->temp_file) != 0) {
+  if (engine->temp_open && engine->temp_file != SALTS_INVALID_FILE) {
+    if (salts_fs_fsync(engine->temp_file) != 0 ||
+        salts_fs_close(engine->temp_file) != 0) {
       engine->temp_open = 0u;
       return MESH_SYNC_IO;
     }
   }
   engine->temp_open = 0u;
-  if (engine->local_file != TURBO_INVALID_FILE) {
-    (void)turbo_fs_close(engine->local_file);
-    engine->local_file = TURBO_INVALID_FILE;
+  if (engine->local_file != SALTS_INVALID_FILE) {
+    (void)salts_fs_close(engine->local_file);
+    engine->local_file = SALTS_INVALID_FILE;
   }
-  if (turbo_fs_lstat(engine->config.output_path, &stat) == 0)
-    (void)turbo_fs_unlink(engine->config.output_path);
-  if (turbo_fs_rename(engine->temp_path, engine->config.output_path) != 0)
+  if (salts_fs_lstat(engine->config.output_path, &stat) == 0)
+    (void)salts_fs_unlink(engine->config.output_path);
+  if (salts_fs_rename(engine->temp_path, engine->config.output_path) != 0)
     return MESH_SYNC_IO;
   /* The committed source becomes the previous version for the next diff. */
   free(engine->prev_chunks);
@@ -393,9 +393,9 @@ mesh_sync_result_t mesh_sync_engine_pump_v1(mesh_sync_engine_v1_t *engine) {
     uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
 
     if (engine->local_offsets[missing] != SIZE_MAX &&
-        engine->local_file != TURBO_INVALID_FILE) {
+        engine->local_file != SALTS_INVALID_FILE) {
       /* Reuse a chunk already present in the previous committed output. */
-      if (turbo_fs_pread(engine->local_file, (char *)engine->scratch, cid->size,
+      if (salts_fs_pread(engine->local_file, (char *)engine->scratch, cid->size,
                          (int64_t)engine->local_offsets[missing]) != (int)cid->size) {
         return MESH_SYNC_IO;
       }
@@ -416,7 +416,7 @@ mesh_sync_result_t mesh_sync_engine_pump_v1(mesh_sync_engine_v1_t *engine) {
     if (memcmp(digest, cid->digest, sizeof(digest)) != 0)
       return MESH_SYNC_INTEGRITY;
   }
-  if (turbo_fs_pwrite(engine->temp_file, (const char *)engine->scratch, len,
+  if (salts_fs_pwrite(engine->temp_file, (const char *)engine->scratch, len,
                       (int64_t)engine->write_offset) != (int)len) {
     return MESH_SYNC_IO;
   }
