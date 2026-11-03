@@ -108,13 +108,13 @@ cleanup:
 }
 
 static m3_chunk_replay_entry_v1_t *find_entry(
-    m3_chunk_replay_journal_v1_t *journal, const turbo_uuid_t *request_id) {
+    m3_chunk_replay_journal_v1_t *journal, const salts_uuid_t *request_id) {
   if (!journal || !journal->entries || !request_id)
     return NULL;
   for (size_t i = 0; i < journal->capacity; i++) {
     m3_chunk_replay_entry_v1_t *entry = &journal->entries[i];
     if (entry->state != M3_CHUNK_REPLAY_ENTRY_FREE &&
-        turbo_uuid_equal(&entry->request_id, request_id)) {
+        salts_uuid_equal(&entry->request_id, request_id)) {
       return entry;
     }
   }
