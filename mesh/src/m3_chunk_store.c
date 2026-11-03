@@ -337,7 +337,7 @@ m3_chunk_store_result_t m3_chunk_store_put_bytes_v1(
   result = ensure_directory(shard_path);
   if (result != M3_CHUNK_STORE_OK)
     return result;
-  if (turbo_secure_random(random_bytes, sizeof(random_bytes)) != 0)
+  if (salts_secure_random(random_bytes, sizeof(random_bytes)) != 0)
     return M3_CHUNK_STORE_CSPRNG_FAILED;
 
   bytes_to_hex(random_bytes, sizeof(random_bytes), random_hex);
