@@ -37,7 +37,7 @@ typedef enum {
 } m3_chunk_replay_begin_kind_t;
 
 typedef struct {
-  turbo_uuid_t request_id;
+  salts_uuid_t request_id;
   uint8_t access_digest[M3_CHUNK_REPLAY_DIGEST_SIZE];
   uint64_t expires_at_ms;
   m3_chunk_replay_entry_state_t state;
