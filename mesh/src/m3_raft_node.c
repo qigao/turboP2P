@@ -106,7 +106,7 @@ static void node_stepper(coro_t *co, void *arg) {
 
   while (!node->stop) {
     int rc = tr_raft_coronet_peer_service_step(node->peer_service,
-                                               turbo_monotonic_ms(),
+                                               salts_monotonic_ms(),
                                                &node->step_result);
     if (rc != TURBO_OK && rc != TURBO_EBUSY && node->failed == 0) {
       node->failed = 1;
@@ -464,7 +464,7 @@ int m3_raft_node_poll(m3_raft_node_t *node) {
   for (int i = 0; i < 8; ++i) {
     coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
   }
-  now = turbo_monotonic_ms();
+  now = salts_monotonic_ms();
   if (now - node->last_raft_poll_ms < M3_RAFT_NODE_RAFT_POLL_INTERVAL_MS) {
     return TURBO_OK;
   }
@@ -480,8 +480,8 @@ void m3_raft_node_run_until(m3_raft_node_t *node, uint64_t timeout_ms,
   if (!node) {
     return;
   }
-  deadline = turbo_monotonic_ms() + timeout_ms;
-  while (turbo_monotonic_ms() < deadline) {
+  deadline = salts_monotonic_ms() + timeout_ms;
+  while (salts_monotonic_ms() < deadline) {
     if (done && done(ctx, node)) {
       return;
     }
@@ -629,7 +629,7 @@ int m3_raft_node_disconnect_peer(m3_raft_node_t *node, tr_raft_node_id_t peer_no
     return TURBO_EINVAL;
   }
   return tr_raft_coronet_peer_service_disconnect_peer(node->peer_service, peer_node_id,
-                                                      turbo_monotonic_ms());
+                                                      salts_monotonic_ms());
 }
 
 typedef struct {
@@ -749,8 +749,8 @@ int m3_raft_node_lookup(m3_raft_node_t *node,
   }
   /* The read barrier needs peer event loops to respond; in a real deployment
    * each node process pumps its own loop, so pumping this node is enough. */
-  deadline = turbo_monotonic_ms() + M3_RAFT_NODE_SOCKET_TIMEOUT_MS;
-  while (!done && turbo_monotonic_ms() < deadline) {
+  deadline = salts_monotonic_ms() + M3_RAFT_NODE_SOCKET_TIMEOUT_MS;
+  while (!done && salts_monotonic_ms() < deadline) {
     if (m3_raft_node_poll(node) != TURBO_OK) {
       break;
     }
@@ -783,8 +783,8 @@ void m3_raft_node_destroy(m3_raft_node_t *node) {
      * The stepper can be blocked inside peer_service_step on a connect whose
      * timeout is M3_RAFT_NODE_SOCKET_TIMEOUT_MS, so the drain window must
      * exceed that timeout or teardown would race a still-alive coroutine. */
-    deadline = turbo_monotonic_ms() + M3_RAFT_NODE_SOCKET_TIMEOUT_MS + 2000u;
-    while (coro_context_alive(node->ctx) && turbo_monotonic_ms() < deadline) {
+    deadline = salts_monotonic_ms() + M3_RAFT_NODE_SOCKET_TIMEOUT_MS + 2000u;
+    while (coro_context_alive(node->ctx) && salts_monotonic_ms() < deadline) {
       coro_context_run(node->ctx, TURBO_RUN_NOWAIT);
     }
     if (node->peer_service) {
