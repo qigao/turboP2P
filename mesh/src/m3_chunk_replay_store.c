@@ -418,7 +418,7 @@ static m3_chunk_replay_store_result_t decode_snapshot(
       const m3_chunk_replay_entry_v1_t *other =
           &store->journal.entries[previous];
       if (other->state != M3_CHUNK_REPLAY_ENTRY_FREE &&
-          turbo_uuid_equal(&other->request_id, &entry->request_id)) {
+          salts_uuid_equal(&other->request_id, &entry->request_id)) {
         return M3_CHUNK_REPLAY_STORE_CORRUPT;
       }
     }
@@ -453,13 +453,13 @@ static m3_chunk_replay_store_result_t map_replay_result(
 }
 
 static m3_chunk_replay_entry_v1_t *find_entry(
-    m3_chunk_replay_store_v1_t *store, const turbo_uuid_t *request_id) {
+    m3_chunk_replay_store_v1_t *store, const salts_uuid_t *request_id) {
   if (!store || !store->journal.entries || !request_id)
     return NULL;
   for (size_t i = 0; i < store->journal.capacity; i++) {
     m3_chunk_replay_entry_v1_t *entry = &store->journal.entries[i];
     if (entry->state != M3_CHUNK_REPLAY_ENTRY_FREE &&
-        turbo_uuid_equal(&entry->request_id, request_id)) {
+        salts_uuid_equal(&entry->request_id, request_id)) {
       return entry;
     }
   }
