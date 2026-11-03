@@ -3,7 +3,8 @@
 
 #include "mesh_control_checkpoint_store.h"
 #include "mesh_control_wal.h"
-#include "turbo_thread.h"
+#include <salts/thread.h>
+#include <salts/thread_pool.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -65,8 +66,8 @@ typedef struct {
 typedef struct {
   mesh_control_wal_v1_t wal;
   mesh_control_checkpoint_store_v1_t checkpoint_store;
-  turbo_threadpool_t *pool;
-  turbo_mutex_t mutex;
+  salts_threadpool_t *pool;
+  salts_mutex_t mutex;
   uint64_t expected_index;
   uint64_t accepted_at_ms;
   uint16_t record_type;
