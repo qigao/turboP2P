@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <turbo_uuid.h>
+#include <salts_uuid.h>
 
 #define M3_OBJECT_DOWNLOAD_FILE_MODE 0600
 
@@ -17,10 +17,10 @@ typedef struct m3_object_download_request_s {
   size_t chunk_count;
   size_t next_chunk;
   uint64_t bytes_written;
-  turbo_file_t file;
+  salts_file_t file;
   EVP_MD_CTX *hash;
-  char output_path[TURBO_FS_MAX_PATH];
-  char temp_path[TURBO_FS_MAX_PATH];
+  char output_path[SALTS_FS_MAX_PATH];
+  char temp_path[SALTS_FS_MAX_PATH];
   m3_object_download_complete_cb complete_cb;
   void *user_data;
   uint8_t driving;
@@ -69,17 +69,17 @@ static void finish_request(m3_object_download_request_t *request,
                            m3_object_download_result_t result) {
   m3_object_download_complete_cb complete_cb;
   m3_chunk_cid_v1_t object_cid;
-  char output_path[TURBO_FS_MAX_PATH];
+  char output_path[SALTS_FS_MAX_PATH];
   void *user_data;
 
   if (!request)
     return;
-  if (request->file != TURBO_INVALID_FILE) {
-    (void)turbo_fs_close(request->file);
-    request->file = TURBO_INVALID_FILE;
+  if (request->file != SALTS_INVALID_FILE) {
+    (void)salts_fs_close(request->file);
+    request->file = SALTS_INVALID_FILE;
   }
   if (result != M3_OBJECT_DOWNLOAD_OK)
-    (void)turbo_fs_unlink(request->temp_path);
+    (void)salts_fs_unlink(request->temp_path);
   complete_cb = request->complete_cb;
   user_data = request->user_data;
   object_cid = request->object_cid;
@@ -114,7 +114,7 @@ static m3_object_download_result_t map_fetch_result(
 }
 
 static m3_object_download_result_t write_all(
-    turbo_file_t file, const uint8_t *bytes, size_t size) {
+    salts_file_t file, const uint8_t *bytes, size_t size) {
   size_t offset = 0u;
 
   while (offset < size) {
@@ -123,7 +123,7 @@ static m3_object_download_result_t write_all(
 
     if (batch > INT_MAX)
       batch = INT_MAX;
-    written = turbo_fs_write(file, (const char *)bytes + offset, batch);
+    written = salts_fs_write(file, (const char *)bytes + offset, batch);
     if (written <= 0)
       return M3_OBJECT_DOWNLOAD_IO;
     offset += (size_t)written;
@@ -178,7 +178,7 @@ cleanup:
 
 static m3_object_download_result_t publish_object(
     m3_object_download_request_t *request) {
-  turbo_fs_stat_t stat;
+  salts_fs_stat_t stat;
   uint8_t digest[M3_CHUNK_CID_DIGEST_SIZE];
   unsigned int digest_size = 0u;
 
@@ -190,16 +190,16 @@ static m3_object_download_result_t publish_object(
   }
   if (memcmp(digest, request->object_cid.digest, sizeof(digest)) != 0)
     return M3_OBJECT_DOWNLOAD_INTEGRITY;
-  if (turbo_fs_fsync(request->file) != 0)
+  if (salts_fs_fsync(request->file) != 0)
     return M3_OBJECT_DOWNLOAD_IO;
-  if (turbo_fs_close(request->file) != 0) {
-    request->file = TURBO_INVALID_FILE;
+  if (salts_fs_close(request->file) != 0) {
+    request->file = SALTS_INVALID_FILE;
     return M3_OBJECT_DOWNLOAD_IO;
   }
-  request->file = TURBO_INVALID_FILE;
-  if (turbo_fs_lstat(request->output_path, &stat) == 0)
+  request->file = SALTS_INVALID_FILE;
+  if (salts_fs_lstat(request->output_path, &stat) == 0)
     return M3_OBJECT_DOWNLOAD_OUTPUT_EXISTS;
-  if (turbo_fs_rename(request->temp_path, request->output_path) != 0)
+  if (salts_fs_rename(request->temp_path, request->output_path) != 0)
     return M3_OBJECT_DOWNLOAD_IO;
   return M3_OBJECT_DOWNLOAD_OK;
 }
@@ -311,13 +311,13 @@ m3_object_download_result_t m3_object_download_service_start_v1(
     const m3_object_manifest_v1_t *manifest, const char *output_path,
     m3_object_download_complete_cb complete_cb, void *user_data) {
   m3_object_download_request_t *request;
-  turbo_fs_stat_t stat;
-  turbo_uuid_t uuid;
-  char uuid_text[TURBO_UUID_STRING_SIZE];
+  salts_fs_stat_t stat;
+  salts_uuid_t uuid;
+  char uuid_text[SALTS_UUID_STRING_SIZE];
   int path_length;
   if (!service || !service->open || !output_path || !complete_cb ||
-      !turbo_fs_path_is_absolute(output_path) ||
-      strlen(output_path) >= TURBO_FS_MAX_PATH)
+      !salts_fs_path_is_absolute(output_path) ||
+      strlen(output_path) >= SALTS_FS_MAX_PATH)
     return M3_OBJECT_DOWNLOAD_INVALID_ARG;
   if (m3_object_manifest_validate_v1(
           manifest, service->max_object_bytes,
@@ -326,18 +326,18 @@ m3_object_download_result_t m3_object_download_service_start_v1(
   }
   if (find_output(service, output_path))
     return M3_OBJECT_DOWNLOAD_BUSY;
-  if (turbo_fs_lstat(output_path, &stat) == 0)
+  if (salts_fs_lstat(output_path, &stat) == 0)
     return M3_OBJECT_DOWNLOAD_OUTPUT_EXISTS;
   if (service->pending_count >= service->max_pending)
     return M3_OBJECT_DOWNLOAD_RESOURCE_EXHAUSTED;
-  if (turbo_uuid_v4_generate(&uuid) != 0 ||
-      turbo_uuid_format(&uuid, uuid_text, sizeof(uuid_text)) != 0) {
+  if (salts_uuid_v4_generate(&uuid) != 0 ||
+      salts_uuid_format(&uuid, uuid_text, sizeof(uuid_text)) != 0) {
     return M3_OBJECT_DOWNLOAD_CRYPTO_FAILED;
   }
   request = (m3_object_download_request_t *)calloc(1, sizeof(*request));
   if (!request)
     return M3_OBJECT_DOWNLOAD_RESOURCE_EXHAUSTED;
-  request->file = TURBO_INVALID_FILE;
+  request->file = SALTS_INVALID_FILE;
   request->chunks = (m3_chunk_cid_v1_t *)calloc(
       manifest->chunk_count, sizeof(*request->chunks));
   if (manifest->chunk_count > 0u && !request->chunks) {
@@ -371,11 +371,11 @@ m3_object_download_result_t m3_object_download_service_start_v1(
     free(request);
     return M3_OBJECT_DOWNLOAD_INVALID_ARG;
   }
-  request->file = turbo_fs_open(
+  request->file = salts_fs_open(
       request->temp_path,
-      TURBO_FS_O_WRONLY | TURBO_FS_O_CREAT | TURBO_FS_O_TRUNC,
+      SALTS_FS_O_WRONLY | SALTS_FS_O_CREAT | SALTS_FS_O_TRUNC,
       M3_OBJECT_DOWNLOAD_FILE_MODE);
-  if (request->file == TURBO_INVALID_FILE) {
+  if (request->file == SALTS_INVALID_FILE) {
     EVP_MD_CTX_free(request->hash);
     free(request->chunks);
     free(request);
