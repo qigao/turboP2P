@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef TURBO_WIN32
+#ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
 #endif
@@ -54,7 +54,7 @@ typedef enum {
 
 static replace_snapshot_result_t replace_snapshot(const char *old_path,
                                                   const char *new_path) {
-#ifdef TURBO_WIN32
+#ifdef _WIN32
   return MoveFileExA(old_path, new_path,
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
              ? REPLACE_SNAPSHOT_DURABLE
