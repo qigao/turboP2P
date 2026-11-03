@@ -38,14 +38,14 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_init_v1(
     return MESH_STREAM_LIVE_HLS_RESOURCE_EXHAUSTED;
   for (size_t i = 0u; i < (size_t)config->window; i++)
     hls->indexes[i] = HLS_EMPTY;
-  turbo_mutex_init(&hls->mutex);
+  salts_mutex_init(&hls->mutex);
   return MESH_STREAM_LIVE_HLS_OK;
 }
 
 void mesh_stream_live_hls_destroy_v1(mesh_stream_live_hls_v1_t *hls) {
   if (!hls)
     return;
-  turbo_mutex_destroy(&hls->mutex);
+  salts_mutex_destroy(&hls->mutex);
   free(hls->indexes);
   free(hls->lens);
   free(hls->pool);
@@ -63,7 +63,7 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_push_v1(
     return MESH_STREAM_LIVE_HLS_INVALID_ARG;
   if (len > (size_t)hls->config.max_segment_bytes)
     return MESH_STREAM_LIVE_HLS_RESOURCE_EXHAUSTED;
-  turbo_mutex_lock(&hls->mutex);
+  salts_mutex_lock(&hls->mutex);
   index = hls->live_edge == HLS_EMPTY ? 0u : hls->live_edge + 1u;
   slot = (size_t)(index % hls->config.window);
   dst = hls->pool + slot * (size_t)hls->config.max_segment_bytes;
@@ -71,7 +71,7 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_push_v1(
   hls->lens[slot] = len;
   hls->indexes[slot] = index;
   hls->live_edge = index;
-  turbo_mutex_unlock(&hls->mutex);
+  salts_mutex_unlock(&hls->mutex);
   *out_index = index;
   return MESH_STREAM_LIVE_HLS_OK;
 }
@@ -87,9 +87,9 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_playlist_v1(
   if (!hls || !out || !out_len)
     return MESH_STREAM_LIVE_HLS_INVALID_ARG;
   *out_len = 0u;
-  turbo_mutex_lock(&hls->mutex);
+  salts_mutex_lock(&hls->mutex);
   if (hls->live_edge == HLS_EMPTY) {
-    turbo_mutex_unlock(&hls->mutex);
+    salts_mutex_unlock(&hls->mutex);
     return MESH_STREAM_LIVE_HLS_OK; /* empty live playlist */
   }
   first = first_index(hls);
@@ -98,7 +98,7 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_playlist_v1(
   do {                                                                         \
     written = snprintf(out + used, cap > used ? cap - used : 0u, __VA_ARGS__); \
     if (written < 0 || (size_t)written >= (cap > used ? cap - used : 0u)) {    \
-      turbo_mutex_unlock(&hls->mutex);                                         \
+      salts_mutex_unlock(&hls->mutex);                                         \
       return MESH_STREAM_LIVE_HLS_RESOURCE_EXHAUSTED;                          \
     }                                                                          \
     used += (size_t)written;                                                   \
@@ -118,7 +118,7 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_playlist_v1(
     PLAYLIST_APPEND("seg-%llu\n", (unsigned long long)i);
   }
 #undef PLAYLIST_APPEND
-  turbo_mutex_unlock(&hls->mutex);
+  salts_mutex_unlock(&hls->mutex);
   *out_len = used;
   return MESH_STREAM_LIVE_HLS_OK;
 }
@@ -132,24 +132,24 @@ mesh_stream_live_hls_result_t mesh_stream_live_hls_segment_v1(
   if (!hls || !out || !out_len)
     return MESH_STREAM_LIVE_HLS_INVALID_ARG;
   *out_len = 0u;
-  turbo_mutex_lock(&hls->mutex);
+  salts_mutex_lock(&hls->mutex);
   if (hls->live_edge == HLS_EMPTY || index < first_index(hls) ||
       index > hls->live_edge) {
-    turbo_mutex_unlock(&hls->mutex);
+    salts_mutex_unlock(&hls->mutex);
     return MESH_STREAM_LIVE_HLS_NOT_FOUND; /* evicted or not yet live */
   }
   slot = (size_t)(index % hls->config.window);
   if (hls->indexes[slot] != index) {
-    turbo_mutex_unlock(&hls->mutex);
+    salts_mutex_unlock(&hls->mutex);
     return MESH_STREAM_LIVE_HLS_NOT_FOUND;
   }
   len = hls->lens[slot];
   if (len > cap) {
-    turbo_mutex_unlock(&hls->mutex);
+    salts_mutex_unlock(&hls->mutex);
     return MESH_STREAM_LIVE_HLS_RESOURCE_EXHAUSTED;
   }
   memcpy(out, hls->pool + slot * (size_t)hls->config.max_segment_bytes, len);
-  turbo_mutex_unlock(&hls->mutex);
+  salts_mutex_unlock(&hls->mutex);
   *out_len = len;
   return MESH_STREAM_LIVE_HLS_OK;
 }
@@ -159,9 +159,9 @@ uint64_t mesh_stream_live_hls_live_edge(const mesh_stream_live_hls_v1_t *hls) {
 
   if (!hls)
     return HLS_EMPTY;
-  turbo_mutex_lock(&hls->mutex);
+  salts_mutex_lock(&hls->mutex);
   edge = hls->live_edge;
-  turbo_mutex_unlock(&hls->mutex);
+  salts_mutex_unlock(&hls->mutex);
   return edge;
 }
 
@@ -170,8 +170,8 @@ uint64_t mesh_stream_live_hls_first_index(const mesh_stream_live_hls_v1_t *hls) 
 
   if (!hls)
     return 0u;
-  turbo_mutex_lock(&hls->mutex);
+  salts_mutex_lock(&hls->mutex);
   first = first_index(hls);
-  turbo_mutex_unlock(&hls->mutex);
+  salts_mutex_unlock(&hls->mutex);
   return first;
 }
